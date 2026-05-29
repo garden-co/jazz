@@ -1454,3 +1454,11 @@ Decision: query and recursive-ref history deltas now choose missing sealed block
 Why: real query bundles can include policy dependency rows, recursive rows, and ref-included rows. If those rows have cold history sealed into blocks, sidecar/block export should follow the bundle shape rather than assuming the queried table is the whole sync scope.
 
 Scope impact: this is a correctness-oriented sync integration cleanup. It can send additional relevant blocks for multi-table query scopes, while still filtering against receiver block manifests and branch-base visibility.
+
+## Fri May 29 03:48:42 PDT 2026 - Test Ref-Include Query Deltas With Referenced Blocks
+
+Decision: add a regression test where a `comments` query includes a referenced `docs` row whose older history is sealed into a block.
+
+Why: the first implementation of multi-table block selection still did not seed referenced rows that had no open history in the bundle. The test caught that; the fix now explicitly seeds ref-included row ids before selecting missing blocks.
+
+Scope impact: the test keeps one hot doc row open so the referenced row becomes current-visible after apply, while still requiring the older `docs` block to be exported. A fully sealed referenced row becoming current-visible from only a block remains a separate design question.

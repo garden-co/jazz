@@ -6404,6 +6404,7 @@ impl Runtime {
             .iter()
             .map(|row_num| public_row_id(&self.conn, *row_num))
             .collect::<Result<BTreeSet<_>>>()?;
+        let mut block_seed_row_ids = BTreeMap::from([(table_name.to_owned(), row_ids.clone())]);
         let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
         let mut history = export_history_versions_for_rows(
             &self.conn,
@@ -6443,6 +6444,12 @@ impl Runtime {
             },
         )?);
         for ref_field_name in options.ref_include_fields {
+            let (ref_table_name, ref_row_ids) =
+                self.ref_include_row_ids(table, &rows, ref_field_name)?;
+            block_seed_row_ids
+                .entry(ref_table_name)
+                .or_default()
+                .extend(ref_row_ids);
             history.extend(self.export_ref_include_history(
                 table,
                 &rows,
@@ -6488,7 +6495,7 @@ impl Runtime {
         let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
         let missing_block_manifests = self.missing_history_block_manifests_for_bundle_rows(
             &bundle,
-            BTreeMap::from([(table_name.to_owned(), row_ids)]),
+            block_seed_row_ids,
             options.remote_block_manifests,
         )?;
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
@@ -6736,6 +6743,34 @@ impl Runtime {
             },
         )?);
         Ok(history)
+    }
+
+    fn ref_include_row_ids(
+        &self,
+        table: &crate::schema::TableDef,
+        rows: &[RowView],
+        ref_field_name: &str,
+    ) -> Result<(String, BTreeSet<String>)> {
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == ref_field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown include field {ref_field_name}")))?;
+        let FieldKind::Ref {
+            table: ref_table_name,
+        } = &field.kind
+        else {
+            return Err(crate::Error::new(format!(
+                "include field {ref_field_name} is not a ref"
+            )));
+        };
+        Ok((
+            ref_table_name.clone(),
+            rows.iter()
+                .filter_map(|row| row.values.get(ref_field_name).and_then(JsonValue::as_str))
+                .map(str::to_owned)
+                .collect(),
+        ))
     }
 
     pub fn read_recursive_refs(
@@ -14530,6 +14565,73 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != "doc-2"));
+    }
+
+    #[test]
+    fn query_delta_ref_include_exports_referenced_table_blocks() {
+        let schema = SchemaDef::new()
+            .table("docs", |table| {
+                table.deep_text("body");
+            })
+            .table("comments", |table| {
+                table.text("topic");
+                table.ref_("doc", "docs");
+            });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        for _ in 0..8 {
+            alice
+                .append_deep_text("docs", "doc-1", "body", "x")
+                .unwrap();
+        }
+        alice.compact_table_accepted_history("docs", 1, 1).unwrap();
+        assert!(!alice.history_block_manifests("docs").unwrap().is_empty());
+        alice
+            .insert_row(
+                "comments",
+                "comment-1",
+                BTreeMap::from([
+                    ("topic".to_owned(), JsonValue::from("kept")),
+                    ("doc".to_owned(), JsonValue::from("doc-1")),
+                ]),
+            )
+            .unwrap();
+
+        let rows = alice
+            .read_rows_where_eq("comments", "topic", "kept")
+            .unwrap();
+        let delta = alice
+            .export_query_scope_history_delta(
+                "comments",
+                "topic",
+                "eq",
+                JsonValue::from("kept"),
+                rows,
+                QueryScopeDeltaOptions {
+                    ref_include_fields: &["doc"],
+                    extra_row_ids: &[],
+                    remote_block_manifests: &[],
+                    text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(delta
+            .blocks
+            .iter()
+            .any(|block| block.manifest.table == "docs"));
+        bob.apply_history_delta(&delta).unwrap();
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "xxxxxxxx"
+        );
     }
 
     #[test]
