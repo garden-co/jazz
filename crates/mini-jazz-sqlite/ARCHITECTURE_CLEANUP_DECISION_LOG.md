@@ -716,3 +716,9 @@ regress.
 - Extracted `query_descriptor` as the live descriptor registry boundary and dedupes windowed descriptors by descriptor identity without treating `observed_ids` as part of the primary interest identity.
 - Added focused regressions for tiered timestamp ordering, direct delete read sets, and windowed descriptor replacement.
 - Focused query-read, tiered, and delete test suites pass.
+
+## 2026-05-29 03:08 PDT - Full validation passes after review fixes
+
+- Ran `cargo test -p mini-jazz-sqlite` after fixing the reviewer findings.
+- Result: 439 passed, 18 ignored placeholders, 0 failed.
+- This covers the new tiered timestamp, direct-delete read-set, and observed descriptor replacement regressions inside the full suite.
