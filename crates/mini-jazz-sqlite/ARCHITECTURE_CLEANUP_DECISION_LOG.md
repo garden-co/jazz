@@ -853,3 +853,8 @@ regress.
 
 - Rechecked PR #973 after the descriptor/WASM fixes.
 - It has moved to `2188e1ed73e01f88e692e7b979f531966470ff79` and remains draft, so it is still better treated as a moving source of lessons rather than something to merge into this cleanup lane.
+
+## 2026-05-29 03:57 PDT - Full validation passes after review fixes
+
+- Ran `cargo test -p mini-jazz-sqlite` after fixing generic built-query descriptor identity and the WASM schema constructor surface.
+- Result: 440 passed, 18 ignored placeholders, 0 failed.
