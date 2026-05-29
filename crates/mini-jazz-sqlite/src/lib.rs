@@ -11,6 +11,7 @@ mod query;
 mod query_api;
 mod query_observation;
 mod query_predicate;
+mod query_refresh;
 mod read_set;
 mod read_visibility;
 mod rows;

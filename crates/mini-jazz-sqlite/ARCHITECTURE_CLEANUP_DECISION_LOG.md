@@ -366,3 +366,11 @@ Follow-on boundary cleanup: the inverse branch lookup should live in
 `branch.rs`, not be duplicated by whichever module happens to need to turn a
 physical branch number back into the public branch id. This is exactly the kind
 of tiny centralization that prevents future hardcoded helper drift.
+
+## 2026-05-29 00:30 PDT
+
+Next cleanup target is query refresh planning. The runtime should orchestrate
+observed-query refreshes, but the batching decision for predicates, recursive
+reads, and windowed pages is pure planner logic. Moving it behind a
+`query_refresh` module should make later replacement of legacy query-read ops
+with built-query descriptors less invasive.
