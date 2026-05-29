@@ -886,7 +886,12 @@ impl Runtime {
             node_id,
             after_local_epoch,
         )?;
-        let reads = export_reads_for_history(&self.conn, &history)?;
+        let reads = export_reads_for_single_node_incremental(
+            &self.conn,
+            node_id,
+            after_local_epoch,
+            &history,
+        )?;
         let txs = export_txs_for_single_node_incremental(
             &self.conn,
             node_id,
@@ -8604,13 +8609,13 @@ fn export_txs_for_single_node_incremental(
     else {
         return Ok(Vec::new());
     };
-    let min_local_epoch = after_local_epoch.max(1);
+    let min_local_epoch = after_local_epoch.max(0);
     let mut receipt_stmt = conn.prepare_cached(
         "SELECT tx.local_epoch, receipt.tier
          FROM jazz_tx tx
          JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
          WHERE tx.node_num = ?
-           AND tx.local_epoch >= ?
+           AND tx.local_epoch > ?
          ORDER BY tx.tx_num, receipt.tier",
     )?;
     let receipt_rows = receipt_stmt.query_map(params![node_num, min_local_epoch], |row| {
@@ -8631,7 +8636,7 @@ fn export_txs_for_single_node_incremental(
          FROM jazz_tx tx
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          WHERE tx.node_num = ?
-           AND tx.local_epoch >= ?
+           AND tx.local_epoch > ?
          ORDER BY tx.tx_num",
     )?;
     let rows = stmt.query_map(params![node_num, min_local_epoch], |row| {
@@ -10337,6 +10342,107 @@ fn export_reads_for_history(
         return export_reads_for_history_simple(conn, history, &tx_ids);
     }
     export_reads_for_history_with_temp_scope(conn, history)
+}
+
+fn export_reads_for_single_node_incremental(
+    conn: &Connection,
+    node_id: &str,
+    after_local_epoch: i64,
+    history: &[HistoryRecord],
+) -> Result<Vec<ReadRecord>> {
+    if history.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(node_num) = conn
+        .prepare_cached("SELECT node_num FROM jazz_node WHERE node_id = ?")?
+        .query_row(params![node_id], |row| row.get::<_, i64>(0))
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let history_keys = history
+        .iter()
+        .map(|record| {
+            (
+                record.tx_id.clone(),
+                record.table.clone(),
+                record.row_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut records = Vec::new();
+    {
+        let mut stmt = conn.prepare_cached(
+            "SELECT tx.local_epoch, tables.table_name, ids.row_id,
+                    CAST(json_extract(read.value, '$[2]') AS INTEGER) AS reason,
+                    observed.tx_id
+             FROM jazz_tx tx, json_each(tx.reads_json) read
+             JOIN jazz_table tables
+               ON tables.table_num = CAST(json_extract(read.value, '$[0]') AS INTEGER)
+             JOIN jazz_row_id ids
+               ON ids.row_num = CAST(json_extract(read.value, '$[1]') AS INTEGER)
+             LEFT JOIN jazz_tx_public observed
+               ON observed.tx_num = CAST(json_extract(read.value, '$[3]') AS INTEGER)
+             WHERE tx.node_num = ?
+               AND tx.local_epoch > ?
+               AND tx.reads_json IS NOT NULL
+             ORDER BY tx.tx_num, tables.table_name, ids.row_id, reason",
+        )?;
+        let rows = stmt.query_map(params![node_num, after_local_epoch], |row| {
+            let local_epoch = row.get::<_, i64>(0)?;
+            Ok(ReadRecord {
+                tx_id: format!("tx-{node_id}-{local_epoch}"),
+                table: row.get(1)?,
+                row_id: row.get(2)?,
+                reason: row.get(3)?,
+                observed_tx_id: row.get(4)?,
+            })
+        })?;
+        for row in rows {
+            records.push(row?);
+        }
+    }
+    {
+        let mut stmt = conn.prepare_cached(
+            "SELECT tx.local_epoch, tables.table_name, ids.row_id, previous.local_epoch
+             FROM jazz_tx tx
+             JOIN jazz_tx previous
+               ON previous.node_num = tx.node_num
+              AND previous.local_epoch = tx.local_epoch - 1,
+                  json_each(tx.writes_json) write
+             JOIN jazz_table tables
+               ON tables.table_num = CAST(json_extract(write.value, '$[0]') AS INTEGER)
+             JOIN jazz_row_id ids
+               ON ids.row_num = CAST(json_extract(write.value, '$[1]') AS INTEGER)
+             WHERE tx.node_num = ?
+               AND tx.local_epoch > ?
+               AND tx.reads_json IS NULL
+             ORDER BY tx.tx_num, tables.table_name, ids.row_id",
+        )?;
+        let rows = stmt.query_map(params![node_num, after_local_epoch], |row| {
+            let local_epoch = row.get::<_, i64>(0)?;
+            let previous_epoch = row.get::<_, i64>(3)?;
+            Ok(ReadRecord {
+                tx_id: format!("tx-{node_id}-{local_epoch}"),
+                table: row.get(1)?,
+                row_id: row.get(2)?,
+                reason: 2,
+                observed_tx_id: Some(format!("tx-{node_id}-{previous_epoch}")),
+            })
+        })?;
+        for row in rows {
+            records.push(row?);
+        }
+    }
+    records.retain(|record| {
+        history_keys.contains(&(
+            record.tx_id.clone(),
+            record.table.clone(),
+            record.row_id.clone(),
+        ))
+    });
+    dedupe_reads(&mut records);
+    Ok(records)
 }
 
 fn export_reads_for_history_simple(

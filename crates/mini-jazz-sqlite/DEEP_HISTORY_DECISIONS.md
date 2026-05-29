@@ -22,6 +22,14 @@ Why: after the runtime benchmark conversion, live incremental receive was paying
 
 Scope impact: `persisted_text_ops` can now report its current watermark, and `Runtime` has a table-history delta export that accepts a text-op watermark. The benchmark tracks the sender watermark between live samples. A smoke run moved append live apply from about 1550 ms to about 246 ms across the sampled loop; live export is now the next obvious hotspot.
 
+## Thu May 28 22:52:48 PDT 2026
+
+Decision: optimize live incremental export with general storage/query improvements rather than benchmark-only shortcuts.
+
+Why: once text-op deltas were incremental, live export was dominated by ordinary Jazz history/read metadata work. Two fixes looked broadly valid: history tables need an index in `tx_num` order for recent-transaction exports, and single-node incremental exports should decode reads directly from the bounded tx range instead of expanding the generic `jazz_tx_read` view and then filtering.
+
+Scope impact: every app history table now has a `(tx_num, row_num)` index. The single-node incremental export path uses a direct read-dependency query over the node/local-epoch range and also fixed an inclusive `>= after_local_epoch` off-by-one in tx export. Append smoke live export dropped from about 2806 ms to about 1259 ms across 446 samples, at the cost of a small live DB-size increase from the new index.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.

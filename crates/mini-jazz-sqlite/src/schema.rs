@@ -639,9 +639,13 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
           j_updated_by INTEGER NOT NULL,
           PRIMARY KEY (row_num, j_branch_num)
         ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS {history_tx_index}
+          ON {history}(tx_num, row_num);
         "#,
         history = history_table(&table.name),
         current = current_table(&table.name),
+        history_tx_index = quote_ident(&format!("{}_history_tx_row", table.name)),
     ))?;
 
     for index in &table.indexes {
