@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +28,17 @@ pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
+/// Cap on concurrent connections sharing a single `client_id`. When a new
+/// connection would exceed this cap, the oldest connection(s) for the same
+/// `client_id` are evicted so a reconnecting client is never locked out by
+/// its own zombies. Bounds the fan-out memory described in jaz0-a803.
+///
+/// Value of 4 gives headroom for the realistic legitimate case (a brief
+/// overlap between an old half-open socket and a new reconnect, plus a
+/// small amount of slack for unusual topologies) without giving an
+/// attacker meaningful amplification before the cap bites.
+pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct SequencedSyncUpdate {
     pub seq: u64,
@@ -43,6 +55,24 @@ struct ConnectionStreamState {
     client_id: ClientId,
     next_sync_seq: u64,
     sender: mpsc::UnboundedSender<SequencedSyncUpdate>,
+    /// Set to `true` by `register_connection` immediately before this
+    /// stream is removed during per-client cap eviction. The connection
+    /// task reads it after `sync_rx.recv()` returns `None` to distinguish
+    /// eviction from a normal disconnect and emit a `RateLimited` error
+    /// frame.
+    evicted: Arc<AtomicBool>,
+}
+
+/// Result of registering a connection with the hub.
+pub struct ConnectionRegistration {
+    /// First sequence number to use for outbound payloads.
+    pub next_sync_seq: u64,
+    /// Receives sequenced sync updates dispatched to this connection.
+    pub receiver: mpsc::UnboundedReceiver<SequencedSyncUpdate>,
+    /// Set to `true` when this connection has been evicted by the
+    /// per-client cap. The connection task observes it after the
+    /// receiver returns `None`.
+    pub evicted: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -55,8 +85,9 @@ impl ConnectionEventHub {
         &self,
         connection_id: u64,
         client_id: ClientId,
-    ) -> (u64, mpsc::UnboundedReceiver<SequencedSyncUpdate>) {
+    ) -> ConnectionRegistration {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let evicted = Arc::new(AtomicBool::new(false));
         let mut streams = self.streams.lock().unwrap();
         streams.insert(
             connection_id,
@@ -64,9 +95,57 @@ impl ConnectionEventHub {
                 client_id,
                 next_sync_seq: 1,
                 sender,
+                evicted: evicted.clone(),
             },
         );
-        (1, receiver)
+
+        // Fast path: no eviction needed. Count without allocating; only
+        // walk + sort if we're actually past the cap.
+        let same_client_count = streams
+            .values()
+            .filter(|state| state.client_id == client_id)
+            .count();
+        if same_client_count > PER_CLIENT_CONNECTION_CAP {
+            // Evict the oldest connection(s) for this client_id past
+            // the cap. Connection IDs are assigned by a monotonic
+            // `fetch_add` in `handle_ws_connection`, so the smallest
+            // IDs were assigned earliest. Two registrations can race
+            // between the fetch and the lock here, but ordering by ID
+            // is still a stable, well-defined oldest-first tiebreaker.
+            //
+            // Eviction marks the per-stream `evicted` flag, then drops
+            // the stream's sender. The connection task's
+            // `sync_rx.recv()` returns `None` on its next select tick;
+            // it reads the flag, emits a `RateLimited` error frame,
+            // and runs `ws_cleanup` — which removes itself from
+            // `ServerState::connections`.
+            let mut ids_for_client: Vec<u64> = streams
+                .iter()
+                .filter_map(|(id, state)| (state.client_id == client_id).then_some(*id))
+                .collect();
+            ids_for_client.sort_unstable();
+            let evict_count = same_client_count - PER_CLIENT_CONNECTION_CAP;
+            for evicted_id in &ids_for_client[..evict_count] {
+                if let Some(state) = streams.get(evicted_id) {
+                    state
+                        .evicted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                streams.remove(evicted_id);
+            }
+            tracing::warn!(
+                %client_id,
+                cap = PER_CLIENT_CONNECTION_CAP,
+                evicted = evict_count,
+                "evicting oldest ws connections past per-client cap"
+            );
+        }
+
+        ConnectionRegistration {
+            next_sync_seq: 1,
+            receiver,
+            evicted,
+        }
     }
 
     pub fn unregister_connection(&self, connection_id: u64) {
