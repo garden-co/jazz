@@ -512,15 +512,25 @@ impl Runtime {
         )?))
     }
 
-    fn export_text_ops_delta(&self) -> Result<Vec<u8>> {
+    pub fn current_text_ops_watermark(&self) -> Result<crate::persisted_text_ops::DeltaWatermark> {
+        if !self.schema_has_deep_text_fields() {
+            return Ok(crate::persisted_text_ops::DeltaWatermark::default());
+        }
+        crate::persisted_text_ops::current_watermark(&self.conn)
+    }
+
+    pub fn export_text_ops_delta_since(
+        &self,
+        watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<Vec<u8>> {
         if !self.schema_has_deep_text_fields() {
             return Ok(Vec::new());
         }
-        Ok(crate::persisted_text_ops::export_delta(
-            &self.conn,
-            crate::persisted_text_ops::DeltaWatermark::default(),
-        )?
-        .bytes)
+        Ok(crate::persisted_text_ops::export_delta(&self.conn, watermark)?.bytes)
+    }
+
+    fn export_text_ops_delta(&self) -> Result<Vec<u8>> {
+        self.export_text_ops_delta_since(crate::persisted_text_ops::DeltaWatermark::default())
     }
 
     fn schema_has_deep_text_fields(&self) -> bool {
@@ -910,6 +920,24 @@ impl Runtime {
             )?,
             blocks: Vec::new(),
             text_ops_delta: self.export_text_ops_delta()?,
+        })
+    }
+
+    pub fn export_table_history_since_node_epoch_delta_since_text_watermark(
+        &self,
+        table_name: &str,
+        node_id: &str,
+        after_local_epoch: i64,
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<HistoryDelta> {
+        Ok(HistoryDelta {
+            bundle: self.export_table_history_since_node_epoch(
+                table_name,
+                node_id,
+                after_local_epoch,
+            )?,
+            blocks: Vec::new(),
+            text_ops_delta: self.export_text_ops_delta_since(text_ops_watermark)?,
         })
     }
 
@@ -12449,6 +12477,55 @@ mod tests {
         assert_eq!(
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello sync"
+        );
+    }
+
+    #[test]
+    fn history_delta_can_increment_deep_text_sidecar_from_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let first_delta = alice.export_all_history_delta(&[]).unwrap();
+        bob.apply_history_delta(&first_delta).unwrap();
+        let text_watermark = alice.current_text_ops_watermark().unwrap();
+        let row_epoch = first_delta
+            .bundle
+            .txs
+            .iter()
+            .filter(|tx| tx.node_id == "alice-node")
+            .map(|tx| tx.local_epoch)
+            .max()
+            .unwrap();
+
+        alice
+            .append_deep_text("docs", "doc-1", "body", " again")
+            .unwrap();
+        let second_delta = alice
+            .export_table_history_since_node_epoch_delta_since_text_watermark(
+                "docs",
+                "alice-node",
+                row_epoch,
+                text_watermark,
+            )
+            .unwrap();
+        assert!(!second_delta.text_ops_delta.is_empty());
+        bob.apply_history_delta(&second_delta).unwrap();
+
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello again"
         );
     }
 }

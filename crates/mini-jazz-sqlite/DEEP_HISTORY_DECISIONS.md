@@ -14,6 +14,14 @@ Why: the previous benchmark still had benchmark-only wiring around separate text
 
 Scope impact: text benchmarks now call `append_deep_text`, `replace_deep_text_ranges`, `read_deep_text`, and `profile_apply_history_delta`. Deep-text op tables are included in SQLite storage totals. The first smoke run shows a new obvious issue: live incremental samples still export the full text-op delta, so sidecar-aware watermarks are the next sync-runtime target.
 
+## Thu May 28 22:48:06 PDT 2026
+
+Decision: make runtime deep-text sync watermark-aware before chasing lower-level write tuning.
+
+Why: after the runtime benchmark conversion, live incremental receive was paying to export and apply the full text-op delta every sample. That is not the runtime shape we want: peers should track the last text-op and snapshot ids they have received, just as they track row-history epochs and block manifests.
+
+Scope impact: `persisted_text_ops` can now report its current watermark, and `Runtime` has a table-history delta export that accepts a text-op watermark. The benchmark tracks the sender watermark between live samples. A smoke run moved append live apply from about 1550 ms to about 246 ms across the sampled loop; live export is now the next obvious hotspot.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.

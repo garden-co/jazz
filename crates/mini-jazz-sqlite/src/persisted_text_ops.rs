@@ -299,6 +299,20 @@ pub fn export_delta(conn: &Connection, watermark: DeltaWatermark) -> Result<Enco
     })
 }
 
+pub fn current_watermark(conn: &Connection) -> Result<DeltaWatermark> {
+    let op_id = conn.query_row(
+        "SELECT COALESCE(MAX(op_id), 0) FROM jazz_text_op",
+        [],
+        |row| row.get(0),
+    )?;
+    let snapshot_id = conn.query_row(
+        "SELECT COALESCE(MAX(snapshot_id), 0) FROM jazz_text_snapshot",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(DeltaWatermark { op_id, snapshot_id })
+}
+
 pub fn apply_delta(
     conn: &Connection,
     encoded: &[u8],
