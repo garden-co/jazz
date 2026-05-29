@@ -188,12 +188,20 @@ impl MiniJazzRuntime {
 
     #[wasm_bindgen(js_name = storageStats)]
     pub fn storage_stats(&self) -> Result<JsValue, JsValue> {
-        to_js_value(self.runtime.storage_stats().map_err(to_js_error)?)
+        to_js_value(
+            self.runtime
+                .storage_admin()
+                .storage_stats()
+                .map_err(to_js_error)?,
+        )
     }
 
     #[wasm_bindgen(js_name = storageFormatVersion)]
     pub fn storage_format_version(&self) -> Result<i64, JsValue> {
-        self.runtime.storage_format_version().map_err(to_js_error)
+        self.runtime
+            .storage_admin()
+            .storage_format_version()
+            .map_err(to_js_error)
     }
 }
 

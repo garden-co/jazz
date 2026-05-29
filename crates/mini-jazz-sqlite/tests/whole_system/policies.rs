@@ -833,7 +833,10 @@ fn untrusted_acceptance_uses_authority_policy_not_sender_policy_fingerprint() {
         )
         .unwrap();
     let bundle = writer.export_table_history("notes").unwrap();
-    assert_ne!(bundle.policy_fingerprint, edge.local_policy_fingerprint());
+    assert_ne!(
+        bundle.policy_fingerprint,
+        edge.storage_admin().local_policy_fingerprint()
+    );
 
     edge.apply_untrusted_bundle_as_user(&bundle, writer.current_policy_user())
         .unwrap();
@@ -1052,7 +1055,14 @@ fn trusted_peer_generic_transaction_bypasses_user_write_policy() {
         .unwrap();
 
     assert_eq!(trusted.read_rows("comments").unwrap().len(), 1);
-    assert_eq!(trusted.storage_stats().unwrap().rejected_transactions, 0);
+    assert_eq!(
+        trusted
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .rejected_transactions,
+        0
+    );
 }
 
 #[test]
@@ -2563,7 +2573,7 @@ fn policy_denied_write_is_rejected_history_not_current_state() {
         .unwrap();
 
     assert!(bob.read_rows("comments").unwrap().is_empty());
-    let stats = bob.storage_stats().unwrap();
+    let stats = bob.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.current_rows, 1);
     assert_eq!(stats.rejected_transactions, 1);

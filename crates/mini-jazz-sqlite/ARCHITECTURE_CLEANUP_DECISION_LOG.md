@@ -782,3 +782,10 @@ regress.
 - Replaced the read-surface wildcard runtime import with explicit query, visibility, row-id, schema, transaction, and type dependencies.
 - This clarifies that reads are a thin surface over `QueryContext`/`ReadVisibility`, with conflict metadata as the one extra runtime-specific read helper.
 - Focused branch and generic-schema tests pass, and `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:22 PDT - Grouped storage/projection inspection APIs
+
+- Moved projection clearing/rebuild, physical row-number inspection, storage stats, storage format version, and local policy fingerprint behind `Runtime::storage_admin()`.
+- This keeps implementation-inspection and maintenance hooks available for invariants/benchmarks while making the main runtime API less like a test toolbox.
+- Updated tests and perf scenarios to use the explicit admin surface.
+- Focused storage/generic tests pass, and `cargo check -p mini-jazz-sqlite --examples` is green.

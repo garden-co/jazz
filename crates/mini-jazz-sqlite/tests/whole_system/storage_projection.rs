@@ -4,7 +4,7 @@ use super::*;
 fn memory_runtime_writes_through_sqlite_current_projection() {
     let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
-    assert_eq!(alice.storage_format_version().unwrap(), 7);
+    assert_eq!(alice.storage_admin().storage_format_version().unwrap(), 7);
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -18,7 +18,7 @@ fn memory_runtime_writes_through_sqlite_current_projection() {
     assert_eq!(todos[0].project_title.as_deref(), Some("Spec work"));
     assert_eq!(todos[0].created_by, "alice");
 
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.current_rows, 2);
     assert!(stats.page_count > 0);
@@ -186,10 +186,10 @@ fn rebuild_current_projection_from_history_matches_current_reads() {
         .unwrap();
     let before = alice.open_todos().unwrap();
 
-    alice.clear_current_projection().unwrap();
+    alice.storage_admin().clear_current_projection().unwrap();
     assert!(alice.open_todos().unwrap().is_empty());
 
-    alice.rebuild_current_projection().unwrap();
+    alice.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(alice.open_todos().unwrap(), before);
 }
 
@@ -204,7 +204,7 @@ fn delete_is_history_not_removal() {
     alice.delete_todo("todo-1").unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 1);
 }
@@ -233,8 +233,8 @@ fn deleted_generic_row_can_be_restored_as_new_history_version() {
     let rows = alice.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["body"], json!("Before delete"));
-    alice.clear_current_projection().unwrap();
-    alice.rebuild_current_projection().unwrap();
+    alice.storage_admin().clear_current_projection().unwrap();
+    alice.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(alice.read_rows("notes").unwrap().len(), 1);
 }
 
@@ -296,7 +296,10 @@ fn batched_logical_inserts_keep_distinct_jazz_transactions_but_commit_together()
         .unwrap();
 
     assert_eq!(tx_ids, vec!["tx-alice-node-1", "tx-alice-node-2"]);
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        2
+    );
     assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
 
     bob.apply_bundle(&alice.export_table_history("notes").unwrap())
@@ -436,7 +439,10 @@ fn batched_logical_writes_roll_back_atomically_on_validation_error() {
 
     assert!(err.to_string().contains("unknown field unknown"));
     assert!(alice.read_rows("notes").unwrap().is_empty());
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
 }
 
 #[test]

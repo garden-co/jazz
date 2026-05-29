@@ -36,7 +36,7 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
     assert_eq!(todos.len(), 2);
     assert!(todos.iter().all(|todo| todo.tx_id == tx));
 
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 3);
 }
@@ -330,15 +330,18 @@ fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
             ("todos".to_owned(), "todo-2".to_owned())
         ]
     );
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 0);
 
-    alice.clear_current_projection().unwrap();
-    alice.rebuild_current_projection().unwrap();
+    alice.storage_admin().clear_current_projection().unwrap();
+    alice.storage_admin().rebuild_current_projection().unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 3);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        3
+    );
 }
 
 #[test]
@@ -665,7 +668,11 @@ fn authority_acceptance_enriches_existing_transaction() {
     assert_eq!(after.global_epoch, Some(7));
     assert!(after.receipt_tiers.contains(&"global".to_owned()));
     assert_eq!(
-        alice.storage_stats().unwrap().physical_tx_num_for(&tx),
+        alice
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .physical_tx_num_for(&tx),
         Some(alice.transaction_physical_num_for(&tx).unwrap())
     );
 }

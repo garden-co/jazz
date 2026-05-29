@@ -25,7 +25,7 @@ impl Runtime {
         id: &str,
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
-        self.physical_row_num_for(id)?;
+        row_num(&self.conn, id)?;
         self.write_row(table_name, id, values, WriteOp::Update)
     }
 

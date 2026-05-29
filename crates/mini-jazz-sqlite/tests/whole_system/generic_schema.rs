@@ -14,17 +14,30 @@ fn runtime_can_install_and_write_a_non_todo_schema() {
 
     let tx = runtime.insert_row("notes", "note-1", values).unwrap();
 
-    let stats = runtime.storage_stats().unwrap();
+    let stats = runtime.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 1);
     assert_eq!(stats.current_rows, 1);
     assert!(stats.physical_tx_num_for(&tx).is_some());
-    assert!(runtime.physical_row_num_for("note-1").is_ok());
+    assert!(runtime
+        .storage_admin()
+        .physical_row_num_for("note-1")
+        .is_ok());
 
-    runtime.clear_current_projection().unwrap();
-    assert_eq!(runtime.storage_stats().unwrap().current_rows, 0);
+    runtime.storage_admin().clear_current_projection().unwrap();
+    assert_eq!(
+        runtime
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .current_rows,
+        0
+    );
 
-    runtime.rebuild_current_projection().unwrap();
-    let rebuilt = runtime.storage_stats().unwrap();
+    runtime
+        .storage_admin()
+        .rebuild_current_projection()
+        .unwrap();
+    let rebuilt = runtime.storage_admin().storage_stats().unwrap();
     assert_eq!(rebuilt.history_rows, 1);
     assert_eq!(rebuilt.current_rows, 1);
 }
@@ -1004,8 +1017,8 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
 
     let bundle = alice.export_table_history("comments").unwrap();
     bob.apply_bundle(&bundle).unwrap();
-    bob.clear_current_projection().unwrap();
-    bob.rebuild_current_projection().unwrap();
+    bob.storage_admin().clear_current_projection().unwrap();
+    bob.storage_admin().rebuild_current_projection().unwrap();
 
     let comments = bob.read_rows("comments").unwrap();
     assert_eq!(comments.len(), 1);
@@ -1019,8 +1032,8 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
         vec![("comments".to_owned(), "comment-1".to_owned())]
     );
     assert_ne!(
-        alice.physical_row_num_for("doc-1").unwrap(),
-        bob.physical_row_num_for("doc-1").unwrap()
+        alice.storage_admin().physical_row_num_for("doc-1").unwrap(),
+        bob.storage_admin().physical_row_num_for("doc-1").unwrap()
     );
 }
 

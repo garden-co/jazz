@@ -511,7 +511,14 @@ fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
         fresh_tab.open_todos().unwrap(),
         worker.open_todos().unwrap()
     );
-    assert_eq!(fresh_tab.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(
+        fresh_tab
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .history_rows,
+        2
+    );
 }
 
 #[test]
@@ -528,7 +535,7 @@ fn rejected_transaction_remains_history_but_is_hidden_from_current() {
     alice.reject_transaction(&tx, "policy_denied").unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 2);
     assert_eq!(stats.rejected_transactions, 1);
     assert_eq!(
@@ -555,7 +562,13 @@ fn rejected_fate_update_repairs_peer_current_projection() {
         .unwrap();
 
     assert!(peer.open_todos().unwrap().is_empty());
-    assert_eq!(peer.storage_stats().unwrap().rejected_transactions, 1);
+    assert_eq!(
+        peer.storage_admin()
+            .storage_stats()
+            .unwrap()
+            .rejected_transactions,
+        1
+    );
 }
 
 #[test]
@@ -590,7 +603,7 @@ fn durable_worker_reconciles_rejected_fate_after_restart() {
         .unwrap();
 
     assert!(reopened.open_todos().unwrap().is_empty());
-    let stats = reopened.storage_stats().unwrap();
+    let stats = reopened.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 1);
     assert_eq!(stats.rejected_transactions, 1);
 }
@@ -618,7 +631,7 @@ fn rejecting_generic_transaction_repairs_schema_driven_projection() {
     alice.reject_transaction(&tx, "policy_denied").unwrap();
 
     assert!(alice.read_rows("notes").unwrap().is_empty());
-    let stats = alice.storage_stats().unwrap();
+    let stats = alice.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 1);
     assert_eq!(stats.current_rows, 0);
     assert_eq!(stats.rejected_transactions, 1);
@@ -779,7 +792,7 @@ fn same_bundle_twice_is_idempotent() {
     bob.apply_bundle(&bundle).unwrap();
 
     assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
-    assert_eq!(bob.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(bob.storage_admin().storage_stats().unwrap().history_rows, 2);
 }
 
 #[test]
@@ -800,7 +813,7 @@ fn bundle_with_unknown_table_fails_closed_without_partial_apply() {
 
     let err = peer.apply_bundle(&bundle).unwrap_err();
     assert!(err.to_string().contains("unknown table"));
-    let stats = peer.storage_stats().unwrap();
+    let stats = peer.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 0);
     assert_eq!(stats.current_rows, 0);
     assert!(peer.open_todos().unwrap().is_empty());
@@ -820,7 +833,7 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
 
     let err = peer.apply_bundle(&bundle).unwrap_err();
     assert!(err.to_string().contains("unknown table"));
-    let stats = peer.storage_stats().unwrap();
+    let stats = peer.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 0);
     assert_eq!(stats.current_rows, 0);
     assert!(peer.observed_query_reads().unwrap().is_empty());
@@ -850,7 +863,7 @@ fn absent_query_with_unknown_field_fails_closed_without_partial_apply() {
 
     let err = peer.apply_bundle(&bundle).unwrap_err();
     assert!(err.to_string().contains("unknown query field"));
-    let stats = peer.storage_stats().unwrap();
+    let stats = peer.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 0);
     assert_eq!(stats.current_rows, 0);
     assert!(peer.observed_query_reads().unwrap().is_empty());
@@ -883,7 +896,7 @@ fn recursive_query_with_unknown_parent_field_fails_closed_without_partial_apply(
     let err = peer.apply_bundle(&bundle).unwrap_err();
 
     assert!(err.to_string().contains("unknown query field"));
-    let stats = peer.storage_stats().unwrap();
+    let stats = peer.storage_admin().storage_stats().unwrap();
     assert_eq!(stats.history_rows, 0);
     assert_eq!(stats.current_rows, 0);
     assert!(peer.observed_query_reads().unwrap().is_empty());
@@ -1027,7 +1040,14 @@ fn incompatible_schema_fingerprint_fails_closed_without_partial_apply() {
     let err = receiver.apply_bundle(&bundle).unwrap_err();
 
     assert!(err.to_string().contains("incompatible schema"));
-    assert_eq!(receiver.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        receiver
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .history_rows,
+        0
+    );
     assert!(receiver.read_rows("notes").unwrap().is_empty());
 }
 
@@ -1062,7 +1082,14 @@ fn permission_fingerprint_mismatch_fails_closed_without_partial_apply() {
     let err = receiver.apply_bundle(&bundle).unwrap_err();
 
     assert!(err.to_string().contains("incompatible policy"));
-    assert_eq!(receiver.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        receiver
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .history_rows,
+        0
+    );
     assert!(receiver.read_rows("notes").unwrap().is_empty());
 }
 
@@ -1083,7 +1110,10 @@ fn future_bundle_protocol_versions_fail_closed_without_partial_apply() {
     assert!(err
         .to_string()
         .contains("unsupported bundle protocol version"));
-    assert_eq!(peer.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        peer.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
     assert!(peer.open_todos().unwrap().is_empty());
 }
 
@@ -1104,8 +1134,13 @@ fn replicas_may_use_different_physical_ids_for_same_public_ids() {
 
     assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
     assert_ne!(
-        alice.physical_row_num_for("project-1").unwrap(),
-        bob.physical_row_num_for("project-1").unwrap()
+        alice
+            .storage_admin()
+            .physical_row_num_for("project-1")
+            .unwrap(),
+        bob.storage_admin()
+            .physical_row_num_for("project-1")
+            .unwrap()
     );
 }
 
@@ -1132,11 +1167,13 @@ fn replicas_may_use_different_physical_tx_nums_for_same_public_tx_id() {
     assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
     assert_ne!(
         alice
+            .storage_admin()
             .storage_stats()
             .unwrap()
             .physical_tx_num_for(&tx)
             .unwrap(),
-        bob.storage_stats()
+        bob.storage_admin()
+            .storage_stats()
             .unwrap()
             .physical_tx_num_for(&tx)
             .unwrap()
@@ -1209,8 +1246,14 @@ fn query_scope_is_not_table_replication() {
     bob.apply_bundle(&bundle).unwrap();
 
     assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
-    assert!(bob.physical_row_num_for("project-1").is_ok());
-    assert!(bob.physical_row_num_for("project-2").is_err());
+    assert!(bob
+        .storage_admin()
+        .physical_row_num_for("project-1")
+        .is_ok());
+    assert!(bob
+        .storage_admin()
+        .physical_row_num_for("project-2")
+        .is_err());
 }
 
 #[test]
@@ -1240,8 +1283,14 @@ fn query_scope_excludes_rows_outside_current_result_set() {
 
     bob.apply_bundle(&bundle).unwrap();
     assert_eq!(bob.open_todos().unwrap(), alice.open_todos().unwrap());
-    assert!(bob.physical_row_num_for("todo-open").is_ok());
-    assert!(bob.physical_row_num_for("todo-closed").is_err());
+    assert!(bob
+        .storage_admin()
+        .physical_row_num_for("todo-open")
+        .is_ok());
+    assert!(bob
+        .storage_admin()
+        .physical_row_num_for("todo-closed")
+        .is_err());
 }
 
 #[test]
@@ -1272,7 +1321,10 @@ fn query_scope_hydrates_current_for_previously_pruned_history_row() {
     )
     .unwrap();
     assert_eq!(peer.open_todos().unwrap().len(), 1);
-    assert!(peer.physical_row_num_for("todo-old").is_ok());
+    assert!(peer
+        .storage_admin()
+        .physical_row_num_for("todo-old")
+        .is_ok());
 
     peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
         .unwrap();
@@ -1498,7 +1550,10 @@ fn rejected_fate_arriving_before_history_keeps_later_rows_invisible() {
     peer.apply_bundle(&history_bundle).unwrap();
 
     assert!(peer.open_todos().unwrap().is_empty());
-    assert_eq!(peer.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(
+        peer.storage_admin().storage_stats().unwrap().history_rows,
+        1
+    );
     assert_eq!(
         peer.transaction_info(&tx).unwrap().rejection_code,
         Some("policy_denied".to_owned())
@@ -2142,8 +2197,8 @@ fn out_of_order_global_epochs_do_not_regress_current_projection() {
         json!("epoch 20")
     );
 
-    peer.clear_current_projection().unwrap();
-    peer.rebuild_current_projection().unwrap();
+    peer.storage_admin().clear_current_projection().unwrap();
+    peer.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
         json!("epoch 20")
@@ -2192,8 +2247,8 @@ fn rebuild_uses_global_epoch_order_not_local_tx_order() {
         json!("epoch 20")
     );
 
-    peer.clear_current_projection().unwrap();
-    peer.rebuild_current_projection().unwrap();
+    peer.storage_admin().clear_current_projection().unwrap();
+    peer.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
         json!("epoch 20")
@@ -2257,10 +2312,10 @@ fn same_global_epoch_same_row_uses_stable_tie_breaker_across_apply_order_and_reb
     let peer_b_body = peer_b.read_rows("notes").unwrap()[0].values["body"].clone();
     assert_eq!(peer_a_body, peer_b_body);
 
-    peer_a.clear_current_projection().unwrap();
-    peer_b.clear_current_projection().unwrap();
-    peer_a.rebuild_current_projection().unwrap();
-    peer_b.rebuild_current_projection().unwrap();
+    peer_a.storage_admin().clear_current_projection().unwrap();
+    peer_b.storage_admin().clear_current_projection().unwrap();
+    peer_a.storage_admin().rebuild_current_projection().unwrap();
+    peer_b.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(
         peer_a.read_rows("notes").unwrap()[0].values["body"],
         peer_a_body
@@ -2357,8 +2412,8 @@ fn remote_pending_update_does_not_override_global_current_on_peer() {
         json!("global")
     );
 
-    peer.clear_current_projection().unwrap();
-    peer.rebuild_current_projection().unwrap();
+    peer.storage_admin().clear_current_projection().unwrap();
+    peer.storage_admin().rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
         json!("global")
@@ -2585,7 +2640,14 @@ fn direct_accept_after_reject_preserves_rejected_outcome_with_global_metadata() 
     alice.accept_transaction_at_global(&tx, 7).unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());
-    assert_eq!(alice.storage_stats().unwrap().rejected_transactions, 1);
+    assert_eq!(
+        alice
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .rejected_transactions,
+        1
+    );
     let info = alice.transaction_info(&tx).unwrap();
     assert_eq!(info.global_epoch, Some(7));
     assert_eq!(info.rejection_code, Some("policy_denied".to_owned()));
@@ -2604,7 +2666,14 @@ fn direct_reject_after_accept_removes_current_but_preserves_global_metadata() {
     alice.reject_transaction(&tx, "policy_denied").unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());
-    assert_eq!(alice.storage_stats().unwrap().rejected_transactions, 1);
+    assert_eq!(
+        alice
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .rejected_transactions,
+        1
+    );
     let info = alice.transaction_info(&tx).unwrap();
     assert_eq!(info.global_epoch, Some(7));
     assert_eq!(info.rejection_code, Some("policy_denied".to_owned()));

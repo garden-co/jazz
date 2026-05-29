@@ -863,10 +863,10 @@ fn run_core_only_scoped_page(config: &Config) -> BenchResult<ScenarioReport> {
     seed_rows_by_table.insert("orgs", 100);
     seed_rows_by_table.insert("documents", config.total_rows);
     let approx_raw_json_payload_bytes = approx_raw_json_payload_bytes(config)?;
-    let core_stats = core.storage_stats()?;
-    let edge_stats = edge.storage_stats()?;
-    let worker_stats = worker.storage_stats()?;
-    let tab_stats = tab.storage_stats()?;
+    let core_stats = core.storage_admin().storage_stats()?;
+    let edge_stats = edge.storage_admin().storage_stats()?;
+    let worker_stats = worker.storage_admin().storage_stats()?;
+    let tab_stats = tab.storage_admin().storage_stats()?;
     let core_database_bytes = core_stats.database_bytes;
 
     Ok(ScenarioReport {
@@ -972,7 +972,7 @@ fn run_tx_granularity_case(seed_batch_size: usize) -> BenchResult<TxGranularityC
         bundle_bytes: summary.bytes,
         history_rows_synced: bundle.history.len(),
         transaction_rows_synced: bundle.txs.len(),
-        core_database_bytes: core.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -1017,7 +1017,7 @@ fn run_recursive_policy_probe() -> BenchResult<RecursivePolicyProbe> {
         history_rows_synced: bundle.history.len(),
         transaction_rows_synced: bundle.txs.len(),
         bundle_bytes: summary.bytes,
-        core_database_bytes: core.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
         seed_ms: ms(seed_elapsed),
         core_query_ms: ms(query_elapsed),
         export_ms: ms(export_elapsed),
@@ -1134,7 +1134,7 @@ fn run_many_user_page_probe() -> BenchResult<ManyUserPageProbe> {
         total_transaction_rows_synced,
         average_transaction_rows_synced: total_transaction_rows_synced as f64
             / sampled_users as f64,
-        core_database_bytes: core.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -1178,7 +1178,7 @@ fn run_user_id_footprint_case(
     )?;
     let seed_elapsed = seed_started.elapsed();
 
-    let stats = core.storage_stats()?;
+    let stats = core.storage_admin().storage_stats()?;
     Ok(UserIdFootprintCase {
         user_count,
         rows_per_user,
@@ -1500,8 +1500,8 @@ fn run_permissioned_dashboard_probe() -> BenchResult<PermissionedDashboardProbe>
         subscription_added: total_counts.added,
         subscription_updated: total_counts.updated,
         subscription_removed: total_counts.removed,
-        core_database_bytes: core.storage_stats()?.database_bytes,
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -1808,8 +1808,8 @@ fn run_recursive_tree_subscription_probe() -> BenchResult<RecursiveTreeSubscript
         subscription_updated: diff_counts.updated,
         subscription_removed: diff_counts.removed,
         visible_rows_after_refresh,
-        core_database_bytes: core.storage_stats()?.database_bytes,
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -1931,10 +1931,10 @@ fn run_recursive_tree_topology_probe() -> BenchResult<RecursiveTreeTopologyProbe
         initial_core_bundle_gzip_bytes,
         refresh_core_bundle_bytes: refresh_core_summary.bytes,
         refresh_core_bundle_gzip_bytes,
-        core_database_bytes: core.storage_stats()?.database_bytes,
-        edge_database_bytes: edge.storage_stats()?.database_bytes,
-        worker_database_bytes: worker.storage_stats()?.database_bytes,
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
+        edge_database_bytes: edge.storage_admin().storage_stats()?.database_bytes,
+        worker_database_bytes: worker.storage_admin().storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -2044,7 +2044,7 @@ fn run_cold_reopen_profile_probe() -> BenchResult<ColdReopenProfileProbe> {
         )
     })?;
     let bundle_summary = BundleSummary::from(&bundle)?;
-    let core_database_bytes = core.storage_stats()?.database_bytes;
+    let core_database_bytes = core.storage_admin().storage_stats()?.database_bytes;
 
     let mut worker = Runtime::open_with_schema(
         Storage::File(worker_path.clone()),
@@ -2065,7 +2065,7 @@ fn run_cold_reopen_profile_probe() -> BenchResult<ColdReopenProfileProbe> {
     let reopened_query_elapsed = reopened_query_started.elapsed();
     assert_eq!(reopened_rows.len(), page_size);
     let reopened_worker_observed_reads = reopened.observed_query_reads()?.len();
-    let worker_database_bytes = reopened.storage_stats()?.database_bytes;
+    let worker_database_bytes = reopened.storage_admin().storage_stats()?.database_bytes;
 
     Ok(ColdReopenProfileProbe {
         total_rows,
@@ -2162,8 +2162,8 @@ fn run_project_board_probe() -> BenchResult<ProjectBoardProbe> {
         tab_apply_profile,
         tab_query_ms: ms(query_elapsed),
         visible_rows_returned: visible_rows,
-        core_database_bytes: core.storage_stats()?.database_bytes,
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        core_database_bytes: core.storage_admin().storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -2439,7 +2439,7 @@ fn run_wide_schema_apply_probe() -> BenchResult<WideSchemaApplyProbe> {
         bundle_bytes: summary.bytes,
         apply_ms: ms(apply_elapsed),
         query_ms: ms(query_elapsed),
-        tab_database_bytes: tab.storage_stats()?.database_bytes,
+        tab_database_bytes: tab.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -2523,8 +2523,8 @@ fn run_storage_topology_case(durable_intermediaries: bool) -> BenchResult<Storag
             + worker_export_elapsed
             + tab_apply_elapsed
             + query_elapsed),
-        edge_database_bytes: edge.storage_stats()?.database_bytes,
-        worker_database_bytes: worker.storage_stats()?.database_bytes,
+        edge_database_bytes: edge.storage_admin().storage_stats()?.database_bytes,
+        worker_database_bytes: worker.storage_admin().storage_stats()?.database_bytes,
     })
 }
 
@@ -2951,7 +2951,7 @@ fn run_branch_fan_in_probe() -> BenchResult<BranchFanInProbe> {
         bundle_bytes: summary.bytes,
         history_rows: bundle.history.len(),
         transaction_rows: bundle.txs.len(),
-        core_database_bytes: runtime.storage_stats()?.database_bytes,
+        core_database_bytes: runtime.storage_admin().storage_stats()?.database_bytes,
     })
 }
 

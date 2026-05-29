@@ -264,7 +264,11 @@ async fn open_and_hydrate(
         .into_iter()
         .map(|query| runtime.export_query(query).map_err(error_message))
         .collect::<Result<Vec<_>, _>>()?;
-    let storage_stats = runtime.storage_stats().map_err(error_message)?.into();
+    let storage_stats = runtime
+        .storage_admin()
+        .storage_stats()
+        .map_err(error_message)?
+        .into();
     Ok((runtime, bundles, storage_stats))
 }
 
@@ -312,7 +316,11 @@ fn apply_and_refresh(
         .collect::<Result<Vec<_>, _>>()?;
     let refresh_export_ms = now_ms() - export_started_at;
 
-    let storage_stats = runtime.storage_stats().map_err(error_message)?.into();
+    let storage_stats = runtime
+        .storage_admin()
+        .storage_stats()
+        .map_err(error_message)?
+        .into();
     Ok((
         bundles,
         WorkerSyncProfile {
@@ -377,7 +385,11 @@ fn run_query(
 }
 
 fn storage_stats(runtime: &Runtime, request_id: RuntimeRequestId) -> RuntimeWorkerOutput {
-    match runtime.storage_stats().map_err(error_message) {
+    match runtime
+        .storage_admin()
+        .storage_stats()
+        .map_err(error_message)
+    {
         Ok(stats) => RuntimeWorkerOutput::StorageStats {
             request_id,
             storage_stats: stats.into(),

@@ -975,9 +975,9 @@ fn repeated_bundle_replay_does_not_duplicate_history_or_current_rows() {
     let bundle = alice.export_table_history("todos").unwrap();
 
     bob.apply_bundle(&bundle).unwrap();
-    let after_once = bob.storage_stats().unwrap();
+    let after_once = bob.storage_admin().storage_stats().unwrap();
     bob.apply_bundle(&bundle).unwrap();
-    let after_twice = bob.storage_stats().unwrap();
+    let after_twice = bob.storage_admin().storage_stats().unwrap();
 
     assert_eq!(after_once.history_rows, after_twice.history_rows);
     assert_eq!(after_once.current_rows, after_twice.current_rows);
@@ -1016,8 +1016,8 @@ fn projection_rebuild_is_semantically_identical_to_current_reads_after_mixed_fat
         .unwrap();
 
     let before = alice.read_rows("notes").unwrap();
-    alice.clear_current_projection().unwrap();
-    alice.rebuild_current_projection().unwrap();
+    alice.storage_admin().clear_current_projection().unwrap();
+    alice.storage_admin().rebuild_current_projection().unwrap();
     let after = alice.read_rows("notes").unwrap();
 
     assert_eq!(after, before);
@@ -1039,7 +1039,14 @@ fn durable_reopen_preserves_projection_without_rebuild() {
         .durable("worker.sqlite", "worker-reopened", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
-    assert_eq!(reopened.storage_stats().unwrap().current_rows, 2);
+    assert_eq!(
+        reopened
+            .storage_admin()
+            .storage_stats()
+            .unwrap()
+            .current_rows,
+        2
+    );
 }
 
 #[test]
@@ -1462,7 +1469,10 @@ fn duplicate_overlapping_query_refreshes_dedupe_history_and_query_reads() {
     let rows = peer.read_rows("todos").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["title"], json!("Alpha shared updated"));
-    assert_eq!(peer.storage_stats().unwrap().current_rows, 1);
+    assert_eq!(
+        peer.storage_admin().storage_stats().unwrap().current_rows,
+        1
+    );
 }
 
 #[test]
@@ -1809,8 +1819,8 @@ fn declared_defaults_are_materialized_and_survive_sync_rebuild() {
         .unwrap();
     bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
         .unwrap();
-    bob.clear_current_projection().unwrap();
-    bob.rebuild_current_projection().unwrap();
+    bob.storage_admin().clear_current_projection().unwrap();
+    bob.storage_admin().rebuild_current_projection().unwrap();
 
     let rows = bob.read_rows("tasks").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1915,7 +1925,10 @@ fn exclusive_without_global_epoch_fails_without_writing_history() {
     assert!(err
         .to_string()
         .contains("exclusive transactions require global"));
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
     assert!(alice.read_rows("notes").unwrap().is_empty());
 }
 
@@ -1953,7 +1966,10 @@ fn mergeable_same_row_updates_can_follow_each_other() {
     let row = alice.read_rows("notes").unwrap().remove(0);
     assert_eq!(row.values["body"], json!("Body update"));
     assert_eq!(row.values["pinned"], json!(true));
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 3);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        3
+    );
 }
 
 #[test]
@@ -1982,8 +1998,8 @@ fn update_preserves_omitted_fields_across_sync_and_rebuild() {
         .unwrap();
     bob.apply_bundle(&alice.export_table_history("notes").unwrap())
         .unwrap();
-    bob.clear_current_projection().unwrap();
-    bob.rebuild_current_projection().unwrap();
+    bob.storage_admin().clear_current_projection().unwrap();
+    bob.storage_admin().rebuild_current_projection().unwrap();
 
     let row = bob.read_rows("notes").unwrap().remove(0);
     assert_eq!(row.values["body"], json!("Original body"));
@@ -1998,7 +2014,10 @@ fn deleting_invisible_row_fails_without_creating_transaction() {
 
     let err = alice.delete_row("notes", "missing-note").unwrap_err();
     assert!(err.to_string().contains("not visible") || err.to_string().contains("not found"));
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
 }
 
 #[test]
@@ -2237,7 +2256,13 @@ fn duplicate_untrusted_rejection_bundle_is_idempotent_and_quiet_after_first_even
     edge.apply_untrusted_bundle_as_user(&bundle, "bob").unwrap();
 
     assert!(edge.read_rows("docs").unwrap().is_empty());
-    assert_eq!(edge.storage_stats().unwrap().rejected_transactions, 1);
+    assert_eq!(
+        edge.storage_admin()
+            .storage_stats()
+            .unwrap()
+            .rejected_transactions,
+        1
+    );
     assert_eq!(
         edge.transaction_info(&tx).unwrap().rejection_detail,
         Some(json!({
@@ -2279,8 +2304,8 @@ fn same_global_epoch_tie_breaker_is_stable_after_rebuild() {
     alice.accept_transaction_at_global(&second, 7).unwrap();
     let before = alice.read_rows("notes").unwrap();
 
-    alice.clear_current_projection().unwrap();
-    alice.rebuild_current_projection().unwrap();
+    alice.storage_admin().clear_current_projection().unwrap();
+    alice.storage_admin().rebuild_current_projection().unwrap();
     let after = alice.read_rows("notes").unwrap();
 
     assert_eq!(after, before);
@@ -2357,7 +2382,10 @@ fn empty_explicit_transaction_is_noop_without_history() {
     let tx = alice.transaction().commit().unwrap();
 
     assert!(tx.is_empty());
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
     assert!(alice.read_rows("notes").unwrap().is_empty());
 }
 
@@ -2403,7 +2431,10 @@ fn same_row_updates_in_one_transaction_normalize_to_one_history_version() {
         alice.transaction_write_rows(&tx).unwrap(),
         vec![("notes".to_owned(), "note-1".to_owned())]
     );
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        2
+    );
 }
 
 #[test]
@@ -2435,7 +2466,10 @@ fn insert_then_update_same_row_in_one_transaction_seals_final_created_row() {
     assert_eq!(rows[0].values["body"], json!("Final body"));
     assert_eq!(rows[0].values["pinned"], json!(false));
     assert_eq!(rows[0].tx_id, tx);
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        1
+    );
 }
 
 #[test]
@@ -2645,7 +2679,10 @@ fn missing_catalogue_state_fails_closed_without_partial_apply() {
         .unwrap_err();
     assert!(err.to_string().contains("schema fingerprint"));
     assert!(target.read_rows("tasks").unwrap().is_empty());
-    assert_eq!(target.storage_stats().unwrap().history_rows, 0);
+    assert_eq!(
+        target.storage_admin().storage_stats().unwrap().history_rows,
+        0
+    );
 }
 
 #[test]
@@ -2677,7 +2714,10 @@ fn upsert_creates_missing_row_and_updates_existing_row() {
     assert_eq!(rows[0].values["body"], json!("Created by upsert"));
     assert_eq!(rows[0].values["pinned"], json!(true));
     assert_ne!(create_tx, update_tx);
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        2
+    );
 }
 
 #[test]
@@ -2711,7 +2751,10 @@ fn insert_is_create_only_for_visible_same_table_row() {
     let rows = alice.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["body"], json!("first"));
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        1
+    );
 }
 
 #[test]
@@ -2743,7 +2786,10 @@ fn transaction_upsert_normalizes_with_later_same_row_updates() {
     assert_eq!(rows[0].values["body"], json!("Upsert final"));
     assert_eq!(rows[0].values["pinned"], json!(false));
     assert_eq!(rows[0].tx_id, tx);
-    assert_eq!(alice.storage_stats().unwrap().history_rows, 1);
+    assert_eq!(
+        alice.storage_admin().storage_stats().unwrap().history_rows,
+        1
+    );
 }
 
 #[test]
@@ -3378,8 +3424,8 @@ fn query_scope_export_includes_full_history_for_result_rows() {
     );
 
     peer.apply_bundle(&bundle).unwrap();
-    peer.clear_current_projection().unwrap();
-    peer.rebuild_current_projection().unwrap();
+    peer.storage_admin().clear_current_projection().unwrap();
+    peer.storage_admin().rebuild_current_projection().unwrap();
     let row = peer.read_rows("notes").unwrap().remove(0);
     assert_eq!(row.id, "note-history");
     assert_eq!(row.values["body"], json!("ready"));
@@ -3498,7 +3544,7 @@ fn restore_deleted_row_reuses_insert_semantics_and_creates_new_history_version()
     assert_eq!(row.id, "note-restore");
     assert_eq!(row.created_by, "bob");
     assert_eq!(row.values["body"], json!("restore me"));
-    assert_eq!(bob.storage_stats().unwrap().history_rows, 3);
+    assert_eq!(bob.storage_admin().storage_stats().unwrap().history_rows, 3);
 }
 
 #[test]
@@ -3524,14 +3570,14 @@ fn stale_delete_bundle_cannot_hide_restored_row() {
 
     peer.apply_bundle(&source.export_table_history("notes").unwrap())
         .unwrap();
-    let history_rows_after_restore = peer.storage_stats().unwrap().history_rows;
+    let history_rows_after_restore = peer.storage_admin().storage_stats().unwrap().history_rows;
     peer.apply_bundle(&stale_deleted).unwrap();
 
     let rows = peer.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "note-restore");
     assert_eq!(
-        peer.storage_stats().unwrap().history_rows,
+        peer.storage_admin().storage_stats().unwrap().history_rows,
         history_rows_after_restore
     );
 }
