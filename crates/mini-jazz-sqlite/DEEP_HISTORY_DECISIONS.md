@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:42:25 PDT 2026
+
+Decision: fail closed when raw `Bundle` apply sees `deep_text` roots.
+
+Why: the real sync envelope for deep-history text is `HistoryDelta`, because it carries the row/history bundle, sealed history blocks, and text sidecar delta together. A raw bundle with integer roots but no sidecar can import rows that are unreadable later. That is worse than a clear boundary error.
+
+Scope impact: `apply_bundle`, `profile_apply_bundle`, and untrusted raw-bundle apply now reject bundles containing deep-text roots and tell callers to use `HistoryDelta`. `apply_history_delta` remains the path that validates roots and imports sidecar data. Non-text raw bundle tests and benchmarks continue to use the old bundle path.
+
 ## Fri May 29 01:33:37 PDT 2026
 
 Decision: let SQLite build the local single-row read/write tuple JSONB directly.

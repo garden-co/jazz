@@ -2206,6 +2206,13 @@ impl Runtime {
         let total_started = Instant::now();
         let validation_started = Instant::now();
         self.validate_bundle_header_for_apply(bundle, check_policy_fingerprint)?;
+        if !validate_deep_text_roots
+            && !deep_text_roots_for_bundle(&self.schema, bundle)?.is_empty()
+        {
+            return Err(crate::Error::new(
+                "bundle contains deep_text roots; use HistoryDelta so text sidecar data is included",
+            ));
+        }
         let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
         let begin_tx_started = Instant::now();
@@ -13479,6 +13486,31 @@ mod tests {
     }
 
     #[test]
+    fn raw_bundle_apply_rejects_deep_text_roots_without_sidecar() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let bundle = alice.export_table_history("docs").unwrap();
+
+        let err = bob.apply_bundle(&bundle).unwrap_err();
+
+        assert!(err.to_string().contains("use HistoryDelta"));
+        assert!(bob.read_rows("docs").unwrap().is_empty());
+    }
+
+    #[test]
     fn rejected_history_delta_does_not_apply_deep_text_sidecar() {
         let alice_schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
@@ -13868,19 +13900,20 @@ mod tests {
             alice.read_deep_text("docs", "doc-1", "body").unwrap(),
             "abc"
         );
-        let bundle = alice.export_table_history("docs").unwrap();
-        let versions = bundle
+        let delta = alice.export_table_history_delta("docs", &[]).unwrap();
+        let versions = delta
+            .bundle
             .history
             .iter()
             .filter(|record| record.row_id == "doc-1")
             .count();
         assert_eq!(versions, 4);
-        assert!(bundle.reads.len() < versions);
+        assert!(delta.bundle.reads.len() < versions);
 
         let mut bob =
             Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", alice.schema.clone())
                 .unwrap();
-        bob.apply_bundle(&bundle).unwrap();
+        bob.apply_history_delta(&delta).unwrap();
         assert_eq!(
             bob.transaction_previous_read_rows("tx-alice-node-4")
                 .unwrap(),
