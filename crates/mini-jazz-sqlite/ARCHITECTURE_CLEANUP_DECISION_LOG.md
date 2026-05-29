@@ -864,3 +864,9 @@ regress.
 - Addressed the review's second boundary finding: runtime child modules no longer reach `history_export` / `sync_apply` helpers through glob imports installed on the runtime root.
 - Query export, query refresh, query-scope export, sync export, and transaction status now import helpers from the sibling module that actually owns them.
 - Removed the `use history_export::*` and `use sync_apply::*` imports from `runtime.rs`; `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 04:00 PDT - Made WASM open names match schema semantics
+
+- Tightened the WASM constructor cleanup further: `openMemory` / `openOpfs` now require an explicit schema, while the todo-specific convenience constructors are named `openTodoMemory` / `openTodoOpfs`.
+- Updated WASM tests to use the explicit todo constructor name.
+- `cargo check -p mini-jazz-sqlite-wasm` and `cargo check -p mini-sqlite-todo-yew` are green.

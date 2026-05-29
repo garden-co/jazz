@@ -49,12 +49,7 @@ impl From<JsValue> for NotificationError {
 #[wasm_bindgen]
 impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = openMemory)]
-    pub fn open_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
-        Self::open_memory_with_schema(node_id, user, to_js_value(todo_app_schema())?)
-    }
-
-    #[wasm_bindgen(js_name = openMemoryWithSchema)]
-    pub fn open_memory_with_schema(
+    pub fn open_memory(
         node_id: &str,
         user: &str,
         schema: JsValue,
@@ -64,19 +59,14 @@ impl MiniJazzRuntime {
             .map_err(to_js_error)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openOpfs)]
-    pub async fn open_opfs(
-        db_name: &str,
-        node_id: &str,
-        user: &str,
-    ) -> Result<MiniJazzRuntime, JsValue> {
-        Self::open_opfs_with_schema(db_name, node_id, user, to_js_value(todo_app_schema())?).await
+    #[wasm_bindgen(js_name = openTodoMemory)]
+    pub fn open_todo_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
+        Self::open_memory(node_id, user, to_js_value(todo_app_schema())?)
     }
 
     #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openOpfsWithSchema)]
-    pub async fn open_opfs_with_schema(
+    #[wasm_bindgen(js_name = openOpfs)]
+    pub async fn open_opfs(
         db_name: &str,
         node_id: &str,
         user: &str,
@@ -100,6 +90,16 @@ impl MiniJazzRuntime {
         )
         .map(MiniJazzRuntime::new)
         .map_err(to_js_error)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openTodoOpfs)]
+    pub async fn open_todo_opfs(
+        db_name: &str,
+        node_id: &str,
+        user: &str,
+    ) -> Result<MiniJazzRuntime, JsValue> {
+        Self::open_opfs(db_name, node_id, user, to_js_value(todo_app_schema())?).await
     }
 
     #[wasm_bindgen(js_name = insertRow)]
@@ -414,7 +414,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn subscription_callback_error_is_returned_and_delta_retried() {
         reset_test_globals();
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let callback = js_sys::Function::new_with_args(
             "delta",
             r#"
@@ -468,7 +468,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn throwing_subscription_callback_does_not_block_later_callbacks() {
         reset_test_globals();
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let throwing = js_sys::Function::new_with_args(
             "delta",
             r#"
@@ -519,7 +519,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn subscription_initial_callback_write_is_reported_to_new_subscription() {
         reset_test_globals();
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let runtime_ptr = &mut runtime as *mut MiniJazzRuntime;
         let write_closure = Closure::<dyn FnMut()>::new(move || unsafe {
             (*runtime_ptr)
@@ -563,7 +563,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn subscription_nested_write_still_notifies_when_later_callback_throws() {
         reset_test_globals();
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let seen_initial = Rc::new(Cell::new(false));
         let wrote_nested_row = Rc::new(Cell::new(false));
         let writer_callback_count = Rc::new(Cell::new(0));
@@ -619,7 +619,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn subscription_callback_can_unsubscribe_current_handle() {
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let handle = Rc::new(Cell::new(None::<u32>));
         let seen_initial = Rc::new(Cell::new(false));
         let callback_count = Rc::new(Cell::new(0));
@@ -661,7 +661,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn subscription_callback_can_write_another_row() {
-        let mut runtime = MiniJazzRuntime::open_memory("alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::open_todo_memory("alice-node", "alice").unwrap();
         let seen_initial = Rc::new(Cell::new(false));
         let wrote_nested_row = Rc::new(Cell::new(false));
         let callback_count = Rc::new(Cell::new(0));
