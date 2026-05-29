@@ -1,4 +1,5 @@
 use crate::auth::RuntimeAuth;
+use crate::profile::ProfileTimer;
 use crate::query_api::{
     predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
 };
@@ -27,8 +28,6 @@ use crate::{
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
 pub struct Runtime {
     conn: Connection,
@@ -37,44 +36,6 @@ pub struct Runtime {
     auth: RuntimeAuth,
     node_num: i64,
     branch_num: i64,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct ProfileTimer {
-    started_at: Instant,
-}
-
-#[cfg(target_arch = "wasm32")]
-struct ProfileTimer {
-    started_at_ms: f64,
-}
-
-impl ProfileTimer {
-    fn start() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self {
-                started_at: Instant::now(),
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self {
-                started_at_ms: js_sys::Date::now(),
-            }
-        }
-    }
-
-    fn elapsed_ms(&self) -> f64 {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.started_at.elapsed().as_secs_f64() * 1000.0
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            js_sys::Date::now() - self.started_at_ms
-        }
-    }
 }
 
 struct AwaitingDependencyTx {

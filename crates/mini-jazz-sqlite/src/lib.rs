@@ -3,6 +3,7 @@ mod branch;
 mod effective;
 mod error;
 mod policy;
+mod profile;
 mod projection;
 mod query;
 mod query_api;
