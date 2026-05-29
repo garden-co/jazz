@@ -1334,3 +1334,11 @@ Decision: add `Runtime::history_delta_export_options`, collecting sealed block m
 Why: table-specific receiver state is enough for table deltas, but export-all/bootstrap-style sync needs the same cursor-like object over the whole runtime. Callers should not need to know how to walk table manifests by hand.
 
 Scope impact: `export_all_history_delta_with_options` can now be driven by receiver-captured state. A regression verifies that after an initial block+text sync, a second all-history delta omits already-known blocks and carries only one new text op.
+
+## Fri May 29 02:55:54 PDT 2026 - Report Live Receive Wire Bytes
+
+Decision: benchmark reports now include sampled live receive wire bytes: total sampled bytes, average bytes/sample, and last sample bytes.
+
+Why: cold native sync bytes are useful, but write-path realism depends on the incremental deltas carried during live sync. Receiver-state export made those deltas more honest; the report should expose their size directly instead of forcing us to infer from timing.
+
+Scope impact: JSON report shape expands for all three deep-history scenarios. Existing overview tables remain unchanged until we decide which byte metric belongs there.

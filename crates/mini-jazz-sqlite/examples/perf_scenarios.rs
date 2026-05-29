@@ -229,6 +229,9 @@ struct DeepHistoryCaseReport {
     live_receive_p95_ms: Option<f64>,
     live_receive_p99_ms: Option<f64>,
     live_receive_last_ms: Option<f64>,
+    sampled_receive_wire_bytes: usize,
+    live_receive_average_wire_bytes: Option<f64>,
+    live_receive_last_wire_bytes: Option<usize>,
     cold_load_ms: f64,
     current_read_ms: f64,
     historical_read_total_ms: f64,
@@ -4654,6 +4657,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
 
     let started = Instant::now();
     let mut receive_samples = Vec::new();
+    let mut receive_wire_samples = Vec::new();
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
     let mut phase_ms = DeepHistoryPhaseReport::default();
@@ -4726,7 +4730,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
                 live_sync_writer_epoch.max(max_local_epoch_for_node(&delta.bundle, "writer-node"));
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let encode_decode_started = Instant::now();
-            let (delta, _) = encode_decode_native_delta(delta)?;
+            let (delta, wire_bytes) = encode_decode_native_delta(delta)?;
+            receive_wire_samples.push(wire_bytes);
             DeepHistoryPhaseReport::add_elapsed(
                 &mut phase_ms.live_encode_decode,
                 encode_decode_started,
@@ -4892,6 +4897,9 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         live_receive_p95_ms: percentile(receive_samples.clone(), 0.95),
         live_receive_p99_ms: percentile(receive_samples.clone(), 0.99),
         live_receive_last_ms: receive_samples.last().copied(),
+        sampled_receive_wire_bytes: receive_wire_samples.iter().sum(),
+        live_receive_average_wire_bytes: average_usize(&receive_wire_samples),
+        live_receive_last_wire_bytes: receive_wire_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
         historical_read_total_ms,
@@ -5005,6 +5013,7 @@ fn run_naive_deep_history_case(
     let started = Instant::now();
     let deadline = started + Duration::from_secs(input.max_seconds);
     let mut receive_samples = Vec::new();
+    let mut receive_wire_samples = Vec::new();
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
     let mut phase_ms = DeepHistoryPhaseReport::default();
@@ -5126,6 +5135,7 @@ fn run_naive_deep_history_case(
             } else {
                 writer.export_table_history(input.table)?
             };
+            receive_wire_samples.push(BundleSummary::from(&bundle)?.bytes);
             live_sync_writer_epoch =
                 live_sync_writer_epoch.max(max_local_epoch_for_node(&bundle, "writer-node"));
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
@@ -5365,6 +5375,9 @@ fn run_naive_deep_history_case(
         live_receive_p95_ms: percentile(receive_samples.clone(), 0.95),
         live_receive_p99_ms: percentile(receive_samples.clone(), 0.99),
         live_receive_last_ms: receive_samples.last().copied(),
+        sampled_receive_wire_bytes: receive_wire_samples.iter().sum(),
+        live_receive_average_wire_bytes: average_usize(&receive_wire_samples),
+        live_receive_last_wire_bytes: receive_wire_samples.last().copied(),
         cold_load_ms,
         current_read_ms,
         historical_read_total_ms,
@@ -5556,6 +5569,14 @@ fn average(values: &[f64]) -> Option<f64> {
         None
     } else {
         Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn average_usize(values: &[usize]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<usize>() as f64 / values.len() as f64)
     }
 }
 
