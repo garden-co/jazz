@@ -819,3 +819,11 @@ Decision: cache `node_id -> node_num` lookups within one `apply_bundle` call.
 Why: the incremental live benchmark applies many transactions from the same node in each receive batch. Even with `INSERT ... RETURNING` for tx upserts, repeatedly ensuring the same node still showed up inside `txs_ms`. A per-call cache keeps the durable semantics identical while avoiding redundant node table work.
 
 Scope impact: with the incremental live-export env flag enabled, live apply/update moved from roughly `0.0446 -> 0.0380` ms for append, `0.0445 -> 0.0372` ms for Automerge, and `0.0433 -> 0.0366` ms for canvas. The gain is almost entirely `txs_ms`, which drops from about `0.017` to `0.010` ms/update. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:35:42 PDT 2026 - Set Received Read/Write Tuples Together
+
+Decision: when receiving a bundle, collect read tuples and write tuples first, then update each affected `jazz_tx` once with both tuple columns.
+
+Why: the previous receive path appended reads before applying history and appended writes after applying history. For the common one-row transaction, that made two `jazz_tx` updates per received tx. The new path keeps the same row-per-update history model and JSONB tuple columns, but writes the received tuple state in one durable update.
+
+Scope impact: with the incremental live-export env flag enabled, live apply/update moved from roughly `0.0380 -> 0.0331` ms for append, `0.0372 -> 0.0331` ms for Automerge, and `0.0366 -> 0.0325` ms for canvas. `reads_ms` drops from about `0.0085` to `0.0021` ms/update; `history_ms` rises slightly because it now owns the combined tuple write. `cargo test -q -p mini-jazz-sqlite` passes.

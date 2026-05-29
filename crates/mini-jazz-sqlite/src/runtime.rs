@@ -1969,9 +1969,6 @@ impl Runtime {
                 observed_tx_num,
             ));
         }
-        for (tx_num, reads) in reads_by_tx {
-            tx::append_reads(&db, tx_num, reads)?;
-        }
         let reads_ms = duration_ms(reads_started.elapsed());
 
         let rejected_cleanup_started = Instant::now();
@@ -2023,8 +2020,24 @@ impl Runtime {
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
         }
-        for (tx_num, writes) in &history_context.writes_by_tx {
-            tx::append_writes(&db, *tx_num, writes.clone())?;
+        let mut tuple_tx_nums = history_context
+            .writes_by_tx
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        tuple_tx_nums.extend(reads_by_tx.keys().copied());
+        for tx_num in tuple_tx_nums {
+            let writes = history_context
+                .writes_by_tx
+                .get(&tx_num)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            tx::set_received_read_write_tuples(
+                &db,
+                tx_num,
+                writes,
+                reads_by_tx.get(&tx_num).map(Vec::as_slice),
+            )?;
         }
         for (table_name, row_num, branch_num) in &history_context.touched_current_rows {
             let key = (table_name.clone(), *row_num, *branch_num);

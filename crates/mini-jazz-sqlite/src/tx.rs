@@ -12,10 +12,10 @@ pub(crate) const OUTCOME_REJECTED: i64 = 3;
 pub(crate) const TIER_EDGE: i64 = 2;
 pub(crate) const TIER_GLOBAL: i64 = 3;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PackedWrite(pub(crate) i64, pub(crate) i64, pub(crate) i64);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PackedRead(
     pub(crate) i64,
     pub(crate) i64,
@@ -145,6 +145,24 @@ pub(crate) fn set_single_row_read_write(
           WHERE tx_num = ?",
     )?
     .execute(params![writes, reads, tx_num])?;
+    Ok(())
+}
+
+pub(crate) fn set_received_read_write_tuples(
+    conn: &Connection,
+    tx_num: i64,
+    writes: &[PackedWrite],
+    reads: Option<&[PackedRead]>,
+) -> Result<()> {
+    let writes = encode_writes(writes);
+    let reads = reads.map(encode_reads);
+    conn.prepare_cached(
+        "UPDATE jazz_tx
+            SET writes_json = jsonb(?),
+                reads_json = CASE WHEN ? IS NULL THEN NULL ELSE jsonb(?) END
+          WHERE tx_num = ?",
+    )?
+    .execute(params![writes, reads, reads, tx_num])?;
     Ok(())
 }
 
@@ -344,6 +362,56 @@ fn replace_explicit_reads(conn: &Connection, tx_num: i64, reads: &[PackedRead]) 
     conn.prepare_cached("UPDATE jazz_tx SET reads_json = jsonb(?) WHERE tx_num = ?")?
         .execute(params![encoded, tx_num])?;
     Ok(())
+}
+
+fn encode_writes(writes: &[PackedWrite]) -> String {
+    if writes.is_empty() {
+        return "[]".to_owned();
+    }
+    let mut encoded = String::with_capacity(writes.len() * 20 + 2);
+    encoded.push('[');
+    for (index, PackedWrite(table_num, row_num, op)) in writes.iter().enumerate() {
+        if index > 0 {
+            encoded.push(',');
+        }
+        encoded.push('[');
+        encoded.push_str(&table_num.to_string());
+        encoded.push(',');
+        encoded.push_str(&row_num.to_string());
+        encoded.push(',');
+        encoded.push_str(&op.to_string());
+        encoded.push(']');
+    }
+    encoded.push(']');
+    encoded
+}
+
+fn encode_reads(reads: &[PackedRead]) -> String {
+    if reads.is_empty() {
+        return "[]".to_owned();
+    }
+    let mut encoded = String::with_capacity(reads.len() * 28 + 2);
+    encoded.push('[');
+    for (index, PackedRead(table_num, row_num, reason, observed_tx_num)) in reads.iter().enumerate()
+    {
+        if index > 0 {
+            encoded.push(',');
+        }
+        encoded.push('[');
+        encoded.push_str(&table_num.to_string());
+        encoded.push(',');
+        encoded.push_str(&row_num.to_string());
+        encoded.push(',');
+        encoded.push_str(&reason.to_string());
+        encoded.push(',');
+        match observed_tx_num {
+            Some(tx_num) => encoded.push_str(&tx_num.to_string()),
+            None => encoded.push_str("null"),
+        }
+        encoded.push(']');
+    }
+    encoded.push(']');
+    encoded
 }
 
 fn implicit_previous_reads(conn: &Connection, tx_num: i64) -> Result<Vec<PackedRead>> {
