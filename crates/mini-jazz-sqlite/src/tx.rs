@@ -159,14 +159,15 @@ pub(crate) fn append_writes(
     }
     if new_writes.len() == 1 {
         let PackedWrite(table_num, row_num, op) = new_writes[0];
+        let writes = format!("[[{table_num},{row_num},{op}]]");
         let changed = conn
             .prepare_cached(
                 "UPDATE jazz_tx
-                SET writes_json = jsonb_array(jsonb_array(?, ?, ?))
+                SET writes_json = jsonb(?)
               WHERE tx_num = ?
                 AND writes_json = jsonb('[]')",
             )?
-            .execute(params![table_num, row_num, op, tx_num])?;
+            .execute(params![writes, tx_num])?;
         if changed > 0 {
             return Ok(());
         }
@@ -215,15 +216,19 @@ pub(crate) fn append_reads(
     }
     if new_reads.len() == 1 {
         let PackedRead(table_num, row_num, reason, observed_tx_num) = new_reads[0];
+        let observed = observed_tx_num
+            .map(|tx_num| tx_num.to_string())
+            .unwrap_or_else(|| "null".to_owned());
+        let reads = format!("[[{table_num},{row_num},{reason},{observed}]]");
         let changed = conn
             .prepare_cached(
                 "UPDATE jazz_tx
-                    SET reads_json = jsonb_array(jsonb_array(?, ?, ?, ?))
+                    SET reads_json = jsonb(?)
                   WHERE tx_num = ?
                     AND reads_json IS NULL
                     AND writes_json = jsonb('[]')",
             )?
-            .execute(params![table_num, row_num, reason, observed_tx_num, tx_num])?;
+            .execute(params![reads, tx_num])?;
         if changed > 0 {
             return Ok(());
         }
