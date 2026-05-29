@@ -883,6 +883,11 @@ regress.
 - PR #973 has moved again to `e1fe2689ad7b86a91cfbd12f6e08d9eb8e94b69c` and is still draft.
 - The set of open stacked PRs remains #974, #973, and #945.
 
+## 2026-05-29 04:12 PDT - Full validation passes after shared reconstruction move
+
+- Ran `cargo test -p mini-jazz-sqlite` after moving `history_records_for_tx` to `history_export` and fixing the JS todo demo constructor call.
+- Result: 440 passed, 18 ignored placeholders, 0 failed.
+
 ## 2026-05-29 04:03 PDT - Full validation passes after final boundary/name cleanup
 
 - Ran `cargo test -p mini-jazz-sqlite` after removing runtime-root helper re-export indirection and renaming the WASM todo constructors.
