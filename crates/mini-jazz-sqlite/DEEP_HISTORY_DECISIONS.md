@@ -974,3 +974,11 @@ Decision: extend `HistoryDelta` with a text-op sidecar payload and change `Runti
 Why: applying `bundle` and `blocks` separately made it too easy to mismatch pieces of one logical transfer, and text sidecar sync previously lived entirely in benchmark code. A coherent delta object is closer to the real sync shape: apply sidecar bytes first, then sealed blocks, then the open-history bundle.
 
 Scope impact: current text-op export is still coarse: when a schema contains deep-text fields, deltas carry the full text-op delta from an empty watermark. That is honest but not final; the next step is adding sidecar watermarks so incremental sync can avoid resending already-known text ops.
+
+## Thu May 28 23:24:03 PDT 2026 - Fetch Text Ancestors With One Recursive Query
+
+Decision: replace per-ancestor materialization probes with a recursive CTE that walks from a deep-text root back to the nearest snapshot.
+
+Why: independent text roots made reads and snapshot creation pay one or two SQLite statements per replayed op. The new query keeps the same op-chain semantics, but fetches the ancestor window in one statement and lets Rust replay from the returned rows.
+
+Scope impact: focused text-op tests and the full `mini-jazz-sqlite` test suite pass. A canonical Block+Ops sample shows current and historical text reads improving, while append write-only moved worse in this single run; keep profiling before treating this as a settled write-path win.

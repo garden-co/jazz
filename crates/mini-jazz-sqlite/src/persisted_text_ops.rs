@@ -405,38 +405,73 @@ fn ancestor_ops_to_replay(
     root_op_id: i64,
 ) -> Result<(Option<Snapshot>, Vec<TextOpRow>)> {
     let mut ops = Vec::new();
-    let mut current = Some(root_op_id);
-    let mut snapshot_stmt =
-        conn.prepare_cached("SELECT chunk_hashes FROM jazz_text_snapshot WHERE op_id = ?")?;
-    let mut op_stmt = conn.prepare_cached(
-        "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
-         FROM jazz_text_op
-         WHERE op_id = ?",
+    let mut snapshot = None;
+    let mut stmt = conn.prepare_cached(
+        r#"
+        WITH RECURSIVE ancestors(
+          depth,
+          op_id,
+          parent_op_id,
+          start_byte,
+          delete_bytes,
+          insert_text,
+          resulting_len,
+          chunk_hashes
+        ) AS (
+          SELECT
+            0,
+            op.op_id,
+            op.parent_op_id,
+            op.start_byte,
+            op.delete_bytes,
+            op.insert_text,
+            op.resulting_len,
+            snapshot.chunk_hashes
+          FROM jazz_text_op op
+          LEFT JOIN jazz_text_snapshot snapshot ON snapshot.op_id = op.op_id
+          WHERE op.op_id = ?
+
+          UNION ALL
+
+          SELECT
+            ancestors.depth + 1,
+            op.op_id,
+            op.parent_op_id,
+            op.start_byte,
+            op.delete_bytes,
+            op.insert_text,
+            op.resulting_len,
+            snapshot.chunk_hashes
+          FROM ancestors
+          JOIN jazz_text_op op ON op.op_id = ancestors.parent_op_id
+          LEFT JOIN jazz_text_snapshot snapshot ON snapshot.op_id = op.op_id
+          WHERE ancestors.chunk_hashes IS NULL
+        )
+        SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, chunk_hashes
+        FROM ancestors
+        ORDER BY depth
+        "#,
     )?;
-    while let Some(op_id) = current {
-        if let Some(chunk_hashes) = snapshot_stmt
-            .query_row(params![op_id], |row| row.get::<_, Vec<u8>>(0))
-            .optional()?
-        {
-            return Ok((Some(Snapshot { chunk_hashes }), ops));
+    let mut rows = stmt.query(params![root_op_id])?;
+    while let Some(row) = rows.next()? {
+        let chunk_hashes: Option<Vec<u8>> = row.get(6)?;
+        if let Some(chunk_hashes) = chunk_hashes {
+            snapshot = Some(Snapshot { chunk_hashes });
+            break;
         }
-        let op = op_stmt
-            .query_row(params![op_id], |row| {
-                Ok(TextOpRow {
-                    op_id: row.get(0)?,
-                    parent_op_id: row.get(1)?,
-                    start_byte: row.get(2)?,
-                    delete_bytes: row.get(3)?,
-                    insert_text: row.get(4)?,
-                    resulting_len: row.get(5)?,
-                })
-            })
-            .optional()?
-            .ok_or_else(|| Error::new("unknown text op root"))?;
-        current = op.parent_op_id;
-        ops.push(op);
+        ops.push(TextOpRow {
+            op_id: row.get(0)?,
+            parent_op_id: row.get(1)?,
+            start_byte: row.get(2)?,
+            delete_bytes: row.get(3)?,
+            insert_text: row.get(4)?,
+            resulting_len: row.get(5)?,
+        });
     }
-    Ok((None, ops))
+    if ops.is_empty() && snapshot.is_none() {
+        return Err(Error::new("unknown text op root"));
+    }
+    Ok((snapshot, ops))
 }
 
 fn store_chunks(conn: &Connection, text: &str) -> Result<Vec<u8>> {
