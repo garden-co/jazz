@@ -90,11 +90,7 @@ impl Runtime {
             self.is_trusted(),
             "run_as_user is only valid for trusted peers"
         );
-        let previous = self.auth.clone();
-        self.auth = RuntimeAuth::trusted_as_user(user);
-        let result = f(self);
-        self.auth = previous;
-        result
+        self.with_temporary_auth(RuntimeAuth::trusted_as_user(user), f)
     }
 
     pub fn run_attributing_to_user<T>(
@@ -106,11 +102,7 @@ impl Runtime {
             self.is_trusted(),
             "run_attributing_to_user is only valid for trusted peers"
         );
-        let previous = self.auth.clone();
-        self.auth = RuntimeAuth::trusted_attributing_to_user(user);
-        let result = f(self);
-        self.auth = previous;
-        result
+        self.with_temporary_auth(RuntimeAuth::trusted_attributing_to_user(user), f)
     }
 
     pub fn session_user_for_test(&mut self, user: &str) {
@@ -119,5 +111,45 @@ impl Runtime {
         } else {
             RuntimeAuth::client(user)
         }
+    }
+
+    fn with_temporary_auth<T>(
+        &mut self,
+        auth: RuntimeAuth,
+        f: impl FnOnce(&mut Runtime) -> T,
+    ) -> T {
+        let previous = self.auth.clone();
+        self.auth = auth;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.auth = previous;
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::ADMIN_SYSTEM_USER;
+
+    #[test]
+    fn run_as_user_restores_auth_after_panic() {
+        let mut runtime = Runtime::open_trusted_with_schema(
+            Storage::Memory,
+            "trusted",
+            SchemaDef::new().table("docs", |table| {
+                table.text("title");
+            }),
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_as_user("bob", |_| panic!("boom"));
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(runtime.session_user(), ADMIN_SYSTEM_USER);
     }
 }

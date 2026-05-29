@@ -50,12 +50,13 @@ impl Runtime {
     ) -> Result<T> {
         let previous_branch_id = branch::id_for_num(&self.conn, self.branch_num)?;
         self.checkout_branch(branch_id)?;
-        let result = query(self);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| query(self)));
         let restore_result = self.checkout_branch(&previous_branch_id);
         match (result, restore_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
+            (Ok(Ok(value)), Ok(())) => Ok(value),
+            (Ok(Err(error)), _) => Err(error),
+            (Ok(Ok(_)), Err(error)) => Err(error),
+            (Err(payload), _) => std::panic::resume_unwind(payload),
         }
     }
 
@@ -119,5 +120,31 @@ impl Runtime {
             });
         }
         Ok(branches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_in_branch_restores_checkout_after_panic() {
+        let mut runtime = Runtime::open_trusted_with_schema(
+            Storage::Memory,
+            "trusted",
+            SchemaDef::new().table("docs", |table| {
+                table.text("title");
+            }),
+        )
+        .unwrap();
+        let main_branch_num = runtime.branch_num;
+        runtime.create_branch("draft", None).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = runtime.query_in_branch("draft", |_| panic!("boom"));
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(runtime.branch_num, main_branch_num);
     }
 }

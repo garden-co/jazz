@@ -623,3 +623,10 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after the runtime split and helper moves.
 - Result: 434 passed, 19 ignored placeholders, 0 failed.
 - This is an important checkpoint: the PR is no longer just a line shuffle, it has a full green baseline after the central runtime file was reduced to wiring.
+
+## 2026-05-29 02:33 PDT - Temporary auth and branch scopes are panic-safe
+
+- Added regression tests proving `run_as_user` and branch-scoped query execution restore the previous runtime state even if the caller closure panics.
+- Implemented restore-then-resume semantics with `catch_unwind`/`resume_unwind`.
+- This is a small API hardening slice but it matters for the cleanup theme: scoped runtime APIs should behave like real boundaries, not best-effort fixture conveniences.
+- Focused restore/auth/branch-query tests pass.
