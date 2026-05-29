@@ -4138,6 +4138,25 @@ fn decode_native_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
     Ok(decode_bundle(bytes)?)
 }
 
+fn encode_decode_native_delta(delta: HistoryDelta) -> BenchResult<(HistoryDelta, usize)> {
+    let bundle_wire = encode_native_bundle(&delta.bundle)?;
+    let text_ops_wire = delta.text_ops_delta.clone();
+    let block_payload_bytes = delta
+        .blocks
+        .iter()
+        .map(|block| block.payload.len())
+        .sum::<usize>();
+    let total_bytes = bundle_wire.len() + text_ops_wire.len() + block_payload_bytes;
+    Ok((
+        HistoryDelta {
+            bundle: decode_native_bundle(&bundle_wire)?,
+            blocks: delta.blocks,
+            text_ops_delta: text_ops_wire,
+        },
+        total_bytes,
+    ))
+}
+
 fn max_local_epoch_for_node(bundle: &Bundle, node_id: &str) -> i64 {
     bundle
         .txs
@@ -4630,13 +4649,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     )?;
     let (initial_edit, mut final_payload_bytes) = (input.next_edit)(0)?;
     writer.edit_deep_texts_batched("documents", "doc", "body", &[initial_edit])?;
-    let initial_delta = writer.export_table_history_delta("documents", &[])?;
-    let initial_wire = encode_native_bundle(&initial_delta.bundle)?;
-    let initial_delta = HistoryDelta {
-        bundle: decode_native_bundle(&initial_wire)?,
-        blocks: initial_delta.blocks,
-        text_ops_delta: initial_delta.text_ops_delta,
-    };
+    let (initial_delta, _) =
+        encode_decode_native_delta(writer.export_table_history_delta("documents", &[])?)?;
     let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_delta.bundle, "writer-node");
     let mut live_text_ops_watermark = writer.current_text_ops_watermark()?;
     receiver.apply_history_delta(&initial_delta)?;
@@ -4717,12 +4731,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             live_text_ops_watermark = writer.current_text_ops_watermark()?;
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let encode_decode_started = Instant::now();
-            let wire = encode_native_bundle(&delta.bundle)?;
-            let delta = HistoryDelta {
-                bundle: decode_native_bundle(&wire)?,
-                blocks: delta.blocks,
-                text_ops_delta: delta.text_ops_delta,
-            };
+            let (delta, _) = encode_decode_native_delta(delta)?;
             DeepHistoryPhaseReport::add_elapsed(
                 &mut phase_ms.live_encode_decode,
                 encode_decode_started,
@@ -4777,18 +4786,13 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         ));
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
-        let delta_wire = encode_native_bundle(&delta.bundle)?;
-        let text_ops_delta_bytes = delta.text_ops_delta.len();
-        let decoded_delta = HistoryDelta {
-            bundle: decode_native_bundle(&delta_wire)?,
-            blocks: delta.blocks.clone(),
-            text_ops_delta: delta.text_ops_delta.clone(),
-        };
+        let block_count = delta.blocks.len();
+        let block_payload_bytes = delta.blocks.iter().map(|block| block.payload.len()).sum();
+        let (decoded_delta, delta_wire_bytes) = encode_decode_native_delta(delta)?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
         phase_ms.native_export += block_native_export_ms.unwrap_or(0.0);
-        block_native_blocks = Some(delta.blocks.len());
-        block_native_payload_bytes =
-            Some(delta.blocks.iter().map(|block| block.payload.len()).sum());
+        block_native_blocks = Some(block_count);
+        block_native_payload_bytes = Some(block_payload_bytes);
         native_export_ms = block_native_export_ms;
         let mut block_peer =
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
@@ -4801,8 +4805,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
         phase_ms.native_import_apply += block_native_import_ms.unwrap_or(0.0);
         native_import_ms = block_native_import_ms;
-        native_sync_bytes =
-            Some(delta_wire.len() + block_native_payload_bytes.unwrap_or(0) + text_ops_delta_bytes);
+        native_sync_bytes = Some(delta_wire_bytes);
     }
 
     let current_started = Instant::now();
@@ -4817,21 +4820,13 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let final_delta = writer.export_table_history_delta("documents", &[])?;
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.final_export, final_bundle_export_started);
     let final_encode_decode_started = Instant::now();
-    let final_wire = encode_native_bundle(&final_delta.bundle)?;
-    let final_bundle = decode_native_bundle(&final_wire)?;
-    let final_text_ops_delta_bytes = final_delta.text_ops_delta.len();
-    let final_delta = HistoryDelta {
-        bundle: final_bundle,
-        blocks: final_delta.blocks,
-        text_ops_delta: final_delta.text_ops_delta,
-    };
+    let (final_delta, final_bundle_bytes) = encode_decode_native_delta(final_delta)?;
     DeepHistoryPhaseReport::add_elapsed(
         &mut phase_ms.final_encode_decode,
         final_encode_decode_started,
     );
     let final_bundle_export_ms = phase_ms.final_export + phase_ms.final_encode_decode;
-    let final_bundle_bytes = final_wire.len();
-    let sidecar_bundle_bytes = final_text_ops_delta_bytes;
+    let sidecar_bundle_bytes = 0;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let cold_started = Instant::now();
     let cold_apply_started = Instant::now();

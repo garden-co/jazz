@@ -54,6 +54,14 @@ Why: the latest code is not a simple optimization of `Block+Ops5`; it moves the 
 
 Scope impact: `/tmp/deep_history_runtime_real_all_block_ops.json` is the current all-scenario run. The benchmark overview now compares `Block+Ops6` for append, Automerge, and canvas.
 
+## Thu May 28 23:05:03 PDT 2026
+
+Decision: include deep-text sidecar bytes in the measured encode/decode path, not only in byte accounting.
+
+Why: the benchmark had already counted text-op delta bytes in `native_sync_bytes`, but live and cold encode/decode timing only round-tripped the Jazz bundle and then carried `text_ops_delta` by Rust object move. That understated the real sync path now that `HistoryDelta` is the runtime envelope.
+
+Scope impact: text scenarios now clone the raw text-op delta during native delta encode/decode and reconstruct a full `HistoryDelta` before apply. `/tmp/deep_history_runtime_real_delta_wire_all_block_ops.json` is the refreshed run used for the latest `Block+Ops6` numbers.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
