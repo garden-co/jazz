@@ -503,3 +503,9 @@ regress.
 - Moved subscription construction, observed-query subscription reconstruction, polling, and rejection polling into `runtime::subscriptions`.
 - This keeps reactive behavior findable and separate from sync export/apply and storage maintenance.
 - Focused subscription tests pass after the move.
+
+## 2026-05-29 01:37 PDT - Transaction fate and introspection moved behind a transaction-status module
+
+- Moved accept/reject, rejection listing, transaction info, physical tx lookup, and transaction read/write-set inspection into `runtime::transaction_status`.
+- The explicit transaction constructor stays in `runtime::transaction_builder`; this split mirrors the semantic distinction between creating transactions and later assigning/inspecting fate.
+- Focused transaction and fate-introspection tests pass after the move.
