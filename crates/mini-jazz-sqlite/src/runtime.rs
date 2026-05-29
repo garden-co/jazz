@@ -54,8 +54,8 @@ use sync_apply::*;
 pub use transaction_builder::TransactionBuilder;
 use write_core::{
     exclusive_write_conflict_exists, insert_row_in_tx, record_tx_write_num,
-    row_has_current_branch_value, row_id_used_by_other_table, stage_delete_row_in_tx,
-    DeleteReadSetMode, InsertRowInTx, StageDeleteInTx, WriteOp,
+    row_id_used_by_other_table, stage_delete_row_in_tx, DeleteReadSetMode, InsertRowInTx,
+    StageDeleteInTx, WriteOp,
 };
 
 pub struct Runtime {

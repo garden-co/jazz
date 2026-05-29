@@ -676,3 +676,9 @@ regress.
 - Simple delete calls now state that their read-set shape is already covered by write-call semantics, while explicit transaction deletes state that they record the previous row.
 - This preserves current behavior but removes another ambiguous write-core flag from the API future work will copy.
 - Focused delete-related tests pass.
+
+## 2026-05-29 02:52 PDT - Tightened imports for the write-facing runtime modules
+
+- Replaced wildcard runtime imports in `runtime::writes` and `runtime::write_batch` with explicit dependencies.
+- This is deliberately small but useful: these modules are now examples of the desired post-split shape, where write APIs declare the runtime helpers they actually depend on.
+- Focused storage/projection and transaction tests pass.
