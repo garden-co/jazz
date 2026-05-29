@@ -539,3 +539,9 @@ regress.
 - Moved runtime constructors, trusted/user session switching, attribution switching, and internal auth accessors into `runtime::session`.
 - The compiler forced an explicit boundary: `policy_user`, `attribution_user`, and `bypasses_policy` are now `pub(super)` runtime-internal helpers instead of invisible methods accidentally shared by everything in one giant file.
 - Focused auth/policy tests pass, including trusted admin writes, untrusted policy validation, and same-user/multiple-node authorship.
+
+## 2026-05-29 02:01 PDT - Observed-query refresh API moved behind a query-refresh module
+
+- Moved observed query read listing, query-read refresh export, and forgotten observed-query reads into `runtime::query_refresh`.
+- This is a product-shaped boundary: durable intermediaries replay observed query descriptors to reconcile downstream clients. The code now has one obvious place for predicate/window/recursive refresh planning instead of burying that behavior in the sync/apply block.
+- Focused query-read refresh tests pass across predicate, in/contains/ne, top-created, top-field, recursive, branch, and durable-restart cases.
