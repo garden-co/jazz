@@ -121,7 +121,11 @@ impl WorkerHost {
 // =============================================================================
 
 #[wasm_bindgen(js_name = runAsWorker)]
-pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(), JsError> {
+pub fn run_as_worker(
+    init_message: JsValue,
+    pending_messages: Array,
+    on_init_ok: Option<Function>,
+) -> Result<(), JsError> {
     if HOST.with(|h| h.borrow().is_some()) {
         return Ok(());
     }
@@ -180,7 +184,7 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
 
     // Spawn async runtime open + init.
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = run_init(*init).await {
+        if let Err(e) = run_init(*init, on_init_ok).await {
             post_to_main(&WorkerToMainWire::Error {
                 message: format!("Init failed: {e}"),
             });
@@ -216,7 +220,7 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
 // Async init flow
 // =============================================================================
 
-async fn run_init(init: InitPayload) -> Result<(), String> {
+async fn run_init(init: InitPayload, on_init_ok: Option<Function>) -> Result<(), String> {
     let f = &init.fields;
 
     // 1. Open runtime.
@@ -379,6 +383,12 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     post_to_main(&WorkerToMainWire::InitOk {
         client_id: main_client_id.clone(),
     });
+
+    // Notify JS caller that init completed (additive — postcard InitOk is
+    // still posted above for the dedicated-Worker bridge).
+    if let Some(cb) = on_init_ok.as_ref() {
+        let _ = cb.call0(&JsValue::NULL);
+    }
 
     Ok(())
 }
