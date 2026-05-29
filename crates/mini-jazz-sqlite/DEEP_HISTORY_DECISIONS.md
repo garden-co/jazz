@@ -1286,3 +1286,11 @@ Decision: observed-query refresh delta export now accepts a deep-text sidecar wa
 Why: real sync refreshes are cursor-shaped. Block manifests already avoided resending sealed blocks, but text sidecar export was still pinned to zero in refresh APIs, which made repeated observed-query sync less honest than the benchmark-native path.
 
 Scope impact: direct query exports still default to a zero watermark for compatibility, while refresh callers can now pass the receiver watermark. A runtime regression verifies a refreshed predicate query exports exactly one new text op after the first sync.
+
+## Fri May 29 02:43:18 PDT 2026 - Add Shared Query Delta Export Options
+
+Decision: ordinary predicate query HistoryDelta APIs now have `HistoryDeltaExportOptions`, bundling remote block manifests with the deep-text sidecar watermark. The old slice-based methods remain wrappers.
+
+Why: the runtime was growing one-off sync knobs. A caller should be able to pass receiver state as one options object instead of remembering which query shape has a special watermark method. This is a small step toward a real sync cursor without committing to the final cursor shape yet.
+
+Scope impact: equality, inequality, contains, and in-query delta exports can now increment deep-text sidecar bytes directly from the receiver watermark. A regression covers the equality path exporting exactly one new text op after an initial query sync.

@@ -195,6 +195,31 @@ pub struct HistoryDelta {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct HistoryDeltaExportOptions {
+    pub remote_block_manifests: Vec<HistoryBlockManifest>,
+    pub text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+}
+
+impl HistoryDeltaExportOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_remote_block_manifests(mut self, manifests: Vec<HistoryBlockManifest>) -> Self {
+        self.remote_block_manifests = manifests;
+        self
+    }
+
+    pub fn with_text_ops_watermark(
+        mut self,
+        watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Self {
+        self.text_ops_watermark = watermark;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct TopFieldHistoryDeltaOptions {
     pub order_field_name: String,
     pub limit: usize,

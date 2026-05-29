@@ -7,8 +7,9 @@ use crate::sync::{
 };
 use crate::types::{
     ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
-    HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
-    RejectionInfo, RowView, StorageStats, TopFieldHistoryDeltaOptions, TransactionInfo,
+    HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, HistoryDeltaExportOptions,
+    QueryExportProfile, RejectionInfo, RowView, StorageStats, TopFieldHistoryDeltaOptions,
+    TransactionInfo,
 };
 use crate::value::{bytes_to_hex, hex_to_bytes, IntoValueMap, Value as JsonValue, WireValue};
 use crate::{
@@ -5134,6 +5135,25 @@ impl Runtime {
     where
         V: Into<JsonValue>,
     {
+        self.export_query_where_eq_history_delta_with_options(
+            table_name,
+            field_name,
+            value,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_eq_history_delta_with_options<V>(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: V,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
         let value = value.into();
         let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
@@ -5142,7 +5162,10 @@ impl Runtime {
             "eq",
             value,
             rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            QueryScopeDeltaOptions::remote_since_text_watermark(
+                &options.remote_block_manifests,
+                options.text_ops_watermark,
+            ),
         )
     }
 
@@ -5153,6 +5176,22 @@ impl Runtime {
         needle: &str,
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<HistoryDelta> {
+        self.export_query_where_contains_history_delta_with_options(
+            table_name,
+            field_name,
+            needle,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_contains_history_delta_with_options(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        needle: &str,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<HistoryDelta> {
         let rows = self.read_rows_where_contains(table_name, field_name, needle)?;
         self.export_query_scope_history_delta(
             table_name,
@@ -5160,7 +5199,10 @@ impl Runtime {
             "contains",
             JsonValue::String(needle.to_owned()),
             rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            QueryScopeDeltaOptions::remote_since_text_watermark(
+                &options.remote_block_manifests,
+                options.text_ops_watermark,
+            ),
         )
     }
 
@@ -5174,6 +5216,25 @@ impl Runtime {
     where
         V: Into<JsonValue>,
     {
+        self.export_query_where_in_history_delta_with_options(
+            table_name,
+            field_name,
+            values,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_in_history_delta_with_options<V>(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        values: Vec<V>,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
         let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
         let rows = self.read_rows_where_in(table_name, field_name, values.clone())?;
         self.export_query_scope_history_delta(
@@ -5182,7 +5243,10 @@ impl Runtime {
             "in",
             JsonValue::Array(values),
             rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            QueryScopeDeltaOptions::remote_since_text_watermark(
+                &options.remote_block_manifests,
+                options.text_ops_watermark,
+            ),
         )
     }
 
@@ -5196,6 +5260,25 @@ impl Runtime {
     where
         V: Into<JsonValue>,
     {
+        self.export_query_where_ne_history_delta_with_options(
+            table_name,
+            field_name,
+            value,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_ne_history_delta_with_options<V>(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: V,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
         let value = value.into();
         let rows = self.read_rows_where_ne(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
@@ -5204,7 +5287,10 @@ impl Runtime {
             "ne",
             value,
             rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            QueryScopeDeltaOptions::remote_since_text_watermark(
+                &options.remote_block_manifests,
+                options.text_ops_watermark,
+            ),
         )
     }
 
@@ -14207,6 +14293,61 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != "doc-2"));
+    }
+
+    #[test]
+    fn predicate_query_delta_options_can_increment_deep_text_sidecar_from_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("folder");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("folder".to_owned(), JsonValue::from("kept"))]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let first_delta = alice
+            .export_query_where_eq_history_delta("docs", "folder", "kept", &[])
+            .unwrap();
+        let text_watermark = alice.current_text_ops_watermark().unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " again")
+            .unwrap();
+
+        let second_delta = alice
+            .export_query_where_eq_history_delta_with_options(
+                "docs",
+                "folder",
+                "kept",
+                HistoryDeltaExportOptions::new().with_text_ops_watermark(text_watermark),
+            )
+            .unwrap();
+
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &first_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &second_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+
+        assert_eq!(stats.ops, 1);
     }
 
     #[test]
