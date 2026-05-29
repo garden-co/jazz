@@ -12993,6 +12993,39 @@ mod tests {
     }
 
     #[test]
+    fn deep_text_columns_can_be_queried_like_text_at_the_public_boundary() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .insert_row("docs", "doc-2", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello searchable text")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-2", "body", "plain note")
+            .unwrap();
+
+        let rows = alice
+            .read_rows_where_contains("docs", "body", "searchable")
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "doc-1");
+        assert_eq!(
+            rows[0].values["body"],
+            JsonValue::from("hello searchable text")
+        );
+    }
+
+    #[test]
     fn history_delta_can_increment_deep_text_sidecar_from_watermark() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");

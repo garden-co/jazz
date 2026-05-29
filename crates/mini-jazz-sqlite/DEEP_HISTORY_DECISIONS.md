@@ -1054,3 +1054,11 @@ Decision: public `read_rows` now exposes `deep_text` fields as normal text strin
 Why: the opt-in deep-history text column should behave like a real user column at the runtime API boundary. Requiring callers or benchmarks to read a sidecar root and then call `read_deep_text` made the experiment feel like plumbing instead of runtime behavior. The row-query layer is the last-mile boundary where materialization belongs; bundle/history code still needs roots for efficient sync and compaction.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. The canonical Block+Ops sample now verifies current/cold/live text reads through `read_rows`; append current-read timing rose from about 0.55 ms to 0.76 ms because it now measures the public materialization path.
+
+## Fri May 29 00:24:24 PDT 2026 - Make Basic Deep-Text Predicates Publicly Text-Shaped
+
+Decision: equality, `IN`, and `contains` queries over `deep_text` fields now filter over materialized public row values instead of comparing the internal numeric root column.
+
+Why: after public `read_rows` returns strings, predicates must not leak the internal root representation either. This fallback is intentionally simple and correct first: it uses the normal row-query path, then filters materialized strings in memory. A future indexed/full-text path can replace it without changing the API contract.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. This is not tuned for large deep-text search result sets yet, but it keeps the runtime semantics honest for the spike.

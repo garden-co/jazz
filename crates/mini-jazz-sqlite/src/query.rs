@@ -63,6 +63,13 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if matches!(field.kind, FieldKind::DeepText) {
+            return Ok(self
+                .read_rows(table_name)?
+                .into_iter()
+                .filter(|row| row.values.get(field_name) == Some(&value))
+                .collect());
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows =
@@ -138,6 +145,17 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if matches!(field.kind, FieldKind::DeepText) {
+            return Ok(self
+                .read_rows(table_name)?
+                .into_iter()
+                .filter(|row| {
+                    row.values
+                        .get(field_name)
+                        .is_some_and(|value| values.contains(value))
+                })
+                .collect());
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows =
@@ -891,6 +909,18 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if matches!(field.kind, FieldKind::DeepText) {
+            return Ok(self
+                .read_rows(table_name)?
+                .into_iter()
+                .filter(|row| {
+                    row.values
+                        .get(field_name)
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|value| value.contains(needle))
+                })
+                .collect());
+        }
         if !matches!(field.kind, FieldKind::Text) {
             return Err(crate::Error::new(format!(
                 "contains only supports text fields, got {table_name}.{field_name}"
