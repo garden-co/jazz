@@ -1660,13 +1660,9 @@ fn top_field_query_with_ref_include_syncs_page_and_dependency() {
         .unwrap();
 
     let bundle = alice
-        .export_query_where_eq_top_field_desc_with_ref_include(
-            "todos",
-            "done",
-            json!(false),
-            "title",
-            1,
-            "project",
+        .export_query_with_ref_includes(
+            support::top_field_query("todos", "done", json!(false), "title", 1),
+            &["project"],
         )
         .unwrap();
     peer.apply_bundle(&bundle).unwrap();
@@ -1696,23 +1692,15 @@ fn batched_top_field_ref_include_matches_individual_exports() {
         .unwrap();
 
     let open = alice
-        .export_query_where_eq_top_field_desc_with_ref_include(
-            "todos",
-            "done",
-            json!(false),
-            "title",
-            1,
-            "project",
+        .export_query_with_ref_includes(
+            support::top_field_query("todos", "done", json!(false), "title", 1),
+            &["project"],
         )
         .unwrap();
     let done = alice
-        .export_query_where_eq_top_field_desc_with_ref_include(
-            "todos",
-            "done",
-            json!(true),
-            "title",
-            1,
-            "project",
+        .export_query_with_ref_includes(
+            support::top_field_query("todos", "done", json!(true), "title", 1),
+            &["project"],
         )
         .unwrap();
     individual_peer.apply_bundle(&open).unwrap();
@@ -1756,10 +1744,22 @@ fn batched_top_field_query_matches_individual_exports_without_include() {
         .unwrap();
 
     let open = alice
-        .export_query_where_eq_top_field_desc("todos", "done", json!(false), "title", 1)
+        .export_query(support::top_field_query(
+            "todos",
+            "done",
+            json!(false),
+            "title",
+            1,
+        ))
         .unwrap();
     let done = alice
-        .export_query_where_eq_top_field_desc("todos", "done", json!(true), "title", 1)
+        .export_query(support::top_field_query(
+            "todos",
+            "done",
+            json!(true),
+            "title",
+            1,
+        ))
         .unwrap();
     individual_peer.apply_bundle(&open).unwrap();
     individual_peer.apply_bundle(&done).unwrap();

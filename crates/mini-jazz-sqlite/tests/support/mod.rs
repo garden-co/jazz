@@ -405,6 +405,22 @@ pub fn top_created_query(table: &str, field: &str, value: JsonValue, limit: usiz
     .unwrap()
 }
 
+pub fn top_field_query(
+    table: &str,
+    field: &str,
+    value: JsonValue,
+    order_field: &str,
+    limit: usize,
+) -> BuiltQuery {
+    BuiltQuery::from_json_value(json!({
+        "table": table,
+        "conditions": [{"column": field, "op": "eq", "value": value}],
+        "orderBy": [[order_field, "desc"]],
+        "limit": limit,
+    }))
+    .unwrap()
+}
+
 pub fn folders_schema() -> SchemaDef {
     SchemaDef::new().table("folders", |table| {
         table.text("name");

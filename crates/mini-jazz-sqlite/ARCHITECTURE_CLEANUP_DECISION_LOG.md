@@ -988,3 +988,16 @@ regress.
 - Moved refresh-application helpers, row-id set projection, and deterministic replay schedule generation into shared test support.
 - Split future placeholder invariants out of `invariant_coverage.rs` so the active invariant file is less mixed with product backlog markers.
 - Validation: `cargo test -p mini-jazz-sqlite invariant_coverage -- --nocapture` passed 90 focused invariant tests with 2 ignored underspecified cases.
+
+## 2026-05-29 13:35 PDT - Migrated safe query export call sites to BuiltQuery
+
+- Tried a broad migration from legacy predicate export helpers to `export_query(BuiltQuery)`, then rolled back the cases whose tests intentionally assert legacy `QueryReadRecord` shape or refresh batching by predicate descriptor.
+- Kept the safe migrations: top-field query exports with ref includes now use `export_query_with_ref_includes(BuiltQuery, ...)`, and direct top-field comparison exports use `export_query(BuiltQuery)`.
+- Removed the now-unused `export_query_where_eq_top_field_desc_with_ref_include` convenience API.
+- Decision: keep legacy predicate export helpers for now because they encode a compatibility descriptor shape that many tests deliberately cover. Future removal needs a semantic decision about whether query descriptors should always be generic `$query` records.
+- Validation: `cargo check -p mini-jazz-sqlite --examples`; `cargo test -p mini-jazz-sqlite sync_fate -- --nocapture` passed 65 focused sync tests.
+
+## 2026-05-29 13:36 PDT - Full whole-system validation after simplification slices
+
+- Ran `cargo test -p mini-jazz-sqlite --test whole_system -- --nocapture`.
+- Result: 436 passed, 18 ignored placeholders/underspecified cases, 0 failed.
