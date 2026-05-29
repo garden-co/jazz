@@ -125,6 +125,13 @@ feature exists.
   policy.
 - Branch access checks both backing-row permission and row/version permission
   through the branch view.
+- Branch-view read policies never apply to ordinary main reads.
+- If a branch-view read policy is declared for a table, branch reads for that
+  table do not fall back to the main read policy.
+- Hidden or missing app-visible branch backing rows deny branch-scoped row
+  visibility.
+- Branch-view field policies compare against the backing row for the branch
+  being queried, not an arbitrary row with similar contents.
 - A branch-local transaction may be globally accepted while invisible to main.
 - Main visibility does not automatically include branch-local history.
 - Branch reads use source precedence, not incidental storage order.

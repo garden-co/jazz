@@ -22,7 +22,7 @@ Coverage labels:
 | D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
 | D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
-| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
+| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, branch policy contexts, and a narrow read-only app backing-row branch policy are tested. Merge commits are not.        |
 | D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
 | D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries and ephemeral observed interests are not.  |
 | D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
@@ -164,6 +164,7 @@ Coverage labels:
 - `branch_write_policy_uses_parent_visible_from_pinned_base`: D.5, D.9
 - `branch_recursive_write_policy_uses_parent_state_from_pinned_base`: D.5,
   D.9
+- `for_branch_read_uses_branch_policy_and_backing_row_visibility`: D.5, D.9
 - `trusted_edge_validates_branch_recursive_write_policy_against_pinned_base`:
   D.5, D.9, D.11
 - `trusted_edge_rejects_untrusted_delete_policy_violation`: D.9, D.11

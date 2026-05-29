@@ -151,6 +151,12 @@ Branch access has two policy layers:
 - can the session see/use/change the branch backing row?
 - can the session see or mutate this row through that branch view?
 
+A branch backing row is an ordinary application row whose public id equals the
+branch id. Engine metadata still lives in system branch tables; the backing row
+supplies user-visible policy and product metadata. Branch-view read policies may
+compare fields on the target row with fields on the backing row. The first
+implemented shape is equality, such as `todo.project == branch.project`.
+
 A branch-local transaction may be globally accepted while invisible to main.
 Global acceptance means durable/valid history, not visible in every branch.
 
@@ -206,12 +212,16 @@ Baseline branch features:
 - branch policy/write validation against branch overlay plus pinned base
 - branch query-scope repair scoped by branch id
 - replay-ordered branch source-list mutation
+- read-only branch-view policy over app backing rows and direct branch queries
 
 Deferred branch features:
 
 - hot branch projections
 - metadata-only merge commits
 - product-grade branch merge APIs over multi-source graphs
+- branch-view write policies
+- inherit-main branch policies
+- branch-view policy over pinned base snapshot/export repair paths
 
 Branch merge should preferably become a metadata transaction changing branch
 sources rather than copying rows. Multi-base conflicts should remain visible

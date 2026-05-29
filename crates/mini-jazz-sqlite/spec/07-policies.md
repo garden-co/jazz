@@ -29,6 +29,18 @@ Policy operations:
   influence downstream row visibility in that branch view
 - catalogue publication is admin/core-controlled rather than ordinary row policy
 
+Branch read policies are evaluated in two layers:
+
+1. the session must be able to read the branch's app-visible backing row
+2. the target row must pass the table's branch-view read rule
+
+The first implemented branch-view rule shape is field equality between the
+target row and the backing row, for example `todo.project == branch.project`.
+When a table declares a branch-view read rule, branch reads for that table must
+use it rather than silently falling back to the table's main read policy.
+Missing branch-view rules for a declared branch policy deny. Normal main reads
+never use branch-view policies.
+
 ## Server Permission Validation Flow
 
 Permission enforcement follows the current Jazz Tools server flow:
@@ -117,6 +129,9 @@ snapshots.
 Open issues:
 
 - exact SQL-lowerable policy IR
+- branch-view write policies
+- explicit inherit-main branch policy semantics
+- branch-view policy lowering for pinned base snapshots and export repair
 - how to bound recursive policy evaluation
 - edge policy-readiness strategy
 - redaction rules for policy denial/rejection explanations
