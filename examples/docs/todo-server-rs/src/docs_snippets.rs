@@ -321,7 +321,7 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<
     let one_week_ago = Value::Timestamp(now_ms - 7 * 24 * 60 * 60 * 1000);
 
     let query = QueryBuilder::new("todos")
-        .filter_gt("created_at", one_week_ago)
+        .filter_gt("$createdAt", one_week_ago)
         .build();
     let recent_todos = client.query(query, None).await?;
 
@@ -368,7 +368,7 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<
     // #region where-order-limit-rust
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
-        .order_by("created_at")
+        .order_by("$createdAt")
         .limit(50)
         .build();
     let recent_incomplete = client.query(query, None).await?;
