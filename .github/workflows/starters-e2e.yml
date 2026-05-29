@@ -30,6 +30,9 @@ jobs:
     timeout-minutes: 30
     env:
       JAZZ_SKIP_RN_DEPS: "1"
+      # The scaffolded starter pins its own pnpm via `packageManager`; without
+      # this, Corepack prompts on first download and the non-TTY CI run aborts.
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
     strategy:
       fail-fast: false
       matrix:
