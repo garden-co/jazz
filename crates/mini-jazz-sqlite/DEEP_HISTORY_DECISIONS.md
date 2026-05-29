@@ -811,3 +811,11 @@ Decision: add an experimental single-writer open-history export path, gated in t
 Why: after exact receive idempotency caching, live export and encode/decode became comparable to live apply. Filtering after full export proved smaller bundles help, but export still paid the full scan cost. The new path exports visible open history for one writer node after a known local epoch directly in SQL, then includes the corresponding reads, txs, and branch metadata. This is intentionally narrower than a complete sync protocol: it does not yet cover deleted rows, sealed blocks, multi-node watermarks, or policy dependency expansion.
 
 Scope impact: with the env flag enabled on canonical `all-block-ops`, receive/update moved from roughly `0.201 -> 0.135` ms for append, `0.196 -> 0.130` ms for Automerge, and `0.136 -> 0.103` ms for canvas. Default behavior is unchanged. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:33:13 PDT 2026 - Cache Node Numbers During Bundle Apply
+
+Decision: cache `node_id -> node_num` lookups within one `apply_bundle` call.
+
+Why: the incremental live benchmark applies many transactions from the same node in each receive batch. Even with `INSERT ... RETURNING` for tx upserts, repeatedly ensuring the same node still showed up inside `txs_ms`. A per-call cache keeps the durable semantics identical while avoiding redundant node table work.
+
+Scope impact: with the incremental live-export env flag enabled, live apply/update moved from roughly `0.0446 -> 0.0380` ms for append, `0.0445 -> 0.0372` ms for Automerge, and `0.0433 -> 0.0366` ms for canvas. The gain is almost entirely `txs_ms`, which drops from about `0.017` to `0.010` ms/update. `cargo test -q -p mini-jazz-sqlite` passes.

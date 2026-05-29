@@ -1823,6 +1823,7 @@ impl Runtime {
         let mut tx_info_by_num = BTreeMap::new();
         let mut already_applied_tx_ids = BTreeSet::new();
         let mut pending_applied_tx_cache = BTreeMap::new();
+        let mut node_nums_by_id = BTreeMap::new();
         let tx_ids_with_history = bundle
             .history
             .iter()
@@ -1865,7 +1866,14 @@ impl Runtime {
                 already_applied_tx_ids.insert(tx_record.tx_id.clone());
                 continue;
             }
-            let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
+            let node_num = match node_nums_by_id.get(&tx_record.node_id).copied() {
+                Some(node_num) => node_num,
+                None => {
+                    let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
+                    node_nums_by_id.insert(tx_record.node_id.clone(), node_num);
+                    node_num
+                }
+            };
             let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
             let (tx_num, info) = upsert_tx_stmt.query_row(
                 params![
