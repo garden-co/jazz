@@ -458,3 +458,10 @@ regress.
 - Created a `runtime::query_scope_export` child module and moved the built-query SQL row-scope bundle export entry point there.
 - I deliberately left the lower-level history/policy helper functions in `runtime.rs` for this slice. They are shared by legacy row-id export and SQL-scope export, so moving them safely needs a broader export-boundary refactor rather than a purely mechanical copy.
 - Focused `query_matrix` tests pass after the extraction.
+
+## 2026-05-29 01:23 PDT - Transaction builder gets its own runtime module
+
+- The explicit transaction constructor had become a large tail section of `runtime.rs`, mixing the public transaction API with mutation normalization, read-your-writes snapshot semantics, exclusive conflict checks, and delete materialization.
+- Moved that builder implementation into `runtime::transaction_builder`, re-exporting only the public `TransactionBuilder` type from `runtime`.
+- This is mostly a shape improvement, but it matters: transactions are a core semantic layer, not a miscellaneous appendage on the runtime facade.
+- Focused transaction tests pass after the move.
