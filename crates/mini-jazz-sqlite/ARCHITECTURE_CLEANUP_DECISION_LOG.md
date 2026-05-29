@@ -611,3 +611,9 @@ regress.
 - Moved the remaining query-scope export orchestration methods from `runtime.rs` into `runtime::query_export`: batched predicate refreshes, top-N refresh exports, built-query export, query-read scope export, batched query scopes, and ref-include history collection.
 - I briefly botched the mechanical lift by removing the methods before inserting them; restored the exact block from HEAD before continuing. This reinforced that large moves should stay uncommitted until the focused tests are green.
 - Focused query-matrix and sync-fate tests pass after the move.
+
+## 2026-05-29 02:29 PDT - Central runtime file reduced to wiring and tiny shared utilities
+
+- Moved apply/dependency helper functions and `ApplyHistoryContext` into `runtime::sync_apply`, and moved `BatchedQueryScopeItem` into `runtime::query_export`.
+- `runtime.rs` is now about 117 lines and mostly contains imports, module wiring, `Runtime`, `QueryScopeOptions`, and tiny display/SQL helpers that are still shared across modules.
+- Focused sync-fate and transaction tests pass after the move.

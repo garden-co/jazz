@@ -1,5 +1,12 @@
 use super::*;
 
+struct BatchedQueryScopeItem {
+    op: String,
+    value: JsonValue,
+    rows: Vec<RowView>,
+    extra_row_ids: Vec<String>,
+}
+
 impl Runtime {
     pub fn export_query_where_eq(
         &self,
@@ -838,7 +845,7 @@ impl Runtime {
         self.export_query_read_scope(query_read, rows, options)
     }
 
-    pub(super) fn export_batched_query_scopes(
+    fn export_batched_query_scopes(
         &self,
         table_name: &str,
         field_name: &str,
