@@ -7,6 +7,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
+    priority: s.int().optional(),
     description: s.string().optional(),
     parent: s.ref("todos").optional(),
     project: s.ref("projects").optional(),
