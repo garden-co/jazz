@@ -429,7 +429,7 @@ interface Rule {
 
 type RuleLike = Rule | UpdateRuleBuilder<unknown, unknown>;
 
-type RowContext<Row> = {
+export type RowContext<Row> = {
   [K in keyof Row & string]: RowRefValue;
 };
 

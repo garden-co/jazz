@@ -43,6 +43,70 @@ describe("chat permissions", () => {
     ]);
   });
 
+  it("allows chat name updates", async () => {
+    const privateChat = testApp.seed((db) => {
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      });
+      const { value: privateChat } = db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        createdBy: "alice",
+        joinCode: "invite-456",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: "alice",
+        joinCode: "invite-456",
+      });
+      return privateChat;
+    });
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.update(app.chats, privateChat.id, {
+        name: "New chat title",
+      }),
+    );
+  });
+
+  it("does not allow chat creator and isPublic updates", async () => {
+    const privateChat = testApp.seed((db) => {
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      });
+      const { value: privateChat } = db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        createdBy: "alice",
+        joinCode: "invite-456",
+      });
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: "alice",
+        joinCode: "invite-456",
+      });
+      return privateChat;
+    });
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectDenied((db) =>
+      db.update(app.chats, privateChat.id, {
+        createdBy: "bob",
+      }),
+    );
+
+    aliceDb.expectDenied((db) =>
+      db.update(app.chats, privateChat.id, {
+        isPublic: true,
+      }),
+    );
+  });
+
   it("allows message inserts only for chat members", async () => {
     const { aliceProfile, bobProfile, privateChat } = testApp.seed((db) => {
       const { value: aliceProfile } = db.insert(app.profiles, {
