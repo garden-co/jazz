@@ -27,15 +27,13 @@ type Role = "reader" | "writer" | "contributor" | "admin";
 
 s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   // Re-usable helpers to improve readability.
-  // Where-callbacks receive row columns as RowRefValue references rather than
-  // raw scalars, so helpers accept `string | RowRefValue` for the id parameter.
-  const isMember = (workspaceId: string | RowRefValue) =>
+  const isMember = (workspaceId: RowRefValue) =>
     policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id });
 
-  const hasRole = (workspaceId: string | RowRefValue, role: Role) =>
+  const hasRole = (workspaceId: RowRefValue, role: Role) =>
     policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id, role });
 
-  const isAdmin = (workspaceId: string | RowRefValue) => hasRole(workspaceId, "admin");
+  const isAdmin = (workspaceId: RowRefValue) => hasRole(workspaceId, "admin");
 
   // --- documents ---
 

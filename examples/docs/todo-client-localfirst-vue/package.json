@@ -16,6 +16,6 @@
     "@vitejs/plugin-vue": "catalog:default",
     "typescript": "catalog:default",
     "vite": "catalog:default",
-    "vue-tsc": "^2.1.10"
+    "vue-tsc": "catalog:default"
   }
 }
