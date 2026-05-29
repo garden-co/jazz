@@ -1800,9 +1800,35 @@ impl Runtime {
             row_nums_by_id: &mut row_nums_by_id,
             row_nums_created_in_apply: &mut row_nums_created_in_apply,
             user_nums_by_id: &mut user_nums_by_id,
+            touched_current_rows: BTreeSet::new(),
+            current_candidates: BTreeMap::new(),
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
+        }
+        for (table_name, row_num, branch_num) in &history_context.touched_current_rows {
+            let key = (table_name.clone(), *row_num, *branch_num);
+            if let Some(candidate) = history_context.current_candidates.get(&key) {
+                if !try_apply_current_candidate(&db, &schema, self.node_num, candidate)? {
+                    repair_current_projection_for_row(
+                        &db,
+                        &schema,
+                        self.node_num,
+                        table_name,
+                        *row_num,
+                        *branch_num,
+                    )?;
+                }
+            } else {
+                repair_current_projection_for_row(
+                    &db,
+                    &schema,
+                    self.node_num,
+                    table_name,
+                    *row_num,
+                    *branch_num,
+                )?;
+            }
         }
         let history_ms = duration_ms(history_started.elapsed());
 
@@ -2917,7 +2943,6 @@ impl Runtime {
             .copied()
             .map(Ok)
             .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
-        let outcome = tx_info.outcome;
         let history_exists = history_record_exists(context.db, &record.table, row_num, tx_num)?;
         if history_exists
             && current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
@@ -2987,102 +3012,28 @@ impl Runtime {
         if !history_exists {
             record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
         }
-        if outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE {
+        context
+            .touched_current_rows
+            .insert((record.table.clone(), row_num, branch_num));
+        if let Some(order) = projection_order_for_tx_info(tx_info, context.local_node_num, tx_num) {
+            let candidate = CurrentCandidate {
+                table_name: record.table.clone(),
+                row_num,
+                branch_num,
+                tx_num,
+                op: record.op,
+                order,
+                values_after_prefix: values.iter().skip(4).cloned().collect(),
+            };
+            let key = (record.table.clone(), row_num, branch_num);
+            match context.current_candidates.get(&key) {
+                Some(existing) if existing.order >= candidate.order => {}
+                _ => {
+                    context.current_candidates.insert(key, candidate);
+                }
+            }
+        } else {
             return Ok(());
-        }
-        let current_tx_num =
-            current_visible_tx_num(context.db, &record.table, row_num, branch_num)?;
-        if tx_info.outcome == tx::OUTCOME_PENDING && tx_info.node_num != context.local_node_num {
-            if let Some(current_tx_num) = current_tx_num {
-                if tx_apply_info(context.db, current_tx_num)?.is_durable {
-                    return Ok(());
-                }
-            } else if !context.row_nums_created_in_apply.contains(&row_num)
-                && durable_version_exists_for_row(context.db, &record.table, row_num, branch_num)?
-            {
-                return Ok(());
-            }
-        }
-        if outcome != tx::OUTCOME_REJECTED {
-            if let Some(current_tx_num) = current_tx_num {
-                if let Some(is_newer) =
-                    tx_is_newer_than_current_fast_path(context.db, tx_num, current_tx_num)?
-                {
-                    if !is_newer {
-                        return Ok(());
-                    }
-                } else if !is_newest_version_for_current(
-                    context.db,
-                    &record.table,
-                    row_num,
-                    branch_num,
-                    tx_num,
-                )? {
-                    return Ok(());
-                }
-            } else if !context.row_nums_created_in_apply.contains(&row_num)
-                && !is_newest_version_for_current(
-                    context.db,
-                    &record.table,
-                    row_num,
-                    branch_num,
-                    tx_num,
-                )?
-            {
-                return Ok(());
-            }
-        }
-        if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
-            context.db.execute(
-                &format!(
-                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
-                    crate::schema::current_table(&record.table)
-                ),
-                params![row_num, branch_num],
-            )?;
-            if branch_num != 1 {
-                let mut current_columns = vec![
-                    "row_num".to_owned(),
-                    "j_branch_num".to_owned(),
-                    "visible_tx_num".to_owned(),
-                    "is_deleted".to_owned(),
-                ];
-                let mut current_values = vec![
-                    rusqlite::types::Value::Integer(row_num),
-                    rusqlite::types::Value::Integer(branch_num),
-                    rusqlite::types::Value::Integer(tx_num),
-                    rusqlite::types::Value::Integer(1),
-                ];
-                current_columns.extend(columns.iter().skip(4).cloned());
-                current_values.extend(values.iter().skip(4).cloned());
-                insert_dynamic(
-                    context.db,
-                    &crate::schema::current_table(&record.table),
-                    &current_columns,
-                    &current_values,
-                )?;
-            }
-        } else if outcome != tx::OUTCOME_REJECTED {
-            let mut current_columns = vec![
-                "row_num".to_owned(),
-                "j_branch_num".to_owned(),
-                "visible_tx_num".to_owned(),
-                "is_deleted".to_owned(),
-            ];
-            let mut current_values = vec![
-                rusqlite::types::Value::Integer(row_num),
-                rusqlite::types::Value::Integer(branch_num),
-                rusqlite::types::Value::Integer(tx_num),
-                rusqlite::types::Value::Integer(0),
-            ];
-            current_columns.extend(columns.iter().skip(4).cloned());
-            current_values.extend(values.iter().skip(4).cloned());
-            insert_dynamic(
-                context.db,
-                &crate::schema::current_table(&record.table),
-                &current_columns,
-                &current_values,
-            )?;
         }
         Ok(())
     }
@@ -7270,7 +7221,8 @@ struct ApplyTxInfo {
     node_num: i64,
     outcome: i64,
     conflict_mode: i64,
-    is_durable: bool,
+    global_epoch: Option<i64>,
+    has_awaiting_dependency: bool,
 }
 
 struct ApplyHistoryContext<'a> {
@@ -7284,25 +7236,47 @@ struct ApplyHistoryContext<'a> {
     row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
     row_nums_created_in_apply: &'a mut BTreeSet<i64>,
     user_nums_by_id: &'a mut BTreeMap<String, i64>,
+    touched_current_rows: BTreeSet<(String, i64, i64)>,
+    current_candidates: BTreeMap<(String, i64, i64), CurrentCandidate>,
+}
+
+#[derive(Clone)]
+struct CurrentCandidate {
+    table_name: String,
+    row_num: i64,
+    branch_num: i64,
+    tx_num: i64,
+    op: i64,
+    order: ProjectionOrder,
+    values_after_prefix: Vec<rusqlite::types::Value>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+struct ProjectionOrder {
+    rank: i64,
+    global_epoch: Option<i64>,
+    tx_num: i64,
 }
 
 fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
     let mut stmt = conn.prepare_cached(
-        "SELECT node_num, outcome, conflict_mode,
-                outcome = ? OR global_epoch IS NOT NULL
-         FROM jazz_tx
+        "SELECT tx.node_num, tx.outcome, tx.conflict_mode, tx.global_epoch,
+                EXISTS(
+                  SELECT 1 FROM jazz_tx_awaiting_dependency awaiting
+                  WHERE awaiting.tx_num = tx.tx_num
+                )
+         FROM jazz_tx tx
          WHERE tx_num = ?",
     )?;
-    Ok(
-        stmt.query_row(params![tx::OUTCOME_ACCEPTED, tx_num], |row| {
-            Ok(ApplyTxInfo {
-                node_num: row.get(0)?,
-                outcome: row.get(1)?,
-                conflict_mode: row.get(2)?,
-                is_durable: row.get(3)?,
-            })
-        })?,
-    )
+    Ok(stmt.query_row(params![tx_num], |row| {
+        Ok(ApplyTxInfo {
+            node_num: row.get(0)?,
+            outcome: row.get(1)?,
+            conflict_mode: row.get(2)?,
+            global_epoch: row.get(3)?,
+            has_awaiting_dependency: row.get(4)?,
+        })
+    })?)
 }
 
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
@@ -7311,37 +7285,6 @@ fn next_global_epoch(conn: &Connection) -> Result<i64> {
         [],
         |row| row.get(0),
     )?)
-}
-
-fn durable_version_exists_for_row(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    branch_num: i64,
-) -> Result<bool> {
-    let exists: bool = conn.query_row(
-        &format!(
-            "SELECT EXISTS(
-               SELECT 1
-               FROM {} h
-               JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
-               WHERE h.row_num = ?
-                 AND h.j_branch_num = ?
-                 AND tx.outcome != ?
-                 AND (tx.outcome = ? OR tx.global_epoch IS NOT NULL)
-               LIMIT 1
-             )",
-            crate::schema::history_table(table_name)
-        ),
-        params![
-            row_num,
-            branch_num,
-            tx::OUTCOME_REJECTED,
-            tx::OUTCOME_ACCEPTED
-        ],
-        |row| row.get(0),
-    )?;
-    Ok(exists)
 }
 
 fn write_allowed_for_history_record(
@@ -7369,38 +7312,6 @@ fn write_allowed_for_history_record(
     })
 }
 
-fn is_newest_version_for_current(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    branch_num: i64,
-    tx_num: i64,
-) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*)
-             FROM {} h
-             JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
-             JOIN jazz_tx_public current_tx ON current_tx.tx_num = ?
-             WHERE h.row_num = ?
-               AND h.j_branch_num = ?
-               AND tx.outcome != ?
-               AND (
-                 (tx.global_epoch IS NOT NULL AND current_tx.global_epoch IS NOT NULL
-                  AND (tx.global_epoch > current_tx.global_epoch
-                       OR (tx.global_epoch = current_tx.global_epoch AND tx.tx_num > current_tx.tx_num)))
-                 OR ((tx.global_epoch IS NOT NULL) = (current_tx.global_epoch IS NOT NULL)
-                     AND tx.global_epoch IS NULL
-                     AND tx.tx_num > current_tx.tx_num)
-               )",
-            crate::schema::history_table(table_name)
-        ),
-        params![tx_num, row_num, branch_num, tx::OUTCOME_REJECTED],
-        |row| row.get(0),
-    )?;
-    Ok(count == 0)
-}
-
 fn current_visible_tx_num(
     conn: &Connection,
     table_name: &str,
@@ -7421,6 +7332,307 @@ fn current_visible_tx_num(
         .map_err(Into::into)
 }
 
+fn projection_order_for_tx_info(
+    tx_info: ApplyTxInfo,
+    local_node_num: i64,
+    tx_num: i64,
+) -> Option<ProjectionOrder> {
+    if tx_info.outcome == tx::OUTCOME_REJECTED
+        || (tx_info.outcome == tx::OUTCOME_PENDING && tx_info.conflict_mode == tx::MODE_EXCLUSIVE)
+        || tx_info.has_awaiting_dependency
+    {
+        return None;
+    }
+    Some(ProjectionOrder {
+        rank: projection_rank(
+            tx_info.outcome,
+            tx_info.node_num,
+            tx_info.global_epoch,
+            local_node_num,
+        ),
+        global_epoch: tx_info.global_epoch,
+        tx_num,
+    })
+}
+
+fn projection_order_for_tx_num(
+    conn: &Connection,
+    local_node_num: i64,
+    tx_num: i64,
+) -> Result<Option<ProjectionOrder>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT tx.node_num, tx.outcome, tx.conflict_mode, tx.global_epoch,
+                EXISTS(
+                  SELECT 1 FROM jazz_tx_awaiting_dependency awaiting
+                  WHERE awaiting.tx_num = tx.tx_num
+                )
+         FROM jazz_tx tx
+         WHERE tx.tx_num = ?",
+    )?;
+    let info = stmt.query_row(params![tx_num], |row| {
+        Ok(ApplyTxInfo {
+            node_num: row.get(0)?,
+            outcome: row.get(1)?,
+            conflict_mode: row.get(2)?,
+            global_epoch: row.get(3)?,
+            has_awaiting_dependency: row.get(4)?,
+        })
+    })?;
+    if info.outcome == tx::OUTCOME_REJECTED
+        || (info.outcome == tx::OUTCOME_PENDING && info.conflict_mode == tx::MODE_EXCLUSIVE)
+        || info.has_awaiting_dependency
+    {
+        return Ok(None);
+    }
+    Ok(Some(ProjectionOrder {
+        rank: projection_rank(
+            info.outcome,
+            info.node_num,
+            info.global_epoch,
+            local_node_num,
+        ),
+        global_epoch: info.global_epoch,
+        tx_num,
+    }))
+}
+
+fn projection_rank(
+    outcome: i64,
+    node_num: i64,
+    global_epoch: Option<i64>,
+    local_node_num: i64,
+) -> i64 {
+    if outcome == tx::OUTCOME_PENDING && node_num == local_node_num {
+        0
+    } else if outcome == tx::OUTCOME_PENDING {
+        1
+    } else if global_epoch.is_some() {
+        2
+    } else if outcome == tx::OUTCOME_ACCEPTED {
+        3
+    } else {
+        4
+    }
+}
+
+fn try_apply_current_candidate(
+    conn: &Connection,
+    schema: &SchemaDef,
+    local_node_num: i64,
+    candidate: &CurrentCandidate,
+) -> Result<bool> {
+    if let Some(current_tx_num) = current_visible_tx_num(
+        conn,
+        &candidate.table_name,
+        candidate.row_num,
+        candidate.branch_num,
+    )? {
+        let Some(current_order) =
+            projection_order_for_tx_num(conn, local_node_num, current_tx_num)?
+        else {
+            return Ok(false);
+        };
+        if current_order >= candidate.order {
+            return Ok(true);
+        }
+    }
+
+    let current_table = crate::schema::current_table(&candidate.table_name);
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+            current_table
+        ),
+        params![candidate.row_num, candidate.branch_num],
+    )?;
+    if candidate.op == 3 && candidate.branch_num == 1 {
+        return Ok(true);
+    }
+    let table = schema.table_def(&candidate.table_name)?;
+    let mut columns = vec![
+        "row_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "visible_tx_num".to_owned(),
+        "is_deleted".to_owned(),
+    ];
+    columns.extend(
+        table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field))),
+    );
+    columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    let placeholders = (0..columns.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let upsert_sql = format!(
+        "INSERT OR REPLACE INTO {current_table} ({}) VALUES ({placeholders})",
+        columns.join(", ")
+    );
+    let mut values = vec![
+        rusqlite::types::Value::Integer(candidate.row_num),
+        rusqlite::types::Value::Integer(candidate.branch_num),
+        rusqlite::types::Value::Integer(candidate.tx_num),
+        rusqlite::types::Value::Integer(if candidate.op == 3 { 1 } else { 0 }),
+    ];
+    values.extend(candidate.values_after_prefix.iter().cloned());
+    conn.prepare_cached(&upsert_sql)?
+        .execute(params_from_iter(values.iter()))?;
+    Ok(true)
+}
+
+fn repair_current_projection_for_row(
+    conn: &Connection,
+    schema: &SchemaDef,
+    local_node_num: i64,
+    table_name: &str,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<()> {
+    let table = schema.table_def(table_name)?;
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+    )?;
+
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut current_columns = vec![
+        "row_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "visible_tx_num".to_owned(),
+        "is_deleted".to_owned(),
+    ];
+    current_columns.extend(field_columns.iter().cloned());
+    current_columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    let current_table = crate::schema::current_table(table_name);
+    let current_placeholders = (0..current_columns.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current_upsert_sql = format!(
+        "INSERT OR REPLACE INTO {current_table} ({}) VALUES ({current_placeholders})",
+        current_columns.join(", ")
+    );
+    let mut select_columns = vec!["h.tx_num".to_owned(), "h.op".to_owned()];
+    select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+    select_columns.extend([
+        "h.j_created_at".to_owned(),
+        "h.j_updated_at".to_owned(),
+        "h.j_created_by".to_owned(),
+        "h.j_updated_by".to_owned(),
+    ]);
+    let sql = format!(
+        "SELECT {}
+         FROM {} h
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = ?
+           AND tx.outcome != ?
+           AND NOT (tx.outcome = ? AND tx.conflict_mode = ?)
+           AND NOT EXISTS (
+             SELECT 1
+             FROM jazz_tx_awaiting_dependency awaiting
+             WHERE awaiting.tx_num = tx.tx_num
+           )
+         ORDER BY CASE
+                    WHEN tx.outcome = ? AND tx.node_num = ? THEN 0
+                    WHEN tx.outcome = ? AND tx.node_num != ? THEN 1
+                    WHEN tx.global_epoch IS NOT NULL THEN 2
+                    WHEN tx.outcome = ? THEN 3
+                    ELSE 4
+                  END,
+                  tx.global_epoch,
+                  tx.tx_num",
+        select_columns.join(", "),
+        crate::schema::history_table(table_name),
+    );
+    let row_width = 2 + table.fields.len() + 4;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![
+            row_num,
+            branch_num,
+            tx::OUTCOME_REJECTED,
+            tx::OUTCOME_PENDING,
+            tx::MODE_EXCLUSIVE,
+            tx::OUTCOME_PENDING,
+            local_node_num,
+            tx::OUTCOME_PENDING,
+            local_node_num,
+            tx::OUTCOME_ACCEPTED
+        ],
+        |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        },
+    )?;
+
+    for row in rows {
+        let values = row?;
+        let tx_num = integer_sql_value(&values[0], "tx_num")?;
+        let op = integer_sql_value(&values[1], "op")?;
+        if op == 3 {
+            conn.execute(
+                &format!(
+                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+                    current_table
+                ),
+                params![row_num, branch_num],
+            )?;
+            if branch_num == 1 {
+                continue;
+            }
+            let mut current_values = vec![
+                rusqlite::types::Value::Integer(row_num),
+                rusqlite::types::Value::Integer(branch_num),
+                rusqlite::types::Value::Integer(tx_num),
+                rusqlite::types::Value::Integer(1),
+            ];
+            current_values.extend(values.into_iter().skip(2));
+            conn.prepare_cached(&current_upsert_sql)?
+                .execute(params_from_iter(current_values.iter()))?;
+            continue;
+        }
+
+        let mut current_values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(branch_num),
+            rusqlite::types::Value::Integer(tx_num),
+            rusqlite::types::Value::Integer(0),
+        ];
+        current_values.extend(values.into_iter().skip(2));
+        conn.prepare_cached(&current_upsert_sql)?
+            .execute(params_from_iter(current_values.iter()))?;
+    }
+    Ok(())
+}
+
+fn integer_sql_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
+    match value {
+        rusqlite::types::Value::Integer(value) => Ok(*value),
+        _ => Err(crate::Error::new(format!("expected integer {name}"))),
+    }
+}
+
 fn history_record_exists(
     conn: &Connection,
     table_name: &str,
@@ -7437,29 +7649,6 @@ fn history_record_exists(
     ))?;
     let mut rows = stmt.query(params![row_num, tx_num])?;
     Ok(rows.next()?.is_some())
-}
-
-fn tx_is_newer_than_current_fast_path(
-    conn: &Connection,
-    candidate_tx_num: i64,
-    current_tx_num: i64,
-) -> Result<Option<bool>> {
-    let comparison: Option<i64> = conn.query_row(
-        "SELECT CASE
-           WHEN (candidate.global_epoch IS NULL) != (current.global_epoch IS NULL)
-             THEN NULL
-           WHEN candidate.global_epoch IS NOT NULL
-             THEN candidate.global_epoch > current.global_epoch
-               OR (candidate.global_epoch = current.global_epoch AND candidate.tx_num > current.tx_num)
-           ELSE candidate.tx_num > current.tx_num
-         END
-         FROM jazz_tx candidate
-         JOIN jazz_tx_public current ON current.tx_num = ?
-         WHERE candidate.tx_num = ?",
-        params![current_tx_num, candidate_tx_num],
-        |row| row.get(0),
-    )?;
-    Ok(comparison.map(|is_newer| is_newer != 0))
 }
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
