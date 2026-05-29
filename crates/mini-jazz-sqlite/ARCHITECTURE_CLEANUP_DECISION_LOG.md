@@ -814,7 +814,7 @@ regress.
 - Added a regression where a merge branch has both an ordinary visible row and a separate conflicted row; the API now returns both conflict candidates plus the ordinary row.
 - Focused conflict and branch tests pass.
 
-## 2026-05-29 03:43 PDT - Moved descriptor identity to observed-query semantics
+## 2026-05-29 03:42 PDT - Moved descriptor identity to observed-query semantics
 
 - Query descriptor dedupe now asks `observed_query::identity_value` for semantic descriptor identity instead of deleting top-level `observed_ids` from arbitrary JSON.
 - Only top-window descriptors currently ignore repair-state `observed_ids`; other descriptors keep full value identity.
