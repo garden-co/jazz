@@ -2077,6 +2077,11 @@ pub(crate) fn sql_value_to_json(
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }
+        (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => Ok(JsonValue::Number(
+            serde_json::Number::from(u64::try_from(*value).map_err(|_| {
+                crate::Error::new(format!("invalid deep text root for {}", field.name))
+            })?),
+        )),
         (FieldKind::Bytes, rusqlite::types::Value::Blob(value)) => {
             Ok(JsonValue::String(bytes_to_hex(value)))
         }

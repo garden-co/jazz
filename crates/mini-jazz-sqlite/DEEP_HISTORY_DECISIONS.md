@@ -867,3 +867,11 @@ Decision: update received `jazz_tx.writes_json` and `reads_json` with one CTE `V
 Why: after batching history inserts, the remaining `history_ms` bucket still included a per-tx tuple-column update. The data is already grouped by receive bundle, so a CTE batch keeps the same JSONB tuple columns while reducing SQLite statement count.
 
 Scope impact: with the incremental live-export env flag enabled, apply `history_ms/update` moved from roughly `0.0164 -> 0.0133` ms for append, `0.0157 -> 0.0124` ms for Automerge, and `0.0147 -> 0.0120` ms for canvas. Total apply/update moved to roughly `0.0264`, `0.0251`, and `0.0245` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 22:31:57 PDT 2026 - Make Deep Text A Schema-Level Opt-In
+
+Decision: introduce an explicit `deep_text` table field kind as the first runtime-facing API for the text op-log sidecar.
+
+Why: the previous Block+Ops benchmark stored text roots and inline op bytes in benchmark-specific columns (`body_root`, `body_op`) and managed a separate sidecar connection by hand. That proved the representation but not the runtime shape. The next iteration should let schema authors opt into a deep-history text column, with Runtime methods owning the op-log write and storing only the current op root in ordinary Jazz row history/current storage.
+
+Scope impact: deep text remains an opt-in prototype column codec, not a transparent replacement for every `text` field. Reads use an explicit materialization API so sync/history code can still move compact root ids as normal row values.

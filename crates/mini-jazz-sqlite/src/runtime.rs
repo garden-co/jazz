@@ -275,6 +275,7 @@ impl Runtime {
     ) -> Result<Self> {
         let conn = storage::open(storage)?;
         schema::install(&conn, &schema_def)?;
+        crate::persisted_text_ops::install(&conn)?;
         let node_num = tx::ensure_node(&conn, node_id)?;
         Ok(Self {
             conn,
@@ -416,6 +417,90 @@ impl Runtime {
                 .collect(),
             BatchedWriteMode::Update,
         )
+    }
+
+    pub fn append_deep_text(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        text: &str,
+    ) -> Result<String> {
+        let root = self.current_deep_text_root(table_name, id, field_name)?;
+        let next_root = crate::persisted_text_ops::append(&self.conn, root, text, 256)?;
+        self.update_row(
+            table_name,
+            id,
+            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]),
+        )
+    }
+
+    pub fn replace_deep_text_range(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        start_byte: usize,
+        delete_bytes: usize,
+        insert: &str,
+    ) -> Result<String> {
+        let root = self.current_deep_text_root(table_name, id, field_name)?;
+        let next_root = crate::persisted_text_ops::replace_range(
+            &self.conn,
+            root,
+            start_byte,
+            delete_bytes,
+            insert,
+            256,
+        )?;
+        self.update_row(
+            table_name,
+            id,
+            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]),
+        )
+    }
+
+    pub fn read_deep_text(&self, table_name: &str, id: &str, field_name: &str) -> Result<String> {
+        let root = self.current_deep_text_root(table_name, id, field_name)?;
+        crate::persisted_text_ops::materialize(&self.conn, root)
+    }
+
+    fn current_deep_text_root(
+        &self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+    ) -> Result<crate::persisted_text_ops::TextRoot> {
+        let table = self.schema.table_def(table_name)?;
+        let field = table
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
+        if !matches!(field.kind, FieldKind::DeepText) {
+            return Err(crate::Error::new(format!(
+                "{field_name} is not a deep_text field"
+            )));
+        }
+        let row_num = row_num(&self.conn, id)?;
+        let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+        let value = self.conn.query_row(
+            &format!(
+                "SELECT {column}
+                 FROM {}
+                 WHERE row_num = ?
+                   AND j_branch_num = ?
+                   AND is_deleted = 0",
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, self.branch_num],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if value == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
     }
 
     pub fn upsert_rows_batched<V>(
@@ -6726,6 +6811,10 @@ fn validate_write_fields(
     Ok(())
 }
 
+fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
+    JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
+}
+
 fn row_has_current_branch_value(
     conn: &Connection,
     table_name: &str,
@@ -11636,6 +11725,11 @@ fn sql_value_to_json_cached(
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }
+        (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => Ok(JsonValue::Number(
+            serde_json::Number::from(u64::try_from(*value).map_err(|_| {
+                crate::Error::new(format!("invalid deep text root for {}", field.name))
+            })?),
+        )),
         (FieldKind::Bytes, rusqlite::types::Value::Blob(value)) => {
             Ok(JsonValue::Bytes(value.clone()))
         }
@@ -12187,5 +12281,34 @@ mod tests {
         assert_eq!(cache.len(), HISTORY_BLOCK_CACHE_CAPACITY);
         assert!(cache.contains_key(&1));
         assert!(!cache.contains_key(&2));
+    }
+
+    #[test]
+    fn deep_text_field_uses_runtime_sidecar_and_row_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " world")
+            .unwrap();
+        alice
+            .replace_deep_text_range("docs", "doc-1", "body", 6, 5, "Ada")
+            .unwrap();
+
+        assert_eq!(
+            alice.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello Ada"
+        );
+        let row = alice.read_rows("docs").unwrap().remove(0);
+        assert!(row.values["body"].as_u64().unwrap() > 0);
     }
 }

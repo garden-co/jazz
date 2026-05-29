@@ -110,6 +110,7 @@ pub(crate) struct FieldDef {
 #[derive(Clone, Debug)]
 pub(crate) enum FieldKind {
     Text,
+    DeepText,
     Bytes,
     Bool,
     Ref { table: String },
@@ -119,6 +120,7 @@ impl FieldKind {
     fn fingerprint(&self) -> String {
         match self {
             FieldKind::Text => "text".to_owned(),
+            FieldKind::DeepText => "deep_text".to_owned(),
             FieldKind::Bytes => "bytes".to_owned(),
             FieldKind::Bool => "bool".to_owned(),
             FieldKind::Ref { table } => format!("ref:{table}"),
@@ -184,6 +186,16 @@ impl TableBuilder {
             kind: FieldKind::Text,
             nullable: false,
             default_value: None,
+        });
+    }
+
+    pub fn deep_text(&mut self, name: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::DeepText,
+            nullable: false,
+            default_value: Some(JsonValue::Number(serde_json::Number::from(0))),
         });
     }
 
@@ -702,6 +714,12 @@ pub(crate) fn field_sql_value(
                 .ok_or_else(|| crate::Error::new(format!("expected text for {}", field.name)))?
                 .to_owned(),
         ),
+        FieldKind::DeepText => {
+            let root = value.as_u64().ok_or_else(|| {
+                crate::Error::new(format!("expected deep text root for {}", field.name))
+            })?;
+            rusqlite::types::Value::Integer(root as i64)
+        }
         FieldKind::Bytes => {
             rusqlite::types::Value::Blob(if let Some(bytes) = value.as_bytes() {
                 bytes.to_vec()
@@ -745,6 +763,7 @@ fn user_storage_name(name: &str) -> String {
 fn sql_type(kind: &FieldKind) -> &'static str {
     match kind {
         FieldKind::Text => "TEXT",
+        FieldKind::DeepText => "INTEGER",
         FieldKind::Bytes => "BLOB",
         FieldKind::Ref { table } => {
             let _ = table;
