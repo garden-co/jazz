@@ -7,7 +7,7 @@ impl Runtime {
         id: &str,
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
-        self.write_row(table_name, id, values, 1)
+        self.write_row(table_name, id, values, WriteOp::Create)
     }
 
     pub fn update_row(
@@ -17,7 +17,7 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         self.physical_row_num_for(id)?;
-        self.write_row(table_name, id, values, 2)
+        self.write_row(table_name, id, values, WriteOp::Update)
     }
 
     pub fn upsert_row(
@@ -27,9 +27,9 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         let op = if self.row_has_current_branch_value(table_name, id)? {
-            2
+            WriteOp::Update
         } else {
-            1
+            WriteOp::Create
         };
         self.write_row(table_name, id, values, op)
     }
@@ -41,9 +41,9 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         let op = if self.row_has_current_branch_value(table_name, id)? {
-            2
+            WriteOp::Update
         } else {
-            1
+            WriteOp::Create
         };
         self.write_row(table_name, id, values, op)
     }
@@ -53,7 +53,7 @@ impl Runtime {
         table_name: &str,
         id: &str,
         values: BTreeMap<String, JsonValue>,
-        op: i64,
+        op: WriteOp,
     ) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
@@ -171,6 +171,6 @@ impl Runtime {
         }
         drop(rows);
         drop(stmt);
-        self.write_row(table_name, id, values, 1)
+        self.write_row(table_name, id, values, WriteOp::Create)
     }
 }

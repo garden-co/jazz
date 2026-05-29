@@ -1,5 +1,26 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WriteOp {
+    Create,
+    Update,
+    Delete,
+}
+
+impl WriteOp {
+    pub(super) fn code(self) -> i64 {
+        match self {
+            Self::Create => 1,
+            Self::Update => 2,
+            Self::Delete => 3,
+        }
+    }
+
+    fn is_create(self) -> bool {
+        matches!(self, Self::Create)
+    }
+}
+
 pub(super) struct InsertRowInTx<'a> {
     pub(super) db: &'a Connection,
     pub(super) schema: &'a SchemaDef,
@@ -11,7 +32,7 @@ pub(super) struct InsertRowInTx<'a> {
     pub(super) now: i64,
     pub(super) user: &'a str,
     pub(super) bypass_policy: bool,
-    pub(super) op: i64,
+    pub(super) op: WriteOp,
     pub(super) base_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
@@ -37,13 +58,13 @@ struct EffectiveWriteValues<'a> {
     row_num: i64,
     branch_num: i64,
     patch_values: &'a BTreeMap<String, JsonValue>,
-    op: i64,
+    op: WriteOp,
     base_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
 fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
     let table = args.schema.table_def(args.table_name)?;
-    if args.op == 1 {
+    if args.op.is_create() {
         let mut values = args.patch_values.clone();
         for field in &table.fields {
             if !values.contains_key(&field.name) {
@@ -74,7 +95,7 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
-    if args.op == 1 && !row_id_created {
+    if args.op.is_create() && !row_id_created {
         if row_id_used_by_other_table(args.db, args.schema, args.table_name, row_num)? {
             return Err(crate::Error::new(format!(
                 "row id {} is already used by another table",
@@ -99,7 +120,7 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         op: args.op,
         base_values: args.base_values,
     })?;
-    if args.op == 1 {
+    if args.op.is_create() {
         if row_id_created {
             read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
         } else {
@@ -152,7 +173,7 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         rusqlite::types::Value::Integer(row_num),
         rusqlite::types::Value::Integer(args.tx_num),
         rusqlite::types::Value::Integer(args.branch_num),
-        rusqlite::types::Value::Integer(args.op),
+        rusqlite::types::Value::Integer(args.op.code()),
     ];
 
     for field in &table.fields {
@@ -174,7 +195,7 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         "j_created_by".to_owned(),
         "j_updated_by".to_owned(),
     ]);
-    let (created_at, created_by) = if args.op == 1 {
+    let (created_at, created_by) = if args.op.is_create() {
         (args.now, args.user.to_owned())
     } else {
         current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
@@ -252,7 +273,7 @@ pub(super) fn stage_delete_row_in_tx(args: StageDeleteInTx<'_>) -> Result<bool> 
             branch_num: args.branch_num,
             values: args.visible_values,
             user: args.user,
-            op: 3,
+            op: WriteOp::Delete,
         })?;
 
     let field_columns = table
@@ -382,7 +403,7 @@ pub(super) fn stage_delete_row_in_tx(args: StageDeleteInTx<'_>) -> Result<bool> 
             &current_values,
         )?;
     }
-    record_tx_write(args.db, args.tx_num, &table.name, row_num, 3)?;
+    record_tx_write(args.db, args.tx_num, &table.name, row_num, WriteOp::Delete)?;
     Ok(allowed)
 }
 
@@ -469,11 +490,11 @@ pub(super) struct LocalWriteCheck<'a> {
     pub(super) branch_num: i64,
     pub(super) values: &'a BTreeMap<String, JsonValue>,
     pub(super) user: &'a str,
-    pub(super) op: i64,
+    pub(super) op: WriteOp,
 }
 
 pub(super) fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
-    if check.op == 1 && matches!(check.table.write_policy, PolicyDef::CreatedByUser) {
+    if check.op.is_create() && matches!(check.table.write_policy, PolicyDef::CreatedByUser) {
         return Ok(true);
     }
     policy::write_allowed(policy::WriteCheck {
@@ -541,10 +562,10 @@ pub(super) fn record_tx_write(
     tx_num: i64,
     table_name: &str,
     row_num: i64,
-    op: i64,
+    op: WriteOp,
 ) -> Result<()> {
     let table_num = crate::schema::table_num(conn, table_name)?;
-    record_tx_write_num(conn, tx_num, table_num, row_num, op)
+    record_tx_write_num(conn, tx_num, table_num, row_num, op.code())
 }
 
 pub(super) fn record_tx_write_num(

@@ -18,7 +18,7 @@ pub(super) enum Mutation {
         table: String,
         id: String,
         values: BTreeMap<String, JsonValue>,
-        op: i64,
+        op: WriteOp,
     },
     DeleteRow {
         table: String,
@@ -74,7 +74,7 @@ fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
                 Mutation::Row { values, op, .. },
             ) => {
                 existing_values.extend(values);
-                if *existing_op != 1 {
+                if *existing_op != WriteOp::Create {
                     *existing_op = op;
                 }
             }
@@ -139,7 +139,7 @@ impl TransactionBuilder<'_> {
             table: table.to_owned(),
             id: id.to_owned(),
             values,
-            op: 1,
+            op: WriteOp::Create,
         });
         self
     }
@@ -154,7 +154,7 @@ impl TransactionBuilder<'_> {
             table: table.to_owned(),
             id: id.to_owned(),
             values,
-            op: 2,
+            op: WriteOp::Update,
         });
         self
     }
@@ -166,8 +166,8 @@ impl TransactionBuilder<'_> {
         values: BTreeMap<String, JsonValue>,
     ) -> Self {
         let op = match self.runtime.row_has_current_branch_value(table, id) {
-            Ok(true) => 2,
-            Ok(false) | Err(_) => 1,
+            Ok(true) => WriteOp::Update,
+            Ok(false) | Err(_) => WriteOp::Create,
         };
         self.mutations.push(Mutation::Row {
             table: table.to_owned(),

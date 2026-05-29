@@ -40,14 +40,14 @@ impl Runtime {
             let now = now_ms();
             let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
             let op = match mode {
-                BatchedWriteMode::Insert => 1,
-                BatchedWriteMode::Update => 2,
+                BatchedWriteMode::Insert => WriteOp::Create,
+                BatchedWriteMode::Update => WriteOp::Update,
                 BatchedWriteMode::Upsert => {
                     let row_num = ensure_row_id(&db, table_name, &id)?;
                     if row_has_current_branch_value(&db, table_name, row_num, self.branch_num)? {
-                        2
+                        WriteOp::Update
                     } else {
-                        1
+                        WriteOp::Create
                     }
                 }
             };

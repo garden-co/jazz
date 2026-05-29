@@ -662,3 +662,10 @@ regress.
 - Added schema validation that rejects more than one branch policy backing table per row table until we define composition/selection semantics.
 - Renamed the internal helper from `active_branch_policy` to `single_branch_policy` so the limitation is visible at call sites.
 - Focused schema validation test passes.
+
+## 2026-05-29 02:48 PDT - Replaced runtime write op integers with a semantic enum
+
+- The storage/protocol layer still encodes create/update/delete as integer op codes, but runtime write construction should not pass raw `1`, `2`, and `3` as intent.
+- Added `WriteOp` at the shared write-core boundary and converted simple writes, batched writes, explicit transactions, deletes, and write-set recording through it.
+- This keeps numeric encoding at the SQLite/protocol edge while giving future write-pipeline work a typed vocabulary.
+- Focused storage/projection and transaction tests pass.
