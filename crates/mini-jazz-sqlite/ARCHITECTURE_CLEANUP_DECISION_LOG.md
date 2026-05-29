@@ -551,3 +551,9 @@ regress.
 - Moved table-history export, exclusive-transaction forwarding export, recursive query-scope export, and batched recursive refresh export into `runtime::sync_export`.
 - This keeps bundle production separate from bundle application. The remaining apply path has policy/fate/awaiting-dependency concerns and should move separately if it stays coherent.
 - Focused recursive-query export/sync tests pass, including branch snapshots, tombstones, recursive policy ancestors, and refresh repair.
+
+## 2026-05-29 02:06 PDT - Sync apply API moved behind a sync-apply module
+
+- Moved bundle apply, profiled apply, untrusted apply, exclusive forwarding staging, and awaiting-dependency revalidation into `runtime::sync_apply`.
+- This is the first extraction that names the authority-facing apply path directly. It separates "produce a bundle" from "validate and materialize a bundle into local SQLite state", which should make future policy/fate fixes less likely to land in export code by accident.
+- Focused sync/fate tests pass, including fail-closed validation, protocol versions, stale pending/rejected fate, page-boundary repair, required ref repair, idempotence, and out-of-order global epochs.
