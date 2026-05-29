@@ -255,6 +255,9 @@ impl ReadVisibility<'_> {
                     tx::OUTCOME_REJECTED,
                 ))
             }
+            PolicyDef::BranchFieldEquals { .. } => Err(crate::Error::new(
+                "branch field effective policy is not implemented yet",
+            )),
         }
     }
 }

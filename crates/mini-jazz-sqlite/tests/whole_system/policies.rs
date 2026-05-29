@@ -214,6 +214,119 @@ fn tiered_built_query_subscription_matches_requested_settlement() {
 }
 
 #[test]
+fn for_branch_read_uses_branch_policy_and_backing_row_visibility() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        edge.insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    });
+    support::run_attributing_to_user(&mut edge, "bob", |edge| {
+        edge.insert_row(
+            "branches",
+            "draft-b",
+            BTreeMap::from([("project".to_owned(), json!("project-b"))]),
+        )
+        .unwrap();
+    });
+
+    edge.create_branch("draft-a", None).unwrap();
+    edge.checkout_branch("draft-a").unwrap();
+    support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        edge.insert_row(
+            "todos",
+            "todo-matches-branch",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible on draft A")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "todos",
+            "todo-wrong-project",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Wrong project")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+    });
+
+    edge.create_branch("draft-b", None).unwrap();
+    edge.checkout_branch("draft-b").unwrap();
+    support::run_attributing_to_user(&mut edge, "bob", |edge| {
+        edge.insert_row(
+            "todos",
+            "todo-hidden-by-backing-row",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Bob branch")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+    });
+    edge.checkout_branch("main").unwrap();
+
+    let draft_a_rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-a",
+            BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "orderBy": [["title", "asc"]]
+            }))
+            .unwrap(),
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        draft_a_rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-matches-branch"]
+    );
+
+    let draft_b_rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-b",
+            BuiltQuery::from_json_value(json!({ "table": "todos" })).unwrap(),
+        )
+    })
+    .unwrap();
+    assert!(draft_b_rows.is_empty());
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

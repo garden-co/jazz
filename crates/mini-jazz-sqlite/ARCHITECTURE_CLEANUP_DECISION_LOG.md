@@ -287,3 +287,15 @@ Apply-refactor reviewer found no correctness issues, but noted one misleading
 boundary: `encode_optional_json` is generic rejection-detail/tx fate machinery,
 not apply-specific. Move it to `tx.rs` where `reject_with_detail_json` already
 lives.
+
+## 2026-05-29 00:04 PDT
+
+Ported the first #952 semantic slice: read-only `forBranch` policy. Schema can
+declare `read_for_branch_if_field_matches(branch_table, row_field,
+branch_field)`. Branch reads/direct branch queries for such tables now require
+the app backing row whose id equals the branch id to be visible on main and the
+row field to equal the backing-row field. This is deliberately narrower than
+#952: branch writes, inherit-main branch policies, branch snapshot/base policy,
+and export filtering are not implemented yet. The first green test covers the
+product-shaped read case via generic `query_branch`, not a bespoke
+`read_rows_on_branch` API.

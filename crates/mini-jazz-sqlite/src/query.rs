@@ -1908,6 +1908,7 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
+            PolicyDef::BranchFieldEquals { .. } => Ok(false),
         }
     }
 

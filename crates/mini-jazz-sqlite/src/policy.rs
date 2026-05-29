@@ -1,4 +1,4 @@
-use crate::schema::{FieldKind, PolicyDef, SchemaDef, TableDef};
+use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef, TableDef};
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
@@ -7,9 +7,18 @@ use std::collections::BTreeMap;
 const MAX_POLICY_RECURSION_DEPTH: usize = 64;
 
 #[derive(Clone, Copy)]
-enum PolicyReadScope {
+enum PolicyReadScope<'a> {
     CurrentMain,
-    Branch { branch_num: i64 },
+    Branch {
+        branch_num: i64,
+        branch_context: Option<BranchPolicyContext<'a>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct BranchPolicyContext<'a> {
+    branch_num: i64,
+    branch_table: &'a str,
 }
 
 pub(crate) struct WriteCheck<'a> {
@@ -92,6 +101,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                 check.user,
                 PolicyReadScope::Branch {
                     branch_num: check.branch_num,
+                    branch_context: None,
                 },
                 0,
             )?;
@@ -114,6 +124,7 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
             )?;
             Ok(count > 0)
         }
+        PolicyDef::BranchFieldEquals { .. } => Ok(false),
     }
 }
 
@@ -210,8 +221,34 @@ pub(crate) fn branch_read_policy_sql_for_alias(
     let scope = if branch_num == 1 {
         PolicyReadScope::CurrentMain
     } else {
-        PolicyReadScope::Branch { branch_num }
+        PolicyReadScope::Branch {
+            branch_num,
+            branch_context: None,
+        }
     };
+    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+        let Some(read_policy) = branch_policy.read_policy.as_ref() else {
+            return Ok("0 = 1".to_owned());
+        };
+        let context = BranchPolicyContext {
+            branch_num,
+            branch_table,
+        };
+        let backing_sql = branch_backing_row_visible_sql(schema, user, context, 0, None)?;
+        let policy_sql = lower_policy(
+            schema,
+            table,
+            alias,
+            read_policy,
+            user,
+            PolicyReadScope::Branch {
+                branch_num,
+                branch_context: Some(context),
+            },
+            0,
+        )?;
+        return Ok(format!("({backing_sql}) AND ({policy_sql})"));
+    }
     lower_policy(schema, table, alias, &table.read_policy, user, scope, 0)
 }
 
@@ -239,7 +276,7 @@ fn lower_policy(
     alias: &str,
     policy: &PolicyDef,
     user: &str,
-    scope: PolicyReadScope,
+    scope: PolicyReadScope<'_>,
     depth: usize,
 ) -> Result<String> {
     if depth > MAX_POLICY_RECURSION_DEPTH {
@@ -280,7 +317,7 @@ fn lower_policy(
             )?;
             let branch_filter = match scope {
                 PolicyReadScope::CurrentMain => String::new(),
-                PolicyReadScope::Branch { branch_num } => {
+                PolicyReadScope::Branch { branch_num, .. } => {
                     format!(
                         "AND {}",
                         effective_branch_sql(&parent_alias, &ref_table.name, branch_num)
@@ -304,7 +341,112 @@ fn lower_policy(
                 tx::OUTCOME_REJECTED,
             ))
         }
+        PolicyDef::BranchFieldEquals {
+            field,
+            branch_field,
+        } => {
+            let PolicyReadScope::Branch {
+                branch_context: Some(context),
+                ..
+            } = scope
+            else {
+                return Err(crate::Error::new(
+                    "branch field policy requires branch context",
+                ));
+            };
+            let field = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .ok_or_else(|| crate::Error::new(format!("unknown branch policy field {field}")))?;
+            let branch_table = schema.table_def(context.branch_table)?;
+            let branch_field = branch_table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *branch_field)
+                .ok_or_else(|| {
+                    crate::Error::new(format!(
+                        "unknown branch policy field {}.{branch_field}",
+                        branch_table.name
+                    ))
+                })?;
+            branch_backing_row_visible_sql(
+                schema,
+                user,
+                context,
+                depth,
+                Some((alias, field, branch_field)),
+            )
+        }
     }
+}
+
+fn active_branch_policy(
+    table: &TableDef,
+    branch_num: i64,
+) -> Option<(&str, &crate::schema::BranchPolicyDef)> {
+    if branch_num == 1 {
+        return None;
+    }
+    table
+        .branch_policies
+        .iter()
+        .next()
+        .map(|(branch_table, policy)| (branch_table.as_str(), policy))
+}
+
+fn branch_backing_row_visible_sql(
+    schema: &SchemaDef,
+    user: &str,
+    context: BranchPolicyContext<'_>,
+    depth: usize,
+    field_match: Option<(&str, &FieldDef, &FieldDef)>,
+) -> Result<String> {
+    let branch_table = schema.table_def(context.branch_table)?;
+    let backing_alias = format!("branch_policy_backing_{depth}");
+    let ids_alias = format!("branch_policy_backing_ids_{depth}");
+    let tx_alias = format!("branch_policy_backing_tx_{depth}");
+    let branch_alias = format!("branch_policy_branch_{depth}");
+    let backing_policy_sql = lower_policy(
+        schema,
+        branch_table,
+        &backing_alias,
+        &branch_table.read_policy,
+        user,
+        PolicyReadScope::CurrentMain,
+        depth + 1,
+    )?;
+    let field_match_sql = field_match
+        .map(|(row_alias, row_field, branch_field)| {
+            format!(
+                "AND {row_alias}.{row_column} = {backing_alias}.{branch_column}",
+                row_column = crate::schema::quote_ident(&crate::schema::storage_column(row_field)),
+                branch_column =
+                    crate::schema::quote_ident(&crate::schema::storage_column(branch_field)),
+            )
+        })
+        .unwrap_or_default();
+    Ok(format!(
+        "EXISTS (
+           SELECT 1
+           FROM {current_table} {backing_alias}
+           JOIN jazz_row_id {ids_alias}
+             ON {ids_alias}.row_num = {backing_alias}.row_num
+           JOIN jazz_tx {tx_alias}
+             ON {tx_alias}.tx_num = {backing_alias}.visible_tx_num
+           JOIN jazz_branch {branch_alias}
+             ON {branch_alias}.branch_num = {branch_num}
+           WHERE {ids_alias}.row_id = {branch_alias}.branch_id
+             AND {backing_alias}.j_branch_num = 1
+             AND {backing_alias}.is_deleted = 0
+             AND {tx_alias}.outcome != {rejected}
+             {field_match_sql}
+             AND {backing_policy_sql}
+         )",
+        current_table = crate::schema::current_table(&branch_table.name),
+        branch_num = context.branch_num,
+        rejected = tx::OUTCOME_REJECTED,
+    ))
 }
 
 fn lower_snapshot_policy(
@@ -389,5 +531,8 @@ fn lower_snapshot_policy(
                 tx::OUTCOME_REJECTED,
             ))
         }
+        PolicyDef::BranchFieldEquals { .. } => Err(crate::Error::new(
+            "branch field snapshot policy is not implemented yet",
+        )),
     }
 }
