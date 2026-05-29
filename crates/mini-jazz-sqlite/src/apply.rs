@@ -216,6 +216,52 @@ pub(crate) fn apply_tx_records(db: &Connection, bundle: &Bundle) -> Result<Appli
     })
 }
 
+pub(crate) fn apply_read_records(
+    db: &Connection,
+    bundle: &Bundle,
+    applied_txs: &AppliedTxs,
+    table_nums_by_name: &BTreeMap<String, i64>,
+    apply_caches: &mut ApplyCaches,
+) -> Result<()> {
+    let mut insert_read_stmt = db.prepare(
+        "INSERT OR REPLACE INTO jazz_tx_read
+         (tx_num, table_num, row_num, reason, observed_tx_num)
+         VALUES (?, ?, ?, ?, ?)",
+    )?;
+    for read_record in &bundle.reads {
+        let tx_num = applied_txs
+            .tx_nums_by_id
+            .get(&read_record.tx_id)
+            .copied()
+            .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
+        let row_num =
+            apply_caches.ensure_row_id_with_status(db, &read_record.table, &read_record.row_id)?;
+        let table_num = table_nums_by_name
+            .get(&read_record.table)
+            .copied()
+            .ok_or_else(|| crate::Error::new("bundle read references missing table"))?;
+        let observed_tx_num = read_record
+            .observed_tx_id
+            .as_deref()
+            .map(|observed_tx_id| {
+                applied_txs
+                    .tx_nums_by_id
+                    .get(observed_tx_id)
+                    .copied()
+                    .ok_or_else(|| crate::Error::new("bundle read references missing observed tx"))
+            })
+            .transpose()?;
+        insert_read_stmt.execute(params![
+            tx_num,
+            table_num,
+            row_num,
+            read_record.reason,
+            observed_tx_num
+        ])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
     Ok(conn.query_row(
         "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",

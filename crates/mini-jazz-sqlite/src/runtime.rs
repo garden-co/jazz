@@ -1,6 +1,6 @@
 use crate::apply::{
-    apply_tx_records, encode_optional_json, tx_apply_info, ApplyCaches, ApplyTxInfo,
-    BundleApplyPlan,
+    apply_read_records, apply_tx_records, encode_optional_json, tx_apply_info, ApplyCaches,
+    ApplyTxInfo, BundleApplyPlan,
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
@@ -631,48 +631,13 @@ impl Runtime {
 
         let reads_started = ProfileTimer::start();
         let mut apply_caches = ApplyCaches::default();
-        let mut insert_read_stmt = db.prepare(
-            "INSERT OR REPLACE INTO jazz_tx_read
-             (tx_num, table_num, row_num, reason, observed_tx_num)
-             VALUES (?, ?, ?, ?, ?)",
+        apply_read_records(
+            &db,
+            bundle,
+            &applied_txs,
+            &table_nums_by_name,
+            &mut apply_caches,
         )?;
-        for read_record in &bundle.reads {
-            let tx_num = applied_txs
-                .tx_nums_by_id
-                .get(&read_record.tx_id)
-                .copied()
-                .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
-            let row_num = apply_caches.ensure_row_id_with_status(
-                &db,
-                &read_record.table,
-                &read_record.row_id,
-            )?;
-            let table_num = table_nums_by_name
-                .get(&read_record.table)
-                .copied()
-                .ok_or_else(|| crate::Error::new("bundle read references missing table"))?;
-            let observed_tx_num = read_record
-                .observed_tx_id
-                .as_deref()
-                .map(|observed_tx_id| {
-                    applied_txs
-                        .tx_nums_by_id
-                        .get(observed_tx_id)
-                        .copied()
-                        .ok_or_else(|| {
-                            crate::Error::new("bundle read references missing observed tx")
-                        })
-                })
-                .transpose()?;
-            insert_read_stmt.execute(params![
-                tx_num,
-                table_num,
-                row_num,
-                read_record.reason,
-                observed_tx_num
-            ])?;
-        }
-        drop(insert_read_stmt);
         let reads_ms = reads_started.elapsed_ms();
 
         let rejected_cleanup_started = ProfileTimer::start();

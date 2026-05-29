@@ -235,3 +235,11 @@ across read and history application to avoid repeated SQLite lookups and to
 track rows created by the current apply. They should be explicit apply state,
 not free-floating `BTreeMap`s in runtime. This also prepares a cleaner future
 `apply_read_records` and `apply_history_records` phase split.
+
+## 2026-05-28 23:52 PDT
+
+Extract read-record application as its own phase. This is semantically useful
+because read-set import will become central to exclusive validation,
+dependency-awaiting, query settlement, and future compact read-set
+representations. The phase should consume `AppliedTxs` plus table identity
+maps, not reach back into arbitrary runtime locals.
