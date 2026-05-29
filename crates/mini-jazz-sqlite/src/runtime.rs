@@ -11,6 +11,7 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
+use crate::transaction::{snapshot_result, StagedRowChange, TransactionSnapshot};
 use crate::types::{
     ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
     TransactionInfo,
@@ -2422,7 +2423,7 @@ impl Runtime {
     }
 
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
-        let start_rows_by_table = self
+        let start_snapshot = self
             .schema
             .tables()
             .map(|table| {
@@ -2430,12 +2431,13 @@ impl Runtime {
                     .map(|rows| (table.name.clone(), rows))
                     .map_err(|error| error.to_string())
             })
-            .collect();
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            .map(TransactionSnapshot::new);
         TransactionBuilder {
             runtime: self,
             mutations: Vec::new(),
             mode: TransactionMode::Mergeable,
-            start_rows_by_table,
+            start_snapshot,
         }
     }
 
@@ -5075,7 +5077,7 @@ pub struct TransactionBuilder<'a> {
     runtime: &'a mut Runtime,
     mutations: Vec<Mutation>,
     mode: TransactionMode,
-    start_rows_by_table: std::result::Result<BTreeMap<String, Vec<RowView>>, String>,
+    start_snapshot: std::result::Result<TransactionSnapshot, String>,
 }
 
 enum TransactionMode {
@@ -5094,6 +5096,22 @@ enum Mutation {
         table: String,
         id: String,
     },
+}
+
+impl Mutation {
+    fn staged_row_change<'a>(&'a self, author: &'a str) -> StagedRowChange<'a> {
+        match self {
+            Self::Row {
+                table, id, values, ..
+            } => StagedRowChange::Upsert {
+                table,
+                id,
+                values,
+                author,
+            },
+            Self::DeleteRow { table, id } => StagedRowChange::Delete { table, id },
+        }
+    }
 }
 
 fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
@@ -5142,42 +5160,12 @@ fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
 
 impl<'a> TransactionBuilder<'a> {
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
-        let start_rows = self
-            .start_rows_by_table
-            .as_ref()
-            .map_err(|error| crate::Error::new(error.clone()))?;
-        let mut rows_by_id = start_rows
-            .get(table_name)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| (row.id.clone(), row))
-            .collect::<BTreeMap<_, _>>();
-
-        for mutation in &self.mutations {
-            match mutation {
-                Mutation::Row {
-                    table, id, values, ..
-                } if table == table_name => {
-                    let row = rows_by_id.entry(id.clone()).or_insert_with(|| RowView {
-                        table: table.clone(),
-                        id: id.clone(),
-                        values: BTreeMap::new(),
-                        created_at: 0,
-                        created_by: self.runtime.attribution_user().to_owned(),
-                        tx_id: String::new(),
-                        conflict_count: 0,
-                    });
-                    row.values.extend(values.clone());
-                }
-                Mutation::DeleteRow { table, id } if table == table_name => {
-                    rows_by_id.remove(id);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(rows_by_id.into_values().collect())
+        Ok(snapshot_result(&self.start_snapshot)?.read_rows(
+            table_name,
+            self.mutations
+                .iter()
+                .map(|mutation| mutation.staged_row_change(self.runtime.attribution_user())),
+        ))
     }
 
     pub fn exclusive(mut self) -> Self {
@@ -5313,13 +5301,8 @@ impl<'a> TransactionBuilder<'a> {
                     values,
                     op,
                 } => {
-                    let base_values = self
-                        .start_rows_by_table
-                        .as_ref()
-                        .map_err(|error| crate::Error::new(error.clone()))?
-                        .get(&table)
-                        .and_then(|rows| rows.iter().find(|row| row.id == id))
-                        .map(|row| &row.values);
+                    let base_values =
+                        snapshot_result(&self.start_snapshot)?.base_values(&table, &id);
                     allowed &= insert_row_in_tx(InsertRowInTx {
                         db: &db,
                         schema: &self.runtime.schema,

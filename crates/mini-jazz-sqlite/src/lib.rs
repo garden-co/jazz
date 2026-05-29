@@ -17,6 +17,7 @@ mod storage;
 mod subscription;
 pub mod sync;
 mod time;
+mod transaction;
 mod tx;
 mod types;
 mod users;

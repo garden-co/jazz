@@ -113,3 +113,11 @@ tests: start-snapshot transaction reads, own staged write overlay, isolation
 from other staged writes/later commits, and patch update materialization against
 the start snapshot. Remaining gap: branch conflict candidate preservation inside
 transaction reads still needs a focused test/implementation pass.
+
+## 2026-05-28 22:58 PDT
+
+Refactor follow-up: move the pure transaction snapshot/staged-read overlay out
+of `runtime.rs`. The first implementation worked, but leaving it in the giant
+runtime file would preserve the broken-window pattern. Target module:
+`src/transaction.rs` owns `TransactionSnapshot`; runtime/builder orchestration
+can stay in `runtime.rs` until a larger write-pipeline extraction is safe.
