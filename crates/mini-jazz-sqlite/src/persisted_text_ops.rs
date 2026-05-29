@@ -322,6 +322,113 @@ pub fn export_delta(conn: &Connection, watermark: DeltaWatermark) -> Result<Enco
     })
 }
 
+pub fn export_delta_for_roots(
+    conn: &Connection,
+    roots: impl IntoIterator<Item = TextRoot>,
+    watermark: DeltaWatermark,
+) -> Result<EncodedDelta> {
+    let mut op_ids = BTreeSet::new();
+    let mut snapshot_op_ids = BTreeSet::new();
+    let mut ancestor_stmt =
+        conn.prepare_cached("SELECT parent_op_id FROM jazz_text_op WHERE op_id = ?")?;
+    let mut snapshot_stmt =
+        conn.prepare_cached("SELECT snapshot_id FROM jazz_text_snapshot WHERE op_id = ?")?;
+    for root in roots {
+        let mut current = root;
+        while let Some(op_id) = current {
+            if op_id <= watermark.op_id {
+                break;
+            }
+            if !op_ids.insert(op_id) {
+                break;
+            }
+            if let Some(snapshot_id) = snapshot_stmt
+                .query_row(params![op_id], |row| row.get::<_, i64>(0))
+                .optional()?
+            {
+                if snapshot_id > watermark.snapshot_id {
+                    snapshot_op_ids.insert(op_id);
+                }
+                break;
+            }
+            current = ancestor_stmt
+                .query_row(params![op_id], |row| row.get::<_, Option<i64>>(0))
+                .optional()?
+                .ok_or_else(|| Error::new("unknown text op root"))?;
+        }
+    }
+    encode_delta_for_op_ids(conn, &op_ids, &snapshot_op_ids)
+}
+
+fn encode_delta_for_op_ids(
+    conn: &Connection,
+    op_ids: &BTreeSet<i64>,
+    snapshot_op_ids: &BTreeSet<i64>,
+) -> Result<EncodedDelta> {
+    let mut ops = Vec::with_capacity(op_ids.len());
+    let mut op_stmt = conn.prepare_cached(
+        "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
+         FROM jazz_text_op
+         WHERE op_id = ?",
+    )?;
+    for op_id in op_ids {
+        ops.push(op_stmt.query_row(params![op_id], |row| {
+            Ok(TextOpRow {
+                op_id: row.get(0)?,
+                parent_op_id: row.get(1)?,
+                start_byte: row.get(2)?,
+                delete_bytes: row.get(3)?,
+                insert_text: row.get(4)?,
+                resulting_len: row.get(5)?,
+            })
+        })?);
+    }
+
+    let mut snapshots = Vec::new();
+    let mut chunk_hashes = BTreeSet::new();
+    let mut snapshot_stmt = conn.prepare_cached(
+        "SELECT snapshot_id, op_id, byte_len, chunk_hashes
+         FROM jazz_text_snapshot
+         WHERE op_id = ?",
+    )?;
+    for op_id in snapshot_op_ids {
+        let snapshot = snapshot_stmt.query_row(params![op_id], |row| {
+            Ok(SnapshotRow {
+                snapshot_id: row.get(0)?,
+                op_id: row.get(1)?,
+                byte_len: row.get(2)?,
+                chunk_hashes: row.get(3)?,
+            })
+        })?;
+        for hash in snapshot.chunk_hashes.chunks_exact(32) {
+            chunk_hashes.insert(hash.to_vec());
+        }
+        snapshots.push(snapshot);
+    }
+
+    let mut chunks = Vec::new();
+    let mut chunk_stmt =
+        conn.prepare_cached("SELECT text FROM jazz_text_chunk WHERE chunk_hash = ?")?;
+    for hash in chunk_hashes {
+        let text: String = chunk_stmt.query_row(params![hash.as_slice()], |row| row.get(0))?;
+        chunks.push(ChunkRow { hash, text });
+    }
+
+    let mut uncompressed = Vec::new();
+    encode_delta_payload(&mut uncompressed, &ops, &snapshots, &chunks);
+    let compressed = lz4_flex::compress_prepend_size(&uncompressed);
+    Ok(EncodedDelta {
+        bytes: compressed.clone(),
+        stats: DeltaStats {
+            ops: ops.len(),
+            snapshots: snapshots.len(),
+            chunks: chunks.len(),
+            uncompressed_bytes: uncompressed.len(),
+            compressed_bytes: compressed.len(),
+        },
+    })
+}
+
 pub fn current_watermark(conn: &Connection) -> Result<DeltaWatermark> {
     let op_id = conn.query_row(
         "SELECT COALESCE(MAX(op_id), 0) FROM jazz_text_op",

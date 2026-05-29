@@ -626,8 +626,25 @@ impl Runtime {
         Ok(crate::persisted_text_ops::export_delta(&self.conn, watermark)?.bytes)
     }
 
-    fn export_text_ops_delta(&self) -> Result<Vec<u8>> {
-        self.export_text_ops_delta_since(crate::persisted_text_ops::DeltaWatermark::default())
+    fn export_text_ops_delta_for_bundle_since(
+        &self,
+        bundle: &Bundle,
+        blocks: &[HistoryBlockExport],
+        watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<Vec<u8>> {
+        if !self.schema_has_deep_text_fields() {
+            return Ok(Vec::new());
+        }
+        let mut roots = deep_text_roots_for_bundle(&self.schema, bundle)?;
+        for block in blocks {
+            let block_bundle = decode_history_block_payload(
+                &block.manifest.codec,
+                block.manifest.format_version,
+                &block.payload,
+            )?;
+            roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
+        }
+        Ok(crate::persisted_text_ops::export_delta_for_roots(&self.conn, roots, watermark)?.bytes)
     }
 
     fn schema_has_deep_text_fields(&self) -> bool {
@@ -1006,14 +1023,17 @@ impl Runtime {
         node_id: &str,
         after_local_epoch: i64,
     ) -> Result<HistoryDelta> {
+        let bundle =
+            self.export_table_history_since_node_epoch(table_name, node_id, after_local_epoch)?;
+        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+            &bundle,
+            &[],
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?;
         Ok(HistoryDelta {
-            bundle: self.export_table_history_since_node_epoch(
-                table_name,
-                node_id,
-                after_local_epoch,
-            )?,
+            bundle,
             blocks: Vec::new(),
-            text_ops_delta: self.export_text_ops_delta()?,
+            text_ops_delta,
         })
     }
 
@@ -1024,14 +1044,14 @@ impl Runtime {
         after_local_epoch: i64,
         text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
     ) -> Result<HistoryDelta> {
+        let bundle =
+            self.export_table_history_since_node_epoch(table_name, node_id, after_local_epoch)?;
+        let text_ops_delta =
+            self.export_text_ops_delta_for_bundle_since(&bundle, &[], text_ops_watermark)?;
         Ok(HistoryDelta {
-            bundle: self.export_table_history_since_node_epoch(
-                table_name,
-                node_id,
-                after_local_epoch,
-            )?,
+            bundle,
             blocks: Vec::new(),
-            text_ops_delta: self.export_text_ops_delta_since(text_ops_watermark)?,
+            text_ops_delta,
         })
     }
 
@@ -1070,10 +1090,15 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
+        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+            &bundle,
+            &blocks,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?;
         Ok(HistoryDelta {
             bundle,
             blocks,
-            text_ops_delta: self.export_text_ops_delta()?,
+            text_ops_delta,
         })
     }
 
@@ -1116,10 +1141,16 @@ impl Runtime {
         let reads = export_reads_for_history(&self.conn, &history)?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let bundle = make_bundle(&self.schema, branches, txs, reads, Vec::new(), history);
+        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+            &bundle,
+            &blocks,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?;
         Ok(HistoryDelta {
-            bundle: make_bundle(&self.schema, branches, txs, reads, Vec::new(), history),
+            bundle,
             blocks,
-            text_ops_delta: self.export_text_ops_delta()?,
+            text_ops_delta,
         })
     }
 
@@ -1930,10 +1961,15 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
+        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+            &bundle,
+            &blocks,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?;
         Ok(HistoryDelta {
             bundle,
             blocks,
-            text_ops_delta: self.export_text_ops_delta()?,
+            text_ops_delta,
         })
     }
 
@@ -2657,11 +2693,19 @@ impl Runtime {
                     },
                 )
             }
-            _ => Ok(HistoryDelta {
-                bundle: self.export_query_read_refresh(read)?,
-                blocks: Vec::new(),
-                text_ops_delta: self.export_text_ops_delta()?,
-            }),
+            _ => {
+                let bundle = self.export_query_read_refresh(read)?;
+                let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+                    &bundle,
+                    &[],
+                    crate::persisted_text_ops::DeltaWatermark::default(),
+                )?;
+                Ok(HistoryDelta {
+                    bundle,
+                    blocks: Vec::new(),
+                    text_ops_delta,
+                })
+            }
         }
     }
 
@@ -5946,10 +5990,15 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
+        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
+            &bundle,
+            &blocks,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?;
         Ok(HistoryDelta {
             bundle,
             blocks,
-            text_ops_delta: self.export_text_ops_delta()?,
+            text_ops_delta,
         })
     }
 
@@ -7044,6 +7093,36 @@ fn validate_write_fields(
 
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
+}
+
+fn deep_text_roots_for_bundle(
+    schema: &SchemaDef,
+    bundle: &Bundle,
+) -> Result<Vec<crate::persisted_text_ops::TextRoot>> {
+    let mut roots = BTreeMap::new();
+    for record in &bundle.history {
+        let table = schema.table_def(&record.table)?;
+        for field in &table.fields {
+            if !matches!(field.kind, FieldKind::DeepText) {
+                continue;
+            }
+            let Some(root) = record.values.get(&field.name).and_then(JsonValue::as_u64) else {
+                continue;
+            };
+            if root > 0 {
+                roots
+                    .entry((
+                        record.table.clone(),
+                        record.row_id.clone(),
+                        record.branch_id.clone(),
+                        field.name.clone(),
+                    ))
+                    .and_modify(|existing: &mut i64| *existing = (*existing).max(root as i64))
+                    .or_insert(root as i64);
+            }
+        }
+    }
+    Ok(roots.into_values().map(Some).collect())
 }
 
 fn apply_deep_text_edit(
@@ -12819,6 +12898,65 @@ mod tests {
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello again"
         );
+    }
+
+    #[test]
+    fn query_delta_exports_only_referenced_deep_text_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("folder");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("folder".to_owned(), JsonValue::from("kept"))]),
+            )
+            .unwrap();
+        alice
+            .insert_row(
+                "docs",
+                "doc-2",
+                BTreeMap::from([("folder".to_owned(), JsonValue::from("skipped"))]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-2", "body", "unrelated")
+            .unwrap();
+
+        let delta = alice
+            .export_query_where_eq_history_delta("docs", "folder", "kept", &[])
+            .unwrap();
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &delta.text_ops_delta,
+            &mut watermark,
+        )
+        .unwrap();
+        assert_eq!(stats.ops, 1);
+
+        bob.apply_history_delta(&delta).unwrap();
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello"
+        );
+        assert!(bob
+            .read_rows("docs")
+            .unwrap()
+            .iter()
+            .all(|row| row.id != "doc-2"));
     }
 
     #[test]

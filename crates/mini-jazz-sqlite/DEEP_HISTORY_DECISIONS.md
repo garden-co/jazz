@@ -982,3 +982,11 @@ Decision: replace per-ancestor materialization probes with a recursive CTE that 
 Why: independent text roots made reads and snapshot creation pay one or two SQLite statements per replayed op. The new query keeps the same op-chain semantics, but fetches the ancestor window in one statement and lets Rust replay from the returned rows.
 
 Scope impact: focused text-op tests and the full `mini-jazz-sqlite` test suite pass. A canonical Block+Ops sample shows current and historical text reads improving, while append write-only moved worse in this single run; keep profiling before treating this as a settled write-path win.
+
+## Thu May 28 23:31:18 PDT 2026 - Scope Deep-Text Sidecar Export To Referenced Roots
+
+Decision: change history delta export to include text-op sidecar data only for deep-text roots referenced by the exported row history and missing history blocks.
+
+Why: the runtime-shaped deep-text path should sync the sidecar as part of the same logical history delta, but dumping every text op in the local store is not an honest query-sync behavior. The exporter now extracts the latest root per table/row/branch/field, walks its parent closure to the remote watermark or nearest snapshot, and includes only required snapshots/chunks. A regression test verifies that a query delta for one doc does not export another doc's unrelated text op.
+
+Scope impact: this keeps full-store bootstrap behavior correct while making query/table-scoped deltas semantically closer to real sync. The first implementation over-walked overlapping chains; stopping on already-included ops and latest-root filtering brought canonical sample export times back down. Full `mini-jazz-sqlite` tests pass.
