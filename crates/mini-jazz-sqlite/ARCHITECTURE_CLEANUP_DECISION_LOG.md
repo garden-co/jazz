@@ -521,3 +521,9 @@ regress.
 - Moved table reads, tiered reads, predicate reads, required-ref reads, recursive reads, and conflict-candidate reads into `runtime::reads`.
 - This creates a clearer separation between local read semantics and sync/export mechanics.
 - The first test run hit the disk ceiling after several recompiles; cleared generated `target/` output and reran focused generic, recursive, and conflict-candidate read tests successfully.
+
+## 2026-05-29 01:50 PDT - Query export facade moved behind a module
+
+- Extracted the public predicate/window query export and profiling methods into `runtime::query_export`, while leaving the shared query-scope bundle assembly in `runtime.rs` for now.
+- This gives callers and future work a named API layer for "export a query-shaped sync bundle" without pretending the underlying scope machinery is already clean enough to be a standalone component.
+- Focused query-scope export tests pass. This moved another roughly 425 lines out of the central runtime file and made the next cleanup decision sharper: either extract the internal query-scope assembly as its own subsystem, or extract writes/apply first.
