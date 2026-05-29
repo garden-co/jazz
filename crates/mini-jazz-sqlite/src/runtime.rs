@@ -26,8 +26,8 @@ use crate::types::{
     StorageStats, TransactionInfo,
 };
 use crate::{
-    branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
-    storage, tx, users, Result, Storage,
+    branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set,
+    schema, stats, storage, tx, users, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
@@ -2277,15 +2277,15 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = row_num(&db, id)?;
-        record_policy_read_set_for_write(
-            &db,
-            &self.schema,
-            &table,
-            &table.write_policy,
-            &visible_row.values,
-            self.branch_num,
+        policy_read_set::record_for_write(policy_read_set::WritePolicyReadSet {
+            conn: &db,
+            schema: &self.schema,
+            table: &table,
+            policy: &table.write_policy,
+            values: &visible_row.values,
+            branch_num: self.branch_num,
             tx_num,
-        )?;
+        })?;
         let allowed = bypass_policy
             || local_write_allowed(LocalWriteCheck {
                 db: &db,
@@ -4139,15 +4139,15 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             2,
         )?;
     }
-    record_policy_read_set_for_write(
-        args.db,
-        args.schema,
+    policy_read_set::record_for_write(policy_read_set::WritePolicyReadSet {
+        conn: args.db,
+        schema: args.schema,
         table,
-        &table.write_policy,
-        &effective_values,
-        args.branch_num,
-        args.tx_num,
-    )?;
+        policy: &table.write_policy,
+        values: &effective_values,
+        branch_num: args.branch_num,
+        tx_num: args.tx_num,
+    })?;
     let allowed = args.bypass_policy
         || local_write_allowed(LocalWriteCheck {
             db: args.db,
@@ -4712,230 +4712,6 @@ fn exclusive_write_conflict_exists(
     Ok(count > 0)
 }
 
-fn record_policy_read_set_for_write(
-    conn: &Connection,
-    schema: &SchemaDef,
-    table: &crate::schema::TableDef,
-    policy: &PolicyDef,
-    values: &BTreeMap<String, JsonValue>,
-    branch_num: i64,
-    tx_num: i64,
-) -> Result<()> {
-    let mut policy = policy;
-    if branch_num != 1 {
-        if let Some((branch_table_name, branch_policy)) = table.branch_policies.iter().next() {
-            if let Some(branch_write_policy) = branch_policy.write_policy.as_ref() {
-                let branch_id = branch_id_for_num(conn, branch_num)?;
-                let branch_row_num = ensure_row_id(conn, branch_table_name, &branch_id)?;
-                read_set::record_tx_read(conn, tx_num, branch_table_name, branch_row_num, 1, 1)?;
-                let branch_table = schema.table_def(branch_table_name)?;
-                record_policy_read_dependencies_for_row(
-                    conn,
-                    schema,
-                    branch_table,
-                    &branch_table.read_policy,
-                    branch_row_num,
-                    1,
-                    tx_num,
-                )?;
-                policy = branch_write_policy;
-            }
-        }
-    }
-    let PolicyDef::RefReadable { field } = policy else {
-        return Ok(());
-    };
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == *field)
-        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref {
-        table: ref_table_name,
-    } = &field.kind
-    else {
-        return Ok(());
-    };
-    let Some(row_id) = values.get(&field.name).and_then(JsonValue::as_str) else {
-        return Ok(());
-    };
-    let row_num = ensure_row_id(conn, ref_table_name, row_id)?;
-    read_set::record_tx_read(conn, tx_num, ref_table_name, row_num, branch_num, 1)?;
-    let ref_table = schema.table_def(ref_table_name)?;
-    record_policy_read_dependencies_for_row(
-        conn,
-        schema,
-        ref_table,
-        &ref_table.read_policy,
-        row_num,
-        branch_num,
-        tx_num,
-    )
-}
-
-fn record_policy_read_dependencies_for_row(
-    conn: &Connection,
-    schema: &SchemaDef,
-    table: &crate::schema::TableDef,
-    policy: &PolicyDef,
-    row_num: i64,
-    branch_num: i64,
-    tx_num: i64,
-) -> Result<()> {
-    let PolicyDef::RefReadable { field } = policy else {
-        return Ok(());
-    };
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == *field)
-        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref {
-        table: ref_table_name,
-    } = &field.kind
-    else {
-        return Ok(());
-    };
-    let Some(parent_row_num) =
-        current_ref_field_row_num(conn, &table.name, field, row_num, branch_num)?
-    else {
-        return Ok(());
-    };
-    read_set::record_tx_read(conn, tx_num, ref_table_name, parent_row_num, branch_num, 1)?;
-    let parent_table = schema.table_def(ref_table_name)?;
-    record_policy_read_dependencies_for_row(
-        conn,
-        schema,
-        parent_table,
-        &parent_table.read_policy,
-        parent_row_num,
-        branch_num,
-        tx_num,
-    )
-}
-
-fn current_ref_field_row_num(
-    conn: &Connection,
-    table_name: &str,
-    field: &FieldDef,
-    row_num: i64,
-    branch_num: i64,
-) -> Result<Option<i64>> {
-    if branch_num != 1 {
-        if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
-            if !current_row_exists_on_branch(conn, table_name, row_num, branch_num)? {
-                return snapshot_ref_field_row_num(conn, table_name, field, row_num, base_epoch);
-            }
-        }
-    }
-    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    conn.query_row(
-        &format!(
-            "SELECT current.{column}
-             FROM {} current
-             JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-             WHERE current.row_num = ?
-               AND {}
-               AND current.is_deleted = 0
-               AND tx.outcome != ?
-             ORDER BY CASE WHEN current.j_branch_num = ? THEN 0 ELSE 1 END
-             LIMIT 1",
-            crate::schema::current_table(table_name),
-            current_effective_branch_sql("current", table_name, branch_num)
-        ),
-        params![row_num, tx::OUTCOME_REJECTED, branch_num],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn current_row_exists_on_branch(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    branch_num: i64,
-) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        &format!(
-            "SELECT COUNT(*)
-             FROM {}
-             WHERE row_num = ?
-               AND j_branch_num = ?",
-            crate::schema::current_table(table_name)
-        ),
-        params![row_num, branch_num],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn snapshot_ref_field_row_num(
-    conn: &Connection,
-    table_name: &str,
-    field: &FieldDef,
-    row_num: i64,
-    base_epoch: i64,
-) -> Result<Option<i64>> {
-    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    conn.query_row(
-        &format!(
-            "SELECT h.{column}
-             FROM {} h
-             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-             WHERE h.row_num = ?
-               AND h.j_branch_num = 1
-               AND h.op != 3
-               AND tx.outcome != ?
-               AND tx.global_epoch IS NOT NULL
-               AND tx.global_epoch <= ?
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM {history_table} newer
-                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
-                 WHERE newer.row_num = h.row_num
-                   AND newer.j_branch_num = 1
-                   AND newer_tx.outcome != ?
-                   AND newer_tx.global_epoch IS NOT NULL
-                   AND newer_tx.global_epoch <= ?
-                   AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
-               )
-             LIMIT 1",
-            crate::schema::history_table(table_name),
-            history_table = crate::schema::history_table(table_name),
-        ),
-        params![
-            row_num,
-            tx::OUTCOME_REJECTED,
-            base_epoch,
-            tx::OUTCOME_REJECTED,
-            base_epoch
-        ],
-        |row| row.get::<_, i64>(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn current_effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> String {
-    if branch_num == 1 {
-        return format!("{alias}.j_branch_num = 1");
-    }
-    format!(
-        "({alias}.j_branch_num = {branch_num}
-          OR (
-            {alias}.j_branch_num = 1
-            AND NOT EXISTS (
-              SELECT 1
-              FROM {} branch_shadow
-              WHERE branch_shadow.row_num = {alias}.row_num
-                AND branch_shadow.j_branch_num = {branch_num}
-            )
-          ))",
-        crate::schema::current_table(table_name)
-    )
-}
-
 fn record_tx_write(
     conn: &Connection,
     tx_num: i64,
@@ -5223,15 +4999,15 @@ impl<'a> TransactionBuilder<'a> {
                         .ok_or_else(|| {
                             crate::Error::new(format!("missing delete snapshot {id}"))
                         })?;
-                    record_policy_read_set_for_write(
-                        &db,
-                        &self.runtime.schema,
-                        table_def,
-                        &table_def.write_policy,
-                        &visible_row.values,
-                        self.runtime.branch_num,
+                    policy_read_set::record_for_write(policy_read_set::WritePolicyReadSet {
+                        conn: &db,
+                        schema: &self.runtime.schema,
+                        table: table_def,
+                        policy: &table_def.write_policy,
+                        values: &visible_row.values,
+                        branch_num: self.runtime.branch_num,
                         tx_num,
-                    )?;
+                    })?;
                     allowed &= bypass_policy
                         || local_write_allowed(LocalWriteCheck {
                             db: &db,

@@ -351,3 +351,11 @@ policy read-set fact before evaluating the write. This is intentionally generic
 inside the existing branch-policy slot rather than hardcoded to the test schema:
 any active branch write policy records the branch backing row on main, plus
 recursive policy dependencies of that backing row.
+
+## 2026-05-29 00:24 PDT
+
+Starting a cleanup slice to extract policy read-set recording out of
+`runtime.rs`. The pattern to preserve: local write code should record write
+read facts, then delegate policy-dependency recording to a policy/read-set
+boundary that knows about ordinary ref-readable policies, recursive policy
+dependencies, branch bases, and branch backing rows.
