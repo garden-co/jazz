@@ -56,11 +56,18 @@ fn forget_same_descriptor(conn: &Connection, query_read: &QueryReadRecord) -> Re
     let existing_values = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    let new_identity = descriptor_identity_value(&query_read.value);
+    let new_identity = crate::observed_query::identity_value(query_read)?;
     for existing_value_json in existing_values {
         let existing_value = serde_json::from_str::<JsonValue>(&existing_value_json)
             .map_err(|err| crate::Error::new(err.to_string()))?;
-        if descriptor_identity_value(&existing_value) == new_identity {
+        let existing_read = QueryReadRecord {
+            branch_id: query_read.branch_id.clone(),
+            table: query_read.table.clone(),
+            field: query_read.field.clone(),
+            op: query_read.op.clone(),
+            value: existing_value,
+        };
+        if crate::observed_query::identity_value(&existing_read)? == new_identity {
             conn.execute(
                 "DELETE FROM jazz_query_read
                  WHERE branch_id = ?
@@ -79,15 +86,6 @@ fn forget_same_descriptor(conn: &Connection, query_read: &QueryReadRecord) -> Re
         }
     }
     Ok(())
-}
-
-fn descriptor_identity_value(value: &JsonValue) -> JsonValue {
-    let JsonValue::Object(object) = value else {
-        return value.clone();
-    };
-    let mut identity = object.clone();
-    identity.remove("observed_ids");
-    JsonValue::Object(identity)
 }
 
 pub(crate) fn list(conn: &Connection) -> Result<Vec<QueryReadRecord>> {

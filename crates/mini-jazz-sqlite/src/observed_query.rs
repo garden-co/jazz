@@ -124,3 +124,23 @@ pub(crate) fn decode(read: &QueryReadRecord) -> Result<ObservedQuery> {
         ))),
     }
 }
+
+pub(crate) fn identity_value(read: &QueryReadRecord) -> Result<JsonValue> {
+    match decode(read)? {
+        ObservedQuery::TopCreatedAt { value, limit, .. } => Ok(serde_json::json!({
+            "eq": value,
+            "limit": limit,
+        })),
+        ObservedQuery::TopField {
+            value,
+            order_field,
+            limit,
+            ..
+        } => Ok(serde_json::json!({
+            "eq": value,
+            "order_field": order_field,
+            "limit": limit,
+        })),
+        _ => Ok(read.value.clone()),
+    }
+}
