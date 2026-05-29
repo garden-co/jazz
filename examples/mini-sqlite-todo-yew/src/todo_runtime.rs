@@ -38,12 +38,6 @@ pub struct TodoState {
     pub error: String,
     pub generated: u64,
     pub total_to_generate: u64,
-    pub generate_ms: f64,
-    pub main_query_ms: f64,
-    pub export_ms: f64,
-    pub worker_apply_ms: f64,
-    pub worker_query_ms: f64,
-    pub worker_round_trip_ms: f64,
     pub current_rows: u64,
 }
 
@@ -59,12 +53,6 @@ impl Default for TodoState {
             error: String::new(),
             generated: 0,
             total_to_generate: TOTAL_TO_GENERATE,
-            generate_ms: 0.0,
-            main_query_ms: 0.0,
-            export_ms: 0.0,
-            worker_apply_ms: 0.0,
-            worker_query_ms: 0.0,
-            worker_round_trip_ms: 0.0,
             current_rows: 0,
         }
     }
@@ -196,7 +184,6 @@ impl TodoRuntime {
         self.run_mut(|inner| {
             inner.state.generating = true;
             inner.state.generated = 0;
-            inner.state.generate_ms = 0.0;
             inner.emit();
             Ok(())
         });
@@ -256,11 +243,11 @@ impl TodoRuntime {
     }
 
     async fn generate_100k_inner(&self) -> Result<(), String> {
-        let started_at = Date::now();
+        let id_seed = Date::now() as u64;
         let mut batch_ids = Vec::new();
         let browser = self.browser();
         for index in 0..TOTAL_TO_GENERATE {
-            let id = format!("todo-{}-{}", started_at as u64, index);
+            let id = format!("todo-{id_seed}-{index}");
             browser.insert_row(
                 "todos",
                 &id,
@@ -293,7 +280,6 @@ impl TodoRuntime {
         browser.refresh_subscriptions()?;
 
         self.with_inner(|inner| {
-            inner.state.generate_ms = Date::now() - started_at;
             inner.state.generating = false;
             inner.emit();
             Ok(())
@@ -307,11 +293,6 @@ impl TodoRuntime {
                 inner.state.syncing = status.syncing;
                 inner.state.error = status.error;
                 inner.state.current_rows = status.worker_storage_stats.current_rows.max(0) as u64;
-                inner.state.main_query_ms = status.last_sync.main_subscription_ms;
-                inner.state.export_ms = status.last_sync.main_export_ms;
-                inner.state.worker_apply_ms = status.last_sync.worker_apply_ms;
-                inner.state.worker_query_ms = status.last_sync.worker_query_ms;
-                inner.state.worker_round_trip_ms = status.last_sync.round_trip_ms;
                 let should_ensure_project = status.ready && !inner.project_ensured;
                 if should_ensure_project {
                     inner.project_ensured = true;
