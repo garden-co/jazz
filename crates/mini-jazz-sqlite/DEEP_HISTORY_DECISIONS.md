@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:24:40 PDT 2026
+
+Decision: schedule deep-text snapshots by per-root replay depth, not global op id.
+
+Why: independent text values share the same `jazz_text_op` table, but replay cost is per root. A global `op_id % snapshot_every` rule can give snapshots to the wrong row when documents are interleaved, leaving a hot document with a deeper chain than intended. The snapshot policy should cap chain depth from the nearest snapshot for each individual text value.
+
+Scope impact: local text writes now walk the parent chain up to the snapshot threshold and snapshot the new root when that root's chain has grown deep enough. A regression interleaves Ada/Grace docs and verifies the second Ada edit, not the global second op, gets the snapshot.
+
 ## Fri May 29 02:20:57 PDT 2026
 
 Decision: validate deep-text op range structure before importing a text-op delta.

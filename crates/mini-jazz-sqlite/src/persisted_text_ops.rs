@@ -127,7 +127,7 @@ pub(crate) fn replace_range_known_len(
         (total_len + insert.len() - delete_bytes) as i64
     ])?;
     let op_id = conn.last_insert_rowid();
-    if snapshot_every > 0 && (op_id as usize).is_multiple_of(snapshot_every) {
+    if should_snapshot_root(conn, op_id, snapshot_every)? {
         snapshot(conn, Some(op_id))?;
     }
     Ok(Some(op_id))
@@ -544,6 +544,32 @@ fn snapshot_exists(conn: &Connection, op_id: i64) -> Result<bool> {
         .query_row(params![op_id], |_| Ok(()))
         .optional()?
         .is_some())
+}
+
+fn should_snapshot_root(conn: &Connection, op_id: i64, snapshot_every: usize) -> Result<bool> {
+    if snapshot_every == 0 || snapshot_exists(conn, op_id)? {
+        return Ok(false);
+    }
+    let mut depth = 0;
+    let mut current = Some(op_id);
+    let mut parent_stmt =
+        conn.prepare_cached("SELECT parent_op_id FROM jazz_text_op WHERE op_id = ?")?;
+    while let Some(current_op_id) = current {
+        depth += 1;
+        if depth >= snapshot_every {
+            return Ok(true);
+        }
+        current = parent_stmt
+            .query_row(params![current_op_id], |row| row.get::<_, Option<i64>>(0))
+            .optional()?
+            .ok_or_else(|| Error::new("unknown text op root"))?;
+        if let Some(parent_op_id) = current {
+            if snapshot_exists(conn, parent_op_id)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn validate_delta_references(
@@ -1031,6 +1057,34 @@ mod tests {
             materialize(&conn, grace).expect("materialize grace"),
             "Grace Hopper"
         );
+    }
+
+    #[test]
+    fn snapshots_follow_per_root_depth_not_global_op_id() {
+        let conn = open_text_store();
+
+        let mut ada = None;
+        let mut grace = None;
+        ada = append(&conn, ada, "Ada", 2).expect("append ada");
+        grace = append(&conn, grace, "Grace", 2).expect("append grace");
+        ada = append(&conn, ada, " Lovelace", 2).expect("append ada surname");
+
+        assert_eq!(
+            materialize(&conn, ada).expect("materialize ada"),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            materialize(&conn, grace).expect("materialize grace"),
+            "Grace"
+        );
+        let snapshot_op_ids = conn
+            .prepare("SELECT op_id FROM jazz_text_snapshot ORDER BY op_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(snapshot_op_ids, vec![3]);
     }
 
     #[test]
