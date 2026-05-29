@@ -998,3 +998,11 @@ Decision: when a batched local write touches the same row repeatedly inside one 
 Why: current projection is a cache of the visible row after commit. Rewriting it for every intermediate update inside the same SQLite transaction adds write amplification without adding observable runtime semantics. To preserve subsequent writes in the same batch, the write path now maintains batch-local effective-values, visible-tx, row-num, and creation-metadata caches.
 
 Scope impact: this is a general batched-write optimization, not a deep-text special case. The full `mini-jazz-sqlite` suite passes; it caught and fixed an upsert edge case where a row created earlier in the same batch must be treated as an update later in that batch. Canonical samples show current-upsert timing dropping near zero, with the largest visible win on canvas writes and neutral/noisy text results.
+
+## Thu May 28 23:45:32 PDT 2026 - Index Deep-Text Roots For Sealed Blocks
+
+Decision: store the latest deep-text roots referenced by each sealed history block in a small `history_block_text_root` table.
+
+Why: scoped text-op export must include roots from missing blocks, but repeatedly decoding compressed block payloads just to rediscover those roots is unnecessary work. Compaction and block import now populate the index, and export falls back to decoding only if an older block lacks index rows.
+
+Scope impact: native export for text scenarios improves in the canonical sample, while the extra table costs one small SQLite page in these tiny databases. Manifest validation now returns the decoded block bundle so import does not decode payloads twice. Full `mini-jazz-sqlite` tests pass.

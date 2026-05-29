@@ -468,6 +468,12 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           PRIMARY KEY (node_num, max_local_epoch, min_local_epoch, block_id)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS history_block_text_root (
+          block_id INTEGER NOT NULL,
+          root_op_id INTEGER NOT NULL,
+          PRIMARY KEY (block_id, root_op_id)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS jazz_row_id (
           row_num INTEGER PRIMARY KEY,
           row_id TEXT NOT NULL UNIQUE

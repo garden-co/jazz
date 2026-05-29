@@ -641,12 +641,17 @@ impl Runtime {
         }
         let mut roots = deep_text_roots_for_bundle(&self.schema, bundle)?;
         for block in blocks {
-            let block_bundle = decode_history_block_payload(
-                &block.manifest.codec,
-                block.manifest.format_version,
-                &block.payload,
-            )?;
-            roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
+            let indexed_roots = history_block_text_roots(&self.conn, block.manifest.block_id)?;
+            if indexed_roots.is_empty() {
+                let block_bundle = decode_history_block_payload(
+                    &block.manifest.codec,
+                    block.manifest.format_version,
+                    &block.payload,
+                )?;
+                roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
+            } else {
+                roots.extend(indexed_roots);
+            }
         }
         Ok(crate::persisted_text_ops::export_delta_for_roots(&self.conn, roots, watermark)?.bytes)
     }
@@ -1265,6 +1270,7 @@ impl Runtime {
         )?;
         let block_id = db.last_insert_rowid();
         insert_history_block_tx_index_from_ranges(&db, block_id, &block_tx_ranges.by_node)?;
+        insert_history_block_text_roots(&db, block_id, &self.schema, &payload_bundle)?;
         delete_history_rows_for_tx_nums(&db, table_name, row_num, selected)?;
         let sealed_transactions =
             delete_compacted_tx_rows(&db, &self.schema, selected, all_selected)?;
@@ -1414,6 +1420,7 @@ impl Runtime {
         )?;
         let block_id = db.last_insert_rowid();
         insert_history_block_tx_index(&db, block_id, selected)?;
+        insert_history_block_text_roots(&db, block_id, &self.schema, &payload_bundle)?;
         delete_history_rows_for_tx_nums(&db, table_name, row_num, selected)?;
         let sealed_transactions = delete_rejected_compacted_tx_rows(&db, &self.schema, selected)?;
         db.commit()?;
@@ -1590,7 +1597,7 @@ impl Runtime {
             let table_num = crate::schema::table_num(&db, &block.manifest.table)?;
             let row_num = ensure_row_id(&db, &block.manifest.table, &block.manifest.row_id)?;
             let block_kind = history_block_kind_value(&block.manifest.kind)?;
-            validate_history_block_export_manifest(block)?;
+            let block_bundle = validate_history_block_export_manifest(block)?;
             if history_block_exists(&db, block_kind, table_num, row_num, block)? {
                 continue;
             }
@@ -1616,6 +1623,7 @@ impl Runtime {
             )?;
             let block_id = db.last_insert_rowid();
             insert_history_block_tx_index_for_ranges(&db, block_id, &block.tx_ranges)?;
+            insert_history_block_text_roots(&db, block_id, &self.schema, &block_bundle)?;
             imported += 1;
         }
         db.commit()?;
@@ -9236,7 +9244,7 @@ fn history_block_exists(
     Ok(count > 0)
 }
 
-fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<()> {
+fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<Bundle> {
     if block.manifest.compressed_bytes != block.payload.len() as i64 {
         return Err(crate::Error::new(
             "history block compressed byte count mismatch",
@@ -9365,7 +9373,7 @@ fn validate_history_block_export_manifest(block: &HistoryBlockExport) -> Result<
     if expected_ranges != actual_ranges {
         return Err(crate::Error::new("history block tx range mismatch"));
     }
-    Ok(())
+    Ok(bundle)
 }
 
 fn history_block_manifest_key(
@@ -9735,6 +9743,40 @@ fn insert_history_block_tx_index_for_ranges(
         )?;
     }
     Ok(())
+}
+
+fn insert_history_block_text_roots(
+    conn: &Connection,
+    block_id: i64,
+    schema: &SchemaDef,
+    bundle: &Bundle,
+) -> Result<()> {
+    let roots = deep_text_roots_for_bundle(schema, bundle)?;
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR IGNORE INTO history_block_text_root (block_id, root_op_id)
+         VALUES (?, ?)",
+    )?;
+    for root_op_id in roots.into_iter().flatten() {
+        stmt.execute(params![block_id, root_op_id])?;
+    }
+    Ok(())
+}
+
+fn history_block_text_roots(
+    conn: &Connection,
+    block_id: i64,
+) -> Result<Vec<crate::persisted_text_ops::TextRoot>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT root_op_id
+         FROM history_block_text_root
+         WHERE block_id = ?
+         ORDER BY root_op_id",
+    )?;
+    let rows = stmt.query_map(params![block_id], |row| row.get::<_, i64>(0))?;
+    rows.map(|row| row.map(Some).map_err(Into::into)).collect()
 }
 
 fn history_block_tx_ranges(
