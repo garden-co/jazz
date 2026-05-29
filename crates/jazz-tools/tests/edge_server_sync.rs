@@ -37,7 +37,6 @@ fn todo_schema_with_notes() -> jazz_tools::Schema {
         .build()
 }
 
-const PEER_SECRET: &str = "cluster-peer-secret";
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLICATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -122,6 +121,26 @@ fn app_scoped_ws_upstream_url(server: &TestingServer) -> String {
     )
 }
 
+#[tokio::test]
+async fn edge_connects_to_core_with_admin_secret_only() {
+    let app_id = TestingServer::default_app_id();
+    let admin_secret = "shared-admin-secret";
+
+    let core = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_admin_secret(admin_secret)
+        .start()
+        .await;
+    let edge = TestingServer::builder()
+        .with_app_id(app_id)
+        .with_admin_secret(admin_secret)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+
+    wait_for_upstream(&edge).await;
+}
+
 struct MultiServerCluster {
     schema: jazz_tools::Schema,
     core: TestingServer,
@@ -137,20 +156,14 @@ impl MultiServerCluster {
     async fn start_dynamic(schema: jazz_tools::Schema) -> Self {
         let app_id = TestingServer::default_app_id();
 
-        let core = TestingServer::builder()
-            .with_app_id(app_id)
-            .with_peer_secret(PEER_SECRET)
-            .start()
-            .await;
+        let core = TestingServer::builder().with_app_id(app_id).start().await;
         let edge_us = TestingServer::builder()
             .with_app_id(app_id)
-            .with_peer_secret(PEER_SECRET)
             .with_upstream_url(core.base_url())
             .start()
             .await;
         let edge_eu = TestingServer::builder()
             .with_app_id(app_id)
-            .with_peer_secret(PEER_SECRET)
             .with_upstream_url(core.base_url())
             .start()
             .await;
@@ -172,8 +185,7 @@ impl MultiServerCluster {
 
         let mut core_builder = TestingServer::builder()
             .with_app_id(app_id)
-            .with_schema(schema.clone())
-            .with_peer_secret(PEER_SECRET);
+            .with_schema(schema.clone());
         if let Some(tracer) = tracer.clone() {
             core_builder = core_builder.with_tracer(tracer);
         }
@@ -182,7 +194,6 @@ impl MultiServerCluster {
         let mut edge_us_builder = TestingServer::builder()
             .with_app_id(app_id)
             .with_schema(schema.clone())
-            .with_peer_secret(PEER_SECRET)
             .with_upstream_url(core.base_url());
         if let Some(tracer) = tracer.clone() {
             edge_us_builder = edge_us_builder.with_tracer(tracer);
@@ -192,7 +203,6 @@ impl MultiServerCluster {
         let mut edge_eu_builder = TestingServer::builder()
             .with_app_id(app_id)
             .with_schema(schema.clone())
-            .with_peer_secret(PEER_SECRET)
             .with_upstream_url(core.base_url());
         if let Some(tracer) = tracer {
             edge_eu_builder = edge_eu_builder.with_tracer(tracer);
@@ -385,7 +395,7 @@ async fn edge_tier_write_propagates_from_writer_edge_to_core_and_peer_edge() {
 /// Alice writes through an edge but requests GlobalServer durability.
 ///
 /// ```text
-/// alice --GlobalServer write--> edge_us --peer sync--> core
+/// alice --GlobalServer write--> edge_us --upstream sync--> core
 /// alice <--return only after global settlement----------
 /// carol <--global read----------- core
 /// dave  <--global read----------- edge_eu
@@ -560,7 +570,7 @@ async fn core_write_reaches_subscribed_clients_on_both_edges() {
 }
 
 /// Schema and permissions are published only to the core. Both edges learn the
-/// catalogue through peer sync before clients on either edge use it.
+/// catalogue through upstream sync before clients on either edge use it.
 ///
 /// ```text
 /// mallory --schema + permissions--> core
@@ -631,7 +641,7 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
 ///
 /// ```text
 /// mallory --schema + permissions--> core
-/// edge_eu --peer reconnect--------> core
+/// edge_eu --upstream reconnect----> core
 /// core    --full catalogue replay-> edge_eu
 /// alice   --write-----------------> edge_eu --sync--> core
 /// ```
@@ -641,11 +651,7 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
     let app_id = TestingServer::default_app_id();
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
 
     publish_schema_to_core(&core, &schema).await;
     let permissions_head = publish_allow_all_permissions(
@@ -658,7 +664,6 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
 
     let edge_eu = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -707,7 +712,7 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
 }
 
 /// Catalogue published through one edge is forwarded to core, then core
-/// propagates it to another connected edge over peer sync.
+/// propagates it to another connected edge over upstream sync.
 ///
 /// ```text
 /// mallory --schema + permissions--> edge_us --HTTP forward--> core
@@ -720,20 +725,14 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
     let app_id = TestingServer::default_app_id();
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
     let edge_us = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(core.base_url())
         .start()
         .await;
     let edge_eu = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -812,11 +811,11 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
     core.shutdown().await;
 }
 
-/// A WebSocket-style, app-scoped upstream URL should drive both peer sync and
+/// A WebSocket-style, app-scoped upstream URL should drive both upstream sync and
 /// HTTP catalogue forwarding.
 ///
 /// ```text
-/// edge --upstream-url ws://core/apps/<app>/ws-- peer sync + HTTP forwarding
+/// edge --upstream-url ws://core/apps/<app>/ws-- upstream sync + HTTP forwarding
 /// mallory --schema + permissions--------------> edge --------> core
 /// alice   --write/read------------------------> edge
 /// ```
@@ -828,14 +827,9 @@ async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() 
     let query = QueryBuilder::new("todos").build();
     let client = reqwest::Client::new();
 
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
     let edge = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(app_scoped_ws_upstream_url(&core))
         .start()
         .await;
@@ -954,11 +948,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
     let edge_data_dir = TempDir::new().expect("temp edge data dir");
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder()
-        .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
-        .start()
-        .await;
+    let core = TestingServer::builder().with_app_id(app_id).start().await;
 
     publish_schema_to_core(&core, &v1_schema).await;
     let v1_permissions_head = publish_allow_all_permissions(
@@ -971,7 +961,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
 
     let edge_before_restart = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(core.base_url())
         .with_persistent_storage()
         .with_data_dir(edge_data_dir.path())
@@ -1009,7 +998,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
 
     let edge_after_restart = TestingServer::builder()
         .with_app_id(app_id)
-        .with_peer_secret(PEER_SECRET)
         .with_upstream_url(core.base_url())
         .with_persistent_storage()
         .with_data_dir(edge_data_dir.path())

@@ -62,10 +62,10 @@ Admin writes can take the direct server-side path.
 ### Peer
 
 Peer is used for trusted runtime-to-runtime links such as browser main-thread to
-worker or server-to-server communication. Server-to-server WebSocket links use
-the peer-secret handshake and are registered as `ClientRole::Peer`, preserving
-the normal sync state for the connection while allowing trusted catalogue and
-row sync payloads.
+worker communication. Edge server upstream WebSocket links authenticate with
+the admin-secret handshake and are registered with trusted backend-style sync
+permissions, preserving the normal sync state for the connection while allowing
+row sync and downstream catalogue replay.
 
 ## What Moves Over Sync
 
@@ -109,7 +109,7 @@ global-tier and edge-tier durability. An edge can satisfy edge-tier work locally
 after it has durable edge state, but global-tier writes and global-tier query
 settlement continue upstream to the core.
 
-Edges connect to core as peer clients over the existing WebSocket transport.
+Edges connect to core with the admin secret over the existing WebSocket transport.
 That means reconnect/backoff, active subscription replay, batch-settlement
 replay, and catalogue-digest optimization all stay inside the same transport
 and SyncManager paths used by other runtime links.

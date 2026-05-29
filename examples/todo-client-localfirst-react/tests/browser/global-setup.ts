@@ -6,11 +6,10 @@ import {
   TEST_PORT,
   JWT_SECRET,
   ADMIN_SECRET,
-  PEER_SECRET,
   APP_ID,
 } from "./test-constants.js";
 
-export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, PEER_SECRET, APP_ID };
+export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
 
 type LocalServer = Awaited<ReturnType<typeof startLocalJazzServer>>;
 
@@ -74,7 +73,6 @@ export async function setup(): Promise<void> {
         appId: APP_ID,
         port: CORE_TEST_PORT,
         adminSecret: ADMIN_SECRET,
-        peerSecret: PEER_SECRET,
         inMemory: true,
       });
 
@@ -82,7 +80,6 @@ export async function setup(): Promise<void> {
         appId: APP_ID,
         port: EDGE_TEST_PORT,
         adminSecret: ADMIN_SECRET,
-        peerSecret: PEER_SECRET,
         upstreamUrl: coreServer.url,
         inMemory: true,
       });

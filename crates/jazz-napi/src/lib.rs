@@ -369,7 +369,6 @@ struct DevServerStartOptions {
     backend_secret: Option<String>,
     admin_secret: Option<String>,
     upstream_url: Option<String>,
-    peer_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
 }
@@ -1615,7 +1614,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1630,7 +1629,6 @@ impl DevServer {
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
-            peer_secret: opts.peer_secret.clone(),
             ..Default::default()
         };
 

@@ -192,11 +192,8 @@ mod tests {
         schema: crate::query_manager::types::Schema,
         upstream_url: String,
     ) -> Arc<ServerState> {
-        let mut auth_config = test_auth_config();
-        auth_config.peer_secret = Some("cluster-secret".to_string());
-
         ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
+            .with_auth_config(test_auth_config())
             .with_upstream_url(upstream_url)
             .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
@@ -602,70 +599,6 @@ mod tests {
             .expect("loopback cross-port cookie auth should succeed");
 
         assert!(matches!(setup, WsClientSetup::Session(_)));
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_accepts_valid_peer_secret_as_peer() {
-        let auth_config = AuthConfig {
-            peer_secret: Some("cluster-peer-secret".to_string()),
-            allow_local_first_auth: false,
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build peer auth test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig {
-                peer_secret: Some("cluster-peer-secret".to_string()),
-                ..Default::default()
-            },
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-
-        let setup = authenticate_ws_handshake(&handshake, &HeaderMap::new(), &state)
-            .await
-            .expect("peer auth should succeed");
-
-        assert!(matches!(setup, WsClientSetup::Peer));
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_rejects_wrong_peer_secret() {
-        let auth_config = AuthConfig {
-            peer_secret: Some("cluster-peer-secret".to_string()),
-            allow_local_first_auth: false,
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build peer auth test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig {
-                peer_secret: Some("wrong-peer-secret".to_string()),
-                ..Default::default()
-            },
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-
-        let error = authenticate_ws_handshake(&handshake, &HeaderMap::new(), &state)
-            .await
-            .expect_err("wrong peer secret should be rejected");
-
-        assert!(error.contains("Invalid peer secret"));
     }
 
     #[tokio::test]

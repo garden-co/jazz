@@ -378,10 +378,6 @@ fn validate_server_config(
     auth_config: &AuthConfig,
     topology: ServerTopology,
 ) -> Result<(), String> {
-    if topology.is_edge() && auth_config.peer_secret.is_none() {
-        return Err("edge mode requires --peer-secret / JAZZ_PEER_SECRET".to_string());
-    }
-
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -391,14 +387,13 @@ fn validate_server_config(
 
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, peer={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
         auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
-        auth_config.peer_secret.is_some(),
         topology
     );
 }
@@ -489,10 +484,10 @@ fn start_upstream_sync(
     upstream_ws_url: String,
     auth_config: &AuthConfig,
 ) -> Result<(), String> {
-    let peer_secret = auth_config
-        .peer_secret
+    let admin_secret = auth_config
+        .admin_secret
         .clone()
-        .ok_or_else(|| "edge mode requires --peer-secret / JAZZ_PEER_SECRET".to_string())?;
+        .ok_or_else(|| "edge mode requires --admin-secret / JAZZ_ADMIN_SECRET".to_string())?;
 
     info!(
         local_tier = "edge",
@@ -504,7 +499,7 @@ fn start_upstream_sync(
     runtime.connect(
         upstream_ws_url.clone(),
         crate::transport_manager::AuthConfig {
-            peer_secret: Some(peer_secret),
+            admin_secret: Some(admin_secret),
             ..Default::default()
         },
     );
@@ -625,7 +620,6 @@ mod tests {
     #[tokio::test]
     async fn builder_requires_admin_secret_in_edge_mode() {
         let auth_config = AuthConfig {
-            peer_secret: Some("cluster-peer-secret".to_string()),
             allow_local_first_auth: true,
             ..Default::default()
         };
@@ -642,6 +636,31 @@ mod tests {
 
         assert!(error.contains("--admin-secret"));
         assert!(error.contains("--upstream-url"));
+    }
+
+    #[tokio::test]
+    async fn builder_allows_edge_mode_with_admin_secret_only() {
+        let built = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
+            .with_storage(StorageBackend::InMemory)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_string()),
+                ..Default::default()
+            })
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build edge server with admin secret only");
+
+        let tiers = built
+            .state
+            .runtime
+            .with_sync_manager(|sync| sync.local_durability_tiers())
+            .expect("read sync manager");
+
+        assert_eq!(
+            tiers,
+            std::collections::HashSet::from([DurabilityTier::EdgeServer])
+        );
     }
 
     #[tokio::test]
@@ -669,7 +688,6 @@ mod tests {
         let built = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
-                peer_secret: Some("cluster-secret".to_string()),
                 admin_secret: Some("admin-secret".to_string()),
                 ..Default::default()
             })
