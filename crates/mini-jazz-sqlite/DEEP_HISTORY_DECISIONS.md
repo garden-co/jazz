@@ -1126,3 +1126,11 @@ Decision: ordinary `insert_row` and `update_row` calls can now pass string value
 Why: `deep_text` should be an opt-in storage behavior, not an API that requires callers to manufacture internal sidecar roots. The specialized append/replace APIs are still useful for efficient incremental edits, but the generic row API must remain text-shaped.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. A regression inserts and updates a deep-text field through ordinary row writes, exports the resulting history delta, imports it on another runtime, and reads back the materialized string.
+
+## Fri May 29 01:03:03 PDT 2026 - Chain Batched Deep-Text Row Writes Through Batch-Local Roots
+
+Decision: when ordinary batched row writes set a `deep_text` field more than once for the same row, later writes derive their replacement root from the batch-local effective values cache.
+
+Why: current projection is intentionally deferred inside write batches, so reading the current table while normalizing a later deep-text string can see a stale or missing root. The correct source is the same batch-local row state used for ordinary field merging.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. A regression upserts the same deep-text row twice in one SQLite batch and verifies both the final text and the first historical version.

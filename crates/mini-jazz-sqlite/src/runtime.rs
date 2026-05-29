@@ -6957,7 +6957,8 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         (row_num, row_id_created)
     };
     add_write_phase(|stats| &mut stats.row_lookup_ms, row_lookup_started);
-    let normalized_values = normalize_deep_text_write_values(&mut args, table, row_id_created)?;
+    let normalized_values =
+        normalize_deep_text_write_values(&mut args, table, row_num, row_id_created)?;
     let write_values = normalized_values.as_ref().unwrap_or(args.values);
     let effective_started = Instant::now();
     let effective_cache_key = (args.table_name.to_owned(), row_num);
@@ -7198,6 +7199,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
 fn normalize_deep_text_write_values(
     args: &mut InsertRowInTx<'_>,
     table: &crate::schema::TableDef,
+    row_num: i64,
     row_id_created: bool,
 ) -> Result<Option<BTreeMap<String, JsonValue>>> {
     let mut normalized = None;
@@ -7211,7 +7213,18 @@ fn normalize_deep_text_write_values(
         let Some(text) = value.as_str() else {
             continue;
         };
-        let root = if args.op == 1 && row_id_created {
+        let effective_cache_key = (args.table_name.to_owned(), row_num);
+        let cached_root = args
+            .effective_values_cache
+            .as_deref()
+            .and_then(|cache| cache.get(&effective_cache_key))
+            .and_then(|values| values.get(&field.name))
+            .and_then(JsonValue::as_u64)
+            .map(|root| root as i64)
+            .filter(|root| *root != 0);
+        let root = if let Some(root) = cached_root {
+            Some(root)
+        } else if args.op == 1 && row_id_created {
             None
         } else {
             current_deep_text_root_in_tx(
@@ -13067,6 +13080,43 @@ mod tests {
         assert_eq!(
             bob.read_rows("docs").unwrap()[0].values["body"],
             JsonValue::from("goodbye")
+        );
+    }
+
+    #[test]
+    fn batched_row_writes_use_batch_local_deep_text_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .upsert_rows_batched(
+                "docs",
+                vec![
+                    (
+                        "doc-1".to_owned(),
+                        BTreeMap::from([("body".to_owned(), JsonValue::from("first"))]),
+                    ),
+                    (
+                        "doc-1".to_owned(),
+                        BTreeMap::from([("body".to_owned(), JsonValue::from("second"))]),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("second")
+        );
+        assert_eq!(
+            alice
+                .read_deep_text_at_node_epoch("docs", "doc-1", "body", "alice-node", 1)
+                .unwrap()
+                .unwrap(),
+            "first"
         );
     }
 
