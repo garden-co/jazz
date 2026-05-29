@@ -3,27 +3,22 @@ use super::history_export::{
     export_history_versions_for_rows_in_branches, export_policy_dependency_history,
     export_reads_for_history, export_snapshot_policy_dependency_history,
     export_txs_for_query_scope, export_visible_table_history, include_branch_record, make_bundle,
-    query_scope_rejected_tx_ids, query_scope_rejected_tx_ids_for_read, query_scope_repair_row_nums,
-    query_scope_repair_row_nums_for_read, PolicyDependencyExport,
+    query_scope_rejected_tx_ids_for_read, query_scope_repair_row_nums_for_read,
+    PolicyDependencyExport,
 };
 use super::{QueryScopeOptions, Runtime};
 use crate::profile::ProfileTimer;
-use crate::query_api::{predicate_query, BuiltQuery, QueryConditionOp};
-use crate::query_observation::{built_query_read_value, observed_row_ids, support_window_query};
+use crate::query_api::{
+    predicate_query, BuiltQuery, QueryConditionOp, QueryDirection, QueryOrderBy,
+};
+use crate::query_observation::{built_query_read_value, support_window_query};
 use crate::rows::row_num;
 use crate::schema::FieldKind;
-use crate::sync::{Bundle, HistoryRecord, QueryReadRecord};
+use crate::sync::{merge_bundles, Bundle, HistoryRecord, QueryReadRecord};
 use crate::types::{QueryExportProfile, RowView};
 use crate::{branch, Result};
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
-
-struct BatchedQueryScopeItem {
-    op: String,
-    value: JsonValue,
-    rows: Vec<RowView>,
-    extra_row_ids: Vec<String>,
-}
 
 impl Runtime {
     pub fn export_query_where_eq(
@@ -32,20 +27,12 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Bundle> {
-        let rows = self.query(predicate_query(
+        self.export_query(predicate_query(
             table_name,
             field_name,
             QueryConditionOp::Eq,
-            value.clone(),
-        ))?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq",
             value,
-            rows,
-            QueryScopeOptions::empty(),
-        )
+        ))
     }
 
     pub fn export_query_where_eq_with_ref_include(
@@ -55,22 +42,9 @@ impl Runtime {
         value: JsonValue,
         ref_field_name: &str,
     ) -> Result<Bundle> {
-        let rows = self.query(predicate_query(
-            table_name,
-            field_name,
-            QueryConditionOp::Eq,
-            value.clone(),
-        ))?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq",
-            value,
-            rows,
-            QueryScopeOptions {
-                ref_include_fields: &[ref_field_name],
-                extra_row_ids: &[],
-            },
+        self.export_query_with_ref_includes(
+            predicate_query(table_name, field_name, QueryConditionOp::Eq, value),
+            &[ref_field_name],
         )
     }
 
@@ -80,14 +54,12 @@ impl Runtime {
         field_name: &str,
         needle: &str,
     ) -> Result<Bundle> {
-        self.export_query_scope(
+        self.export_query(predicate_query(
             table_name,
             field_name,
-            "contains",
+            QueryConditionOp::Contains,
             JsonValue::String(needle.to_owned()),
-            self.read_rows_where_contains(table_name, field_name, needle)?,
-            QueryScopeOptions::empty(),
-        )
+        ))
     }
 
     pub fn export_query_where_in(
@@ -96,14 +68,12 @@ impl Runtime {
         field_name: &str,
         values: Vec<JsonValue>,
     ) -> Result<Bundle> {
-        self.export_query_scope(
+        self.export_query(predicate_query(
             table_name,
             field_name,
-            "in",
-            JsonValue::Array(values.clone()),
-            self.read_rows_where_in(table_name, field_name, values)?,
-            QueryScopeOptions::empty(),
-        )
+            QueryConditionOp::In,
+            JsonValue::Array(values),
+        ))
     }
 
     pub fn export_query_where_ne(
@@ -112,14 +82,12 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<Bundle> {
-        self.export_query_scope(
+        self.export_query(predicate_query(
             table_name,
             field_name,
-            "ne",
-            value.clone(),
-            self.read_rows_where_ne(table_name, field_name, value)?,
-            QueryScopeOptions::empty(),
-        )
+            QueryConditionOp::Ne,
+            value,
+        ))
     }
 
     pub fn export_query_where_eq_top_field_desc(
@@ -130,14 +98,13 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<Bundle> {
-        self.export_query_where_eq_top_field_desc_with_previous_observed(
+        self.export_query(top_field_query(
             table_name,
             field_name,
             value,
             order_field_name,
             limit,
-            Vec::new(),
-        )
+        ))
     }
 
     pub fn export_query_where_eq_top_created_at_desc(
@@ -147,13 +114,13 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<Bundle> {
-        self.export_query_where_eq_top_created_at_desc_with_previous_observed(
+        self.export_query(top_field_query(
             table_name,
             field_name,
             value,
+            "$createdAt",
             limit,
-            Vec::new(),
-        )
+        ))
     }
 
     pub fn export_many_query_where_eq_top_field_desc(
@@ -164,17 +131,19 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<Bundle> {
-        self.export_many_query_where_eq_top_field_desc_inner(
-            table_name,
-            field_name,
-            values
-                .into_iter()
-                .map(|value| (value, Vec::new()))
-                .collect(),
-            order_field_name,
-            limit,
-            &[],
-        )
+        let bundles = values
+            .into_iter()
+            .map(|value| {
+                self.export_query(top_field_query(
+                    table_name,
+                    field_name,
+                    value,
+                    order_field_name,
+                    limit,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        merge_bundles(&bundles)
     }
 
     pub fn export_many_query_where_eq_top_field_desc_with_ref_include(
@@ -186,17 +155,16 @@ impl Runtime {
         limit: usize,
         ref_field_name: &str,
     ) -> Result<Bundle> {
-        self.export_many_query_where_eq_top_field_desc_inner(
-            table_name,
-            field_name,
-            values
-                .into_iter()
-                .map(|value| (value, Vec::new()))
-                .collect(),
-            order_field_name,
-            limit,
-            &[ref_field_name],
-        )
+        let bundles = values
+            .into_iter()
+            .map(|value| {
+                self.export_query_with_ref_includes(
+                    top_field_query(table_name, field_name, value, order_field_name, limit),
+                    &[ref_field_name],
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        merge_bundles(&bundles)
     }
 
     pub fn profile_export_query_where_eq_top_field_desc(
@@ -209,30 +177,12 @@ impl Runtime {
     ) -> Result<(Bundle, QueryExportProfile)> {
         let total_started = ProfileTimer::start();
         let read_started = ProfileTimer::start();
-        let rows = self.read_rows_where_eq_top_field_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            order_field_name,
-            limit,
-        )?;
+        let query = top_field_query(table_name, field_name, value, order_field_name, limit);
+        let rows = self.query(support_window_query(&query)?)?;
         let read_rows_ms = read_started.elapsed_ms();
 
-        let query_value = json!({
-            "eq": value.clone(),
-            "order_field": order_field_name,
-            "limit": limit,
-            "observed_ids": observed_row_ids(&rows),
-        });
         let export_started = ProfileTimer::start();
-        let bundle = self.export_query_scope(
-            table_name,
-            field_name,
-            "eq_top_field_desc",
-            query_value,
-            rows,
-            QueryScopeOptions::empty(),
-        )?;
+        let bundle = self.export_built_query_scope(query, rows, &[])?;
         let export_ms = export_started.elapsed_ms();
 
         let profile = QueryExportProfile {
@@ -258,169 +208,6 @@ impl Runtime {
         };
         Ok((bundle, profile))
     }
-    pub(super) fn export_many_predicate_query_refreshes(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        op: &str,
-        values: Vec<(JsonValue, Vec<String>)>,
-    ) -> Result<Bundle> {
-        let mut items = Vec::new();
-        for (value, extra_row_ids) in values {
-            let rows = match op {
-                "eq" => self.read_rows_where_eq(table_name, field_name, value.clone())?,
-                "ne" => self.read_rows_where_ne(table_name, field_name, value.clone())?,
-                "contains" => {
-                    let Some(needle) = value.as_str() else {
-                        return Err(crate::Error::new("contains expects a string value"));
-                    };
-                    self.read_rows_where_contains(table_name, field_name, needle)?
-                }
-                "in" => {
-                    let Some(values) = value.as_array() else {
-                        return Err(crate::Error::new("in predicate expects an array value"));
-                    };
-                    self.read_rows_where_in(table_name, field_name, values.clone())?
-                }
-                op => {
-                    return Err(crate::Error::new(format!(
-                        "unsupported batched predicate refresh {op}"
-                    )));
-                }
-            };
-            items.push(BatchedQueryScopeItem {
-                op: op.to_owned(),
-                value,
-                rows,
-                extra_row_ids,
-            });
-        }
-        self.export_batched_query_scopes(table_name, field_name, items, &[])
-    }
-
-    pub(super) fn export_query_where_eq_top_created_at_desc_with_previous_observed(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-        previous_observed_ids: Vec<String>,
-    ) -> Result<Bundle> {
-        let rows = self.read_rows_where_eq_top_created_at_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            limit,
-        )?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq_top_created_at_desc",
-            json!({
-                "eq": value.clone(),
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            }),
-            rows,
-            QueryScopeOptions {
-                ref_include_fields: &[],
-                extra_row_ids: &previous_observed_ids,
-            },
-        )
-    }
-
-    pub(super) fn export_many_query_where_eq_top_created_at_desc_with_previous_observed(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        values: Vec<(JsonValue, Vec<String>)>,
-        limit: usize,
-    ) -> Result<Bundle> {
-        let value_only = values
-            .iter()
-            .map(|(value, _)| value.clone())
-            .collect::<Vec<_>>();
-        let rows_by_value = self
-            .query_context()
-            .read_many_rows_where_eq_top_created_at_desc(
-                table_name,
-                field_name,
-                &value_only,
-                limit,
-            )?;
-        let mut items = Vec::new();
-        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
-            items.push(BatchedQueryScopeItem {
-                op: "eq_top_created_at_desc".to_owned(),
-                value: json!({
-                    "eq": value.clone(),
-                    "limit": limit,
-                    "observed_ids": observed_row_ids(&rows),
-                }),
-                rows,
-                extra_row_ids: previous_observed_ids,
-            });
-        }
-        self.export_batched_query_scopes(table_name, field_name, items, &[])
-    }
-
-    pub(super) fn export_many_query_where_eq_top_field_desc_with_previous_observed(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        values: Vec<(JsonValue, Vec<String>)>,
-        order_field_name: &str,
-        limit: usize,
-    ) -> Result<Bundle> {
-        self.export_many_query_where_eq_top_field_desc_inner(
-            table_name,
-            field_name,
-            values,
-            order_field_name,
-            limit,
-            &[],
-        )
-    }
-
-    fn export_many_query_where_eq_top_field_desc_inner(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        values: Vec<(JsonValue, Vec<String>)>,
-        order_field_name: &str,
-        limit: usize,
-        ref_include_fields: &[&str],
-    ) -> Result<Bundle> {
-        let value_only = values
-            .iter()
-            .map(|(value, _)| value.clone())
-            .collect::<Vec<_>>();
-        let rows_by_value = self
-            .query_context()
-            .read_many_rows_where_eq_top_field_desc(
-                table_name,
-                field_name,
-                &value_only,
-                order_field_name,
-                limit,
-            )?;
-        let mut items = Vec::new();
-        for ((value, previous_observed_ids), rows) in values.into_iter().zip(rows_by_value) {
-            items.push(BatchedQueryScopeItem {
-                op: "eq_top_field_desc".to_owned(),
-                value: json!({
-                    "eq": value.clone(),
-                    "order_field": order_field_name,
-                    "limit": limit,
-                    "observed_ids": observed_row_ids(&rows),
-                }),
-                rows,
-                extra_row_ids: previous_observed_ids,
-            });
-        }
-        self.export_batched_query_scopes(table_name, field_name, items, ref_include_fields)
-    }
-
     pub(crate) fn export_built_query_scope(
         &self,
         query: BuiltQuery,
@@ -619,197 +406,6 @@ impl Runtime {
         ))
     }
 
-    pub(super) fn export_query_where_eq_top_field_desc_with_previous_observed(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        order_field_name: &str,
-        limit: usize,
-        previous_observed_ids: Vec<String>,
-    ) -> Result<Bundle> {
-        let rows = self.read_rows_where_eq_top_field_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            order_field_name,
-            limit,
-        )?;
-        self.export_query_scope(
-            table_name,
-            field_name,
-            "eq_top_field_desc",
-            json!({
-                "eq": value.clone(),
-                "order_field": order_field_name,
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            }),
-            rows,
-            QueryScopeOptions {
-                ref_include_fields: &[],
-                extra_row_ids: &previous_observed_ids,
-            },
-        )
-    }
-
-    pub(crate) fn export_query_scope(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        op: &str,
-        value: JsonValue,
-        rows: Vec<RowView>,
-        options: QueryScopeOptions<'_>,
-    ) -> Result<Bundle> {
-        let query_read = QueryReadRecord {
-            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
-            table: table_name.to_owned(),
-            field: field_name.to_owned(),
-            op: op.to_owned(),
-            value,
-        };
-        self.export_query_read_scope(query_read, rows, options)
-    }
-
-    fn export_batched_query_scopes(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        items: Vec<BatchedQueryScopeItem>,
-        ref_include_fields: &[&str],
-    ) -> Result<Bundle> {
-        let table = self.schema.table_def(table_name)?;
-        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let visibility = self.read_visibility();
-        let mut all_rows = Vec::new();
-        let mut visible_row_nums = Vec::new();
-        let mut repair_row_nums = Vec::new();
-        let mut rejected_tx_ids = Vec::new();
-        let mut query_reads = Vec::new();
-
-        for item in items {
-            let row_nums = item
-                .rows
-                .iter()
-                .map(|row| row_num(&self.conn, &row.id))
-                .collect::<Result<Vec<_>>>()?;
-            for row_id in &item.extra_row_ids {
-                repair_row_nums.push(row_num(&self.conn, row_id)?);
-            }
-            repair_row_nums.extend(query_scope_repair_row_nums(
-                &self.conn,
-                table,
-                field_name,
-                &item.op,
-                &item.value,
-            )?);
-            rejected_tx_ids.extend(query_scope_rejected_tx_ids(
-                &self.conn,
-                table,
-                field_name,
-                &item.op,
-                &item.value,
-            )?);
-            query_reads.push(QueryReadRecord {
-                branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
-                table: table_name.to_owned(),
-                field: field_name.to_owned(),
-                op: item.op,
-                value: item.value,
-            });
-            visible_row_nums.extend(row_nums);
-            all_rows.extend(item.rows);
-        }
-
-        visible_row_nums.sort();
-        visible_row_nums.dedup();
-        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
-        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
-        repair_row_nums.sort();
-        repair_row_nums.dedup();
-        let mut row_nums = visible_row_nums.clone();
-        row_nums.extend(repair_row_nums.iter());
-        row_nums.sort();
-        row_nums.dedup();
-        rejected_tx_ids.sort();
-        rejected_tx_ids.dedup();
-
-        let mut history = export_history_versions_for_rows_in_branches(
-            &self.conn,
-            &self.schema,
-            table_name,
-            Some(&visible_row_nums),
-            None,
-            &branch_nums,
-        )?;
-        if !repair_row_nums.is_empty() {
-            history.extend(export_visible_table_history(
-                &visibility,
-                table_name,
-                &branch_nums,
-                Some(&repair_row_nums),
-            )?);
-            history.extend(export_history_versions_for_rows_in_branches(
-                &self.conn,
-                &self.schema,
-                table_name,
-                Some(&repair_row_nums),
-                None,
-                &branch_nums,
-            )?);
-        }
-        history.extend(export_policy_dependency_history(
-            &visibility,
-            PolicyDependencyExport {
-                table_name,
-                policy: &table.read_policy,
-                branch_nums: &branch_nums,
-                child_row_nums: Some(&row_nums),
-            },
-        )?);
-        for ref_field_name in ref_include_fields {
-            history.extend(self.export_ref_include_history(
-                table,
-                &all_rows,
-                ref_field_name,
-                &branch_nums,
-            )?);
-        }
-        if self.branch_num != 1 {
-            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
-                history.extend(export_history_versions_for_rows_in_branches(
-                    &self.conn,
-                    &self.schema,
-                    table_name,
-                    Some(&row_nums),
-                    Some(base_epoch),
-                    &[1],
-                )?);
-                history.extend(export_snapshot_policy_dependency_history(
-                    &visibility,
-                    table_name,
-                    base_epoch,
-                    Some(&row_nums),
-                )?);
-            }
-        }
-        dedupe_history_records(&mut history);
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let txs =
-            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
-        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
-        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        Ok(make_bundle(
-            &self.schema,
-            branches,
-            txs,
-            reads,
-            query_reads,
-            history,
-        ))
-    }
-
     pub(super) fn export_ref_include_history(
         &self,
         table: &crate::schema::TableDef,
@@ -867,4 +463,20 @@ impl Runtime {
         )?);
         Ok(history)
     }
+}
+
+fn top_field_query(
+    table: &str,
+    field: &str,
+    value: JsonValue,
+    order_field: &str,
+    limit: usize,
+) -> BuiltQuery {
+    let mut query = predicate_query(table, field, QueryConditionOp::Eq, value);
+    query.order_by = vec![QueryOrderBy {
+        column: order_field.to_owned(),
+        direction: QueryDirection::Desc,
+    }];
+    query.limit = Some(limit);
+    query
 }

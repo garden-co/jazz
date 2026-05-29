@@ -259,7 +259,14 @@ fn id_in_query_matches_and_syncs_selected_rows() {
     let bundle = alice
         .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
         .unwrap();
-    assert_eq!(bundle.query_reads[0].op, "in");
+    support::assert_built_query_read(
+        &bundle.query_reads[0],
+        BuiltQuery::from_json_value(json!({
+            "table": "notes",
+            "conditions": [{"column": "id", "op": "in", "value": ["note-1", "note-3"]}],
+        }))
+        .unwrap(),
+    );
     peer.apply_bundle(&bundle).unwrap();
 
     let peer_rows = peer.read_rows("notes").unwrap();
@@ -327,7 +334,14 @@ fn durable_id_in_query_refreshes_deleted_selected_row_after_restart() {
             .unwrap();
         query_reads = bundle.query_reads.clone();
         worker.apply_bundle(&bundle).unwrap();
-        assert_eq!(worker.observed_query_reads().unwrap()[0].field, "id");
+        support::assert_built_query_read(
+            &worker.observed_query_reads().unwrap()[0],
+            BuiltQuery::from_json_value(json!({
+                "table": "notes",
+                "conditions": [{"column": "id", "op": "in", "value": ["note-1", "note-3"]}],
+            }))
+            .unwrap(),
+        );
         assert_eq!(worker.read_rows("notes").unwrap().len(), 2);
     }
 
@@ -461,7 +475,14 @@ fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart()
             .unwrap();
         query_reads = bundle.query_reads.clone();
         worker.apply_bundle(&bundle).unwrap();
-        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "in");
+        support::assert_built_query_read(
+            &worker.observed_query_reads().unwrap()[0],
+            BuiltQuery::from_json_value(json!({
+                "table": "notes",
+                "conditions": [{"column": "body", "op": "in", "value": ["alpha", "beta"]}],
+            }))
+            .unwrap(),
+        );
         assert_eq!(
             worker
                 .read_rows_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
@@ -624,7 +645,14 @@ fn contains_query_scope_resync_removes_row_that_left_predicate() {
     let bundle = alice
         .export_query_where_contains("notes", "body", "target")
         .unwrap();
-    assert_eq!(bundle.query_reads[0].op, "contains");
+    support::assert_built_query_read(
+        &bundle.query_reads[0],
+        BuiltQuery::from_json_value(json!({
+            "table": "notes",
+            "conditions": [{"column": "body", "op": "contains", "value": "target"}],
+        }))
+        .unwrap(),
+    );
     peer.apply_bundle(&bundle).unwrap();
 
     assert!(peer
@@ -666,7 +694,14 @@ fn durable_contains_query_read_refresh_repairs_row_that_left_predicate_after_res
             .unwrap();
         query_reads = bundle.query_reads.clone();
         worker.apply_bundle(&bundle).unwrap();
-        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "contains");
+        support::assert_built_query_read(
+            &worker.observed_query_reads().unwrap()[0],
+            BuiltQuery::from_json_value(json!({
+                "table": "notes",
+                "conditions": [{"column": "body", "op": "contains", "value": "target"}],
+            }))
+            .unwrap(),
+        );
         assert_eq!(
             worker
                 .read_rows_where_contains("notes", "body", "target")
@@ -1097,8 +1132,10 @@ fn generic_equality_query_scope_exports_matching_rows_and_policy_dependencies() 
     assert_eq!(bundle.query_reads.len(), 1);
     assert_eq!(bundle.query_reads[0].branch_id, "main");
     assert_eq!(bundle.query_reads[0].table, "tasks");
-    assert_eq!(bundle.query_reads[0].field, "done");
-    assert_eq!(bundle.query_reads[0].value, json!(false));
+    support::assert_built_query_read(
+        &bundle.query_reads[0],
+        support::eq_query("tasks", "done", json!(false)),
+    );
     let synced = bundle
         .history
         .iter()
@@ -1529,7 +1566,14 @@ fn durable_not_equal_null_query_read_refreshes_present_optional_values_after_res
             .unwrap();
         query_reads = bundle.query_reads.clone();
         worker.apply_bundle(&bundle).unwrap();
-        assert_eq!(worker.observed_query_reads().unwrap()[0].op, "ne");
+        support::assert_built_query_read(
+            &worker.observed_query_reads().unwrap()[0],
+            BuiltQuery::from_json_value(json!({
+                "table": "notes",
+                "conditions": [{"column": "tag", "op": "ne", "value": null}],
+            }))
+            .unwrap(),
+        );
         assert_eq!(
             worker
                 .read_rows_where_ne("notes", "tag", json!(null))
@@ -1685,9 +1729,13 @@ fn durable_created_by_not_equal_query_refreshes_after_restart() {
             .unwrap();
         query_reads = bundle.query_reads.clone();
         worker.apply_bundle(&bundle).unwrap();
-        assert_eq!(
-            worker.observed_query_reads().unwrap()[0].field,
-            "$createdBy"
+        support::assert_built_query_read(
+            &worker.observed_query_reads().unwrap()[0],
+            BuiltQuery::from_json_value(json!({
+                "table": "notes",
+                "conditions": [{"column": "$createdBy", "op": "ne", "value": "alice"}],
+            }))
+            .unwrap(),
         );
         assert_eq!(
             worker
@@ -2269,8 +2317,10 @@ fn branch_equality_query_scope_records_branch_predicate_read() {
     assert_eq!(bundle.query_reads.len(), 1);
     assert_eq!(bundle.query_reads[0].branch_id, "draft");
     assert_eq!(bundle.query_reads[0].table, "tasks");
-    assert_eq!(bundle.query_reads[0].field, "done");
-    assert_eq!(bundle.query_reads[0].value, json!(false));
+    support::assert_built_query_read(
+        &bundle.query_reads[0],
+        support::eq_query("tasks", "done", json!(false)),
+    );
 }
 
 #[test]
@@ -2499,7 +2549,14 @@ fn query_predicate_reads_survive_bundle_serialization() {
     let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
-    assert_eq!(decoded.query_reads[0].op, "contains");
+    support::assert_built_query_read(
+        &decoded.query_reads[0],
+        BuiltQuery::from_json_value(json!({
+            "table": "notes",
+            "conditions": [{"column": "body", "op": "contains", "value": "predicate"}],
+        }))
+        .unwrap(),
+    );
 }
 
 #[test]
@@ -2528,29 +2585,10 @@ fn query_read_records_roundtrip_equality_operator_through_json() {
     let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
-    assert_eq!(decoded.query_reads[0].op, "eq");
-}
-
-#[test]
-fn older_query_read_records_without_operator_decode_as_equality() {
-    let encoded = r#"{
-        "branches": [],
-        "txs": [],
-        "reads": [],
-        "query_reads": [
-            {
-                "branch_id": "main",
-                "table": "tasks",
-                "field": "done",
-                "value": false
-            }
-        ],
-        "history": []
-    }"#;
-
-    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(encoded).unwrap();
-
-    assert_eq!(decoded.query_reads[0].op, "eq");
+    support::assert_built_query_read(
+        &decoded.query_reads[0],
+        support::eq_query("tasks", "done", json!(false)),
+    );
 }
 
 #[test]

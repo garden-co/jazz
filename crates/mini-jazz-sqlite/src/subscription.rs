@@ -1,9 +1,7 @@
 use crate::query_api::BuiltQuery;
-use crate::sync::QueryPredicateRecord;
 use crate::types::{
     ReadTier, RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta,
 };
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -19,9 +17,19 @@ pub struct RejectionSubscription {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RowsSubscriptionQuery {
-    Table { table: String, tier: ReadTier },
-    Predicate(QueryPredicateRecord),
-    Built { query: BuiltQuery, tier: ReadTier },
+    Table {
+        table: String,
+        tier: ReadTier,
+    },
+    RecursiveRefs {
+        table: String,
+        root_id: String,
+        parent_field: String,
+    },
+    Built {
+        query: BuiltQuery,
+        tier: ReadTier,
+    },
 }
 
 impl RowsSubscription {
@@ -46,12 +54,11 @@ impl RowsSubscription {
         rows: Vec<RowView>,
     ) -> Self {
         Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                parent_field,
-                "recursive_refs",
-                JsonValue::String(root_id.to_owned()),
-            )),
+            query: RowsSubscriptionQuery::RecursiveRefs {
+                table: table.to_owned(),
+                root_id: root_id.to_owned(),
+                parent_field: parent_field.to_owned(),
+            },
             last_rows: rows,
         }
     }

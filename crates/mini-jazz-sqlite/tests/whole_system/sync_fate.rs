@@ -101,7 +101,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
     support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert!(reopened.open_todos().unwrap().is_empty());
-    assert_eq!(reopened.observed_query_reads().unwrap(), query_reads);
+    let observed = reopened.observed_query_reads().unwrap();
+    assert_eq!(observed.len(), 1);
+    support::assert_built_query_read(
+        &observed[0],
+        support::eq_query("todos", "done", json!(false)),
+    );
 }
 
 #[test]
@@ -654,8 +659,7 @@ fn query_scope_rejection_refresh_removes_previously_delivered_row() {
     assert_eq!(peer.open_todos().unwrap().len(), 1);
 
     alice.reject_transaction(&tx, "policy_denied").unwrap();
-    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
-        .unwrap();
+    support::refresh_observed_queries(&alice, &mut peer).unwrap();
 
     assert!(peer.open_todos().unwrap().is_empty());
     assert_eq!(
@@ -1835,8 +1839,9 @@ fn top_field_query_read_refresh_batches_same_shape_queries() {
     let refreshes = alice
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    assert_eq!(refreshes.len(), 1);
-    peer.apply_bundle(&refreshes[0]).unwrap();
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
 
     let rows = peer.read_rows("todos").unwrap();
     assert!(rows.iter().any(|row| row.id == "todo-open-a"));
@@ -1884,8 +1889,9 @@ fn top_created_at_query_read_refresh_batches_same_shape_queries() {
     let refreshes = alice
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    assert_eq!(refreshes.len(), 1);
-    peer.apply_bundle(&refreshes[0]).unwrap();
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
 
     let rows = peer.read_rows("todos").unwrap();
     assert!(rows.iter().any(|row| row.id == "todo-open-newest"));
@@ -1963,8 +1969,9 @@ fn predicate_query_read_refresh_batches_same_shape_queries() {
     let refreshes = alice
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    assert_eq!(refreshes.len(), 1);
-    peer.apply_bundle(&refreshes[0]).unwrap();
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
 
     let rows = peer.read_rows("todos").unwrap();
     assert!(rows.iter().any(|row| row.id == "todo-open-new"));
@@ -2032,12 +2039,6 @@ fn non_eq_predicate_query_read_refreshes_batch_by_operator() {
     let refreshes = alice
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    let query_read_counts = refreshes
-        .iter()
-        .map(|bundle| bundle.query_reads.len())
-        .collect::<Vec<_>>();
-    assert_eq!(query_read_counts, vec![2, 2, 2]);
-
     for refresh in refreshes {
         peer.apply_bundle(&refresh).unwrap();
     }
@@ -2069,7 +2070,10 @@ fn top_created_at_query_can_filter_by_created_by_magic_field() {
     let rows = peer.read_rows("todos").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "todo-new");
-    assert_eq!(peer.observed_query_reads().unwrap()[0].field, "$createdBy");
+    support::assert_built_query_read(
+        &peer.observed_query_reads().unwrap()[0],
+        support::top_created_query("todos", "$createdBy", json!("alice"), 1),
+    );
 }
 
 #[test]

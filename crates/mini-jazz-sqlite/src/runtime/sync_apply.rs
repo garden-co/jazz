@@ -5,7 +5,7 @@ use crate::apply::{
 };
 use crate::profile::ProfileTimer;
 use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp};
-use crate::query_observation::{built_query_from_read, observed_ids_from_query_value};
+use crate::query_observation::built_query_from_read;
 use crate::rows::{ensure_row_id, row_num};
 use crate::runtime::history_export::{
     history_records_for_tx, id_predicate_values, sql_placeholders,
@@ -869,8 +869,6 @@ impl Runtime {
                     bypass_policy,
                 )
             }
-            "eq_top_created_at_desc" => Self::repair_top_created_at_query(schema, db, query_read),
-            "eq_top_field_desc" => Self::repair_top_field_query(schema, db, query_read),
             "in" if query_read.field != "id" => {
                 Self::repair_in_query(schema, db, query_read, user, bypass_policy)
             }
@@ -917,198 +915,6 @@ impl Runtime {
         if !query_read.value.is_string() {
             return Err(crate::Error::new("recursive refs expects root id string"));
         }
-        Ok(())
-    }
-
-    fn repair_top_created_at_query(
-        schema: &SchemaDef,
-        db: &Connection,
-        query_read: &QueryReadRecord,
-    ) -> Result<()> {
-        let value = query_read
-            .value
-            .get("eq")
-            .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-        let limit = query_read
-            .value
-            .get("limit")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-        let table = schema.table_def(&query_read.table)?;
-        if matches!(query_read.field.as_str(), "id" | "$createdBy") {
-            return Self::repair_top_created_magic_query(db, query_read, value);
-        }
-        let field = table
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == query_read.field)
-            .ok_or_else(|| {
-                crate::Error::new(format!("unknown query field {}", query_read.field))
-            })?;
-        let branch_num = branch::checkout(db, &query_read.branch_id)?;
-        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
-        let predicate_value = query_predicate::value(field, "eq", value, db)?;
-        db.execute(
-            &format!(
-                "DELETE FROM {}
-                 WHERE j_branch_num = ?
-                   AND is_deleted = 0
-                   AND {predicate_sql}
-                   AND row_num NOT IN (
-                     SELECT current.row_num
-                     FROM {current_table} current
-                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-                     WHERE current.j_branch_num = ?
-                       AND current.is_deleted = 0
-                       AND tx.outcome != ?
-                       AND {current_predicate_sql}
-                     ORDER BY current.j_created_at DESC, current.row_num
-                     LIMIT ?
-                   )",
-                crate::schema::current_table(&query_read.table),
-                current_table = crate::schema::current_table(&query_read.table),
-                current_predicate_sql =
-                    query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
-            ),
-            params![
-                branch_num,
-                predicate_value.clone(),
-                branch_num,
-                tx::OUTCOME_REJECTED,
-                predicate_value,
-                limit as i64
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn repair_top_created_magic_query(
-        db: &Connection,
-        query_read: &QueryReadRecord,
-        value: &JsonValue,
-    ) -> Result<()> {
-        let branch_num = branch::checkout(db, &query_read.branch_id)?;
-        let observed_row_nums = observed_ids_from_query_value(&query_read.value)?
-            .into_iter()
-            .map(|row_id| row_num(db, &row_id))
-            .collect::<Result<Vec<_>>>()?;
-        let observed_filter = if observed_row_nums.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "AND row_num NOT IN ({})",
-                sql_placeholders(observed_row_nums.len())
-            )
-        };
-        let mut params = vec![rusqlite::types::Value::Integer(branch_num)];
-        let predicate_sql = if query_read.field == "id" {
-            let row_id = value
-                .as_str()
-                .ok_or_else(|| crate::Error::new("id equality expects a string value"))?;
-            params.push(rusqlite::types::Value::Integer(ensure_row_id(
-                db,
-                &query_read.table,
-                row_id,
-            )?));
-            "row_num = ?".to_owned()
-        } else {
-            let user_id = value
-                .as_str()
-                .ok_or_else(|| crate::Error::new("$createdBy equality expects a string value"))?;
-            let Ok(user_num) = users::user_num(db, user_id) else {
-                return Ok(());
-            };
-            params.push(rusqlite::types::Value::Integer(user_num));
-            "j_created_by = ?".to_owned()
-        };
-        params.extend(
-            observed_row_nums
-                .into_iter()
-                .map(rusqlite::types::Value::Integer),
-        );
-        db.execute(
-            &format!(
-                "DELETE FROM {}
-                 WHERE j_branch_num = ?
-                   AND is_deleted = 0
-                   AND {predicate_sql}
-                   {observed_filter}",
-                crate::schema::current_table(&query_read.table),
-            ),
-            params_from_iter(params.iter()),
-        )?;
-        Ok(())
-    }
-
-    fn repair_top_field_query(
-        schema: &SchemaDef,
-        db: &Connection,
-        query_read: &QueryReadRecord,
-    ) -> Result<()> {
-        let value = query_read
-            .value
-            .get("eq")
-            .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-        let order_field_name = query_read
-            .value
-            .get("order_field")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-        let limit = query_read
-            .value
-            .get("limit")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-        let table = schema.table_def(&query_read.table)?;
-        let field = table
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == query_read.field)
-            .ok_or_else(|| {
-                crate::Error::new(format!("unknown query field {}", query_read.field))
-            })?;
-        let order_field = table
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == order_field_name)
-            .ok_or_else(|| crate::Error::new(format!("unknown order field {order_field_name}")))?;
-        let branch_num = branch::checkout(db, &query_read.branch_id)?;
-        let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let order_column = crate::schema::quote_ident(&crate::schema::storage_column(order_field));
-        let predicate_sql = query_predicate::sql(field, &predicate_column, "eq")?;
-        let predicate_value = query_predicate::value(field, "eq", value, db)?;
-        db.execute(
-            &format!(
-                "DELETE FROM {}
-                 WHERE j_branch_num = ?
-                   AND is_deleted = 0
-                   AND {predicate_sql}
-                   AND row_num NOT IN (
-                     SELECT current.row_num
-                     FROM {current_table} current
-                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-                     WHERE current.j_branch_num = ?
-                       AND current.is_deleted = 0
-                       AND tx.outcome != ?
-                       AND {current_predicate_sql}
-                     ORDER BY current.{order_column} DESC, current.row_num
-                     LIMIT ?
-                   )",
-                crate::schema::current_table(&query_read.table),
-                current_table = crate::schema::current_table(&query_read.table),
-                current_predicate_sql =
-                    query_predicate::sql(field, &format!("current.{predicate_column}"), "eq")?,
-            ),
-            params![
-                branch_num,
-                predicate_value.clone(),
-                branch_num,
-                tx::OUTCOME_REJECTED,
-                predicate_value,
-                limit as i64
-            ],
-        )?;
         Ok(())
     }
 

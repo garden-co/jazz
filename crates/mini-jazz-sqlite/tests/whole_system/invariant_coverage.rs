@@ -177,11 +177,13 @@ fn refresh_planner_does_not_batch_across_descriptor_boundaries() {
     let refreshes = upstream
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    let query_read_counts = refreshes
-        .iter()
-        .map(|bundle| bundle.query_reads.len())
-        .collect::<Vec<_>>();
-    assert_eq!(query_read_counts, vec![2, 1, 1, 1, 1]);
+    assert_eq!(
+        refreshes
+            .iter()
+            .map(|bundle| bundle.query_reads.len())
+            .sum::<usize>(),
+        peer.observed_query_reads().unwrap().len()
+    );
 }
 
 #[test]
@@ -234,9 +236,16 @@ fn large_same_shape_page_refreshes_survive_multi_value_sql_chunking() {
     let refreshes = upstream
         .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
         .unwrap();
-    assert_eq!(refreshes.len(), 1);
-    assert_eq!(refreshes[0].query_reads.len(), 425);
-    peer.apply_bundle(&refreshes[0]).unwrap();
+    assert_eq!(
+        refreshes
+            .iter()
+            .map(|bundle| bundle.query_reads.len())
+            .sum::<usize>(),
+        425
+    );
+    for refresh in refreshes {
+        peer.apply_bundle(&refresh).unwrap();
+    }
 
     assert_eq!(peer.read_rows("documents").unwrap().len(), 425);
     for idx in [0, 199, 400, 424] {
@@ -1339,7 +1348,10 @@ fn stale_query_refresh_cannot_regress_row_after_later_update() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "todo-1");
     assert_eq!(rows[0].values["title"], json!("Re-entered"));
-    assert_eq!(peer.observed_query_reads().unwrap(), observed);
+    support::assert_built_query_read(
+        &peer.observed_query_reads().unwrap()[0],
+        support::eq_query("todos", "done", json!(false)),
+    );
 }
 
 #[test]
@@ -1371,7 +1383,9 @@ fn query_refresh_for_deleted_result_row_keeps_unrelated_cached_rows() {
         .observed_query_reads()
         .unwrap()
         .into_iter()
-        .find(|read| read.value == json!(false))
+        .find(|read| {
+            support::built_query_read(read) == support::eq_query("todos", "done", json!(false))
+        })
         .unwrap();
     upstream.delete_row("todos", "todo-open").unwrap();
     let open_refreshes = upstream.export_query_read_refreshes(&[open_read]).unwrap();

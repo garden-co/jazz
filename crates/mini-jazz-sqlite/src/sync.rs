@@ -131,32 +131,8 @@ pub struct QueryReadRecord {
     pub branch_id: String,
     pub table: String,
     pub field: String,
-    #[serde(default = "default_query_predicate_op")]
     pub op: String,
     pub value: JsonValue,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct QueryPredicateRecord {
-    pub(crate) table: String,
-    pub(crate) field: String,
-    pub(crate) op: String,
-    pub(crate) value: JsonValue,
-}
-
-impl QueryPredicateRecord {
-    pub(crate) fn new(table: &str, field: &str, op: &str, value: JsonValue) -> Self {
-        Self {
-            table: table.to_owned(),
-            field: field.to_owned(),
-            op: op.to_owned(),
-            value,
-        }
-    }
-}
-
-fn default_query_predicate_op() -> String {
-    "eq".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

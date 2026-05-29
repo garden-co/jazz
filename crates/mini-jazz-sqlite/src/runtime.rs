@@ -33,14 +33,6 @@ pub(crate) struct QueryScopeOptions<'a> {
     ref_include_fields: &'a [&'a str],
     extra_row_ids: &'a [String],
 }
-impl QueryScopeOptions<'_> {
-    fn empty() -> Self {
-        Self {
-            ref_include_fields: &[],
-            extra_row_ids: &[],
-        }
-    }
-}
 
 fn tier_name(tier: i64) -> rusqlite::Result<String> {
     Ok(match tier {

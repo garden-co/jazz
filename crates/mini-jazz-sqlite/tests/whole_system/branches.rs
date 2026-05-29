@@ -234,7 +234,14 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
             .export_query_where_eq("tasks", "id", json!("task-missing"))
             .unwrap();
         absent_bundle.history.clear();
-        absent_bundle.query_reads[0].op = "absent".to_owned();
+        absent_bundle.query_reads.clear();
+        absent_bundle.query_reads.push(QueryReadRecord {
+            branch_id: "merge".to_owned(),
+            table: "tasks".to_owned(),
+            field: "id".to_owned(),
+            op: "absent".to_owned(),
+            value: json!("task-missing"),
+        });
         query_reads = absent_bundle.query_reads.clone();
         worker.apply_bundle(&absent_bundle).unwrap();
         let non_absent_reads = worker

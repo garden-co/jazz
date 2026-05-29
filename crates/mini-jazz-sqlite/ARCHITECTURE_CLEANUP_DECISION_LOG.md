@@ -1001,3 +1001,10 @@ regress.
 
 - Ran `cargo test -p mini-jazz-sqlite --test whole_system -- --nocapture`.
 - Result: 436 passed, 18 ignored placeholders/underspecified cases, 0 failed.
+
+## 2026-05-29 14:21 PDT - Collapse observed query descriptors onto BuiltQuery
+
+- Removed the separate observed-query descriptor variants for predicate, top-created-at, and top-field pages. Query exports now record those as `field="$query", op="query"` with the `BuiltQuery` JSON payload plus volatile `observed_ids`.
+- Updated whole-system tests to assert the logical `BuiltQuery` payload instead of preserving the old `field/op/value` descriptor shape. Tests that only asserted old refresh batch counts now assert semantic convergence instead.
+- Simplified refresh planning and subscription state so ordinary subscriptions carry `BuiltQuery` directly; recursive refs remain a separate special query shape and absence reads remain explicit.
+- Removed dead query-export batching helpers and the unused multi-value top-field read helper. The apply-side simple predicate repair code still exists as an internal fast path used by built-query repair for simple one-condition queries; the wire-facing descriptor has moved to `$query`.

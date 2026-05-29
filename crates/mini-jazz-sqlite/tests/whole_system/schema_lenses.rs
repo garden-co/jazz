@@ -321,7 +321,10 @@ fn renamed_field_lens_observed_query_refresh_emits_semantic_removal() {
     )
     .unwrap();
     let observed = peer.observed_query_reads().unwrap();
-    assert_eq!(observed[0].field, "name");
+    support::assert_built_query_read(
+        &observed[0],
+        support::eq_query("tasks", "name", json!("Important")),
+    );
     let mut subscription = peer.subscribe_observed_query(&observed[0]).unwrap();
     assert_eq!(
         subscription.initial_rows()[0].values["name"],

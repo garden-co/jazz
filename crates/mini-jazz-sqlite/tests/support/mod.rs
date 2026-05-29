@@ -421,6 +421,29 @@ pub fn top_field_query(
     .unwrap()
 }
 
+pub fn assert_built_query_read(read: &QueryReadRecord, expected: BuiltQuery) {
+    assert_eq!(read.field, "$query");
+    assert_eq!(read.op, "query");
+    assert_eq!(
+        query_value_without_observed_ids(&read.value),
+        expected.to_json_value()
+    );
+}
+
+pub fn built_query_read(read: &QueryReadRecord) -> BuiltQuery {
+    assert_eq!(read.field, "$query");
+    assert_eq!(read.op, "query");
+    BuiltQuery::from_json_value(query_value_without_observed_ids(&read.value)).unwrap()
+}
+
+fn query_value_without_observed_ids(value: &JsonValue) -> JsonValue {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("observed_ids");
+    }
+    value
+}
+
 pub fn folders_schema() -> SchemaDef {
     SchemaDef::new().table("folders", |table| {
         table.text("name");

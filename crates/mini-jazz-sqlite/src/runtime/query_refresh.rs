@@ -1,6 +1,6 @@
 use super::history_export::{export_txs, include_branch_record, make_bundle};
 use super::Runtime;
-use crate::observed_query::{self, ObservedQuery, PredicateOp};
+use crate::observed_query::{self, ObservedQuery};
 use crate::query_api::{predicate_query, QueryConditionOp};
 use crate::query_observation::support_window_query;
 use crate::query_refresh::QueryRefreshPlan;
@@ -24,43 +24,11 @@ impl Runtime {
 
         for plan in crate::query_refresh::plan_refreshes(&current_branch_id, reads)? {
             match plan {
-                QueryRefreshPlan::Predicate {
-                    table,
-                    field,
-                    op,
-                    values,
-                } => bundles
-                    .push(self.export_many_predicate_query_refreshes(&table, &field, &op, values)?),
                 QueryRefreshPlan::RecursiveRefs {
                     table,
                     field,
                     root_ids,
                 } => bundles.push(self.export_many_recursive_refs(&table, &field, root_ids)?),
-                QueryRefreshPlan::TopCreatedAt {
-                    table,
-                    field,
-                    values,
-                    limit,
-                } => bundles.push(
-                    self.export_many_query_where_eq_top_created_at_desc_with_previous_observed(
-                        &table, &field, values, limit,
-                    )?,
-                ),
-                QueryRefreshPlan::TopField {
-                    table,
-                    field,
-                    values,
-                    order_field,
-                    limit,
-                } => bundles.push(
-                    self.export_many_query_where_eq_top_field_desc_with_previous_observed(
-                        &table,
-                        &field,
-                        values,
-                        &order_field,
-                        limit,
-                    )?,
-                ),
                 QueryRefreshPlan::Single(read) => {
                     bundles.push(self.export_query_read_refresh(&read)?);
                 }
@@ -78,59 +46,9 @@ impl Runtime {
             return Err(crate::Error::new("query refresh branch is not checked out"));
         }
         match observed_query::decode(read)? {
-            ObservedQuery::Predicate {
-                op: PredicateOp::Eq,
-                value,
-            } => self.export_query_where_eq(&read.table, &read.field, value),
-            ObservedQuery::Predicate {
-                op: PredicateOp::Ne,
-                value,
-            } => self.export_query_where_ne(&read.table, &read.field, value),
-            ObservedQuery::Predicate {
-                op: PredicateOp::Contains,
-                value,
-            } => {
-                let Some(needle) = value.as_str() else {
-                    return Err(crate::Error::new("contains expects a string value"));
-                };
-                self.export_query_where_contains(&read.table, &read.field, needle)
-            }
-            ObservedQuery::Predicate {
-                op: PredicateOp::In,
-                value,
-            } => {
-                let Some(values) = value.as_array() else {
-                    return Err(crate::Error::new("in predicate expects an array value"));
-                };
-                self.export_query_where_in(&read.table, &read.field, values.clone())
-            }
             ObservedQuery::RecursiveRefs { root_id } => {
                 self.export_recursive_refs(&read.table, &root_id, &read.field)
             }
-            ObservedQuery::TopCreatedAt {
-                value,
-                limit,
-                observed_ids,
-            } => self.export_query_where_eq_top_created_at_desc_with_previous_observed(
-                &read.table,
-                &read.field,
-                value,
-                limit,
-                observed_ids,
-            ),
-            ObservedQuery::TopField {
-                value,
-                order_field,
-                limit,
-                observed_ids,
-            } => self.export_query_where_eq_top_field_desc_with_previous_observed(
-                &read.table,
-                &read.field,
-                value,
-                &order_field,
-                limit,
-                observed_ids,
-            ),
             ObservedQuery::Built {
                 query,
                 observed_ids,
