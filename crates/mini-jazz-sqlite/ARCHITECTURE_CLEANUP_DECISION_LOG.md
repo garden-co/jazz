@@ -881,3 +881,8 @@ regress.
 
 - Ran `cargo test -p mini-jazz-sqlite` after removing runtime-root helper re-export indirection and renaming the WASM todo constructors.
 - Result: 440 passed, 18 ignored placeholders, 0 failed.
+
+## 2026-05-29 04:05 PDT - WASM host test target passes
+
+- Ran `cargo test -p mini-jazz-sqlite-wasm` after making the WASM constructor names schema-explicit.
+- The wasm-gated browser tests do not run on the host target, but the rlib/test target compiles and doc-tests cleanly.
