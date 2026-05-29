@@ -15,6 +15,10 @@ describe("dev-server re-export compatibility", () => {
     expect(typeof dev.startLocalJazzServer).toBe("function");
     expect(typeof dev.pushSchemaCatalogue).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
+    expect(typeof dev.pushSchema).toBe("function");
+    expect(typeof dev.pushPermissions).toBe("function");
+    expect(typeof dev.pushMigration).toBe("function");
+    expect(typeof dev.deploy).toBe("function");
   });
 
   it("testing and dev export the same startLocalJazzServer reference", async () => {

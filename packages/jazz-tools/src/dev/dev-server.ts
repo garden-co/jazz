@@ -3,12 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevServer } from "jazz-napi";
-import { loadCompiledSchema } from "../schema-loader.js";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../runtime/schema-fetch.js";
+
+export {
+  pushSchemaCatalogue,
+  type PushSchemaCatalogueOptions,
+  type PushSchemaCatalogueOptions as PushSchemaOptions,
+} from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;
@@ -41,16 +41,6 @@ export interface LocalJazzServerHandle {
   adminSecret?: string;
   backendSecret?: string;
   stop: () => Promise<void>;
-}
-
-export interface PushSchemaCatalogueOptions {
-  serverUrl: string;
-  appId: string;
-  adminSecret: string;
-  schemaDir: string;
-  env?: string;
-  userBranch?: string;
-  enableLogs?: boolean;
 }
 
 async function canBindPort(port: number): Promise<boolean> {
@@ -158,37 +148,4 @@ export async function startLocalJazzServer(
     backendSecret: server.backendSecret ?? undefined,
     stop,
   };
-}
-
-export async function pushSchemaCatalogue(
-  options: PushSchemaCatalogueOptions,
-): Promise<{ hash: string }> {
-  const compiled = await loadCompiledSchema(options.schemaDir);
-  const result = await publishStoredSchema(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schema: compiled.wasmSchema,
-  });
-
-  if (compiled.permissions) {
-    const { head } = await fetchPermissionsHead(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-    });
-    await publishStoredPermissions(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-      schemaHash: result.hash,
-      permissions: compiled.permissions,
-      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
-    });
-  }
-
-  if (options.enableLogs === true) {
-    console.log(
-      `[jazz-schema-push] published ${result.hash} from ${compiled.schemaFile} to ${options.serverUrl}`,
-    );
-  }
-
-  return { hash: result.hash };
 }
