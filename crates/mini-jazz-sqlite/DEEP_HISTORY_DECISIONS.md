@@ -1430,3 +1430,11 @@ Decision: history batch insertion now binds references to the already-built row 
 Why: history insertion is a persistent hot path for both local writes and receive/import. Copying values just to hand them to SQLite adds avoidable memory traffic, especially once app values are binary/text payloads.
 
 Scope impact: SQL shape and batch sizes are unchanged. This only removes transient copies during parameter binding.
+
+## Fri May 29 03:24:58 PDT 2026 - Rejected JSONB Constructor Tuple Fast Path
+
+Decision: keep the existing JSON text encoder for receive-side transaction tuple updates.
+
+Why: a fast path using `jsonb_array(jsonb_array(...))` for one-write/no-read tuples looked cleaner but measured slower across the canonical receive samples. The extra CTE columns and SQLite constructor calls cost more than parsing the tiny JSON string.
+
+Scope impact: the uncommitted code experiment was reverted.
