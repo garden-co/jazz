@@ -403,3 +403,11 @@ a row from current while retaining its history, and later query hydration of the
 same history must restore current projection. The existing `history_exists`
 short-circuit treats "history exists, current absent" as already applied, which
 is wrong for query-scoped caches.
+
+## 2026-05-29 00:44 PDT
+
+Porting another contained #972 cleanup: remove the temp-table fallback from
+`export_txs_by_ids`. The fallback made the export helper mutate hidden SQLite
+state depending on input size. For the spike, the simpler scan-and-filter path
+is a better abstraction boundary; if it becomes too slow, we should replace it
+with a deliberate scoped-export representation rather than an implicit fallback.

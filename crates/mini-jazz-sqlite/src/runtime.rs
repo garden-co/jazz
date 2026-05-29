@@ -5372,86 +5372,10 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
         return Ok(Vec::new());
     }
     let tx_ids = tx_ids.into_iter().collect::<Vec<_>>();
-    if tx_ids.len() > crate::SQL_VARIABLE_CHUNK_SIZE {
-        return export_txs_by_ids_with_temp_scope(conn, &tx_ids);
-    }
-    let mut receipt_stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, receipt.tier
-         FROM jazz_tx tx
-         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
-         WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num, receipt.tier",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let receipt_rows = receipt_stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
-    for receipt_row in receipt_rows {
-        let (tx_id, tier) = receipt_row?;
-        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
-    }
-
-    let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_tx tx
-         JOIN jazz_node node ON node.node_num = tx.node_num
-         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
-         WHERE tx.tx_id IN ({placeholders})
-         ORDER BY tx.tx_num",
-        placeholders = (0..tx_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", "),
-    ))?;
-    let records = stmt.query_map(params_from_iter(tx_ids.iter()), |row| {
-        let tx_id = row.get::<_, String>(0)?;
-        let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
-        Ok(TxRecord {
-            tx_id,
-            node_id: row.get(1)?,
-            local_epoch: row.get(2)?,
-            global_epoch: row.get(3)?,
-            conflict_mode: row.get(4)?,
-            outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
-            rejection_code: row.get(6)?,
-            rejection_detail: row
-                .get::<_, Option<String>>(7)?
-                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
-                .transpose()?
-                .flatten(),
-            receipt_tiers,
-            created_at: row.get(8)?,
-        })
-    })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Result<Vec<TxRecord>> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS jazz_export_tx_record_scope (
-           tx_id TEXT PRIMARY KEY
-         ) WITHOUT ROWID;
-         DELETE FROM jazz_export_tx_record_scope;",
-    )?;
-    {
-        let mut stmt =
-            conn.prepare("INSERT OR IGNORE INTO jazz_export_tx_record_scope (tx_id) VALUES (?)")?;
-        for tx_id in tx_ids {
-            stmt.execute(params![tx_id])?;
-        }
-    }
 
     let mut receipt_stmt = conn.prepare(
         "SELECT tx.tx_id, receipt.tier
-         FROM jazz_export_tx_record_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         FROM jazz_tx tx
          JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
          ORDER BY tx.tx_num, receipt.tier",
     )?;
@@ -5461,13 +5385,14 @@ fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Resu
     let mut receipt_tiers_by_tx = BTreeMap::<String, Vec<i64>>::new();
     for receipt_row in receipt_rows {
         let (tx_id, tier) = receipt_row?;
-        receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+        if tx_ids.contains(&tx_id.as_str()) {
+            receipt_tiers_by_tx.entry(tx_id).or_default().push(tier);
+        }
     }
 
     let mut stmt = conn.prepare(
         "SELECT tx.tx_id, node.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
-         FROM jazz_export_tx_record_scope tx_scope
-         JOIN jazz_tx tx ON tx.tx_id = tx_scope.tx_id
+         FROM jazz_tx tx
          JOIN jazz_node node ON node.node_num = tx.node_num
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          ORDER BY tx.tx_num",
@@ -5493,9 +5418,14 @@ fn export_txs_by_ids_with_temp_scope(conn: &Connection, tx_ids: &[&str]) -> Resu
             created_at: row.get(8)?,
         })
     })?;
-    records
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut tx_records = Vec::new();
+    for record in records {
+        let record = record?;
+        if tx_ids.contains(&record.tx_id.as_str()) {
+            tx_records.push(record);
+        }
+    }
+    Ok(tx_records)
 }
 
 fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
