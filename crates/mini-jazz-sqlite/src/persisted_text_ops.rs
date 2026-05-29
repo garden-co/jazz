@@ -87,6 +87,38 @@ pub fn append(
     replace_range(conn, root, start, 0, text, snapshot_every)
 }
 
+pub(crate) fn append_with_materialized(
+    conn: &Connection,
+    root: TextRoot,
+    materialized_text: &mut String,
+    text: &str,
+    snapshot_every: usize,
+) -> Result<TextRoot> {
+    if text.is_empty() {
+        return Ok(root);
+    }
+    let start_byte = materialized_text.len();
+    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
+    conn.prepare_cached(
+        "INSERT INTO jazz_text_op
+           (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
+         VALUES (?, ?, 0, ?, ?, ?)",
+    )?
+    .execute(params![
+        root,
+        start_byte as i64,
+        text,
+        (start_byte + text.len()) as i64,
+        depth_since_snapshot
+    ])?;
+    let op_id = conn.last_insert_rowid();
+    materialized_text.push_str(text);
+    if snapshot_every > 0 && depth_since_snapshot >= snapshot_every as i64 {
+        snapshot_known_text(conn, Some(op_id), materialized_text)?;
+    }
+    Ok(Some(op_id))
+}
+
 pub fn replace_range(
     conn: &Connection,
     root: TextRoot,
@@ -183,11 +215,18 @@ pub fn snapshot(conn: &Connection, root: TextRoot) -> Result<()> {
     let Some(op_id) = root else {
         return Ok(());
     };
+    let text = materialize(conn, Some(op_id))?;
+    snapshot_known_text(conn, Some(op_id), &text)
+}
+
+fn snapshot_known_text(conn: &Connection, root: TextRoot, text: &str) -> Result<()> {
+    let Some(op_id) = root else {
+        return Ok(());
+    };
     if snapshot_exists(conn, op_id)? {
         return Ok(());
     }
-    let text = materialize(conn, Some(op_id))?;
-    let chunk_hashes = store_chunks(conn, &text)?;
+    let chunk_hashes = store_chunks(conn, text)?;
     conn.prepare_cached(
         "INSERT OR IGNORE INTO jazz_text_snapshot (op_id, byte_len, chunk_hashes)
          VALUES (?, ?, ?)",

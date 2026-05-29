@@ -56,6 +56,7 @@ struct CachedAppliedTx {
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct RuntimeWritePhaseStats {
+    pub deep_text_edit_ms: f64,
     pub update_prelookup_ms: f64,
     pub begin_transaction_ms: f64,
     pub next_epoch_ms: f64,
@@ -514,9 +515,10 @@ impl Runtime {
         let mut visible_tx_cache = BTreeMap::new();
         let mut effective_values_cache = BTreeMap::new();
         let mut history_rows_by_table = BTreeMap::new();
-        let mut materialized_text = if edits
-            .iter()
-            .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
+        let mut materialized_text = if edits.len() > 1
+            || edits
+                .iter()
+                .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
         {
             Some(crate::persisted_text_ops::materialize(&db, root)?)
         } else {
@@ -526,7 +528,9 @@ impl Runtime {
         let last_edit_index = edits.len().saturating_sub(1);
         let mut last_created_tx_num = None;
         for (index, edit) in edits.iter().enumerate() {
+            let deep_text_edit_started = Instant::now();
             root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
+            add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
             let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
             let now = now_ms();
             let outcome = insert_row_in_tx(InsertRowInTx {
@@ -7750,17 +7754,13 @@ fn apply_deep_text_edit(
     match edit {
         DeepTextEdit::Append(text) => {
             if let Some(materialized_text) = materialized_text {
-                let next_root = crate::persisted_text_ops::replace_range_known_len(
+                crate::persisted_text_ops::append_with_materialized(
                     conn,
                     root,
-                    materialized_text.len(),
-                    materialized_text.len(),
-                    0,
+                    materialized_text,
                     text,
                     256,
-                )?;
-                materialized_text.push_str(text);
-                Ok(next_root)
+                )
             } else {
                 crate::persisted_text_ops::append(conn, root, text, 256)
             }

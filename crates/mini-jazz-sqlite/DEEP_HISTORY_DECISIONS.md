@@ -1350,3 +1350,19 @@ Decision: add a latest live incremental wire-byte summary to the benchmark overv
 Why: the new JSON fields are easy to miss. Keeping a compact summary makes realtime sync payload size visible without widening every historical comparison column.
 
 Scope impact: latest receiver-state sample shows sampled live totals of about 33 KB append, 48 KB Automerge, and 182 KB canvas across the canonical sample points.
+
+## Fri May 29 03:02:53 PDT 2026 - Use Batch-Local Text For Append Snapshots
+
+Decision: batched deep-text append writes now keep a materialized batch-local string and use it for append lengths and snapshot chunking. `persisted_text_ops::append_with_materialized` inserts the append op, updates the cached text, and writes snapshots from that cached text when replay depth reaches the snapshot threshold.
+
+Why: append-heavy workloads were spending most write time in the text sidecar path even though the batch already knows every appended byte. The old path queried root length per append and rebuilt text from the op chain for snapshots. That was honest but needlessly expensive for the LLM-stream shape.
+
+Scope impact: append canonical write-only dropped from about 0.35 ms/update to about 0.03 ms/update in the first sample, while Automerge/canvas stayed essentially unchanged. Existing persisted-text and runtime deep-text tests pass.
+
+## Fri May 29 03:04:46 PDT 2026 - Record Block+Ops16 Benchmark Pulse
+
+Decision: record `Block+Ops16` after optimizing batched append snapshots.
+
+Why: this is the first optimization in the current session that materially changes canonical timing, especially for append-heavy text. The benchmark table should show the jump next to the API-honesty checkpoints.
+
+Scope impact: append total loop/update improved from about 0.43 ms to 0.11 ms and write/update from about 0.35 ms to 0.03 ms. Automerge and canvas stayed roughly flat, as expected.

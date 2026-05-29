@@ -309,6 +309,7 @@ impl DeepHistoryPhaseReport {
 }
 
 fn add_write_detail(total: &mut RuntimeWritePhaseStats, sample: RuntimeWritePhaseStats) {
+    total.deep_text_edit_ms += sample.deep_text_edit_ms;
     total.update_prelookup_ms += sample.update_prelookup_ms;
     total.begin_transaction_ms += sample.begin_transaction_ms;
     total.next_epoch_ms += sample.next_epoch_ms;
