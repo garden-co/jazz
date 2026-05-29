@@ -127,6 +127,49 @@ fn tiered_built_queries_filter_by_settlement_level() {
 }
 
 #[test]
+fn tiered_built_queries_read_previous_settled_version_when_local_current_is_newer() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let create_tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Global pinned version")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&create_tx, 1).unwrap();
+    alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Local unpinned version")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Local)
+        .unwrap()
+        .is_empty());
+
+    let global_rows = alice.query_at_tier(pinned, ReadTier::Global).unwrap();
+    assert_eq!(global_rows.len(), 1);
+    assert_eq!(global_rows[0].id, "note-1");
+    assert_eq!(
+        global_rows[0].values["body"],
+        json!("Global pinned version")
+    );
+}
+
+#[test]
 fn tiered_table_subscription_updates_only_after_requested_settlement() {
     let schema = support::notes_schema();
     let mut alice =

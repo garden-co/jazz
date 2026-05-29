@@ -648,3 +648,10 @@ regress.
 - Replaced branch tests that mutated a runtime's user with the real trusted-peer `run_as_user` API.
 - Removed `Runtime::session_user_for_test`, so future tests must model user switching through the same API trusted peers use in production-shaped topologies.
 - Focused branch tests pass after the replacement.
+
+## 2026-05-29 02:42 PDT - Fixed tiered built-query reads over newer local current
+
+- The review agent found a real semantic gap: built queries at `ReadTier::Edge`/`Global` filtered the current projection, so a newer local version could hide the older edge/global-visible row instead of reconstructing the tier-visible version.
+- Added a regression test where a globally accepted pinned row is later locally updated to unpinned; local query hides it while global query still returns the global pinned version.
+- Implemented the conservative tiered built-query path by reconstructing tier-visible rows from history, then applying built-query predicates/order/window to the semantic rows. This favors correctness over hot-path speed for non-local tier reads.
+- Focused tiered policy/subscription tests pass.

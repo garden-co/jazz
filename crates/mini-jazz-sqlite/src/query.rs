@@ -8,6 +8,7 @@ use crate::types::{ReadTier, RowView};
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
@@ -116,6 +117,9 @@ impl QueryContext<'_> {
 
     pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(&query.table)?;
+        if self.read_tier != ReadTier::Local {
+            return self.read_tiered_rows_for_built_query(query, table);
+        }
         let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
         let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
         if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
@@ -170,6 +174,106 @@ impl QueryContext<'_> {
             rows = apply_query_window(rows, query.limit, query.offset);
         }
         Ok(rows)
+    }
+
+    fn read_tiered_rows_for_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+    ) -> Result<Vec<RowView>> {
+        let mut rows = self
+            .read_rows_from_history_at_tier(&query.table, self.read_tier)?
+            .into_iter()
+            .filter_map(|row| {
+                self.row_matches_built_query(table, &row, &query.conditions)
+                    .map(|matches| matches.then_some(row))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        rows.sort_by(|left, right| self.compare_built_query_rows(table, query, left, right));
+        Ok(apply_query_window(rows, query.limit, query.offset))
+    }
+
+    fn row_matches_built_query(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        conditions: &[QueryCondition],
+    ) -> Result<bool> {
+        for condition in conditions {
+            if !self.row_matches_condition(table, row, condition)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn row_matches_condition(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        condition: &QueryCondition,
+    ) -> Result<bool> {
+        let value = self.row_query_value(table, row, &condition.column)?;
+        Ok(match condition.op {
+            QueryConditionOp::Eq => value == condition.value,
+            QueryConditionOp::Ne => value != condition.value,
+            QueryConditionOp::Contains => value
+                .as_str()
+                .zip(condition.value.as_str())
+                .is_some_and(|(haystack, needle)| haystack.contains(needle)),
+            QueryConditionOp::In => condition
+                .value
+                .as_array()
+                .is_some_and(|values| values.iter().any(|candidate| candidate == &value)),
+        })
+    }
+
+    fn compare_built_query_rows(
+        &self,
+        table: &crate::schema::TableDef,
+        query: &BuiltQuery,
+        left: &RowView,
+        right: &RowView,
+    ) -> Ordering {
+        if query.order_by.is_empty() {
+            return right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.id.cmp(&right.id));
+        }
+        for order in &query.order_by {
+            let left_value = self.row_query_value(table, left, &order.column).ok();
+            let right_value = self.row_query_value(table, right, &order.column).ok();
+            let cmp = json_sort_key(left_value.as_ref()).cmp(&json_sort_key(right_value.as_ref()));
+            let cmp = match order.direction {
+                QueryDirection::Asc => cmp,
+                QueryDirection::Desc => cmp.reverse(),
+            };
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        left.id.cmp(&right.id)
+    }
+
+    fn row_query_value(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        column: &str,
+    ) -> Result<JsonValue> {
+        match query_column(table, column)? {
+            QueryColumn::Id => Ok(JsonValue::String(row.id.clone())),
+            QueryColumn::CreatedBy => Ok(JsonValue::String(row.created_by.clone())),
+            QueryColumn::CreatedAt => Ok(JsonValue::Number(row.created_at.into())),
+            QueryColumn::UpdatedAt => Ok(JsonValue::Number(row.created_at.into())),
+            QueryColumn::Field(field) => Ok(row
+                .values
+                .get(&field.name)
+                .cloned()
+                .unwrap_or(JsonValue::Null)),
+        }
     }
 
     pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {
