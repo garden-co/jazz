@@ -24,9 +24,12 @@ export async function detectSyncOpfsInWorkerScope(): Promise<boolean> {
   let supported = false;
   try {
     const fileHandle = await root.getFileHandle(name, { create: true });
+    // `FileSystemSyncAccessHandle` is a worker-only DOM type (TS `webworker`
+    // lib). This package compiles against the `dom` lib, so reference a minimal
+    // structural type instead — we only ever call `close()` on the handle.
     const createSync = (
       fileHandle as unknown as {
-        createSyncAccessHandle?: () => Promise<FileSystemSyncAccessHandle>;
+        createSyncAccessHandle?: () => Promise<{ close(): void }>;
       }
     ).createSyncAccessHandle;
     if (typeof createSync !== "function") {
