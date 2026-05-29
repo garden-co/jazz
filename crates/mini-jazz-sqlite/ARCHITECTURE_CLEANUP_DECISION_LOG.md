@@ -964,3 +964,9 @@ regress.
 - Replaced the hand-copied `profile_export_query_where_eq_top_field_desc` export implementation with a wrapper around the normal query-scope export path.
 - The profile still reports total time, read time, export time, and bundle row counts, but no longer maintains a second semantic copy of repair/history/read/tx/branch construction.
 - Decision: profiling should not justify duplicated core behavior. If detailed stage timings are needed later, add them inside the shared export path rather than reimplementing it.
+
+## 2026-05-29 13:21 PDT - Split query-scope repair by query kind
+
+- Replaced the long `apply_query_scope_repair` conditional body with a small dispatcher over query-read kind.
+- Extracted private helpers for absent/recursive validation, top-created repair, top-field repair, IN expansion, id repair, `$createdBy` repair, and ordinary field predicate repair.
+- Decision: keep the helpers in `sync_apply` for now. The simplification goal is local readability, not a new cross-module repair abstraction.
