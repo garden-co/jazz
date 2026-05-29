@@ -515,3 +515,9 @@ regress.
 - Moved storage stats/version, local policy fingerprint, physical row lookup, and projection rebuild helpers into `runtime::storage_admin`.
 - The `clear_current_projection_for_test` name is still a smell, but at least it is now isolated with other storage/projection maintenance APIs instead of buried in the read/query block.
 - Focused storage projection tests pass after the move.
+
+## 2026-05-29 01:43 PDT - Runtime read surface moved behind a read module
+
+- Moved table reads, tiered reads, predicate reads, required-ref reads, recursive reads, and conflict-candidate reads into `runtime::reads`.
+- This creates a clearer separation between local read semantics and sync/export mechanics.
+- The first test run hit the disk ceiling after several recompiles; cleared generated `target/` output and reran focused generic, recursive, and conflict-candidate read tests successfully.
