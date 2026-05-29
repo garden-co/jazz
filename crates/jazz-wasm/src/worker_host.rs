@@ -49,7 +49,7 @@ use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::MessageEvent;
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -164,7 +164,6 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     }
 
     // Install Rust onmessage. Subsequent messages during init also buffer here.
-    let global = global_worker_scope();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let data = event.data();
         match parse_main_to_worker(&data) {
@@ -174,7 +173,7 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
             }),
         }
     });
-    global.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    set_global_onmessage(Some(on_message.as_ref().unchecked_ref()));
     host.on_message_closure = Some(on_message);
 
     HOST.with(|cell| *cell.borrow_mut() = Some(host));
@@ -280,7 +279,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //    (main client id + peer table), and install on the runtime core.
     //    Binary encoding is required (the bridge decodes via `parse_worker_to_main`).
     let sender = RustOutboxSender::new(true);
-    let global: JsValue = global_worker_scope().into();
+    let global: JsValue = worker_global();
     let peer_lookup = make_peer_routing_lookup();
     sender.attach_target(
         global,
@@ -795,8 +794,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     // Clear self.onmessage explicitly. `Closure::drop` invalidates the call
     // but does not clear the JS slot — a late inbound would invoke a freed
     // trampoline.
-    let global = global_worker_scope();
-    global.set_onmessage(None);
+    set_global_onmessage(None);
 
     RUNTIME.with(|cell| *cell.borrow_mut() = None);
     PEER_ROUTING.with(|cell| {
@@ -812,7 +810,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     } else {
         post_to_main(&WorkerToMainWire::ShutdownOk);
     }
-    global.close();
+    close_worker_global();
     HOST.with(|cell| *cell.borrow_mut() = None);
 }
 
@@ -824,18 +822,39 @@ fn get_main_client_id() -> Option<String> {
     PEER_ROUTING.with(|cell| cell.borrow().main_client_id.clone())
 }
 
-fn global_worker_scope() -> DedicatedWorkerGlobalScope {
-    js_sys::global()
-        .dyn_into::<DedicatedWorkerGlobalScope>()
-        .expect("worker host expects a DedicatedWorkerGlobalScope")
+fn worker_global() -> JsValue {
+    js_sys::global().into()
+}
+
+fn set_global_onmessage(handler: Option<&Function>) {
+    let global = worker_global();
+    let key = JsValue::from_str("onmessage");
+    let value: JsValue = handler.map(|f| f.into()).unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&global, &key, &value);
+}
+
+fn close_worker_global() {
+    let global = worker_global();
+    let close = Reflect::get(&global, &JsValue::from_str("close"))
+        .ok()
+        .and_then(|v| v.dyn_into::<Function>().ok());
+    if let Some(close_fn) = close {
+        let _ = close_fn.call0(&global);
+    }
 }
 
 fn post_to_main(msg: &WorkerToMainWire) {
     let Ok((value, transfer)) = worker_to_main_post(msg) else {
         return;
     };
-    let global = global_worker_scope();
-    let _ = global.post_message_with_transfer(&value, transfer.as_ref());
+    let global = worker_global();
+    let post_message = Reflect::get(&global, &JsValue::from_str("postMessage"))
+        .ok()
+        .and_then(|v| v.dyn_into::<Function>().ok());
+    let Some(post_message) = post_message else {
+        return;
+    };
+    let _ = post_message.call2(&global, &value, &transfer.into());
 }
 
 /// Serialise a JS-shaped `JsValue` to JSON. Returns `"null"` on failure.
