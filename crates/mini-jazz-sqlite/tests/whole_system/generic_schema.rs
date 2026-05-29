@@ -2503,7 +2503,7 @@ fn query_predicate_reads_survive_bundle_serialization() {
 }
 
 #[test]
-fn native_query_read_records_roundtrip_equality_operator() {
+fn query_read_records_roundtrip_equality_operator_through_json() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");
         table.bool("done");
