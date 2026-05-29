@@ -49,6 +49,10 @@ pnpm --filter create-jazz-e2e exec tsx src/cli.ts --all --skip-e2e
 
 # Keep the scaffolded tempdir around after a failure for inspection.
 pnpm --filter create-jazz-e2e exec tsx src/cli.ts next-localfirst --keep
+
+# Skip the in-process `pnpm pack` step and consume prebuilt tarballs
+# (one *.tgz per package in PACKAGES_TO_PACK). Used by CI's prepare job.
+pnpm --filter create-jazz-e2e exec tsx src/cli.ts next-localfirst --tarball-dir ./_e2e-state/tarballs
 ```
 
 Browsers must be installed once per machine:
@@ -59,7 +63,17 @@ pnpm exec playwright install chromium --with-deps
 
 ## CI
 
-`.github/workflows/starters-e2e.yml` runs the harness as a matrix job (one
-runner per starter) on every push to a `changeset-release/*` branch — i.e. the
-release PR that the changesets action keeps updated against `main`. Failures
-block the release.
+`.github/workflows/starters-e2e.yml` is split into two jobs to avoid repeating
+the ~10-minute `build:core` across 12 matrix runners:
+
+1. `prepare` — builds the workspace once, packs the three workspace tarballs,
+   and uploads them alongside the runtime artifacts the harness needs
+   (`jazz-tools/dist`, jazz-napi's `index.js` + native `.node`) as a single
+   workflow artifact.
+2. `e2e` (matrix) — downloads that artifact, installs Playwright browsers, and
+   runs the harness with `--tarball-dir` so it skips the pack step.
+
+Fires on every push to a `changeset-release/*` branch (the release PR that the
+changesets action keeps updated against `main`). Failures block the release.
+`workflow_dispatch` is also available for ad-hoc runs and accepts a single
+`starter` input to run just one matrix slot.

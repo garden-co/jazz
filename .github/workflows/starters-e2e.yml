@@ -1,11 +1,19 @@
 name: Starters E2E
 
-# Runs the create-jazz-e2e harness against every starter as a matrix job,
-# blocking the changesets release PR if any starter fails to scaffold, install,
-# build, or pass its Playwright suite against the production build.
+# Runs the create-jazz-e2e harness against every starter, blocking the
+# changesets release PR if any starter fails to scaffold, install, build, or
+# pass its Playwright suite against the production build.
 #
 # Trigger: any push to the changesets-managed release branch
 # (`changeset-release/main`), plus manual dispatch for ad-hoc runs.
+#
+# Shape: the `prepare` job builds the workspace once and packs the three
+# workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
+# artifacts the harness needs (jazz-tools/dist, jazz-napi index + .node).
+# The `e2e` matrix then downloads those and runs the harness per starter,
+# skipping the ~10-minute `build:core` step entirely. The prepare job adds
+# ~10 minutes of wall-clock but removes ~10 minutes from each of 12 matrix
+# jobs, dropping total runner-minutes by ~3x.
 
 on:
   pull_request:
@@ -21,34 +29,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  JAZZ_SKIP_RN_DEPS: "1"
+  # The scaffolded starter pins its own pnpm via `packageManager`; without
+  # this, Corepack prompts on first download and the non-TTY CI run aborts.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
 jobs:
-  e2e:
+  prepare:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
-    env:
-      JAZZ_SKIP_RN_DEPS: "1"
-      # The scaffolded starter pins its own pnpm via `packageManager`; without
-      # this, Corepack prompts on first download and the non-TTY CI run aborts.
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-    strategy:
-      fail-fast: false
-      matrix:
-        starter:
-          - next-betterauth
-          - next-localfirst
-          - next-hybrid
-          - sveltekit-betterauth
-          - sveltekit-localfirst
-          - sveltekit-hybrid
-          - react-betterauth
-          - react-localfirst
-          - react-hybrid
-          - ts-betterauth
-          - ts-localfirst
-          - ts-hybrid
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -70,6 +63,72 @@ jobs:
       - name: Build core workspace
         run: pnpm run build:core
 
+      - name: Pack workspace tarballs
+        # Mirrors PACKAGES_TO_PACK in run-starter.ts. The harness picks these up
+        # via `--tarball-dir` and pins them as `pnpm.overrides` in each
+        # scaffolded app, exactly the same as running `pnpm pack` in-process.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+          for pkg in jazz-tools jazz-napi jazz-wasm; do
+            dir="packages/$pkg"
+            if [ ! -d "$dir" ]; then dir="crates/$pkg"; fi
+            (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/_e2e-state/tarballs")
+          done
+          ls -la "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+
+      - name: Upload prebuilt artifacts
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4
+        with:
+          name: starters-e2e-build-state
+          # Tarballs feed `--tarball-dir`. jazz-tools/dist and jazz-napi's JS +
+          # native binary are needed at *harness* runtime (the harness imports
+          # `jazz-tools/dev`, which in turn requires jazz-napi).
+          path: |
+            _e2e-state/tarballs/**
+            packages/jazz-tools/dist/**
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+            crates/jazz-napi/*.node
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    needs: prepare
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        starter:
+          - next-betterauth
+          - next-localfirst
+          - next-hybrid
+          - sveltekit-betterauth
+          - sveltekit-localfirst
+          - sveltekit-hybrid
+          - react-betterauth
+          - react-localfirst
+          - react-hybrid
+          - ts-betterauth
+          - ts-localfirst
+          - ts-hybrid
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Restore prebuilt artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: starters-e2e-build-state
+          path: .
+
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
@@ -80,10 +139,11 @@ jobs:
 
       - name: Run create-jazz-e2e harness
         if: steps.filter.outputs.skip != '1'
-        # `--keep` retains the scaffolded project so the artifact-upload step
-        # below can grab Playwright traces on failure. The runner is torn down
-        # at end-of-job anyway, so there's no on-disk leak.
-        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --verbose --keep
+        # `--tarball-dir` makes the harness reuse the prebuilt tarballs from
+        # `prepare` instead of running `pnpm pack` (which would need build:core
+        # to have run in this job). `--keep` retains the scaffolded project so
+        # the artifact-upload step below can grab Playwright traces on failure.
+        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose --keep
 
       - name: Upload Playwright traces on failure
         if: failure() && steps.filter.outputs.skip != '1'

@@ -29,14 +29,30 @@ function printResult(r: RunStarterResult): void {
 }
 
 function usage(): never {
-  console.error("Usage: tsx src/cli.ts <starter> [<starter>...] [--verbose] [--skip-e2e] [--keep]");
-  console.error("       tsx src/cli.ts --all [--verbose] [--skip-e2e] [--keep]");
+  console.error(
+    "Usage: tsx src/cli.ts <starter> [<starter>...] [--verbose] [--skip-e2e] [--keep] [--tarball-dir <dir>]",
+  );
+  console.error(
+    "       tsx src/cli.ts --all [--verbose] [--skip-e2e] [--keep] [--tarball-dir <dir>]",
+  );
   console.error(`\nKnown starters:\n  ${KNOWN_STARTERS.join("\n  ")}`);
   process.exit(1);
 }
 
+function takeFlagValue(args: string[], flag: string): string | undefined {
+  const idx = args.indexOf(flag);
+  if (idx === -1) return undefined;
+  const value = args[idx + 1];
+  if (value === undefined || value.startsWith("-")) usage();
+  // Remove both the flag and its value from the array so the positional filter
+  // below doesn't pick the value up as a starter name.
+  args.splice(idx, 2);
+  return value;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  const tarballDir = takeFlagValue(args, "--tarball-dir");
   const all = args.includes("--all");
   const verbose = args.includes("--verbose") || args.includes("-v");
   const skipE2E = args.includes("--skip-e2e");
@@ -63,7 +79,7 @@ async function main(): Promise<void> {
 
   for (const starter of targets) {
     console.log(pc.bold(`\n▶ ${starter}`));
-    const r = await runStarter({ starter, repoRoot, verbose, skipE2E, keepTempDir });
+    const r = await runStarter({ starter, repoRoot, verbose, skipE2E, keepTempDir, tarballDir });
     results.push(r);
     printResult(r);
   }
