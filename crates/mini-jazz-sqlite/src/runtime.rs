@@ -87,12 +87,8 @@ struct BatchedQueryScopeItem {
     extra_row_ids: Vec<String>,
 }
 
-type PredicateRefreshKey = (String, String, String, String);
 type PredicateRefreshValue = (JsonValue, Vec<String>);
-type RecursiveRefreshKey = (String, String, String);
-type TopFieldRefreshKey = (String, String, String, String, usize);
 type TopFieldRefreshValue = (JsonValue, Vec<String>);
-type TopCreatedAtRefreshKey = (String, String, String, usize);
 type TopCreatedAtRefreshValue = (JsonValue, Vec<String>);
 
 enum QueryRefreshPlan {
@@ -7760,6 +7756,10 @@ fn integer_list_sql(values: &[i64]) -> String {
         .join(", ")
 }
 
+fn sql_placeholders(count: usize) -> String {
+    (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
 fn sorted_unique_row_nums(row_nums: &[i64]) -> Vec<i64> {
     let mut row_nums = row_nums.to_vec();
     row_nums.sort();
@@ -7899,42 +7899,52 @@ fn plan_query_read_refreshes(
     current_branch_id: &str,
     reads: &[QueryReadRecord],
 ) -> Result<Vec<QueryRefreshPlan>> {
-    let mut predicate_groups: BTreeMap<PredicateRefreshKey, Vec<PredicateRefreshValue>> =
-        BTreeMap::new();
-    let mut recursive_groups: BTreeMap<RecursiveRefreshKey, Vec<String>> = BTreeMap::new();
-    let mut top_created_at_groups: BTreeMap<TopCreatedAtRefreshKey, Vec<TopCreatedAtRefreshValue>> =
-        BTreeMap::new();
-    let mut top_field_groups: BTreeMap<TopFieldRefreshKey, Vec<TopFieldRefreshValue>> =
-        BTreeMap::new();
-    let mut singles = Vec::new();
+    let mut plans = Vec::new();
 
     for read in reads {
         if read.branch_id == current_branch_id
             && matches!(read.op.as_str(), "eq" | "ne" | "contains" | "in")
         {
-            predicate_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    read.op.clone(),
-                ))
-                .or_default()
-                .push((read.value.clone(), Vec::new()));
+            if let Some(values) = plans.iter_mut().find_map(|plan| match plan {
+                QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
+                    values,
+                } if table == &read.table && field == &read.field && op == &read.op => Some(values),
+                _ => None,
+            }) {
+                values.push((read.value.clone(), Vec::new()));
+            } else {
+                plans.push(QueryRefreshPlan::Predicate {
+                    table: read.table.clone(),
+                    field: read.field.clone(),
+                    op: read.op.clone(),
+                    values: vec![(read.value.clone(), Vec::new())],
+                });
+            }
             continue;
         }
         if read.branch_id == current_branch_id && read.op == "recursive_refs" {
             let Some(root_id) = read.value.as_str() else {
                 return Err(crate::Error::new("recursive refs expects root id string"));
             };
-            recursive_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                ))
-                .or_default()
-                .push(root_id.to_owned());
+            if let Some(root_ids) = plans.iter_mut().find_map(|plan| match plan {
+                QueryRefreshPlan::RecursiveRefs {
+                    table,
+                    field,
+                    root_ids,
+                } if table == &read.table && field == &read.field => Some(root_ids),
+                _ => None,
+            }) {
+                root_ids.push(root_id.to_owned());
+            } else {
+                plans.push(QueryRefreshPlan::RecursiveRefs {
+                    table: read.table.clone(),
+                    field: read.field.clone(),
+                    root_ids: vec![root_id.to_owned()],
+                });
+            }
             continue;
         }
         if read.branch_id == current_branch_id && read.op == "eq_top_created_at_desc" {
@@ -7947,15 +7957,27 @@ fn plan_query_read_refreshes(
                 .get("limit")
                 .and_then(JsonValue::as_u64)
                 .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-            top_created_at_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    limit as usize,
-                ))
-                .or_default()
-                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            let limit = limit as usize;
+            if let Some(values) = plans.iter_mut().find_map(|plan| match plan {
+                QueryRefreshPlan::TopCreatedAt {
+                    table,
+                    field,
+                    values,
+                    limit: plan_limit,
+                } if table == &read.table && field == &read.field && *plan_limit == limit => {
+                    Some(values)
+                }
+                _ => None,
+            }) {
+                values.push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            } else {
+                plans.push(QueryRefreshPlan::TopCreatedAt {
+                    table: read.table.clone(),
+                    field: read.field.clone(),
+                    values: vec![(value.clone(), observed_ids_from_query_value(&read.value)?)],
+                    limit,
+                });
+            }
             continue;
         }
         if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
@@ -7973,63 +7995,38 @@ fn plan_query_read_refreshes(
                 .get("limit")
                 .and_then(JsonValue::as_u64)
                 .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-            top_field_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    order_field.to_owned(),
-                    limit as usize,
-                ))
-                .or_default()
-                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            let limit = limit as usize;
+            if let Some(values) = plans.iter_mut().find_map(|plan| match plan {
+                QueryRefreshPlan::TopField {
+                    table,
+                    field,
+                    values,
+                    order_field: plan_order_field,
+                    limit: plan_limit,
+                } if table == &read.table
+                    && field == &read.field
+                    && plan_order_field == order_field
+                    && *plan_limit == limit =>
+                {
+                    Some(values)
+                }
+                _ => None,
+            }) {
+                values.push((value.clone(), observed_ids_from_query_value(&read.value)?));
+            } else {
+                plans.push(QueryRefreshPlan::TopField {
+                    table: read.table.clone(),
+                    field: read.field.clone(),
+                    values: vec![(value.clone(), observed_ids_from_query_value(&read.value)?)],
+                    order_field: order_field.to_owned(),
+                    limit,
+                });
+            }
             continue;
         }
-        singles.push(QueryRefreshPlan::Single(read.clone()));
+        plans.push(QueryRefreshPlan::Single(read.clone()));
     }
 
-    let mut plans = Vec::new();
-    plans.extend(
-        predicate_groups
-            .into_iter()
-            .map(
-                |((table, field, _branch, op), values)| QueryRefreshPlan::Predicate {
-                    table,
-                    field,
-                    op,
-                    values,
-                },
-            ),
-    );
-    plans.extend(
-        recursive_groups
-            .into_iter()
-            .map(
-                |((table, field, _branch), root_ids)| QueryRefreshPlan::RecursiveRefs {
-                    table,
-                    field,
-                    root_ids,
-                },
-            ),
-    );
-    plans.extend(top_created_at_groups.into_iter().map(
-        |((table, field, _branch, limit), values)| QueryRefreshPlan::TopCreatedAt {
-            table,
-            field,
-            values,
-            limit,
-        },
-    ));
-    plans.extend(top_field_groups.into_iter().map(
-        |((table, field, _branch, order_field, limit), values)| QueryRefreshPlan::TopField {
-            table,
-            field,
-            values,
-            order_field,
-            limit,
-        },
-    ));
-    plans.extend(singles);
     Ok(plans)
 }
 
