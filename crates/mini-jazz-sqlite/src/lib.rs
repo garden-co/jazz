@@ -6,6 +6,7 @@ mod policy;
 mod projection;
 mod query;
 mod query_api;
+mod query_observation;
 mod query_predicate;
 mod read_set;
 mod read_visibility;

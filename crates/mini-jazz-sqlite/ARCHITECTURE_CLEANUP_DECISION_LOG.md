@@ -158,3 +158,11 @@ Start #972 as a red/green test slice. The valuable behavior is not the exact imp
 ## 2026-05-28 23:19 PDT
 
 #972 refresh slice is green without importing the draft implementation. Built-query observed read descriptors now carry `observed_ids` beside the query JSON, and refresh exports use those ids as explicit repair rows while querying the support window needed for offset pages. This keeps the API generic and avoids a SQL-scope rewrite for now; SQL-scoped export remains an optimization candidate, not a semantic prerequisite.
+
+## 2026-05-28 23:22 PDT
+
+#952 inspection: much of the branch work already exists in current spike state (branch backing rows, provenance sync, branch policy contexts, direct branch query). The still-open product gap is true app-visible branch backing-row permissions: checkout/export should fail if the backing row is unreadable. That needs schema/API design rather than a blind port. Next safe PR-derived slice: #945 branch conflict transaction read semantics through the new `TransactionSnapshot` module.
+
+## 2026-05-28 23:24 PDT
+
+Architecture cleanup follow-up: extracted query observed-descriptor JSON helpers into `query_observation.rs`. This gives query refresh metadata a named boundary (`built_query_from_read`, `built_query_read_value`, `observed_ids`, support-window query) instead of adding more ad hoc runtime helpers.

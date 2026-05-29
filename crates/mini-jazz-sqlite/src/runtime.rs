@@ -2,6 +2,10 @@ use crate::auth::RuntimeAuth;
 use crate::query_api::{
     predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
 };
+use crate::query_observation::{
+    built_query_from_read, built_query_read_value, observed_ids_from_query_value, observed_row_ids,
+    support_window_query,
+};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
@@ -1064,7 +1068,7 @@ impl Runtime {
             }
             "query" => {
                 let query = built_query_from_read(read)?;
-                let rows = self.query(export_support_query_for_refresh(&query)?)?;
+                let rows = self.query(support_window_query(&query)?)?;
                 self.export_built_query_scope_with_previous_observed(
                     query,
                     rows,
@@ -7218,47 +7222,6 @@ fn delete_current_rows_outside_keep_set(
     Ok(())
 }
 
-fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery> {
-    let query_value = read
-        .value
-        .get("query")
-        .cloned()
-        .unwrap_or_else(|| read.value.clone());
-    let query = BuiltQuery::from_json_value(query_value)?;
-    if read.table != query.table {
-        return Err(crate::Error::new(
-            "query read table does not match descriptor",
-        ));
-    }
-    Ok(query)
-}
-
-fn built_query_read_value(query: &BuiltQuery, rows: &[RowView]) -> JsonValue {
-    json!({
-        "query": query.to_json_value(),
-        "observed_ids": observed_row_ids(rows),
-    })
-}
-
-fn export_support_query_for_refresh(query: &BuiltQuery) -> Result<BuiltQuery> {
-    let offset = query.offset.unwrap_or(0);
-    if offset == 0 {
-        return Ok(query.clone());
-    }
-
-    let mut support_query = query.clone();
-    support_query.offset = None;
-    support_query.limit = query
-        .limit
-        .map(|limit| {
-            offset
-                .checked_add(limit)
-                .ok_or_else(|| crate::Error::new("query limit plus offset is too large"))
-        })
-        .transpose()?;
-    Ok(support_query)
-}
-
 fn id_predicate_values(op: &str, value: &JsonValue) -> Result<Vec<String>> {
     match op {
         "eq" => value
@@ -7722,27 +7685,6 @@ fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
-}
-
-fn observed_row_ids(rows: &[RowView]) -> Vec<String> {
-    rows.iter().map(|row| row.id.clone()).collect()
-}
-
-fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
-    let Some(observed_ids) = value.get("observed_ids") else {
-        return Ok(Vec::new());
-    };
-    observed_ids
-        .as_array()
-        .ok_or_else(|| crate::Error::new("observed_ids expects an array"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| crate::Error::new("observed_ids expects string row ids"))
-        })
-        .collect()
 }
 
 fn plan_query_read_refreshes(
