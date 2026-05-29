@@ -1366,3 +1366,11 @@ Decision: record `Block+Ops16` after optimizing batched append snapshots.
 Why: this is the first optimization in the current session that materially changes canonical timing, especially for append-heavy text. The benchmark table should show the jump next to the API-honesty checkpoints.
 
 Scope impact: append total loop/update improved from about 0.43 ms to 0.11 ms and write/update from about 0.35 ms to 0.03 ms. Automerge and canvas stayed roughly flat, as expected.
+
+## Fri May 29 03:06:12 PDT 2026 - Bound Append Materialization Heuristic
+
+Decision: only use the batch-local materialized append cache for append-heavy batches of at least 16 edits; range edits still materialize because they need UTF-8/range validation against current text.
+
+Why: caching the full text is a major win for large append batches, but for one or two appends on an already-large document, a length lookup is likely cheaper than materializing the whole value. The threshold keeps the optimization general instead of blindly favoring the canonical benchmark batch shape.
+
+Scope impact: canonical append batches are far above the threshold, so the Block+Ops16 numbers still apply. Small append batches keep the old lightweight path.

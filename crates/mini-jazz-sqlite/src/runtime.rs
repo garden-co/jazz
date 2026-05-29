@@ -144,6 +144,7 @@ type TopFieldRefreshKey = (String, String, String, String, usize);
 type TopFieldRefreshValue = (JsonValue, Vec<String>);
 type TopCreatedAtRefreshKey = (String, String, String, usize);
 type TopCreatedAtRefreshValue = (JsonValue, Vec<String>);
+const DEEP_TEXT_APPEND_MATERIALIZE_BATCH_THRESHOLD: usize = 16;
 
 enum QueryRefreshPlan {
     Predicate {
@@ -515,7 +516,7 @@ impl Runtime {
         let mut visible_tx_cache = BTreeMap::new();
         let mut effective_values_cache = BTreeMap::new();
         let mut history_rows_by_table = BTreeMap::new();
-        let mut materialized_text = if edits.len() > 1
+        let mut materialized_text = if edits.len() >= DEEP_TEXT_APPEND_MATERIALIZE_BATCH_THRESHOLD
             || edits
                 .iter()
                 .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
