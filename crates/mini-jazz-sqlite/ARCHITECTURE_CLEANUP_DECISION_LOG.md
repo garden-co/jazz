@@ -557,3 +557,9 @@ regress.
 - Moved bundle apply, profiled apply, untrusted apply, exclusive forwarding staging, and awaiting-dependency revalidation into `runtime::sync_apply`.
 - This is the first extraction that names the authority-facing apply path directly. It separates "produce a bundle" from "validate and materialize a bundle into local SQLite state", which should make future policy/fate fixes less likely to land in export code by accident.
 - Focused sync/fate tests pass, including fail-closed validation, protocol versions, stale pending/rejected fate, page-boundary repair, required ref repair, idempotence, and out-of-order global epochs.
+
+## 2026-05-29 02:10 PDT - Small misplaced runtime methods moved to their owning modules
+
+- Moved top-N read helpers into `runtime::reads`, the explicit `transaction()` constructor into `runtime::transaction_builder`, and `session_user_for_test` into `runtime::session`.
+- These were leftovers from earlier extractions and are a good example of the cleanup rule for this PR: if a method has an obvious semantic owner, move it there even if the raw line count is small.
+- Focused transaction tests pass after the move.

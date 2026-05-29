@@ -21,7 +21,6 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::transaction::TransactionSnapshot;
 use crate::types::{
     ApplyBundleProfile, BranchInfo, QueryExportProfile, ReadTier, RejectionInfo, RowView,
     StorageStats, TransactionInfo,
@@ -48,6 +47,7 @@ mod transaction_builder;
 mod transaction_status;
 mod write_batch;
 mod writes;
+#[allow(unused_imports)]
 pub use transaction_builder::TransactionBuilder;
 
 pub struct Runtime {
@@ -87,34 +87,6 @@ impl QueryScopeOptions<'_> {
 }
 
 impl Runtime {
-    pub fn read_rows_where_eq_top_created_at_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        self.query_context()
-            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
-    }
-
-    pub fn read_rows_where_eq_top_field_desc(
-        &self,
-        table_name: &str,
-        field_name: &str,
-        value: JsonValue,
-        order_field_name: &str,
-        limit: usize,
-    ) -> Result<Vec<RowView>> {
-        self.query_context().read_rows_where_eq_top_field_desc(
-            table_name,
-            field_name,
-            value,
-            order_field_name,
-            limit,
-        )
-    }
-
     fn apply_query_scope_repair(
         schema: &SchemaDef,
         db: &Connection,
@@ -856,33 +828,6 @@ impl Runtime {
             )?;
         }
         Ok(())
-    }
-
-    pub fn session_user_for_test(&mut self, user: &str) {
-        self.auth = if self.auth.is_trusted() {
-            RuntimeAuth::trusted_as_user(user)
-        } else {
-            RuntimeAuth::client(user)
-        }
-    }
-
-    pub fn transaction(&mut self) -> TransactionBuilder<'_> {
-        let start_snapshot = self
-            .schema
-            .tables()
-            .map(|table| {
-                self.read_rows(&table.name)
-                    .map(|rows| (table.name.clone(), rows))
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<std::result::Result<BTreeMap<_, _>, _>>()
-            .map(TransactionSnapshot::new);
-        TransactionBuilder {
-            runtime: self,
-            mutations: Vec::new(),
-            mode: transaction_builder::TransactionMode::Mergeable,
-            start_snapshot,
-        }
     }
 
     fn export_many_predicate_query_refreshes(

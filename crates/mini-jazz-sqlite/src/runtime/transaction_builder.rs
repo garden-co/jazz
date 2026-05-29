@@ -86,6 +86,27 @@ fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
     normalized
 }
 
+impl Runtime {
+    pub fn transaction(&mut self) -> TransactionBuilder<'_> {
+        let start_snapshot = self
+            .schema
+            .tables()
+            .map(|table| {
+                self.read_rows(&table.name)
+                    .map(|rows| (table.name.clone(), rows))
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            .map(TransactionSnapshot::new);
+        TransactionBuilder {
+            runtime: self,
+            mutations: Vec::new(),
+            mode: TransactionMode::Mergeable,
+            start_snapshot,
+        }
+    }
+}
+
 impl TransactionBuilder<'_> {
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         Ok(snapshot_result(&self.start_snapshot)?.read_rows(

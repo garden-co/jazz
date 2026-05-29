@@ -95,6 +95,34 @@ impl Runtime {
             .read_rows_where_ne(table_name, field_name, value)
     }
 
+    pub fn read_rows_where_eq_top_created_at_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        self.query_context()
+            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
+    }
+
+    pub fn read_rows_where_eq_top_field_desc(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: JsonValue,
+        order_field_name: &str,
+        limit: usize,
+    ) -> Result<Vec<RowView>> {
+        self.query_context().read_rows_where_eq_top_field_desc(
+            table_name,
+            field_name,
+            value,
+            order_field_name,
+            limit,
+        )
+    }
+
     pub fn read_recursive_refs(
         &self,
         table_name: &str,

@@ -112,4 +112,12 @@ impl Runtime {
         self.auth = previous;
         result
     }
+
+    pub fn session_user_for_test(&mut self, user: &str) {
+        self.auth = if self.auth.is_trusted() {
+            RuntimeAuth::trusted_as_user(user)
+        } else {
+            RuntimeAuth::client(user)
+        }
+    }
 }
