@@ -5201,24 +5201,21 @@ fn run_naive_deep_history_case(
         }
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta(input.table, &[])?;
+        let block_count = delta.blocks.len();
+        let block_payload_bytes = delta.blocks.iter().map(|block| block.payload.len()).sum();
+        let (delta, delta_wire_bytes) = encode_decode_native_delta(delta)?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
         phase_ms.native_export += block_native_export_ms.unwrap_or(0.0);
         let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
-        block_native_blocks = Some(delta.blocks.len());
-        block_native_payload_bytes = Some(
-            delta
-                .blocks
-                .iter()
-                .map(|block| block.payload.len())
-                .sum::<usize>(),
-        );
+        block_native_blocks = Some(block_count);
+        block_native_payload_bytes = Some(block_payload_bytes);
         notes.push(format!(
-            "Block-native table delta: open bundle bytes {}, block payload bytes {}.",
+            "Block-native table delta: native delta bytes {}, open bundle bytes {}, block payload bytes {}.",
+            delta_wire_bytes,
             delta_bundle_summary.bytes,
             block_native_payload_bytes.unwrap_or(0)
         ));
-        native_sync_bytes =
-            Some(delta_bundle_summary.bytes + block_native_payload_bytes.unwrap_or(0));
+        native_sync_bytes = Some(delta_wire_bytes);
         native_export_ms = block_native_export_ms;
         let mut block_peer = Runtime::open_with_schema(
             Storage::Memory,

@@ -70,6 +70,14 @@ Why: a benchmark-local "bundle plus sidecar bytes" helper was still not the shap
 
 Scope impact: `sync::encode_history_delta` / `decode_history_delta` now define the `MJZD` native envelope. Runtime deep-text sync tests round-trip through it, and the benchmark uses it for all text delta encode/decode timing. `/tmp/deep_history_runtime_native_delta_codec_all_block_ops.json` is the refreshed run.
 
+## Thu May 28 23:10:47 PDT 2026
+
+Decision: use the same `MJZD` native delta envelope for non-text block-native export/import measurements.
+
+Why: canvas/presence does not use the deep-text sidecar, but it still syncs sealed history blocks. Counting open-bundle bytes plus block payload bytes manually skipped the envelope encode/decode work that a real peer would do.
+
+Scope impact: the generic deep-history block path now round-trips `HistoryDelta` through `encode_history_delta` / `decode_history_delta` before import. Canvas native export timing is higher, but the measurement is now the same sync shape as append/document. `/tmp/deep_history_runtime_mjzd_all_block_ops.json` is the latest all-scenario run.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
