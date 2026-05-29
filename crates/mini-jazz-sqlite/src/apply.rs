@@ -1,5 +1,6 @@
 use crate::schema::SchemaDef;
 use crate::sync::{Bundle, BUNDLE_PROTOCOL_VERSION};
+use crate::time::now_ms;
 use crate::{rows, tx, users, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
@@ -258,6 +259,26 @@ pub(crate) fn apply_read_records(
             read_record.reason,
             observed_tx_num
         ])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_query_read_records(db: &Connection, bundle: &Bundle) -> Result<()> {
+    for query_read in &bundle.query_reads {
+        db.execute(
+            "INSERT OR REPLACE INTO jazz_query_read
+             (branch_id, table_name, field_name, op, value_json, observed_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                query_read.branch_id,
+                query_read.table,
+                query_read.field,
+                query_read.op,
+                serde_json::to_string(&query_read.value)
+                    .map_err(|err| crate::Error::new(err.to_string()))?,
+                now_ms()
+            ],
+        )?;
     }
     Ok(())
 }

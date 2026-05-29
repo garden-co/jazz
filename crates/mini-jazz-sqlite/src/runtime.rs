@@ -1,6 +1,6 @@
 use crate::apply::{
-    apply_read_records, apply_tx_records, encode_optional_json, tx_apply_info, ApplyCaches,
-    ApplyTxInfo, BundleApplyPlan,
+    apply_query_read_records, apply_read_records, apply_tx_records, encode_optional_json,
+    tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
@@ -663,9 +663,7 @@ impl Runtime {
         let rejected_cleanup_ms = rejected_cleanup_started.elapsed_ms();
 
         let query_reads_started = ProfileTimer::start();
-        for query_read in &bundle.query_reads {
-            Self::record_query_read(&db, query_read)?;
-        }
+        apply_query_read_records(&db, bundle)?;
         let query_reads_ms = query_reads_started.elapsed_ms();
 
         let history_started = ProfileTimer::start();
@@ -951,24 +949,6 @@ impl Runtime {
                 "unsupported observed query refresh {op}"
             ))),
         }
-    }
-
-    fn record_query_read(db: &Connection, query_read: &QueryReadRecord) -> Result<()> {
-        db.execute(
-            "INSERT OR REPLACE INTO jazz_query_read
-             (branch_id, table_name, field_name, op, value_json, observed_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                query_read.branch_id,
-                query_read.table,
-                query_read.field,
-                query_read.op,
-                serde_json::to_string(&query_read.value)
-                    .map_err(|err| crate::Error::new(err.to_string()))?,
-                now_ms()
-            ],
-        )?;
-        Ok(())
     }
 
     pub fn apply_untrusted_bundle(&mut self, bundle: &Bundle) -> Result<()> {

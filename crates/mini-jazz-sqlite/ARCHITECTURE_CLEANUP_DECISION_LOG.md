@@ -243,3 +243,10 @@ because read-set import will become central to exclusive validation,
 dependency-awaiting, query settlement, and future compact read-set
 representations. The phase should consume `AppliedTxs` plus table identity
 maps, not reach back into arbitrary runtime locals.
+
+## 2026-05-28 23:53 PDT
+
+Extract query-read import as an apply phase too. Query descriptors are durable
+sync facts with their own replay/repair semantics; even if the current phase is
+small, naming it keeps subscription/query-scope behavior from being another
+hidden side effect of runtime bundle application.
