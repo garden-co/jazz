@@ -581,3 +581,9 @@ regress.
 - Moved `query_context`, `query_context_at_tier`, and `read_visibility` into `runtime::reads`.
 - These are read-surface constructors used by several sibling modules, so they are now explicit `pub(super)`/`pub(crate)` helpers instead of tail-end methods in the central runtime file.
 - Focused query-matrix tests pass after the move.
+
+## 2026-05-29 02:17 PDT - Shared write materialization moved behind write-core
+
+- Extracted the shared row write materialization path into `runtime::write_core`: effective value normalization, field validation, create/update history insertion, current projection insertion, local write-policy checks, row-id collision checks, exclusive-write conflict checks, and write-set recording.
+- This boundary is behaviorally important because simple writes, batched writes, explicit transactions, and apply-history all need the same low-level write semantics.
+- Focused storage/projection tests pass after the move.
