@@ -478,6 +478,8 @@ them concrete:
 - removing durable observed-query descriptors requires an explicit
   resubscribe/query-settlement protocol, because retained local facts and
   current query results are not the same thing
+- windowed built-query refresh uses previously observed row ids as repair
+  candidates and current support rows as page-boundary replacements
 - duplicated/reordered table bundles converge across a simple multi-tier
   topology
 - seeded duplicate/reorder schedules converge after mixed insert, update,

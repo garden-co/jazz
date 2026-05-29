@@ -132,6 +132,11 @@ tiers/edges learn active interest by downstream replay. Data received for a
 query may remain cached after it leaves that query's active result set. Evicting
 uninteresting cached data is an asynchronous cache-management concern, not
 eager query-scope contraction.
+For paginated and windowed query descriptors, the observed fact must also carry
+the row ids that were previously published for that descriptor. Refresh uses
+those ids as repair candidates so rows that left the page can be removed, while
+the current support query supplies replacement boundary rows. This is semantic
+repair metadata, not an embedded durable result snapshot.
 Prototype note: removing durable query descriptors by changing storage alone is
 not correct. If retained local facts remain after restart but the active query
 descriptor/result scope is forgotten, a later resubscribe with an empty current

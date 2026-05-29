@@ -146,3 +146,15 @@ Continue #947 tier reads after compaction. Keep the first implementation focused
 ## 2026-05-28 23:14 PDT
 
 #947 first slice is green: `ReadTier` now gates generic main-branch table reads and built queries. This deliberately models settlement as a query/read parameter, not as auth or policy state. Current limitation: subscription delivery and branch snapshot reads still need to reuse this same tier predicate in later slices; the spec now calls this out.
+
+## 2026-05-28 23:18 PDT
+
+Start #972 as a red/green test slice. The valuable behavior is not the exact implementation from the draft branch, but the generic contract: query-scoped export for `BuiltQuery` must export enough rows for offset/limit pagination and refresh must remove stale page rows while adding new boundary rows. Try the behavior tests first against the current generic query/export code.
+
+## 2026-05-28 23:18 PDT
+
+#972 red/green result: initial offset-page export already works in current code, which is encouraging. Refresh does not: after the first page changes, the receiver keeps the stale row and lacks the new boundary row. Missing behavior is not broad initial export; it is refresh repair support for windowed built queries using previously observed ids plus a support query broad enough to include replacement boundary rows.
+
+## 2026-05-28 23:19 PDT
+
+#972 refresh slice is green without importing the draft implementation. Built-query observed read descriptors now carry `observed_ids` beside the query JSON, and refresh exports use those ids as explicit repair rows while querying the support window needed for offset pages. This keeps the API generic and avoids a SQL-scope rewrite for now; SQL-scoped export remains an optimization candidate, not a semantic prerequisite.

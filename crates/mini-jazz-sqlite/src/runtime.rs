@@ -1062,7 +1062,16 @@ impl Runtime {
                     observed_ids_from_query_value(&read.value)?,
                 )
             }
-            "query" => self.export_query(built_query_from_read(read)?),
+            "query" => {
+                let query = built_query_from_read(read)?;
+                let rows = self.query(export_support_query_for_refresh(&query)?)?;
+                self.export_built_query_scope_with_previous_observed(
+                    query,
+                    rows,
+                    &[],
+                    observed_ids_from_query_value(&read.value)?,
+                )
+            }
             "absent" => {
                 if read.field == "id" {
                     let Some(row_id) = read.value.as_str() else {
@@ -3192,19 +3201,34 @@ impl Runtime {
         rows: Vec<RowView>,
         ref_include_fields: &[&str],
     ) -> Result<Bundle> {
+        self.export_built_query_scope_with_previous_observed(
+            query,
+            rows,
+            ref_include_fields,
+            Vec::new(),
+        )
+    }
+
+    fn export_built_query_scope_with_previous_observed(
+        &self,
+        query: BuiltQuery,
+        rows: Vec<RowView>,
+        ref_include_fields: &[&str],
+        previous_observed_ids: Vec<String>,
+    ) -> Result<Bundle> {
         let query_read = QueryReadRecord {
             branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
             table: query.table.clone(),
             field: "$query".to_owned(),
             op: "query".to_owned(),
-            value: query.to_json_value(),
+            value: built_query_read_value(&query, &rows),
         };
         self.export_query_read_scope(
             query_read,
             rows,
             QueryScopeOptions {
                 ref_include_fields,
-                extra_row_ids: &[],
+                extra_row_ids: &previous_observed_ids,
             },
         )
     }
@@ -7195,13 +7219,44 @@ fn delete_current_rows_outside_keep_set(
 }
 
 fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery> {
-    let query = BuiltQuery::from_json_value(read.value.clone())?;
+    let query_value = read
+        .value
+        .get("query")
+        .cloned()
+        .unwrap_or_else(|| read.value.clone());
+    let query = BuiltQuery::from_json_value(query_value)?;
     if read.table != query.table {
         return Err(crate::Error::new(
             "query read table does not match descriptor",
         ));
     }
     Ok(query)
+}
+
+fn built_query_read_value(query: &BuiltQuery, rows: &[RowView]) -> JsonValue {
+    json!({
+        "query": query.to_json_value(),
+        "observed_ids": observed_row_ids(rows),
+    })
+}
+
+fn export_support_query_for_refresh(query: &BuiltQuery) -> Result<BuiltQuery> {
+    let offset = query.offset.unwrap_or(0);
+    if offset == 0 {
+        return Ok(query.clone());
+    }
+
+    let mut support_query = query.clone();
+    support_query.offset = None;
+    support_query.limit = query
+        .limit
+        .map(|limit| {
+            offset
+                .checked_add(limit)
+                .ok_or_else(|| crate::Error::new("query limit plus offset is too large"))
+        })
+        .transpose()?;
+    Ok(support_query)
 }
 
 fn id_predicate_values(op: &str, value: &JsonValue) -> Result<Vec<String>> {
