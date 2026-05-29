@@ -137,10 +137,14 @@ fn batched_tick_strands_parked_messages_when_subscription_deferred() {
 /// Bug A — reschedule loop.
 ///
 /// When no forward progress is possible (no parked messages, no outbox, no
-/// pending storage flush) but a sub is deferred, `batched_tick` should not
-/// keep rescheduling itself. Today both early-returns at ticks.rs:724 and
-/// ticks.rs:741 unconditionally fire `schedule_batched_tick()` before
-/// returning, so N ticks produce ≥N reschedules — a hot loop.
+/// pending storage flush) but a sub is deferred, `batched_tick` must not
+/// reschedule itself *at all*. The pre-fix code unconditionally fired
+/// `schedule_batched_tick()` from its early-return gates, so N ticks produced
+/// ≥N reschedules — a hot loop. The fix gates the reschedule on `drained_any`
+/// (ticks.rs:738) and on a pending/failed WAL flush, neither of which holds
+/// here. A loose `reschedules < ticks` bound would still pass a 90%-hot loop
+/// (9 reschedules over 10 ticks), so this pins the exact invariant: a
+/// progressless tick re-arms the scheduler **zero** times.
 #[test]
 fn batched_tick_hot_spins_when_subscription_stays_deferred() {
     let scheduler = CountingScheduler::default();
@@ -158,13 +162,18 @@ fn batched_tick_hot_spins_when_subscription_stays_deferred() {
     }
     let reschedules = scheduler.schedule_count() - baseline;
 
-    assert!(
-        reschedules < ticks,
-        "batched_tick is hot-spinning the scheduler: {ticks} progressless \
-         ticks produced {reschedules} reschedules (one per tick). The \
-         early-return gates at ticks.rs:724 and ticks.rs:741 must not \
-         re-arm the scheduler when no parked messages were drained and no \
-         new outbox was generated."
+    assert_eq!(
+        reschedules, 0,
+        "batched_tick must not re-arm the scheduler on a progressless tick: \
+         {ticks} ticks with no parked messages, no outbox, and no pending \
+         storage flush produced {reschedules} reschedules. With nothing to \
+         drain, `drained_any` is false so the reschedule gate at ticks.rs:738 \
+         is skipped, and the `immediate_tick` at ticks.rs:713 only schedules \
+         when it leaves outbound or a WAL-flush barrier behind (ticks.rs:685) \
+         — a perpetually-deferred subscription creates neither. `reschedules < \
+         ticks` would let a 90%-hot loop pass; the true invariant is that a \
+         tick with no forward progress re-arms the scheduler zero times. The \
+         next inbound message re-arms it via park_sync_message instead."
     );
 }
 
