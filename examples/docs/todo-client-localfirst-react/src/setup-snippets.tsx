@@ -29,7 +29,7 @@ export function AppWithRuntimeSources() {
       }}
       fallback={<p>Loading...</p>}
     >
-      {/* ... */}
+      <TodoList />
     </JazzProvider>
   );
 }

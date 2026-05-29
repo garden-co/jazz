@@ -74,7 +74,7 @@ export async function whereOperatorExamples(db: Db) {
   // #region where-numeric-ts
   const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-  const recentTodos = await db.all(app.todos.where({ created_at: { gt: oneWeekAgo } }));
+  const recentTodos = await db.all(app.todos.where({ $createdAt: { gt: oneWeekAgo } }));
   const highPriority = await db.all(app.todos.where({ priority: { gte: 3 } }));
   const lowPriority = await db.all(app.todos.where({ priority: { lt: 10 } }));
   // #endregion where-numeric-ts
@@ -104,7 +104,7 @@ export async function whereOperatorExamples(db: Db) {
 
   // #region where-order-limit-ts
   const recentIncomplete = await db.all(
-    app.todos.where({ done: false }).orderBy("created_at", "asc").limit(50),
+    app.todos.where({ done: false }).orderBy("$createdAt", "asc").limit(50),
   );
   // #endregion where-order-limit-ts
 
