@@ -43,7 +43,7 @@ fn memory_size_separates_sync_state_buckets() {
         .sent_batch_ids
         .insert(
             (row_id, BranchName::new("main")),
-            HashSet::from([row.batch_id]),
+            SentBatchIds::from([row.batch_id]),
         );
     sm.servers
         .get_mut(&server_id)

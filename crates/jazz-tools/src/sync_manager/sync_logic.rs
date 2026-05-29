@@ -211,17 +211,18 @@ impl SyncManager {
 
         let branch_name = BranchName::new(&row.branch);
         let batch_id = row.batch_id;
-        let batch_already_sent = {
+        let already_sent = {
             let Some(server) = self.servers.get(&server_id) else {
                 return;
             };
             server
                 .sent_batch_ids
                 .get(&(object_id, branch_name))
-                .is_some_and(|sent| sent.contains(&batch_id))
+                .cloned()
+                .unwrap_or_default()
         };
 
-        if batch_already_sent && !include_metadata {
+        if already_sent.contains(&batch_id) && !include_metadata {
             return;
         }
 
@@ -290,24 +291,25 @@ impl SyncManager {
         let branch_name = BranchName::new(&row.branch);
         let batch_id = row.batch_id;
 
-        let (in_scope, include_metadata, batch_already_sent) = {
+        let (in_scope, include_metadata, already_sent) = {
             let Some(client) = self.clients.get(&client_id) else {
                 return;
             };
             let in_scope = client.is_in_scope(object_id, &branch_name);
             let include_metadata = !client.sent_metadata.contains(&object_id);
-            let batch_already_sent = client
+            let already_sent = client
                 .sent_batch_ids
                 .get(&(object_id, branch_name))
-                .is_some_and(|sent| sent.contains(&batch_id));
-            (in_scope, include_metadata, batch_already_sent)
+                .cloned()
+                .unwrap_or_default();
+            (in_scope, include_metadata, already_sent)
         };
 
         if !in_scope {
             return;
         }
 
-        if !force_resend && batch_already_sent && !include_metadata {
+        if !force_resend && already_sent.contains(&batch_id) && !include_metadata {
             return;
         }
 
