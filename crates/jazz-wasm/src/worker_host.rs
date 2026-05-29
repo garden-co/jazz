@@ -49,7 +49,7 @@ use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::MessageEvent;
+use web_sys::{MessageEvent, MessagePort};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -90,6 +90,17 @@ impl Default for PeerRouting {
             peer_terms: HashMap::new(),
         }
     }
+}
+
+struct FollowerPort {
+    port: MessagePort,
+    leader_tab_id: String,
+    generation: u32,
+    onmessage_closure: Closure<dyn FnMut(MessageEvent)>,
+}
+
+thread_local! {
+    static FOLLOWER_PORTS: RefCell<HashMap<String, FollowerPort>> = RefCell::new(HashMap::new());
 }
 
 struct WorkerHost {
@@ -170,6 +181,15 @@ pub fn run_as_worker(
     // Install Rust onmessage. Subsequent messages during init also buffer here.
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let data = event.data();
+        if let Some(type_str) = Reflect::get(&data, &JsValue::from_str("type"))
+            .ok()
+            .and_then(|v| v.as_string())
+        {
+            if type_str == "attach-follower-port" {
+                handle_attach_follower_port(&event);
+                return;
+            }
+        }
         match parse_main_to_worker(&data) {
             Ok(msg) => handle_main_message(msg),
             Err(e) => post_to_main(&WorkerToMainWire::Error {
@@ -447,6 +467,117 @@ fn close_peer(peer_id: &str) {
         }
         guard.peer_terms.remove(peer_id);
     });
+}
+
+fn handle_attach_follower_port(event: &MessageEvent) {
+    let data = event.data();
+    let follower_tab_id = match Reflect::get(&data, &JsValue::from_str("followerTabId"))
+        .ok()
+        .and_then(|v| v.as_string())
+    {
+        Some(s) => s,
+        None => {
+            post_to_main(&WorkerToMainWire::Error {
+                message: "attach-follower-port missing followerTabId".to_string(),
+            });
+            return;
+        }
+    };
+    let leader_tab_id = Reflect::get(&data, &JsValue::from_str("leaderTabId"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
+    let generation = Reflect::get(&data, &JsValue::from_str("generation"))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .map(|f| f as u32)
+        .unwrap_or(0);
+
+    let ports = event.ports();
+    let port = match ports.get(0).dyn_into::<MessagePort>() {
+        Ok(p) => p,
+        Err(_) => {
+            post_to_main(&WorkerToMainWire::FollowerPortAttachFailed {
+                follower_tab_id: follower_tab_id.clone(),
+                generation,
+                reason: "missing transferred MessagePort".to_string(),
+            });
+            return;
+        }
+    };
+
+    let peer_id = format!("tab:{}", follower_tab_id);
+    let runtime = RUNTIME.with(|cell| cell.borrow().clone());
+    let Some(runtime) = runtime else {
+        post_to_main(&WorkerToMainWire::FollowerPortAttachFailed {
+            follower_tab_id: follower_tab_id.clone(),
+            generation,
+            reason: "attach-follower-port before runtime open".to_string(),
+        });
+        return;
+    };
+    if let Err(err) = ensure_peer_client(&runtime, &peer_id) {
+        post_to_main(&WorkerToMainWire::FollowerPortAttachFailed {
+            follower_tab_id: follower_tab_id.clone(),
+            generation,
+            reason: format!("ensure_peer_client: {err}"),
+        });
+        return;
+    }
+    PEER_ROUTING.with(|cell| {
+        cell.borrow_mut()
+            .peer_terms
+            .insert(peer_id.clone(), generation);
+    });
+
+    let peer_id_for_closure = peer_id.clone();
+    let runtime_for_closure = Rc::clone(&runtime);
+    let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
+        forward_follower_port_message(&peer_id_for_closure, &runtime_for_closure, &ev);
+    });
+    port.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    port.start();
+
+    FOLLOWER_PORTS.with(|cell| {
+        cell.borrow_mut().insert(
+            follower_tab_id.clone(),
+            FollowerPort {
+                port,
+                leader_tab_id,
+                generation,
+                onmessage_closure: onmessage,
+            },
+        );
+    });
+
+    post_to_main(&WorkerToMainWire::FollowerPortAttached {
+        follower_tab_id,
+        generation,
+    });
+}
+
+fn forward_follower_port_message(peer_id: &str, runtime: &Rc<WasmRuntime>, event: &MessageEvent) {
+    let data = event.data();
+    let payload_field = match Reflect::get(&data, &"payload".into()) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let arr = match payload_field.dyn_into::<Array>() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let client_id =
+        PEER_ROUTING.with(|cell| cell.borrow().peer_client_by_peer_id.get(peer_id).cloned());
+    let Some(client_id) = client_id else { return };
+    for entry in arr.iter() {
+        let Ok(u8arr) = entry.dyn_into::<Uint8Array>() else {
+            continue;
+        };
+        if let Err(err) = runtime.on_sync_message_received_from_client(&client_id, u8arr.into()) {
+            tracing::warn!("follower-port sync route: {err:?}");
+        }
+    }
+    runtime.batched_tick();
 }
 
 // =============================================================================

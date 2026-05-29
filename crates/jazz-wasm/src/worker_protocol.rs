@@ -163,6 +163,15 @@ pub enum WorkerToMainWire {
         state_json: String,
     },
     DebugSeedLiveSchemaOk,
+    FollowerPortAttached {
+        follower_tab_id: String,
+        generation: u32,
+    },
+    FollowerPortAttachFailed {
+        follower_tab_id: String,
+        generation: u32,
+        reason: String,
+    },
 }
 
 // =============================================================================
@@ -564,5 +573,14 @@ mod tests {
             state_json: "{}".into(),
         });
         rt_worker(&WorkerToMainWire::DebugSeedLiveSchemaOk);
+        rt_worker(&WorkerToMainWire::FollowerPortAttached {
+            follower_tab_id: "tab-a".into(),
+            generation: 1,
+        });
+        rt_worker(&WorkerToMainWire::FollowerPortAttachFailed {
+            follower_tab_id: "tab-b".into(),
+            generation: 2,
+            reason: "peer client setup failed".into(),
+        });
     }
 }

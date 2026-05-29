@@ -867,6 +867,23 @@ impl BridgeInner {
             | WorkerToMainWire::DebugSeedLiveSchemaOk => {
                 // Test-only debug responses; no listener slot in the bridge.
             }
+            WorkerToMainWire::FollowerPortAttached {
+                follower_tab_id,
+                generation,
+            } => {
+                tracing::debug!(
+                    "follower port attached: tab={follower_tab_id} generation={generation}"
+                );
+            }
+            WorkerToMainWire::FollowerPortAttachFailed {
+                follower_tab_id,
+                generation,
+                reason,
+            } => {
+                tracing::warn!(
+                    "follower port attach failed: tab={follower_tab_id} generation={generation} reason={reason}"
+                );
+            }
         }
     }
 }
