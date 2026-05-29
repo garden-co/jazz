@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:12:08 PDT 2026
+
+Decision: validate that received deep-text roots are materializable before importing their row history.
+
+Why: `HistoryDelta` is now the real sync envelope, so row history and text-op sidecar bytes must be coherent. Without this check, a malformed or truncated delta could import ordinary Jazz row versions whose `deep_text` fields point at missing op roots, only failing later when an app tries to read the row.
+
+Scope impact: after applying any text-op sidecar delta, receive validates every `deep_text` root referenced by open bundle history and raw history blocks. Missing roots now reject the delta before row history is imported. This is still short of the ideal one-SQLite-transaction delta apply, but it closes the most important coherence hole without the larger transaction refactor.
+
 ## Fri May 29 01:09:33 PDT 2026
 
 Decision: make `deep_text` predicates work through ordered queries and query-delta repair by materializing text at the public/runtime boundary.

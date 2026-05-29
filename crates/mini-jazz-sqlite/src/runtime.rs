@@ -2149,8 +2149,28 @@ impl Runtime {
                 &mut watermark,
             )?;
         }
+        self.validate_deep_text_roots_for_history_delta(delta)?;
         self.import_history_blocks(&delta.blocks)?;
         self.apply_bundle_inner(&delta.bundle, true)
+    }
+
+    fn validate_deep_text_roots_for_history_delta(&self, delta: &HistoryDelta) -> Result<()> {
+        if !self.schema_has_deep_text_fields() {
+            return Ok(());
+        }
+        let mut roots = deep_text_roots_for_bundle(&self.schema, &delta.bundle)?;
+        for block in &delta.blocks {
+            let block_bundle = validate_history_block_export_manifest(block)?;
+            roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
+        }
+        roots.sort();
+        roots.dedup();
+        for root in roots.into_iter().flatten() {
+            crate::persisted_text_ops::root_len(&self.conn, Some(root)).map_err(|err| {
+                crate::Error::new(format!("missing deep_text root {root}: {err}"))
+            })?;
+        }
+        Ok(())
     }
 
     pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
@@ -13365,6 +13385,32 @@ mod tests {
             bob.current_text_ops_watermark().unwrap(),
             crate::persisted_text_ops::DeltaWatermark::default()
         );
+    }
+
+    #[test]
+    fn history_delta_rejects_missing_deep_text_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let mut delta = alice.export_all_history_delta(&[]).unwrap();
+        delta.text_ops_delta.clear();
+
+        let err = bob.apply_history_delta(&delta).unwrap_err();
+
+        assert!(err.to_string().contains("missing deep_text root"));
+        assert!(bob.read_rows("docs").unwrap().is_empty());
     }
 
     #[test]
