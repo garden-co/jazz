@@ -119,6 +119,47 @@ pub(crate) fn append_with_materialized(
     Ok(Some(op_id))
 }
 
+pub(crate) fn replace_range_with_materialized(
+    conn: &Connection,
+    root: TextRoot,
+    materialized_text: &mut String,
+    start_byte: usize,
+    delete_bytes: usize,
+    insert: &str,
+    snapshot_every: usize,
+) -> Result<TextRoot> {
+    if start_byte > materialized_text.len() || start_byte + delete_bytes > materialized_text.len() {
+        return Err(Error::new("text op replace range out of bounds"));
+    }
+    if !materialized_text.is_char_boundary(start_byte)
+        || !materialized_text.is_char_boundary(start_byte + delete_bytes)
+    {
+        return Err(Error::new(
+            "text op replace range must use UTF-8 boundaries",
+        ));
+    }
+    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
+    conn.prepare_cached(
+        "INSERT INTO jazz_text_op
+           (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )?
+    .execute(params![
+        root,
+        start_byte as i64,
+        delete_bytes as i64,
+        insert,
+        (materialized_text.len() + insert.len() - delete_bytes) as i64,
+        depth_since_snapshot
+    ])?;
+    let op_id = conn.last_insert_rowid();
+    materialized_text.replace_range(start_byte..start_byte + delete_bytes, insert);
+    if snapshot_every > 0 && depth_since_snapshot >= snapshot_every as i64 {
+        snapshot_known_text(conn, Some(op_id), materialized_text)?;
+    }
+    Ok(Some(op_id))
+}
+
 pub fn replace_range(
     conn: &Connection,
     root: TextRoot,

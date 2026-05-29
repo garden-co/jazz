@@ -7772,25 +7772,15 @@ fn apply_deep_text_edit(
                 crate::Error::new("replace range edits require materialized text cache")
             })?;
             for (start_byte, delete_bytes, insert) in patches {
-                if *start_byte > materialized_text.len()
-                    || start_byte + delete_bytes > materialized_text.len()
-                    || !materialized_text.is_char_boundary(*start_byte)
-                    || !materialized_text.is_char_boundary(start_byte + delete_bytes)
-                {
-                    return Err(crate::Error::new(
-                        "text op replace range must use UTF-8 boundaries",
-                    ));
-                }
-                root = crate::persisted_text_ops::replace_range_known_len(
+                root = crate::persisted_text_ops::replace_range_with_materialized(
                     conn,
                     root,
-                    materialized_text.len(),
+                    materialized_text,
                     *start_byte,
                     *delete_bytes,
                     insert,
                     256,
                 )?;
-                materialized_text.replace_range(*start_byte..*start_byte + *delete_bytes, insert);
             }
             Ok(root)
         }

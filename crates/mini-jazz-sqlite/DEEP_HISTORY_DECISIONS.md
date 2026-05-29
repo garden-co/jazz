@@ -1390,3 +1390,11 @@ Decision: keep the correlated current-visibility `EXISTS` in incremental table-h
 Why: the join looked more relationally direct, but the measured canonical run got worse for append and Automerge live export/apply and was flat for canvas. SQLite was already handling the EXISTS shape well enough for this workload.
 
 Scope impact: the uncommitted SQL rewrite was reverted.
+
+## Fri May 29 03:11:25 PDT 2026 - Use Materialized Text For Range Snapshots
+
+Decision: range-based deep-text edits now insert ops and write snapshots from the batch-local materialized text cache, mirroring the append-heavy optimization.
+
+Why: random-run document edits already require a materialized string for range validation and patch application. Rebuilding snapshot content from the persisted op chain while that string is available is redundant work.
+
+Scope impact: a canonical sample moved Automerge deep-text edit time from about 42 ms to about 37 ms for the run. Overall document timing is roughly flat because live export/apply now dominate, but the storage-side behavior is cleaner.
