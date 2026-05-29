@@ -387,3 +387,19 @@ itself is a todo-shaped product.
 Continuing that cleanup by removing `SchemaDef::todo_app_schema()` from the core
 API as well. Tests and the demo wrapper can define a todo schema fixture, but
 the production-facing schema builder should stay generic.
+
+## 2026-05-29 00:39 PDT
+
+Checked stacked PR state again. #973 has moved to
+`d3bca86eb35478dd71e9c5f9e55d087eddf98dfd` and remains conflicting; #972 is
+mergeable but already mostly represented here by built-query export/refresh
+work; #945/#947/#952 are still the main semantic input branches already being
+ported in slices. Keep watching #973 before trying to ingest deep-history code.
+
+## 2026-05-29 00:41 PDT
+
+Found one small #972 behavior that was not ported: query-scope repair can prune
+a row from current while retaining its history, and later query hydration of the
+same history must restore current projection. The existing `history_exists`
+short-circuit treats "history exists, current absent" as already applied, which
+is wrong for query-scoped caches.

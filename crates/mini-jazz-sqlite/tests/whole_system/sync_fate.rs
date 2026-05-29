@@ -1229,6 +1229,41 @@ fn query_scope_excludes_rows_outside_current_result_set() {
 }
 
 #[test]
+fn query_scope_hydrates_current_for_previously_pruned_history_row() {
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice
+        .create_project("project-1", "Visible project")
+        .unwrap();
+    alice
+        .create_todo("todo-old", "Pruned then rehydrated", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-new", "Newest row", false, "project-1")
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 2);
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq_top_created_at_desc("todos", "done", json!(false), 1)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 1);
+    assert!(peer.physical_row_num_for("todo-old").is_ok());
+
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 2);
+}
+
+#[test]
 fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
     let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
