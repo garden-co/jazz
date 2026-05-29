@@ -624,6 +624,159 @@ mod tests {
     }
 
     #[test]
+    fn done_filter_survives_page_reload_and_filter_flips() {
+        let mut worker = Runtime::open_with_schema(
+            Storage::Memory,
+            "worker-filter-reload-flips",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        let mut main = Runtime::open_with_schema(
+            Storage::Memory,
+            "main-filter-reload-flips",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+
+        let mut pending_ids = Vec::new();
+        for index in 0..5_000 {
+            let id = format!("todo-{index:04}");
+            main.insert_row(
+                "todos",
+                &id,
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("Todo {index:04}"))),
+                    ("done".to_owned(), json!(false)),
+                    ("project".to_owned(), json!("todo-list")),
+                ]),
+            )
+            .unwrap();
+            pending_ids.push(id);
+            if pending_ids.len() == 100 {
+                let changed_ids = QueryBuilder::table("todos")
+                    .in_values("id", json!(std::mem::take(&mut pending_ids)))
+                    .build();
+                worker
+                    .apply_bundle(&main.export_query(changed_ids).unwrap())
+                    .unwrap();
+            }
+        }
+        if !pending_ids.is_empty() {
+            let changed_ids = QueryBuilder::table("todos")
+                .in_values("id", json!(pending_ids))
+                .build();
+            worker
+                .apply_bundle(&main.export_query(changed_ids).unwrap())
+                .unwrap();
+        }
+
+        let page_five = TodoQueryState {
+            page: 4,
+            ..TodoQueryState::default()
+        };
+        main.apply_bundle(
+            &worker
+                .export_query(page_five.page_hydration_query())
+                .unwrap(),
+        )
+        .unwrap();
+        let page_five_ids = main
+            .query(page_five.page_query())
+            .unwrap()
+            .into_iter()
+            .take(3)
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(page_five_ids.len(), 3);
+
+        for id in &page_five_ids {
+            main.update_row(
+                "todos",
+                id,
+                BTreeMap::from([("done".to_owned(), json!(true))]),
+            )
+            .unwrap();
+            let changed_id = QueryBuilder::table("todos")
+                .in_values("id", json!([id]))
+                .build();
+            worker
+                .apply_bundle(&main.export_query(changed_id).unwrap())
+                .unwrap();
+            for query in [page_five.page_query(), page_five.next_page_probe_query()] {
+                main.apply_bundle(&worker.export_query(query).unwrap())
+                    .unwrap();
+            }
+        }
+
+        let mut reloaded = Runtime::open_with_schema(
+            Storage::Memory,
+            "reloaded-main-filter-flips",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        let default_page = TodoQueryState::default();
+        reloaded
+            .apply_bundle(
+                &worker
+                    .export_query(default_page.page_hydration_query())
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let done_page = TodoQueryState {
+            done_filter: TodoDoneFilter::Done,
+            ..TodoQueryState::default()
+        };
+        let mut done_subscription = reloaded.subscribe_query(done_page.page_query()).unwrap();
+        assert!(done_subscription.initial_rows().is_empty());
+        reloaded
+            .apply_bundle(
+                &worker
+                    .export_query(done_page.page_hydration_query())
+                    .unwrap(),
+            )
+            .unwrap();
+        let done_delta = reloaded.subscription_delta(&mut done_subscription).unwrap();
+        assert_eq!(done_delta.all.len(), 3);
+
+        let open_page = TodoQueryState {
+            done_filter: TodoDoneFilter::Open,
+            ..TodoQueryState::default()
+        };
+        let mut open_subscription = reloaded.subscribe_query(open_page.page_query()).unwrap();
+        reloaded
+            .apply_bundle(
+                &worker
+                    .export_query(open_page.page_hydration_query())
+                    .unwrap(),
+            )
+            .unwrap();
+        let open_delta = reloaded.subscription_delta(&mut open_subscription).unwrap();
+        assert_eq!(open_delta.all.len(), TODO_PAGE_SIZE);
+
+        let mut done_subscription = reloaded.subscribe_query(done_page.page_query()).unwrap();
+        reloaded
+            .apply_bundle(
+                &worker
+                    .export_query(done_page.page_hydration_query())
+                    .unwrap(),
+            )
+            .unwrap();
+        let done_ids = reloaded
+            .subscription_delta(&mut done_subscription)
+            .unwrap()
+            .all
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(done_ids, page_five_ids);
+    }
+
+    #[test]
     fn todo_query_state_builds_search_done_and_page_query() {
         let state = TodoQueryState {
             title_search: "  needle  ".to_owned(),

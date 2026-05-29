@@ -445,3 +445,9 @@ regress.
 - #973 is still moving and remains draft/dirty. The new scout pass confirms the sealed-history/deep-text work is coherent but too feature-shaped for this architecture-boundary PR.
 - The small #973 candidates are apply profiling, incremental read export, and batching local history/current writes. I am only taking these if they can land as clean generic boundaries with tests.
 - Because the #972 SQL-scope port added a lot of code to `runtime.rs`, I delegated a bounded refactor to move that logic into a child module. That is more aligned with this PR's purpose than piling on another runtime-local feature path.
+
+## 2026-05-29 01:14 PDT - Added example-level reload/filter regression from #972
+
+- Ported the remaining #972 product-shaped test as an example-level regression: a memory main runtime flips several page-five todos to done, syncs through the worker in id batches, then a freshly reloaded main runtime hydrates done/open pages and subscriptions.
+- This is intentionally not a new core abstraction; it protects the browser todo app's real reload/filter failure mode now that query hydration and SQL-scoped built-query exports are in place.
+- Running the example test initially hit the disk limit. Cleared generated Rust `target/` output, reran, and the focused example test passed.
