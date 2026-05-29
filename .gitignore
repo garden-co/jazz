@@ -9,6 +9,7 @@ dist/
 # Build artifacts
 *.tsbuildinfo
 .svelte-kit/
+**/next-env.d.ts
 
 # IDE
 .idea/
