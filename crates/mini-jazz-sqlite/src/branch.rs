@@ -261,17 +261,17 @@ fn sync_backing_row(conn: &Connection, branch_num: i64) -> Result<()> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     conn.execute(
         "INSERT INTO jazz_branch_backing
-         (branch_id, base_global_epoch, source_branch_ids_json, created_at)
+         (branch_id, base_global_epoch, source_branch_ids, created_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(branch_id) DO UPDATE SET
            base_global_epoch = excluded.base_global_epoch,
-           source_branch_ids_json = excluded.source_branch_ids_json,
+           source_branch_ids = excluded.source_branch_ids,
            created_at = excluded.created_at",
         params![
             branch_id,
             base_global_epoch,
-            serde_json::to_string(&source_branch_ids)
-                .map_err(|err| crate::Error::new(err.to_string()))?,
+            bincode::serialize(&source_branch_ids)
+                .map_err(|err| crate::Error::new(format!("encode branch sources: {err}")))?,
             created_at
         ],
     )?;

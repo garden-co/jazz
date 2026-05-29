@@ -17,6 +17,7 @@ pub mod sync;
 mod tx;
 mod types;
 mod users;
+pub mod value;
 
 pub use error::{Error, Result};
 pub use runtime::Runtime;
@@ -28,3 +29,4 @@ pub use types::{
     HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
     RejectionInfo, RowDiff, RowView, StorageStats, TopFieldHistoryDeltaOptions, TransactionInfo,
 };
+pub use value::Value;

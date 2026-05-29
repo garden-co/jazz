@@ -949,20 +949,17 @@ fn exported_bundles_carry_protocol_version() {
 }
 
 #[test]
-fn older_untagged_bundles_decode_as_protocol_version_one() {
-    let encoded = r#"{
-        "branches": [],
-        "txs": [],
-        "reads": [],
-        "query_reads": [],
-        "history": []
-    }"#;
+fn native_bundles_decode_protocol_metadata() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
-    let bundle: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(encoded).unwrap();
+    alice.create_project("project-1", "Spec work").unwrap();
+    let exported = alice.export_query_scope_open_todos().unwrap();
+    let encoded = mini_jazz_sqlite::sync::encode_bundle(&exported).unwrap();
+    let bundle = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
 
     assert_eq!(bundle.protocol_version, 1);
-    assert_eq!(bundle.schema_fingerprint, "legacy");
-    assert_eq!(bundle.policy_fingerprint, "legacy");
+    assert_eq!(bundle.schema_fingerprint, exported.schema_fingerprint);
+    assert_eq!(bundle.policy_fingerprint, exported.policy_fingerprint);
 }
 
 #[test]

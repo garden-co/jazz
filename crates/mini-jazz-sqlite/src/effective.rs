@@ -1,7 +1,7 @@
 use crate::schema::{current_table, history_table, quote_ident, storage_column, SchemaDef};
+use crate::value::Value as JsonValue;
 use crate::{branch, query, tx, Result};
 use rusqlite::{params, Connection};
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 pub(crate) fn row_values(

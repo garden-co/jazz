@@ -1,7 +1,7 @@
-use mini_jazz_sqlite::sync::{merge_bundles, Bundle};
+use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
 use mini_jazz_sqlite::{
     persisted_text_ops, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
-    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage,
+    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage, Value,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -253,10 +253,13 @@ struct DeepHistoryCaseReport {
     history_rows: i64,
     current_rows: i64,
     database_to_final_payload_ratio: Option<f64>,
+    live_database_to_final_payload_ratio: Option<f64>,
     total_file_to_final_payload_ratio: Option<f64>,
     database_to_extrapolated_final_payload_ratio: Option<f64>,
+    live_database_to_extrapolated_final_payload_ratio: Option<f64>,
     total_file_to_extrapolated_final_payload_ratio: Option<f64>,
     database_to_reference_gzip_ratio: Option<f64>,
+    live_database_to_reference_gzip_ratio: Option<f64>,
     bundle_to_reference_gzip_ratio: Option<f64>,
     extrapolated_write_ms_for_target: Option<f64>,
     extrapolated_database_bytes_for_target: Option<i64>,
@@ -4041,242 +4044,17 @@ struct BundleSummary {
 impl BundleSummary {
     fn from(bundle: &Bundle) -> BenchResult<Self> {
         Ok(Self {
-            bytes: serde_json::to_vec(bundle)?.len(),
+            bytes: encode_bundle(bundle)?.len(),
         })
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct PostcardBundle {
-    protocol_version: i64,
-    schema_fingerprint: String,
-    policy_fingerprint: String,
-    branches: Vec<mini_jazz_sqlite::sync::BranchRecord>,
-    txs: Vec<PostcardTxRecord>,
-    reads: Vec<mini_jazz_sqlite::sync::ReadRecord>,
-    query_reads: Vec<PostcardQueryReadRecord>,
-    history: Vec<PostcardHistoryRecord>,
+fn encode_native_bundle(bundle: &Bundle) -> BenchResult<Vec<u8>> {
+    Ok(encode_bundle(bundle)?)
 }
 
-#[derive(Serialize, Deserialize)]
-struct PostcardTxRecord {
-    tx_id: String,
-    node_id: String,
-    local_epoch: i64,
-    global_epoch: Option<i64>,
-    conflict_mode: i64,
-    outcome: i64,
-    auth_user: Option<String>,
-    rejection_code: Option<String>,
-    rejection_detail_json: Option<Vec<u8>>,
-    receipt_tiers: Vec<i64>,
-    created_at: i64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PostcardQueryReadRecord {
-    branch_id: String,
-    table: String,
-    field: String,
-    op: String,
-    value: PostcardValue,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PostcardHistoryRecord {
-    table: String,
-    row_id: String,
-    branch_id: String,
-    tx_id: String,
-    op: i64,
-    values: BTreeMap<String, PostcardValue>,
-    created_at: i64,
-    updated_at: i64,
-    created_by: String,
-    updated_by: String,
-}
-
-#[derive(Serialize, Deserialize)]
-enum PostcardValue {
-    Json(Vec<u8>),
-    Bytes(Vec<u8>),
-}
-
-fn encode_postcard_bundle(bundle: &Bundle) -> BenchResult<Vec<u8>> {
-    Ok(postcard::to_allocvec(&PostcardBundle::from_bundle(
-        bundle,
-    )?)?)
-}
-
-fn decode_postcard_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
-    let wire: PostcardBundle = postcard::from_bytes(bytes)?;
-    wire.into_bundle()
-}
-
-impl PostcardBundle {
-    fn from_bundle(bundle: &Bundle) -> BenchResult<Self> {
-        Ok(Self {
-            protocol_version: bundle.protocol_version,
-            schema_fingerprint: bundle.schema_fingerprint.clone(),
-            policy_fingerprint: bundle.policy_fingerprint.clone(),
-            branches: bundle.branches.clone(),
-            txs: bundle
-                .txs
-                .iter()
-                .map(|record| {
-                    Ok(PostcardTxRecord {
-                        tx_id: record.tx_id.clone(),
-                        node_id: record.node_id.clone(),
-                        local_epoch: record.local_epoch,
-                        global_epoch: record.global_epoch,
-                        conflict_mode: record.conflict_mode,
-                        outcome: record.outcome,
-                        auth_user: record.auth_user.clone(),
-                        rejection_code: record.rejection_code.clone(),
-                        rejection_detail_json: record
-                            .rejection_detail
-                            .as_ref()
-                            .map(serde_json::to_vec)
-                            .transpose()?,
-                        receipt_tiers: record.receipt_tiers.clone(),
-                        created_at: record.created_at,
-                    })
-                })
-                .collect::<BenchResult<Vec<_>>>()?,
-            reads: bundle.reads.clone(),
-            query_reads: bundle
-                .query_reads
-                .iter()
-                .map(|record| PostcardQueryReadRecord {
-                    branch_id: record.branch_id.clone(),
-                    table: record.table.clone(),
-                    field: record.field.clone(),
-                    op: record.op.clone(),
-                    value: PostcardValue::from_json(&record.value).unwrap_or_else(|| {
-                        PostcardValue::Json(serde_json::to_vec(&record.value).unwrap())
-                    }),
-                })
-                .collect(),
-            history: bundle
-                .history
-                .iter()
-                .map(|record| {
-                    let values = record
-                        .values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok((
-                                key.clone(),
-                                if key == "body_op" {
-                                    PostcardValue::Bytes(hex_to_bytes(
-                                        value.as_str().ok_or("body_op is not hex text")?,
-                                    )?)
-                                } else {
-                                    PostcardValue::Json(serde_json::to_vec(value)?)
-                                },
-                            ))
-                        })
-                        .collect::<BenchResult<BTreeMap<_, _>>>()?;
-                    Ok(PostcardHistoryRecord {
-                        table: record.table.clone(),
-                        row_id: record.row_id.clone(),
-                        branch_id: record.branch_id.clone(),
-                        tx_id: record.tx_id.clone(),
-                        op: record.op,
-                        values,
-                        created_at: record.created_at,
-                        updated_at: record.updated_at,
-                        created_by: record.created_by.clone(),
-                        updated_by: record.updated_by.clone(),
-                    })
-                })
-                .collect::<BenchResult<Vec<_>>>()?,
-        })
-    }
-
-    fn into_bundle(self) -> BenchResult<Bundle> {
-        Ok(Bundle {
-            protocol_version: self.protocol_version,
-            schema_fingerprint: self.schema_fingerprint,
-            policy_fingerprint: self.policy_fingerprint,
-            branches: self.branches,
-            txs: self
-                .txs
-                .into_iter()
-                .map(|record| {
-                    Ok(mini_jazz_sqlite::sync::TxRecord {
-                        tx_id: record.tx_id,
-                        node_id: record.node_id,
-                        local_epoch: record.local_epoch,
-                        global_epoch: record.global_epoch,
-                        conflict_mode: record.conflict_mode,
-                        outcome: record.outcome,
-                        auth_user: record.auth_user,
-                        rejection_code: record.rejection_code,
-                        rejection_detail: record
-                            .rejection_detail_json
-                            .map(|bytes| serde_json::from_slice(&bytes))
-                            .transpose()?,
-                        receipt_tiers: record.receipt_tiers,
-                        created_at: record.created_at,
-                    })
-                })
-                .collect::<BenchResult<Vec<_>>>()?,
-            reads: self.reads,
-            query_reads: self
-                .query_reads
-                .into_iter()
-                .map(|record| mini_jazz_sqlite::sync::QueryReadRecord {
-                    branch_id: record.branch_id,
-                    table: record.table,
-                    field: record.field,
-                    op: record.op,
-                    value: record.value.into_json(),
-                })
-                .collect(),
-            history: self
-                .history
-                .into_iter()
-                .map(|record| {
-                    let values = record
-                        .values
-                        .into_iter()
-                        .map(|(key, value)| (key, value.into_json()))
-                        .collect();
-                    mini_jazz_sqlite::sync::HistoryRecord {
-                        table: record.table,
-                        row_id: record.row_id,
-                        branch_id: record.branch_id,
-                        tx_id: record.tx_id,
-                        op: record.op,
-                        values,
-                        created_at: record.created_at,
-                        updated_at: record.updated_at,
-                        created_by: record.created_by,
-                        updated_by: record.updated_by,
-                    }
-                })
-                .collect(),
-        })
-    }
-}
-
-impl PostcardValue {
-    fn from_json(value: &serde_json::Value) -> Option<Self> {
-        value
-            .as_object()
-            .and_then(|object| object.get("$bytes"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|hex| hex_to_bytes(hex).ok())
-            .map(Self::Bytes)
-    }
-
-    fn into_json(self) -> serde_json::Value {
-        match self {
-            Self::Json(value) => serde_json::from_slice(&value).unwrap_or(serde_json::Value::Null),
-            Self::Bytes(bytes) => json!(bytes_to_hex(&bytes)),
-        }
-    }
+fn decode_native_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
+    Ok(decode_bundle(bytes)?)
 }
 
 fn gzip_json_bytes(bundle: &Bundle) -> BenchResult<Option<usize>> {
@@ -4289,7 +4067,7 @@ fn gzip_json_bytes(bundle: &Bundle) -> BenchResult<Option<usize>> {
         Ok(child) => child,
         Err(_) => return Ok(None),
     };
-    let payload = serde_json::to_vec(bundle)?;
+    let payload = encode_bundle(bundle)?;
     let mut stdin = child.stdin.take().ok_or("gzip stdin was not piped")?;
     stdin.write_all(&payload)?;
     drop(stdin);
@@ -4315,7 +4093,7 @@ impl BundleBatchSummary {
         let mut transaction_rows = 0;
         let mut observed_facts = 0;
         for bundle in bundles {
-            bytes += serde_json::to_vec(bundle)?.len();
+            bytes += encode_bundle(bundle)?.len();
             history_rows += bundle.history.len();
             transaction_rows += bundle.txs.len();
             observed_facts += bundle.query_reads.len();
@@ -4776,10 +4554,10 @@ fn flush_text_op_writes(
                 )
                 .into_iter()
                 .chain(map1("body_op", json!(bytes_to_hex(&write.op_bytes))).into_iter())
-                .collect(),
+                .collect::<BTreeMap<String, serde_json::Value>>(),
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
     writer.update_rows_batched("documents", updates)?;
     Ok(())
 }
@@ -4824,8 +4602,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         ),
     )?;
     let initial_bundle = writer.export_table_history("documents")?;
-    let initial_wire = encode_postcard_bundle(&initial_bundle)?;
-    let initial_bundle = decode_postcard_bundle(&initial_wire)?;
+    let initial_wire = encode_native_bundle(&initial_bundle)?;
+    let initial_bundle = decode_native_bundle(&initial_wire)?;
     receiver.apply_bundle(&initial_bundle)?;
     apply_inline_text_ops_from_bundle(
         &initial_bundle,
@@ -4877,8 +4655,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         if should_sample {
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
-            let wire = encode_postcard_bundle(&bundle)?;
-            let bundle = decode_postcard_bundle(&wire)?;
+            let wire = encode_native_bundle(&bundle)?;
+            let bundle = decode_native_bundle(&wire)?;
             receiver.profile_apply_bundle(&bundle)?;
             apply_inline_text_ops_from_bundle(
                 &bundle,
@@ -4924,8 +4702,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         persisted_text_ops::snapshot(&writer_ops, root)?;
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
-        let delta_wire = encode_postcard_bundle(&delta.bundle)?;
-        let delta_bundle = decode_postcard_bundle(&delta_wire)?;
+        let delta_wire = encode_native_bundle(&delta.bundle)?;
+        let delta_bundle = decode_native_bundle(&delta_wire)?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
         block_native_blocks = Some(delta.blocks.len());
         block_native_payload_bytes =
@@ -4968,8 +4746,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
 
     let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("documents")?;
-    let final_wire = encode_postcard_bundle(&final_bundle)?;
-    let final_bundle = decode_postcard_bundle(&final_wire)?;
+    let final_wire = encode_native_bundle(&final_bundle)?;
+    let final_bundle = decode_native_bundle(&final_wire)?;
     let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
     let final_bundle_bytes = final_wire.len();
     let sidecar_bundle_bytes = 0;
@@ -5007,7 +4785,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             let historical_root = row
                 .values
                 .get("body_root")
-                .and_then(serde_json::Value::as_str)
+                .and_then(Value::as_str)
                 .ok_or("historical text op row missing body_root")?;
             let historical_text = persisted_text_ops::materialize(
                 &writer_ops,
@@ -5088,9 +4866,17 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         history_rows: writer_stats.history_rows,
         current_rows: writer_stats.current_rows,
         database_to_final_payload_ratio: ratio_i64_usize(database_bytes, final_payload_bytes),
+        live_database_to_final_payload_ratio: ratio_i64_usize(
+            live_database_bytes,
+            final_payload_bytes,
+        ),
         total_file_to_final_payload_ratio: ratio_i64_usize(total_file_bytes, final_payload_bytes),
         database_to_extrapolated_final_payload_ratio: ratio_i64_usize(
             database_bytes,
+            final_payload_bytes,
+        ),
+        live_database_to_extrapolated_final_payload_ratio: ratio_i64_usize(
+            live_database_bytes,
             final_payload_bytes,
         ),
         total_file_to_extrapolated_final_payload_ratio: ratio_i64_usize(
@@ -5100,6 +4886,9 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         database_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_i64_usize(database_bytes, bytes)),
+        live_database_to_reference_gzip_ratio: input
+            .reference_gzip_bytes
+            .and_then(|bytes| ratio_i64_usize(live_database_bytes, bytes)),
         bundle_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_usize(final_bundle_bytes + sidecar_bundle_bytes, bytes)),
@@ -5123,14 +4912,16 @@ fn apply_inline_text_ops_from_bundle(
             let root = record
                 .values
                 .get("body_root")
-                .and_then(serde_json::Value::as_str)?
+                .and_then(Value::as_str)?
                 .parse::<i64>()
                 .ok()?;
-            let op = record
-                .values
-                .get("body_op")
-                .and_then(serde_json::Value::as_str)?;
-            Some((root, op.to_owned()))
+            let op = record.values.get("body_op")?;
+            let op_hex = if let Some(bytes) = op.as_bytes() {
+                bytes_to_hex(bytes)
+            } else {
+                op.as_str()?.to_owned()
+            };
+            Some((root, op_hex))
         })
         .collect::<Vec<_>>();
     ops.sort_by_key(|(root, _)| *root);
@@ -5358,7 +5149,7 @@ fn run_naive_deep_history_case(
     let final_payload = rows
         .first()
         .and_then(|row| row.values.get(input.field))
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or(last_value);
     let final_payload_bytes = final_payload.len();
@@ -5482,6 +5273,11 @@ fn run_naive_deep_history_case(
         } else {
             None
         },
+        live_database_to_final_payload_ratio: if input.compare_to_final_payload {
+            ratio_i64_usize(stats.live_database_bytes, final_payload_bytes)
+        } else {
+            None
+        },
         total_file_to_final_payload_ratio: if input.compare_to_final_payload {
             ratio_i64_usize(total_file_bytes, final_payload_bytes)
         } else {
@@ -5489,11 +5285,17 @@ fn run_naive_deep_history_case(
         },
         database_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
             .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
+        live_database_to_extrapolated_final_payload_ratio:
+            extrapolated_final_payload_bytes_for_target
+                .and_then(|bytes| ratio_i64_usize(stats.live_database_bytes, bytes)),
         total_file_to_extrapolated_final_payload_ratio: extrapolated_final_payload_bytes_for_target
             .and_then(|bytes| ratio_i64_usize(total_file_bytes, bytes)),
         database_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_i64_usize(stats.database_bytes, bytes)),
+        live_database_to_reference_gzip_ratio: input
+            .reference_gzip_bytes
+            .and_then(|bytes| ratio_i64_usize(stats.live_database_bytes, bytes)),
         bundle_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
@@ -5594,7 +5396,7 @@ fn canvas_position_json(frame: usize) -> String {
 fn row_root_id(rows: &[mini_jazz_sqlite::RowView], field: &str) -> BenchResult<i64> {
     rows.first()
         .and_then(|row| row.values.get(field))
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .ok_or_else(|| "missing text op root field".into())
         .and_then(|value| value.parse::<i64>().map_err(Into::into))
 }

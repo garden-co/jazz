@@ -1,7 +1,7 @@
 use crate::schema::{FieldKind, PolicyDef, SchemaDef, TableDef};
+use crate::value::Value as JsonValue;
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, Connection};
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 const MAX_POLICY_RECURSION_DEPTH: usize = 64;

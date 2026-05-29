@@ -1,3 +1,4 @@
+use crate::value::{bytes_to_hex, WireValue};
 use crate::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -11,10 +12,10 @@ pub(crate) const OUTCOME_REJECTED: i64 = 3;
 pub(crate) const TIER_EDGE: i64 = 2;
 pub(crate) const TIER_GLOBAL: i64 = 3;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PackedWrite(pub(crate) i64, pub(crate) i64, pub(crate) i64);
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PackedRead(
     pub(crate) i64,
     pub(crate) i64,
@@ -62,25 +63,23 @@ pub(crate) fn create_tx_with_options(
     let tx_id = format!("tx-{node_id}-{next_epoch}");
     conn.prepare_cached(
         "INSERT INTO jazz_tx
-          (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '[]', '[]')",
+          (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata, writes_json, reads_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, jsonb('[]'), NULL)",
     )?
-    .execute(
-        params![
-            node_num,
-            next_epoch,
-            global_epoch,
-            KIND_DATA,
-            conflict_mode,
-            outcome,
-            now
-        ],
-    )?;
+    .execute(params![
+        node_num,
+        next_epoch,
+        global_epoch,
+        KIND_DATA,
+        conflict_mode,
+        outcome,
+        now
+    ])?;
     let tx_num = conn.last_insert_rowid();
     if let Some(global_epoch) = global_epoch {
         conn.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_receipt
-             (tx_num, tier, observed_at, receipt_json)
+             (tx_num, tier, observed_at, receipt)
              VALUES (?, ?, ?, '{}')",
         )?
         .execute(params![tx_num, TIER_GLOBAL, global_epoch])?;
@@ -95,14 +94,47 @@ pub(crate) fn append_write(
     row_num: i64,
     op: i64,
 ) -> Result<()> {
-    let mut writes = packed_writes(conn, tx_num)?;
-    let write = PackedWrite(table_num, row_num, op);
-    if !writes.contains(&write) {
-        writes.push(write);
+    append_writes(conn, tx_num, [PackedWrite(table_num, row_num, op)])
+}
+
+pub(crate) fn append_writes(
+    conn: &Connection,
+    tx_num: i64,
+    new_writes: impl IntoIterator<Item = PackedWrite>,
+) -> Result<()> {
+    let new_writes = new_writes.into_iter().collect::<Vec<_>>();
+    if new_writes.is_empty() {
+        return Ok(());
     }
-    let writes_json = serde_json::to_string(&writes).map_err(|err| Error::new(err.to_string()))?;
-    conn.prepare_cached("UPDATE jazz_tx SET writes_json = ? WHERE tx_num = ?")?
-        .execute(params![writes_json, tx_num])?;
+    if new_writes.len() == 1 {
+        let PackedWrite(table_num, row_num, op) = new_writes[0];
+        let changed = conn
+            .prepare_cached(
+                "UPDATE jazz_tx
+                SET writes_json = jsonb_array(jsonb_array(?, ?, ?))
+              WHERE tx_num = ?
+                AND writes_json = jsonb('[]')",
+            )?
+            .execute(params![table_num, row_num, op, tx_num])?;
+        if changed > 0 {
+            return Ok(());
+        }
+    }
+    let mut writes = packed_writes(conn, tx_num)?;
+    let mut changed = false;
+    for write in new_writes {
+        if !writes.contains(&write) {
+            writes.push(write);
+            changed = true;
+        }
+    }
+    if changed {
+        writes.sort_by_key(|write| (write.0, write.1, write.2));
+        let encoded = serde_json::to_string(&writes)
+            .map_err(|err| Error::new(format!("encode tx writes: {err}")))?;
+        conn.prepare_cached("UPDATE jazz_tx SET writes_json = jsonb(?) WHERE tx_num = ?")?
+            .execute(params![encoded, tx_num])?;
+    }
     Ok(())
 }
 
@@ -114,26 +146,45 @@ pub(crate) fn append_read(
     reason: i64,
     observed_tx_num: Option<i64>,
 ) -> Result<()> {
-    let read = PackedRead(table_num, row_num, reason, observed_tx_num);
-    let implicit = implicit_previous_reads(conn, tx_num)?;
-    let reads_json = conn
-        .prepare_cached("SELECT reads_json FROM jazz_tx WHERE tx_num = ?")?
-        .query_row(params![tx_num], |row| row.get::<_, Option<String>>(0))?;
-    let mut reads = match reads_json {
-        Some(json) => serde_json::from_str::<Vec<PackedRead>>(&json)
-            .map_err(|err| Error::new(err.to_string()))?,
-        None => implicit.clone(),
-    };
-    if !reads.contains(&read) {
-        reads.push(read);
+    append_reads(
+        conn,
+        tx_num,
+        [PackedRead(table_num, row_num, reason, observed_tx_num)],
+    )
+}
+
+pub(crate) fn append_reads(
+    conn: &Connection,
+    tx_num: i64,
+    new_reads: impl IntoIterator<Item = PackedRead>,
+) -> Result<()> {
+    let state = tuple_state(conn, tx_num)?;
+    let implicit: Vec<PackedRead> = state
+        .previous_tx_num
+        .map(|previous_tx_num| {
+            state
+                .writes
+                .iter()
+                .map(|write| PackedRead(write.0, write.1, 2, Some(previous_tx_num)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let explicit = state.reads;
+    let had_explicit = explicit.is_some();
+    let mut reads = explicit.unwrap_or_else(|| implicit.clone());
+    for read in new_reads {
+        if !reads.contains(&read) {
+            reads.push(read);
+        }
     }
-    let next_json = if !implicit.is_empty() && same_read_set(&reads, &implicit) {
-        None
+    if !implicit.is_empty() && same_read_set(&reads, &implicit) {
+        if had_explicit {
+            conn.prepare_cached("UPDATE jazz_tx SET reads_json = NULL WHERE tx_num = ?")?
+                .execute(params![tx_num])?;
+        }
     } else {
-        Some(serde_json::to_string(&reads).map_err(|err| Error::new(err.to_string()))?)
-    };
-    conn.prepare_cached("UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?")?
-        .execute(params![next_json, tx_num])?;
+        replace_explicit_reads(conn, tx_num, &reads)?;
+    }
     Ok(())
 }
 
@@ -144,33 +195,84 @@ pub(crate) fn fill_observed_read(
     row_num: i64,
     observed_tx_num: i64,
 ) -> Result<()> {
-    let reads_json = conn
-        .prepare_cached("SELECT reads_json FROM jazz_tx WHERE tx_num = ?")?
-        .query_row(params![tx_num], |row| row.get::<_, Option<String>>(0))?;
-    let mut reads = match reads_json {
-        Some(json) => serde_json::from_str::<Vec<PackedRead>>(&json)
-            .map_err(|err| Error::new(err.to_string()))?,
-        None => implicit_previous_reads(conn, tx_num)?,
-    };
+    let mut reads = explicit_reads(conn, tx_num)?
+        .unwrap_or_else(|| implicit_previous_reads(conn, tx_num).unwrap_or_default());
     for read in &mut reads {
         if read.0 == table_num && read.1 == row_num && read.3.is_none() {
             read.3 = Some(observed_tx_num);
         }
     }
-    let reads_json = serde_json::to_string(&reads).map_err(|err| Error::new(err.to_string()))?;
-    conn.prepare_cached("UPDATE jazz_tx SET reads_json = ? WHERE tx_num = ?")?
-        .execute(params![reads_json, tx_num])?;
+    replace_explicit_reads(conn, tx_num, &reads)?;
     Ok(())
 }
 
 fn packed_writes(conn: &Connection, tx_num: i64) -> Result<Vec<PackedWrite>> {
-    let json = conn
-        .prepare_cached("SELECT writes_json FROM jazz_tx WHERE tx_num = ?")?
-        .query_row(params![tx_num], |row| row.get::<_, String>(0))?;
-    serde_json::from_str(&json).map_err(|err| Error::new(err.to_string()))
+    let encoded: String = conn
+        .prepare_cached("SELECT json(writes_json) FROM jazz_tx WHERE tx_num = ?")?
+        .query_row(params![tx_num], |row| row.get(0))?;
+    serde_json::from_str(&encoded).map_err(|err| Error::new(format!("decode tx writes: {err}")))
+}
+
+fn explicit_reads(conn: &Connection, tx_num: i64) -> Result<Option<Vec<PackedRead>>> {
+    let encoded = conn
+        .prepare_cached("SELECT json(reads_json) FROM jazz_tx WHERE tx_num = ?")?
+        .query_row(params![tx_num], |row| row.get::<_, Option<String>>(0))?;
+    encoded
+        .map(|encoded| {
+            serde_json::from_str(&encoded)
+                .map_err(|err| Error::new(format!("decode tx reads: {err}")))
+        })
+        .transpose()
+}
+
+struct TxTupleState {
+    previous_tx_num: Option<i64>,
+    writes: Vec<PackedWrite>,
+    reads: Option<Vec<PackedRead>>,
+}
+
+fn tuple_state(conn: &Connection, tx_num: i64) -> Result<TxTupleState> {
+    let (previous_tx_num, writes, reads) = conn
+        .prepare_cached(
+            "SELECT previous.tx_num, json(tx.writes_json), json(tx.reads_json)
+             FROM jazz_tx tx
+             LEFT JOIN jazz_tx previous
+               ON previous.node_num = tx.node_num
+              AND previous.local_epoch = tx.local_epoch - 1
+             WHERE tx.tx_num = ?",
+        )?
+        .query_row(params![tx_num], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+    Ok(TxTupleState {
+        previous_tx_num,
+        writes: serde_json::from_str(&writes)
+            .map_err(|err| Error::new(format!("decode tx writes: {err}")))?,
+        reads: reads
+            .map(|reads| {
+                serde_json::from_str(&reads)
+                    .map_err(|err| Error::new(format!("decode tx reads: {err}")))
+            })
+            .transpose()?,
+    })
+}
+
+fn replace_explicit_reads(conn: &Connection, tx_num: i64, reads: &[PackedRead]) -> Result<()> {
+    let mut reads = reads.to_vec();
+    reads.sort_by_key(|read| (read.0, read.1, read.2, read.3));
+    let encoded = serde_json::to_string(&reads)
+        .map_err(|err| Error::new(format!("encode tx reads: {err}")))?;
+    conn.prepare_cached("UPDATE jazz_tx SET reads_json = jsonb(?) WHERE tx_num = ?")?
+        .execute(params![encoded, tx_num])?;
+    Ok(())
 }
 
 fn implicit_previous_reads(conn: &Connection, tx_num: i64) -> Result<Vec<PackedRead>> {
+    let writes = packed_writes(conn, tx_num)?;
     let previous_tx_num = conn
         .prepare_cached(
             "SELECT previous.tx_num
@@ -185,8 +287,8 @@ fn implicit_previous_reads(conn: &Connection, tx_num: i64) -> Result<Vec<PackedR
     let Some(previous_tx_num) = previous_tx_num else {
         return Ok(Vec::new());
     };
-    Ok(packed_writes(conn, tx_num)?
-        .into_iter()
+    Ok(writes
+        .iter()
         .map(|write| PackedRead(write.0, write.1, 2, Some(previous_tx_num)))
         .collect())
 }
@@ -235,14 +337,18 @@ fn parse_tx_id(tx_id: &str) -> Result<(&str, i64)> {
 }
 
 pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> {
-    reject_with_detail_json(conn, tx_id, code, "null")
+    let detail = bytes_to_hex(
+        &bincode::serialize(&WireValue::Null)
+            .map_err(|err| Error::new(format!("encode rejection detail: {err}")))?,
+    );
+    reject_with_detail(conn, tx_id, code, &detail)
 }
 
-pub(crate) fn reject_with_detail_json(
+pub(crate) fn reject_with_detail(
     conn: &Connection,
     tx_id: &str,
     code: &str,
-    detail_json: &str,
+    detail: &str,
 ) -> Result<i64> {
     let tx_num = tx_num(conn, tx_id)?;
     conn.execute(
@@ -250,9 +356,9 @@ pub(crate) fn reject_with_detail_json(
         params![OUTCOME_REJECTED, tx_num],
     )?;
     conn.execute(
-        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+        "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail)
          VALUES (?, ?, ?)",
-        params![tx_num, code, detail_json],
+        params![tx_num, code, detail],
     )?;
     Ok(tx_num)
 }
@@ -265,7 +371,7 @@ pub(crate) fn accept_global(conn: &Connection, tx_id: &str, global_epoch: i64) -
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO jazz_tx_receipt
-         (tx_num, tier, observed_at, receipt_json)
+         (tx_num, tier, observed_at, receipt)
          VALUES (?, ?, ?, '{}')",
         params![tx_num, TIER_GLOBAL, global_epoch],
     )?;
@@ -280,7 +386,7 @@ pub(crate) fn accept_edge(conn: &Connection, tx_id: &str, observed_at: i64) -> R
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO jazz_tx_receipt
-         (tx_num, tier, observed_at, receipt_json)
+         (tx_num, tier, observed_at, receipt)
          VALUES (?, ?, ?, '{}')",
         params![tx_num, TIER_EDGE, observed_at],
     )?;

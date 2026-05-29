@@ -1,7 +1,5 @@
 use mini_jazz_sqlite::sync::{Bundle, QueryReadRecord};
-use mini_jazz_sqlite::{Result, RowView, Runtime, SchemaDef, Storage};
-use serde_json::json;
-use serde_json::Value as JsonValue;
+use mini_jazz_sqlite::{Result, RowView, Runtime, SchemaDef, Storage, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tempfile::TempDir;

@@ -1,8 +1,8 @@
 use crate::rows::ensure_row_id;
 use crate::schema::{FieldDef, FieldKind};
+use crate::value::Value as JsonValue;
 use crate::Result;
 use rusqlite::Connection;
-use serde_json::Value as JsonValue;
 
 pub(crate) fn sql(field: &FieldDef, column: &str, op: &str) -> Result<String> {
     match op {

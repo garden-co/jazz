@@ -2,9 +2,14 @@ use mini_jazz_sqlite::{
     HistoryBlockExport, HistoryCompactionPolicy, RejectionInfo, RowDiff, Runtime, SchemaDef,
     Storage, TopFieldHistoryDeltaOptions,
 };
-use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
+
+macro_rules! json {
+    ($($json:tt)+) => {
+        mini_jazz_sqlite::Value::from(serde_json::json!($($json)+))
+    };
+}
 
 mod support;
 use support::FixtureRuntimeExt;

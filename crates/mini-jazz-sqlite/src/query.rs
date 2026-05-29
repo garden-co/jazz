@@ -1,9 +1,9 @@
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::types::RowView;
+use crate::value::Value as JsonValue;
 use crate::{branch, policy, tx, users, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;

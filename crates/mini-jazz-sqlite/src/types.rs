@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::sync::Bundle;
+use crate::value::Value as JsonValue;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowView {
@@ -187,7 +187,7 @@ pub struct HistoryBlockExport {
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct HistoryDelta {
     pub bundle: Bundle,
     pub blocks: Vec<HistoryBlockExport>,

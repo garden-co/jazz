@@ -10,23 +10,27 @@ use crate::types::{
     HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, QueryExportProfile,
     RejectionInfo, RowView, StorageStats, TopFieldHistoryDeltaOptions, TransactionInfo,
 };
+use crate::value::{bytes_to_hex, hex_to_bytes, IntoValueMap, Value as JsonValue, WireValue};
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
     storage, tx, users, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HISTORY_BLOCK_FORMAT_VERSION: i64 = 9;
-const HISTORY_BLOCK_CODEC: &str = "columnar-json-lz4";
-const LEGACY_HISTORY_BLOCK_FORMAT_VERSION: i64 = 1;
-const LEGACY_HISTORY_BLOCK_CODEC: &str = "bundle-json-lz4";
+macro_rules! json {
+    ($($json:tt)+) => {
+        JsonValue::from(serde_json::json!($($json)+))
+    };
+}
+
+const HISTORY_BLOCK_FORMAT_VERSION: i64 = 10;
+const HISTORY_BLOCK_CODEC: &str = "columnar-bincode-lz4";
 const HISTORY_BLOCK_CACHE_CAPACITY: usize = 64;
 const HISTORY_BLOCK_KIND_ACCEPTED: i64 = 1;
 const HISTORY_BLOCK_KIND_REJECTED: i64 = 2;
@@ -310,47 +314,72 @@ impl Runtime {
         result
     }
 
-    pub fn insert_row(
-        &mut self,
-        table_name: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Result<String> {
-        self.write_row(table_name, id, values, 1)
+    pub fn insert_row<V>(&mut self, table_name: &str, id: &str, values: V) -> Result<String>
+    where
+        V: IntoValueMap,
+    {
+        self.write_row(table_name, id, values.into_value_map(), 1)
     }
 
-    pub fn insert_rows_batched(
+    pub fn insert_rows_batched<V>(
         &mut self,
         table_name: &str,
-        rows: Vec<(String, BTreeMap<String, JsonValue>)>,
-    ) -> Result<Vec<String>> {
-        self.write_rows_batched(table_name, rows, BatchedWriteMode::Insert)
+        rows: Vec<(String, V)>,
+    ) -> Result<Vec<String>>
+    where
+        V: IntoValueMap,
+    {
+        self.write_rows_batched(
+            table_name,
+            rows.into_iter()
+                .map(|(id, values)| (id, values.into_value_map()))
+                .collect(),
+            BatchedWriteMode::Insert,
+        )
     }
 
-    pub fn update_row(
-        &mut self,
-        table_name: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Result<String> {
+    pub fn update_row<V>(&mut self, table_name: &str, id: &str, values: V) -> Result<String>
+    where
+        V: IntoValueMap,
+    {
         self.physical_row_num_for(id)?;
-        self.write_row(table_name, id, values, 2)
+        self.write_row(table_name, id, values.into_value_map(), 2)
     }
 
-    pub fn update_rows_batched(
+    pub fn update_rows_batched<V>(
         &mut self,
         table_name: &str,
-        updates: Vec<(String, BTreeMap<String, JsonValue>)>,
-    ) -> Result<Vec<String>> {
-        self.write_rows_batched(table_name, updates, BatchedWriteMode::Update)
+        updates: Vec<(String, V)>,
+    ) -> Result<Vec<String>>
+    where
+        V: IntoValueMap,
+    {
+        self.write_rows_batched(
+            table_name,
+            updates
+                .into_iter()
+                .map(|(id, values)| (id, values.into_value_map()))
+                .collect(),
+            BatchedWriteMode::Update,
+        )
     }
 
-    pub fn upsert_rows_batched(
+    pub fn upsert_rows_batched<V>(
         &mut self,
         table_name: &str,
-        writes: Vec<(String, BTreeMap<String, JsonValue>)>,
-    ) -> Result<Vec<String>> {
-        self.write_rows_batched(table_name, writes, BatchedWriteMode::Upsert)
+        writes: Vec<(String, V)>,
+    ) -> Result<Vec<String>>
+    where
+        V: IntoValueMap,
+    {
+        self.write_rows_batched(
+            table_name,
+            writes
+                .into_iter()
+                .map(|(id, values)| (id, values.into_value_map()))
+                .collect(),
+            BatchedWriteMode::Upsert,
+        )
     }
 
     fn write_rows_batched(
@@ -408,32 +437,33 @@ impl Runtime {
         Ok(tx_ids)
     }
 
-    pub fn upsert_row(
-        &mut self,
-        table_name: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Result<String> {
+    pub fn upsert_row<V>(&mut self, table_name: &str, id: &str, values: V) -> Result<String>
+    where
+        V: IntoValueMap,
+    {
         let op = if self.row_has_current_branch_value(table_name, id)? {
             2
         } else {
             1
         };
-        self.write_row(table_name, id, values, op)
+        self.write_row(table_name, id, values.into_value_map(), op)
     }
 
-    pub fn resolve_row_conflict(
+    pub fn resolve_row_conflict<V>(
         &mut self,
         table_name: &str,
         id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Result<String> {
+        values: V,
+    ) -> Result<String>
+    where
+        V: IntoValueMap,
+    {
         let op = if self.row_has_current_branch_value(table_name, id)? {
             2
         } else {
             1
         };
-        self.write_row(table_name, id, values, op)
+        self.write_row(table_name, id, values.into_value_map(), op)
     }
 
     fn write_row(
@@ -477,29 +507,39 @@ impl Runtime {
         Ok(tx_id)
     }
 
-    pub fn read_rows_where_eq_top_created_at_desc(
+    pub fn read_rows_where_eq_top_created_at_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
-    ) -> Result<Vec<RowView>> {
-        self.query_context()
-            .read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)
+    ) -> Result<Vec<RowView>>
+    where
+        V: Into<JsonValue>,
+    {
+        self.query_context().read_rows_where_eq_top_created_at_desc(
+            table_name,
+            field_name,
+            value.into(),
+            limit,
+        )
     }
 
-    pub fn read_rows_where_eq_top_field_desc(
+    pub fn read_rows_where_eq_top_field_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
-    ) -> Result<Vec<RowView>> {
+    ) -> Result<Vec<RowView>>
+    where
+        V: Into<JsonValue>,
+    {
         self.query_context().read_rows_where_eq_top_field_desc(
             table_name,
             field_name,
-            value,
+            value.into(),
             order_field_name,
             limit,
         )
@@ -1659,31 +1699,26 @@ impl Runtime {
         let mut tx_info_by_num = BTreeMap::new();
         let mut upsert_tx_stmt = db.prepare_cached(
             "INSERT INTO jazz_tx
-             (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
+             (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(node_num, local_epoch) DO UPDATE SET
                outcome = MAX(jazz_tx.outcome, excluded.outcome),
                global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
                conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-               metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json),
-               writes_json = CASE
-                 WHEN jazz_tx.writes_json = '[]' THEN excluded.writes_json
-                 ELSE jazz_tx.writes_json
-               END,
-               reads_json = COALESCE(jazz_tx.reads_json, excluded.reads_json)",
+               metadata = COALESCE(excluded.metadata, jazz_tx.metadata)",
         )?;
         let mut upsert_rejection_stmt = db.prepare_cached(
-            "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+            "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail)
              VALUES (?, ?, ?)",
         )?;
         let mut upsert_receipt_stmt = db.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_receipt
-             (tx_num, tier, observed_at, receipt_json)
+             (tx_num, tier, observed_at, receipt)
              VALUES (?, ?, ?, '{}')",
         )?;
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
-            let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
+            let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
             upsert_tx_stmt.execute(params![
                 node_num,
                 tx_record.local_epoch,
@@ -1692,15 +1727,15 @@ impl Runtime {
                 tx_record.conflict_mode,
                 tx_record.outcome,
                 tx_record.created_at,
-                metadata_json
+                metadata
             ])?;
             let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
             tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
             tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
-                    let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
-                    upsert_rejection_stmt.execute(params![tx_num, code, detail_json])?;
+                    let detail = encode_optional_value_text(tx_record.rejection_detail.as_ref())?;
+                    upsert_rejection_stmt.execute(params![tx_num, code, detail])?;
                 }
             }
             if let Some(global_epoch) = tx_record.global_epoch {
@@ -1724,6 +1759,7 @@ impl Runtime {
         let mut row_nums_by_id = BTreeMap::new();
         let mut row_nums_created_in_apply = BTreeSet::new();
         let mut user_nums_by_id = BTreeMap::new();
+        let mut reads_by_tx = BTreeMap::<i64, Vec<tx::PackedRead>>::new();
         for read_record in &bundle.reads {
             let tx_num = tx_nums_by_id
                 .get(&read_record.tx_id)
@@ -1749,14 +1785,15 @@ impl Runtime {
                     })
                 })
                 .transpose()?;
-            tx::append_read(
-                &db,
-                tx_num,
+            reads_by_tx.entry(tx_num).or_default().push(tx::PackedRead(
                 table_num,
                 row_num,
                 read_record.reason,
                 observed_tx_num,
-            )?;
+            ));
+        }
+        for (tx_num, reads) in reads_by_tx {
+            tx::append_reads(&db, tx_num, reads)?;
         }
         let reads_ms = duration_ms(reads_started.elapsed());
 
@@ -1802,9 +1839,13 @@ impl Runtime {
             user_nums_by_id: &mut user_nums_by_id,
             touched_current_rows: BTreeSet::new(),
             current_candidates: BTreeMap::new(),
+            writes_by_tx: BTreeMap::new(),
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
+        }
+        for (tx_num, writes) in &history_context.writes_by_tx {
+            tx::append_writes(&db, *tx_num, writes.clone())?;
         }
         for (table_name, row_num, branch_num) in &history_context.touched_current_rows {
             let key = (table_name.clone(), *row_num, *branch_num);
@@ -1869,13 +1910,13 @@ impl Runtime {
 
     pub fn observed_query_reads(&self) -> Result<Vec<QueryReadRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT branch_id, table_name, field_name, op, value_json
+            "SELECT branch_id, table_name, field_name, op, value
              FROM jazz_query_read
-             ORDER BY branch_id, table_name, field_name, op, value_json",
+             ORDER BY branch_id, table_name, field_name, op, value",
         )?;
         let rows = stmt.query_map([], |row| {
-            let value_json: String = row.get(4)?;
-            let value = serde_json::from_str(&value_json).map_err(|err| {
+            let value_text: String = row.get(4)?;
+            let value = decode_value_text(&value_text).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
                     4,
                     rusqlite::types::Type::Text,
@@ -1990,14 +2031,13 @@ impl Runtime {
                AND table_name = ?
                AND field_name = ?
                AND op = ?
-               AND value_json = ?",
+               AND value = ?",
             params![
                 read.branch_id,
                 read.table,
                 read.field,
                 read.op,
-                serde_json::to_string(&read.value)
-                    .map_err(|err| crate::Error::new(err.to_string()))?
+                encode_value_text(&read.value)?
             ],
         )?;
         Ok(())
@@ -2240,15 +2280,14 @@ impl Runtime {
     fn record_query_read(db: &Connection, query_read: &QueryReadRecord) -> Result<()> {
         db.execute(
             "INSERT OR REPLACE INTO jazz_query_read
-             (branch_id, table_name, field_name, op, value_json, observed_at)
+             (branch_id, table_name, field_name, op, value, observed_at)
              VALUES (?, ?, ?, ?, ?, ?)",
             params![
                 query_read.branch_id,
                 query_read.table,
                 query_read.field,
                 query_read.op,
-                serde_json::to_string(&query_read.value)
-                    .map_err(|err| crate::Error::new(err.to_string()))?,
+                encode_value_text(&query_read.value)?,
                 now_ms()
             ],
         )?;
@@ -2457,12 +2496,11 @@ impl Runtime {
             }
             if let Some(detail) = denied {
                 clear_transaction_awaiting_dependency(&self.conn, awaiting.tx_num)?;
-                tx::reject_with_detail_json(
+                tx::reject_with_detail(
                     &self.conn,
                     &awaiting.tx_id,
                     "policy_denied",
-                    &serde_json::to_string(&detail)
-                        .map_err(|err| crate::Error::new(err.to_string()))?,
+                    &encode_value_text(&detail)?,
                 )?;
                 changed = true;
             } else if let Some(detail) = still_waiting {
@@ -3010,7 +3048,11 @@ impl Runtime {
             .copied()
             .ok_or_else(|| crate::Error::new("history record references missing table"))?;
         if !history_exists {
-            record_tx_write_num(context.db, tx_num, table_num, row_num, record.op)?;
+            context
+                .writes_by_tx
+                .entry(tx_num)
+                .or_default()
+                .push(tx::PackedWrite(table_num, row_num, record.op));
         }
         context
             .touched_current_rows
@@ -3042,13 +3084,16 @@ impl Runtime {
         self.reject_transaction_with_optional_detail(tx_id, code, None)
     }
 
-    pub fn reject_transaction_with_detail(
+    pub fn reject_transaction_with_detail<V>(
         &mut self,
         tx_id: &str,
         code: &str,
-        detail: JsonValue,
-    ) -> Result<()> {
-        self.reject_transaction_with_optional_detail(tx_id, code, Some(detail))
+        detail: V,
+    ) -> Result<()>
+    where
+        V: Into<JsonValue>,
+    {
+        self.reject_transaction_with_optional_detail(tx_id, code, Some(detail.into()))
     }
 
     fn reject_transaction_with_optional_detail(
@@ -3057,9 +3102,9 @@ impl Runtime {
         code: &str,
         detail: Option<JsonValue>,
     ) -> Result<()> {
-        let detail_json = encode_optional_json(detail.as_ref())?;
+        let detail = encode_optional_value_text(detail.as_ref())?;
         let db = self.conn.transaction()?;
-        let tx_num = tx::reject_with_detail_json(&db, tx_id, code, &detail_json)?;
+        let tx_num = tx::reject_with_detail(&db, tx_id, code, &detail)?;
         clear_transaction_awaiting_dependency(&db, tx_num)?;
         for table in self.schema.tables() {
             db.execute(
@@ -3119,7 +3164,7 @@ impl Runtime {
         let rejection = self
             .conn
             .query_row(
-                "SELECT rejection.code, rejection.detail_json
+                "SELECT rejection.code, rejection.detail
                  FROM jazz_tx_rejection rejection
                  JOIN jazz_tx_public tx ON tx.tx_num = rejection.tx_num
                  WHERE tx.tx_id = ?",
@@ -3128,8 +3173,8 @@ impl Runtime {
             )
             .optional()?;
         let (rejection_code, rejection_detail) = match rejection {
-            Some((code, detail_json)) => {
-                let detail = parse_rejection_detail(&detail_json)?;
+            Some((code, detail)) => {
+                let detail = parse_rejection_detail(&detail)?;
                 (Some(code), detail)
             }
             None => (None, None),
@@ -3137,7 +3182,7 @@ impl Runtime {
         let awaiting_dependency = self
             .conn
             .query_row(
-                "SELECT awaiting.detail_json
+                "SELECT awaiting.detail
                  FROM jazz_tx_awaiting_dependency awaiting
                  JOIN jazz_tx_public tx ON tx.tx_num = awaiting.tx_num
                  WHERE tx.tx_id = ?",
@@ -3145,7 +3190,7 @@ impl Runtime {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .map(|detail_json| parse_rejection_detail(&detail_json))
+            .map(|detail| parse_rejection_detail(&detail))
             .transpose()?
             .flatten();
         Ok(TransactionInfo {
@@ -3220,17 +3265,17 @@ impl Runtime {
 
     pub fn rejected_transactions(&self) -> Result<Vec<RejectionInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tx.tx_id, rejection.code, rejection.detail_json
+            "SELECT tx.tx_id, rejection.code, rejection.detail
              FROM jazz_tx_rejection rejection
              JOIN jazz_tx_public tx ON tx.tx_num = rejection.tx_num
              ORDER BY tx.tx_num",
         )?;
         let rows = stmt.query_map([], |row| {
-            let detail_json = row.get::<_, String>(2)?;
+            let detail = row.get::<_, String>(2)?;
             Ok(RejectionInfo {
                 tx_id: row.get(0)?,
                 code: row.get(1)?,
-                detail: parse_rejection_detail_for_sqlite(&detail_json, 2)?,
+                detail: parse_rejection_detail_for_sqlite(&detail, 2)?,
             })
         })?;
         let mut rejections = rows
@@ -3415,7 +3460,7 @@ impl Runtime {
 
     pub fn branch_backing_rows(&self) -> Result<Vec<BranchInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT branch_id, base_global_epoch, source_branch_ids_json
+            "SELECT branch_id, base_global_epoch, source_branch_ids
              FROM jazz_branch_backing
              ORDER BY branch_id",
         )?;
@@ -3423,14 +3468,14 @@ impl Runtime {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<i64>>(1)?,
-                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(2)?,
             ))
         })?;
         let mut branches = Vec::new();
         for row in rows {
-            let (id, base_global_epoch, source_branch_ids_json) = row?;
-            let source_branch_ids = serde_json::from_str::<Vec<String>>(&source_branch_ids_json)
-                .map_err(|err| crate::Error::new(err.to_string()))?;
+            let (id, base_global_epoch, source_branch_ids_blob) = row?;
+            let source_branch_ids = bincode::deserialize::<Vec<String>>(&source_branch_ids_blob)
+                .map_err(|err| crate::Error::new(format!("decode branch sources: {err}")))?;
             branches.push(BranchInfo {
                 id,
                 base_global_epoch,
@@ -4204,14 +4249,17 @@ impl Runtime {
             .collect())
     }
 
-    pub fn read_rows_where_eq(
+    pub fn read_rows_where_eq<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<Vec<RowView>> {
+        value: V,
+    ) -> Result<Vec<RowView>>
+    where
+        V: Into<JsonValue>,
+    {
         self.query_context()
-            .read_rows_where_eq(table_name, field_name, value)
+            .read_rows_where_eq(table_name, field_name, value.into())
     }
 
     pub fn read_rows_where_contains(
@@ -4224,32 +4272,45 @@ impl Runtime {
             .read_rows_where_contains(table_name, field_name, needle)
     }
 
-    pub fn read_rows_where_in(
+    pub fn read_rows_where_in<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
-    ) -> Result<Vec<RowView>> {
-        self.query_context()
-            .read_rows_where_in(table_name, field_name, values)
+        values: Vec<V>,
+    ) -> Result<Vec<RowView>>
+    where
+        V: Into<JsonValue>,
+    {
+        self.query_context().read_rows_where_in(
+            table_name,
+            field_name,
+            values.into_iter().map(Into::into).collect(),
+        )
     }
 
-    pub fn read_rows_where_ne(
+    pub fn read_rows_where_ne<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<Vec<RowView>> {
+        value: V,
+    ) -> Result<Vec<RowView>>
+    where
+        V: Into<JsonValue>,
+    {
         self.query_context()
-            .read_rows_where_ne(table_name, field_name, value)
+            .read_rows_where_ne(table_name, field_name, value.into())
     }
 
-    pub fn export_query_where_eq(
+    pub fn export_query_where_eq<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<Bundle> {
+        value: V,
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         self.export_query_scope(
             table_name,
             field_name,
@@ -4260,13 +4321,17 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_history_delta(
+    pub fn export_query_where_eq_history_delta<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -4296,13 +4361,17 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_in_history_delta(
+    pub fn export_query_where_in_history_delta<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
+        values: Vec<V>,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
         let rows = self.read_rows_where_in(table_name, field_name, values.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -4314,13 +4383,17 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_ne_history_delta(
+    pub fn export_query_where_ne_history_delta<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_ne(table_name, field_name, value.clone())?;
         self.export_query_scope_history_delta(
             table_name,
@@ -4332,14 +4405,18 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_top_created_at_desc_history_delta(
+    pub fn export_query_where_eq_top_created_at_desc_history_delta<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq_top_created_at_desc(
             table_name,
             field_name,
@@ -4360,15 +4437,19 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed(
+    pub fn export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
         previous_observed_ids: Vec<String>,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq_top_created_at_desc(
             table_name,
             field_name,
@@ -4393,31 +4474,38 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_top_field_desc_history_delta(
+    pub fn export_query_where_eq_top_field_desc_history_delta<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
         remote_block_manifests: &[HistoryBlockManifest],
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
         self.export_query_where_eq_top_field_desc_history_delta_with_options(
             table_name,
             field_name,
-            value,
+            value.into(),
             TopFieldHistoryDeltaOptions::new(order_field_name, limit)
                 .with_remote_block_manifests(remote_block_manifests.to_vec()),
         )
     }
 
-    pub fn export_query_where_eq_top_field_desc_history_delta_with_options(
+    pub fn export_query_where_eq_top_field_desc_history_delta_with_options<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         options: TopFieldHistoryDeltaOptions,
-    ) -> Result<HistoryDelta> {
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq_top_field_desc(
             table_name,
             field_name,
@@ -4444,13 +4532,17 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_with_ref_include(
+    pub fn export_query_where_eq_with_ref_include<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         ref_field_name: &str,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         self.export_query_scope(
             table_name,
             field_name,
@@ -4480,12 +4572,16 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_in(
+    pub fn export_query_where_in<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
-    ) -> Result<Bundle> {
+        values: Vec<V>,
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
         self.export_query_scope(
             table_name,
             field_name,
@@ -4496,12 +4592,16 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_ne(
+    pub fn export_query_where_ne<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<Bundle> {
+        value: V,
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         self.export_query_scope(
             table_name,
             field_name,
@@ -4552,17 +4652,20 @@ impl Runtime {
         self.export_batched_query_scopes(table_name, field_name, items, &[])
     }
 
-    pub fn export_query_where_eq_top_created_at_desc(
+    pub fn export_query_where_eq_top_created_at_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
         self.export_query_where_eq_top_created_at_desc_with_previous_observed(
             table_name,
             field_name,
-            value,
+            value.into(),
             limit,
             Vec::new(),
         )
@@ -4599,14 +4702,18 @@ impl Runtime {
         )
     }
 
-    pub fn export_query_where_eq_top_created_at_desc_with_ref_include(
+    pub fn export_query_where_eq_top_created_at_desc_with_ref_include<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
         ref_field_name: &str,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq_top_created_at_desc(
             table_name,
             field_name,
@@ -4665,33 +4772,40 @@ impl Runtime {
         self.export_batched_query_scopes(table_name, field_name, items, &[])
     }
 
-    pub fn export_query_where_eq_top_field_desc(
+    pub fn export_query_where_eq_top_field_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
         self.export_query_where_eq_top_field_desc_with_previous_observed(
             table_name,
             field_name,
-            value,
+            value.into(),
             order_field_name,
             limit,
             Vec::new(),
         )
     }
 
-    pub fn export_query_where_eq_top_field_desc_with_ref_include(
+    pub fn export_query_where_eq_top_field_desc_with_ref_include<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
         ref_field_name: &str,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let rows = self.read_rows_where_eq_top_field_desc(
             table_name,
             field_name,
@@ -4717,20 +4831,23 @@ impl Runtime {
         )
     }
 
-    pub fn export_many_query_where_eq_top_field_desc(
+    pub fn export_many_query_where_eq_top_field_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
+        values: Vec<V>,
         order_field_name: &str,
         limit: usize,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
         self.export_many_query_where_eq_top_field_desc_inner(
             table_name,
             field_name,
             values
                 .into_iter()
-                .map(|value| (value, Vec::new()))
+                .map(|value| (value.into(), Vec::new()))
                 .collect(),
             order_field_name,
             limit,
@@ -4738,21 +4855,24 @@ impl Runtime {
         )
     }
 
-    pub fn export_many_query_where_eq_top_field_desc_with_ref_include(
+    pub fn export_many_query_where_eq_top_field_desc_with_ref_include<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
+        values: Vec<V>,
         order_field_name: &str,
         limit: usize,
         ref_field_name: &str,
-    ) -> Result<Bundle> {
+    ) -> Result<Bundle>
+    where
+        V: Into<JsonValue>,
+    {
         self.export_many_query_where_eq_top_field_desc_inner(
             table_name,
             field_name,
             values
                 .into_iter()
-                .map(|value| (value, Vec::new()))
+                .map(|value| (value.into(), Vec::new()))
                 .collect(),
             order_field_name,
             limit,
@@ -4851,14 +4971,18 @@ impl Runtime {
         )
     }
 
-    pub fn profile_export_query_where_eq_top_field_desc(
+    pub fn profile_export_query_where_eq_top_field_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
-    ) -> Result<(Bundle, QueryExportProfile)> {
+    ) -> Result<(Bundle, QueryExportProfile)>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         let total_started = Instant::now();
         let read_started = Instant::now();
         let rows = self.read_rows_where_eq_top_field_desc(
@@ -5602,12 +5726,16 @@ impl Runtime {
         Ok(RejectionSubscription::new(self.rejected_transactions()?))
     }
 
-    pub fn subscribe_rows_where_eq(
+    pub fn subscribe_rows_where_eq<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<RowsSubscription> {
+        value: V,
+    ) -> Result<RowsSubscription>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         Ok(RowsSubscription::where_eq(
             table_name,
             field_name,
@@ -5630,12 +5758,16 @@ impl Runtime {
         ))
     }
 
-    pub fn subscribe_rows_where_in(
+    pub fn subscribe_rows_where_in<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        values: Vec<JsonValue>,
-    ) -> Result<RowsSubscription> {
+        values: Vec<V>,
+    ) -> Result<RowsSubscription>
+    where
+        V: Into<JsonValue>,
+    {
+        let values = values.into_iter().map(Into::into).collect::<Vec<_>>();
         Ok(RowsSubscription::where_in(
             table_name,
             field_name,
@@ -5644,12 +5776,16 @@ impl Runtime {
         ))
     }
 
-    pub fn subscribe_rows_where_ne(
+    pub fn subscribe_rows_where_ne<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
-    ) -> Result<RowsSubscription> {
+        value: V,
+    ) -> Result<RowsSubscription>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         Ok(RowsSubscription::where_ne(
             table_name,
             field_name,
@@ -5658,13 +5794,17 @@ impl Runtime {
         ))
     }
 
-    pub fn subscribe_rows_where_eq_top_created_at_desc(
+    pub fn subscribe_rows_where_eq_top_created_at_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         limit: usize,
-    ) -> Result<RowsSubscription> {
+    ) -> Result<RowsSubscription>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         Ok(RowsSubscription::where_eq_top_created_at_desc(
             table_name,
             field_name,
@@ -5674,14 +5814,18 @@ impl Runtime {
         ))
     }
 
-    pub fn subscribe_rows_where_eq_top_field_desc(
+    pub fn subscribe_rows_where_eq_top_field_desc<V>(
         &self,
         table_name: &str,
         field_name: &str,
-        value: JsonValue,
+        value: V,
         order_field_name: &str,
         limit: usize,
-    ) -> Result<RowsSubscription> {
+    ) -> Result<RowsSubscription>
+    where
+        V: Into<JsonValue>,
+    {
+        let value = value.into();
         Ok(RowsSubscription::where_eq_top_field_desc(
             table_name,
             field_name,
@@ -6264,13 +6408,12 @@ fn mark_transaction_awaiting_dependency(
     auth_user: &str,
     detail: &JsonValue,
 ) -> Result<()> {
-    let detail_json =
-        serde_json::to_string(detail).map_err(|err| crate::Error::new(err.to_string()))?;
+    let detail = encode_value_text(detail)?;
     conn.execute(
         "INSERT OR REPLACE INTO jazz_tx_awaiting_dependency
-         (tx_num, auth_user, detail_json, updated_at)
+         (tx_num, auth_user, detail, updated_at)
          VALUES (?, ?, ?, ?)",
-        params![tx_num, auth_user, detail_json, now_ms()],
+        params![tx_num, auth_user, detail, now_ms()],
     )?;
     Ok(())
 }
@@ -6889,42 +7032,36 @@ impl<'a> TransactionBuilder<'a> {
         self
     }
 
-    pub fn insert_row(
-        mut self,
-        table: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Self {
+    pub fn insert_row<V>(mut self, table: &str, id: &str, values: V) -> Self
+    where
+        V: IntoValueMap,
+    {
         self.mutations.push(Mutation::Row {
             table: table.to_owned(),
             id: id.to_owned(),
-            values,
+            values: values.into_value_map(),
             op: 1,
         });
         self
     }
 
-    pub fn update_row(
-        mut self,
-        table: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Self {
+    pub fn update_row<V>(mut self, table: &str, id: &str, values: V) -> Self
+    where
+        V: IntoValueMap,
+    {
         self.mutations.push(Mutation::Row {
             table: table.to_owned(),
             id: id.to_owned(),
-            values,
+            values: values.into_value_map(),
             op: 2,
         });
         self
     }
 
-    pub fn upsert_row(
-        mut self,
-        table: &str,
-        id: &str,
-        values: BTreeMap<String, JsonValue>,
-    ) -> Self {
+    pub fn upsert_row<V>(mut self, table: &str, id: &str, values: V) -> Self
+    where
+        V: IntoValueMap,
+    {
         let op = match self.runtime.row_has_current_branch_value(table, id) {
             Ok(true) => 2,
             Ok(false) | Err(_) => 1,
@@ -6932,7 +7069,7 @@ impl<'a> TransactionBuilder<'a> {
         self.mutations.push(Mutation::Row {
             table: table.to_owned(),
             id: id.to_owned(),
-            values,
+            values: values.into_value_map(),
             op,
         });
         self
@@ -7238,6 +7375,7 @@ struct ApplyHistoryContext<'a> {
     user_nums_by_id: &'a mut BTreeMap<String, i64>,
     touched_current_rows: BTreeSet<(String, i64, i64)>,
     current_candidates: BTreeMap<(String, i64, i64), CurrentCandidate>,
+    writes_by_tx: BTreeMap<i64, Vec<tx::PackedWrite>>,
 }
 
 #[derive(Clone)]
@@ -7669,7 +7807,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     drop(receipt_stmt);
 
     let mut stmt = conn.prepare(
-        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail, tx.created_at, tx.metadata
          FROM jazz_tx_public tx
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          ORDER BY tx.tx_num",
@@ -7691,7 +7829,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
-                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
+                .map(|detail| parse_rejection_detail_for_sqlite(&detail, 7))
                 .transpose()?
                 .flatten(),
             receipt_tiers,
@@ -7752,7 +7890,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     }
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail_json, tx.created_at, tx.metadata_json
+        "SELECT tx.tx_id, tx.node_id, tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome, rejection.code, rejection.detail, tx.created_at, tx.metadata
          FROM jazz_tx_public tx
          LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
          WHERE tx.tx_id IN ({placeholders})
@@ -7779,7 +7917,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
-                .map(|detail_json| parse_rejection_detail_for_sqlite(&detail_json, 7))
+                .map(|detail| parse_rejection_detail_for_sqlite(&detail, 7))
                 .transpose()?
                 .flatten(),
             receipt_tiers,
@@ -8203,16 +8341,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -> Result<i64> {
     let node_num = tx::ensure_node(conn, &tx_record.node_id)?;
-    let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
+    let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
     conn.execute(
         "INSERT INTO jazz_tx
-         (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json, writes_json, reads_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]')
+         (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(node_num, local_epoch) DO UPDATE SET
            outcome = MAX(jazz_tx.outcome, excluded.outcome),
            global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
            conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-           metadata_json = COALESCE(excluded.metadata_json, jazz_tx.metadata_json)",
+           metadata = COALESCE(excluded.metadata, jazz_tx.metadata)",
         params![
             node_num,
             tx_record.local_epoch,
@@ -8221,24 +8359,24 @@ fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -
             tx_record.conflict_mode,
             tx_record.outcome,
             tx_record.created_at,
-            metadata_json
+            metadata
         ],
     )?;
     let tx_num = tx::tx_num(conn, &tx_record.tx_id)?;
     if tx_record.outcome == tx::OUTCOME_REJECTED {
         if let Some(code) = &tx_record.rejection_code {
-            let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
+            let detail = encode_optional_value_text(tx_record.rejection_detail.as_ref())?;
             conn.execute(
-                "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail_json)
+                "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail)
                  VALUES (?, ?, ?)",
-                params![tx_num, code, detail_json],
+                params![tx_num, code, detail],
             )?;
         }
     }
     if let Some(global_epoch) = tx_record.global_epoch {
         conn.execute(
             "INSERT OR REPLACE INTO jazz_tx_receipt
-             (tx_num, tier, observed_at, receipt_json)
+             (tx_num, tier, observed_at, receipt)
              VALUES (?, ?, ?, '{}')",
             params![tx_num, tx::TIER_GLOBAL, global_epoch],
         )?;
@@ -8251,7 +8389,7 @@ fn ensure_tx_record_for_history_block(conn: &Connection, tx_record: &TxRecord) -
         };
         conn.execute(
             "INSERT OR REPLACE INTO jazz_tx_receipt
-             (tx_num, tier, observed_at, receipt_json)
+             (tx_num, tier, observed_at, receipt)
              VALUES (?, ?, ?, '{}')",
             params![tx_num, tier, observed_at],
         )?;
@@ -8793,8 +8931,9 @@ fn record_local_epoch_for_point_read(conn: &Connection, tx_id: &str) -> Option<i
         .map(|tx| tx.local_epoch)
 }
 
-fn encode_history_block_payload(bundle: &Bundle) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(&ColumnarHistoryBlockPayload::from_bundle(bundle))
+fn encode_history_block_payload(bundle: &Bundle) -> Result<Vec<u8>> {
+    postcard::to_allocvec(&ColumnarHistoryBlockPayload::from_bundle(bundle))
+        .map_err(|err| crate::Error::new(format!("encode history block payload: {err}")))
 }
 
 fn decode_history_block_payload(
@@ -8811,17 +8950,12 @@ fn decode_history_block_payload_bytes(
     format_version: i64,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
-    if codec == LEGACY_HISTORY_BLOCK_CODEC && format_version == LEGACY_HISTORY_BLOCK_FORMAT_VERSION
-    {
-        return lz4_flex::decompress_size_prepended(payload)
-            .map_err(|err| crate::Error::new(format!("decode history block: {err}")));
-    }
     if codec != HISTORY_BLOCK_CODEC {
         return Err(crate::Error::new(format!(
             "unsupported history block codec {codec}"
         )));
     }
-    if !(3..=HISTORY_BLOCK_FORMAT_VERSION).contains(&format_version) {
+    if format_version != HISTORY_BLOCK_FORMAT_VERSION {
         return Err(crate::Error::new(format!(
             "unsupported history block format version {format_version}"
         )));
@@ -8831,16 +8965,11 @@ fn decode_history_block_payload_bytes(
 }
 
 fn decode_history_block_payload_from_bytes(
-    codec: &str,
-    format_version: i64,
+    _codec: &str,
+    _format_version: i64,
     decoded: &[u8],
 ) -> Result<Bundle> {
-    if codec == LEGACY_HISTORY_BLOCK_CODEC && format_version == LEGACY_HISTORY_BLOCK_FORMAT_VERSION
-    {
-        return serde_json::from_slice::<Bundle>(decoded)
-            .map_err(|err| crate::Error::new(format!("decode history block bundle: {err}")));
-    }
-    serde_json::from_slice::<ColumnarHistoryBlockPayload>(decoded)
+    postcard::from_bytes::<ColumnarHistoryBlockPayload>(decoded)
         .map_err(|err| crate::Error::new(format!("decode history block payload: {err}")))
         .and_then(ColumnarHistoryBlockPayload::into_bundle)
 }
@@ -8853,7 +8982,7 @@ struct ColumnarHistoryBlockPayload {
     branches: Vec<BranchRecord>,
     txs: ColumnarTxRecords,
     reads: ColumnarReadRecords,
-    query_reads: Vec<QueryReadRecord>,
+    query_reads: Vec<ColumnarQueryReadRecord>,
     history: ColumnarHistoryRecords,
 }
 
@@ -8866,7 +8995,11 @@ impl ColumnarHistoryBlockPayload {
             branches: bundle.branches.clone(),
             txs: ColumnarTxRecords::from_records(&bundle.txs),
             reads: ColumnarReadRecords::from_records(&bundle.reads),
-            query_reads: bundle.query_reads.clone(),
+            query_reads: bundle
+                .query_reads
+                .iter()
+                .map(ColumnarQueryReadRecord::from_record)
+                .collect(),
             history: ColumnarHistoryRecords::from_records(&bundle.history),
         }
     }
@@ -8879,9 +9012,44 @@ impl ColumnarHistoryBlockPayload {
             branches: self.branches,
             txs: self.txs.into_records()?,
             reads: self.reads.into_records()?,
-            query_reads: self.query_reads,
+            query_reads: self
+                .query_reads
+                .into_iter()
+                .map(ColumnarQueryReadRecord::into_record)
+                .collect(),
             history: self.history.into_records()?,
         })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ColumnarQueryReadRecord {
+    branch_id: String,
+    table: String,
+    field: String,
+    op: String,
+    value: WireValue,
+}
+
+impl ColumnarQueryReadRecord {
+    fn from_record(record: &QueryReadRecord) -> Self {
+        Self {
+            branch_id: record.branch_id.clone(),
+            table: record.table.clone(),
+            field: record.field.clone(),
+            op: record.op.clone(),
+            value: WireValue::from(&record.value),
+        }
+    }
+
+    fn into_record(self) -> QueryReadRecord {
+        QueryReadRecord {
+            branch_id: self.branch_id,
+            table: self.table,
+            field: self.field,
+            op: self.op,
+            value: self.value.into(),
+        }
     }
 }
 
@@ -8990,12 +9158,8 @@ impl ColumnarTxRecords {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarStringColumn {
-    Dictionary {
-        string_dict: Vec<String>,
-        string_refs: Vec<usize>,
-    },
+    Dictionary(Vec<String>, Vec<usize>),
     Raw(Vec<String>),
 }
 
@@ -9014,10 +9178,7 @@ impl ColumnarStringColumn {
             refs.push(next);
         }
         if dict.len() < refs.len() {
-            Self::Dictionary {
-                string_dict: dict,
-                string_refs: refs,
-            }
+            Self::Dictionary(dict, refs)
         } else {
             let values = refs
                 .into_iter()
@@ -9029,17 +9190,14 @@ impl ColumnarStringColumn {
 
     fn len(&self) -> usize {
         match self {
-            Self::Dictionary { string_refs, .. } => string_refs.len(),
+            Self::Dictionary(_, string_refs) => string_refs.len(),
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> String {
         match self {
-            Self::Dictionary {
-                string_dict,
-                string_refs,
-            } => string_dict[string_refs[idx]].clone(),
+            Self::Dictionary(string_dict, string_refs) => string_dict[string_refs[idx]].clone(),
             Self::Raw(values) => values[idx].clone(),
         }
     }
@@ -9047,10 +9205,7 @@ impl ColumnarStringColumn {
     #[cfg(test)]
     fn clear(&mut self) {
         match self {
-            Self::Dictionary {
-                string_dict,
-                string_refs,
-            } => {
+            Self::Dictionary(string_dict, string_refs) => {
                 string_dict.clear();
                 string_refs.clear();
             }
@@ -9060,12 +9215,8 @@ impl ColumnarStringColumn {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarNullableStringColumn {
-    Dictionary {
-        nullable_string_dict: Vec<String>,
-        string_refs: Vec<Option<usize>>,
-    },
+    Dictionary(Vec<String>, Vec<Option<usize>>),
     Raw(Vec<Option<String>>),
 }
 
@@ -9089,10 +9240,7 @@ impl ColumnarNullableStringColumn {
         }
         let non_null_count = refs.iter().filter(|value| value.is_some()).count();
         if dict.len() < non_null_count {
-            Self::Dictionary {
-                nullable_string_dict: dict,
-                string_refs: refs,
-            }
+            Self::Dictionary(dict, refs)
         } else {
             let values = refs
                 .into_iter()
@@ -9104,27 +9252,25 @@ impl ColumnarNullableStringColumn {
 
     fn len(&self) -> usize {
         match self {
-            Self::Dictionary { string_refs, .. } => string_refs.len(),
+            Self::Dictionary(_, string_refs) => string_refs.len(),
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> Option<String> {
         match self {
-            Self::Dictionary {
-                nullable_string_dict,
-                string_refs,
-            } => string_refs[idx].map(|idx| nullable_string_dict[idx].clone()),
+            Self::Dictionary(nullable_string_dict, string_refs) => {
+                string_refs[idx].map(|idx| nullable_string_dict[idx].clone())
+            }
             Self::Raw(values) => values[idx].clone(),
         }
     }
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarI64Column {
-    Runs { i64_runs: Vec<[i64; 2]> },
-    Delta { i64_base: i64, i64_deltas: Vec<i64> },
+    Runs(Vec<[i64; 2]>),
+    Delta(i64, Vec<i64>),
     Raw(Vec<i64>),
 }
 
@@ -9144,11 +9290,14 @@ impl ColumnarI64Column {
             runs.push([*value, 1]);
         }
         let raw = Self::Raw(values.clone());
+        if runs.len() < values.len() {
+            return Self::Runs(runs);
+        }
         let mut candidates = vec![raw];
-        candidates.push(Self::Runs { i64_runs: runs });
+        candidates.push(Self::Runs(runs));
         if values.len() > 1 {
             let mut previous = values[0];
-            let deltas = values
+            let deltas: Vec<i64> = values
                 .iter()
                 .skip(1)
                 .map(|value| {
@@ -9157,25 +9306,25 @@ impl ColumnarI64Column {
                     delta
                 })
                 .collect();
-            candidates.push(Self::Delta {
-                i64_base: values[0],
-                i64_deltas: deltas,
-            });
+            if deltas.iter().all(|delta: &i64| delta.abs() <= 1_000_000) {
+                return Self::Delta(values[0], deltas);
+            }
+            candidates.push(Self::Delta(values[0], deltas));
         }
-        smallest_json_column(candidates)
+        smallest_binary_column(candidates)
     }
 
     fn len(&self) -> usize {
         match self {
-            Self::Runs { i64_runs } => i64_runs.iter().map(|run| run[1] as usize).sum(),
-            Self::Delta { i64_deltas, .. } => i64_deltas.len() + 1,
+            Self::Runs(i64_runs) => i64_runs.iter().map(|run| run[1] as usize).sum(),
+            Self::Delta(_, i64_deltas) => i64_deltas.len() + 1,
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> i64 {
         match self {
-            Self::Runs { i64_runs } => {
+            Self::Runs(i64_runs) => {
                 let mut remaining = idx;
                 for [value, len] in i64_runs {
                     let len = *len as usize;
@@ -9186,10 +9335,7 @@ impl ColumnarI64Column {
                 }
                 panic!("i64 run column index out of bounds");
             }
-            Self::Delta {
-                i64_base,
-                i64_deltas,
-            } => {
+            Self::Delta(i64_base, i64_deltas) => {
                 let mut value = *i64_base;
                 for delta in i64_deltas.iter().take(idx) {
                     value += *delta;
@@ -9202,11 +9348,8 @@ impl ColumnarI64Column {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarNullableI64Column {
-    Runs {
-        nullable_i64_runs: Vec<ColumnarNullableI64Run>,
-    },
+    Runs(Vec<ColumnarNullableI64Run>),
     Raw(Vec<Option<i64>>),
 }
 
@@ -9234,24 +9377,19 @@ impl ColumnarNullableI64Column {
                 len: 1,
             });
         }
-        smallest_json_column(vec![
-            Self::Raw(values),
-            Self::Runs {
-                nullable_i64_runs: runs,
-            },
-        ])
+        smallest_binary_column(vec![Self::Raw(values), Self::Runs(runs)])
     }
 
     fn len(&self) -> usize {
         match self {
-            Self::Runs { nullable_i64_runs } => nullable_i64_runs.iter().map(|run| run.len).sum(),
+            Self::Runs(nullable_i64_runs) => nullable_i64_runs.iter().map(|run| run.len).sum(),
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> Option<i64> {
         match self {
-            Self::Runs { nullable_i64_runs } => {
+            Self::Runs(nullable_i64_runs) => {
                 let mut remaining = idx;
                 for run in nullable_i64_runs {
                     if remaining < run.len {
@@ -9267,76 +9405,70 @@ impl ColumnarNullableI64Column {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarNullableJsonColumn {
-    Runs {
-        nullable_json_runs: Vec<ColumnarNullableJsonRun>,
-    },
-    Raw(Vec<Option<JsonValue>>),
+    Runs(Vec<ColumnarNullableJsonRun>),
+    Raw(Vec<Option<WireValue>>),
 }
 
 #[derive(Serialize, Deserialize)]
 struct ColumnarNullableJsonRun {
-    value: Option<JsonValue>,
+    value: Option<WireValue>,
     len: usize,
 }
 
 impl ColumnarNullableJsonColumn {
     fn from_values(values: Vec<Option<JsonValue>>) -> Self {
         if values.is_empty() {
-            return Self::Raw(values);
+            return Self::Raw(Vec::new());
         }
         let mut runs = Vec::<ColumnarNullableJsonRun>::new();
         for value in &values {
+            let wire_value = value.as_ref().map(WireValue::from);
             if let Some(last) = runs.last_mut() {
-                if last.value == *value {
+                if last.value == wire_value {
                     last.len += 1;
                     continue;
                 }
             }
             runs.push(ColumnarNullableJsonRun {
-                value: value.clone(),
+                value: wire_value,
                 len: 1,
             });
         }
-        smallest_json_column(vec![
-            Self::Raw(values),
-            Self::Runs {
-                nullable_json_runs: runs,
-            },
-        ])
+        let raw = values
+            .into_iter()
+            .map(|value| value.as_ref().map(WireValue::from))
+            .collect();
+        smallest_binary_column(vec![Self::Raw(raw), Self::Runs(runs)])
     }
 
     fn len(&self) -> usize {
         match self {
-            Self::Runs { nullable_json_runs } => nullable_json_runs.iter().map(|run| run.len).sum(),
+            Self::Runs(nullable_json_runs) => nullable_json_runs.iter().map(|run| run.len).sum(),
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> Option<JsonValue> {
         match self {
-            Self::Runs { nullable_json_runs } => {
+            Self::Runs(nullable_json_runs) => {
                 let mut remaining = idx;
                 for run in nullable_json_runs {
                     if remaining < run.len {
-                        return run.value.clone();
+                        return run.value.clone().map(Into::into);
                     }
                     remaining -= run.len;
                 }
                 panic!("nullable json run column index out of bounds");
             }
-            Self::Raw(values) => values[idx].clone(),
+            Self::Raw(values) => values[idx].clone().map(Into::into),
         }
     }
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarI64VecColumn {
-    Runs {
-        i64_vec_runs: Vec<ColumnarI64VecRun>,
-    },
+    Runs(Vec<ColumnarI64VecRun>),
     Raw(Vec<Vec<i64>>),
 }
 
@@ -9364,19 +9496,19 @@ impl ColumnarI64VecColumn {
                 len: 1,
             });
         }
-        smallest_json_column(vec![Self::Raw(values), Self::Runs { i64_vec_runs: runs }])
+        smallest_binary_column(vec![Self::Raw(values), Self::Runs(runs)])
     }
 
     fn len(&self) -> usize {
         match self {
-            Self::Runs { i64_vec_runs } => i64_vec_runs.iter().map(|run| run.len).sum(),
+            Self::Runs(i64_vec_runs) => i64_vec_runs.iter().map(|run| run.len).sum(),
             Self::Raw(values) => values.len(),
         }
     }
 
     fn value(&self, idx: usize) -> Vec<i64> {
         match self {
-            Self::Runs { i64_vec_runs } => {
+            Self::Runs(i64_vec_runs) => {
                 let mut remaining = idx;
                 for run in i64_vec_runs {
                     if remaining < run.len {
@@ -9567,16 +9699,10 @@ impl ColumnarHistoryRecords {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
 enum ColumnarValueColumn {
-    JsonDictionary {
-        json_value_dict: Vec<JsonValue>,
-        json_value_refs: Vec<usize>,
-    },
-    JsonObjectXYStrings {
-        json_object_xy_strings: ColumnarXYStrings,
-    },
-    Json(Vec<JsonValue>),
+    JsonDictionary(Vec<WireValue>, Vec<usize>),
+    JsonObjectXYStrings(ColumnarXYStrings),
+    Json(Vec<WireValue>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -9588,26 +9714,19 @@ struct ColumnarXYStrings {
 impl ColumnarValueColumn {
     fn len(&self) -> usize {
         match self {
-            Self::JsonDictionary {
-                json_value_refs, ..
-            } => json_value_refs.len(),
+            Self::JsonDictionary(_, json_value_refs) => json_value_refs.len(),
             Self::Json(values) => values.len(),
-            Self::JsonObjectXYStrings {
-                json_object_xy_strings,
-            } => json_object_xy_strings.x.len(),
+            Self::JsonObjectXYStrings(json_object_xy_strings) => json_object_xy_strings.x.len(),
         }
     }
 
     fn value(&self, idx: usize) -> JsonValue {
         match self {
-            Self::JsonDictionary {
-                json_value_dict,
-                json_value_refs,
-            } => json_value_dict[json_value_refs[idx]].clone(),
-            Self::Json(values) => values[idx].clone(),
-            Self::JsonObjectXYStrings {
-                json_object_xy_strings,
-            } => JsonValue::String(
+            Self::JsonDictionary(json_value_dict, json_value_refs) => {
+                json_value_dict[json_value_refs[idx]].clone().into()
+            }
+            Self::Json(values) => values[idx].clone().into(),
+            Self::JsonObjectXYStrings(json_object_xy_strings) => JsonValue::String(
                 json!({
                     "x": json_object_xy_strings.x[idx],
                     "y": json_object_xy_strings.y[idx],
@@ -9628,9 +9747,7 @@ fn encode_columnar_value_column(values: Vec<JsonValue>) -> ColumnarValueColumn {
         x.push(next_x);
         y.push(next_y);
     }
-    ColumnarValueColumn::JsonObjectXYStrings {
-        json_object_xy_strings: ColumnarXYStrings { x, y },
-    }
+    ColumnarValueColumn::JsonObjectXYStrings(ColumnarXYStrings { x, y })
 }
 
 fn encode_json_value_dictionary(values: Vec<JsonValue>) -> ColumnarValueColumn {
@@ -9638,31 +9755,31 @@ fn encode_json_value_dictionary(values: Vec<JsonValue>) -> ColumnarValueColumn {
     let mut indexes = BTreeMap::<String, usize>::new();
     let mut refs = Vec::with_capacity(values.len());
     for value in values {
-        let key = serde_json::to_string(&value).expect("serde_json::Value is serializable");
+        let wire_value = WireValue::from(&value);
+        let key = bytes_to_hex(
+            &bincode::serialize(&wire_value).expect("wire value is bincode serializable"),
+        );
         let next = indexes.get(&key).copied().unwrap_or_else(|| {
             let index = dict.len();
-            dict.push(value);
+            dict.push(wire_value);
             indexes.insert(key, index);
             index
         });
         refs.push(next);
     }
-    smallest_json_column(vec![
+    smallest_binary_column(vec![
         ColumnarValueColumn::Json(
             refs.iter()
                 .map(|idx| dict[*idx].clone())
                 .collect::<Vec<_>>(),
         ),
-        ColumnarValueColumn::JsonDictionary {
-            json_value_dict: dict,
-            json_value_refs: refs,
-        },
+        ColumnarValueColumn::JsonDictionary(dict, refs),
     ])
 }
 
 fn json_xy_string(value: &JsonValue) -> Option<(f64, f64)> {
     let text = value.as_str()?;
-    let parsed = serde_json::from_str::<JsonValue>(text).ok()?;
+    let parsed = JsonValue::from_json(serde_json::from_str::<serde_json::Value>(text).ok()?);
     let x = parsed.get("x")?.as_f64()?;
     let y = parsed.get("y")?.as_f64()?;
     if x.is_finite() && y.is_finite() {
@@ -9672,14 +9789,14 @@ fn json_xy_string(value: &JsonValue) -> Option<(f64, f64)> {
     }
 }
 
-fn smallest_json_column<T>(candidates: Vec<T>) -> T
+fn smallest_binary_column<T>(candidates: Vec<T>) -> T
 where
     T: Serialize,
 {
     candidates
         .into_iter()
         .min_by_key(|candidate| {
-            serde_json::to_vec(candidate)
+            postcard::to_allocvec(candidate)
                 .map(|bytes| bytes.len())
                 .unwrap_or(usize::MAX)
         })
@@ -10005,9 +10122,9 @@ fn parse_public_tx_id(tx_id: &str) -> Result<(&str, i64)> {
     Ok((node_id, local_epoch))
 }
 
-fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
-    let detail = serde_json::from_str::<JsonValue>(detail_json)
-        .map_err(|err| crate::Error::new(format!("invalid rejection detail JSON: {err}")))?;
+fn parse_rejection_detail(detail: &str) -> Result<Option<JsonValue>> {
+    let detail = decode_value_text(detail)
+        .map_err(|err| crate::Error::new(format!("invalid rejection detail: {err}")))?;
     if detail.is_null() {
         Ok(None)
     } else {
@@ -10015,38 +10132,26 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     }
 }
 
-fn tx_metadata_json(auth_user: Option<&str>) -> Result<Option<String>> {
-    auth_user
-        .map(|user| serde_json::to_string(&json!({ "auth_user": user })))
-        .transpose()
-        .map_err(|err| crate::Error::new(err.to_string()))
+fn tx_metadata(auth_user: Option<&str>) -> Result<Option<String>> {
+    Ok(auth_user.map(str::to_owned))
 }
 
 fn parse_tx_auth_user_for_sqlite(
-    metadata_json: Option<&str>,
+    metadata: Option<&str>,
     column: usize,
 ) -> rusqlite::Result<Option<String>> {
-    let Some(metadata_json) = metadata_json else {
+    let Some(metadata) = metadata else {
         return Ok(None);
     };
-    let metadata = serde_json::from_str::<JsonValue>(metadata_json).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(
-            column,
-            rusqlite::types::Type::Text,
-            Box::new(err),
-        )
-    })?;
-    Ok(metadata
-        .get("auth_user")
-        .and_then(JsonValue::as_str)
-        .map(str::to_owned))
+    let _ = column;
+    Ok(Some(metadata.to_owned()))
 }
 
 fn parse_rejection_detail_for_sqlite(
-    detail_json: &str,
+    detail: &str,
     column: usize,
 ) -> rusqlite::Result<Option<JsonValue>> {
-    let detail = serde_json::from_str::<JsonValue>(detail_json).map_err(|err| {
+    let detail = decode_value_text(detail).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Text,
@@ -10060,12 +10165,25 @@ fn parse_rejection_detail_for_sqlite(
     }
 }
 
-fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
-    value
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
-        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
+fn encode_optional_value_text(value: Option<&JsonValue>) -> Result<String> {
+    encode_value_text(value.unwrap_or(&JsonValue::Null))
+}
+
+fn encode_value_text(value: &JsonValue) -> Result<String> {
+    bincode::serialize(&WireValue::from(value))
+        .map(|bytes| bytes_to_hex(&bytes))
+        .map_err(|err| crate::Error::new(format!("encode value: {err}")))
+}
+
+fn decode_value_text(value: &str) -> Result<JsonValue> {
+    if let Ok(bytes) = hex_to_bytes(value) {
+        if let Ok(value) = bincode::deserialize::<WireValue>(&bytes) {
+            return Ok(value.into());
+        }
+    }
+    Err(crate::Error::new(format!(
+        "invalid binary value text {value}"
+    )))
 }
 
 fn export_reads_for_history(
@@ -11418,7 +11536,7 @@ fn sql_value_to_json_cached(
             Ok(JsonValue::String(value.clone()))
         }
         (FieldKind::Bytes, rusqlite::types::Value::Blob(value)) => {
-            Ok(JsonValue::String(bytes_to_hex(value)))
+            Ok(JsonValue::Bytes(value.clone()))
         }
         (FieldKind::Bool, rusqlite::types::Value::Integer(value)) => {
             Ok(JsonValue::Bool(*value != 0))
@@ -11431,16 +11549,6 @@ fn sql_value_to_json_cached(
             field.name
         ))),
     }
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn cached_public_row_id(
@@ -11928,15 +12036,15 @@ mod tests {
 
         assert!(matches!(
             &payload.txs.node_id,
-            ColumnarStringColumn::Dictionary { .. }
+            ColumnarStringColumn::Dictionary(..)
         ));
         assert!(matches!(
             &payload.history.table,
-            ColumnarStringColumn::Dictionary { .. }
+            ColumnarStringColumn::Dictionary(..)
         ));
         assert!(matches!(
             &payload.history.created_by,
-            ColumnarStringColumn::Dictionary { .. }
+            ColumnarStringColumn::Dictionary(..)
         ));
         assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
     }
@@ -11972,7 +12080,7 @@ mod tests {
 
         assert!(matches!(
             &payload.history.value_columns[status_idx],
-            ColumnarValueColumn::JsonDictionary { .. }
+            ColumnarValueColumn::JsonDictionary(..)
         ));
         assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
     }
@@ -11998,28 +12106,22 @@ mod tests {
 
         assert!(matches!(
             &payload.txs.local_epoch,
-            ColumnarI64Column::Delta { .. }
+            ColumnarI64Column::Delta(..)
         ));
         assert!(matches!(
             &payload.txs.global_epoch,
-            ColumnarNullableI64Column::Runs { .. }
+            ColumnarNullableI64Column::Runs(..)
         ));
         assert!(matches!(
             &payload.txs.rejection_detail,
-            ColumnarNullableJsonColumn::Runs { .. }
+            ColumnarNullableJsonColumn::Runs(..)
         ));
         assert!(matches!(
             &payload.txs.receipt_tiers,
-            ColumnarI64VecColumn::Runs { .. }
+            ColumnarI64VecColumn::Runs(..)
         ));
-        assert!(matches!(
-            &payload.txs.outcome,
-            ColumnarI64Column::Runs { .. }
-        ));
-        assert!(matches!(
-            &payload.history.op,
-            ColumnarI64Column::Runs { .. }
-        ));
+        assert!(matches!(&payload.txs.outcome, ColumnarI64Column::Runs(..)));
+        assert!(matches!(&payload.history.op, ColumnarI64Column::Runs(..)));
         assert_eq!(payload.into_bundle().unwrap().history, bundle.history);
     }
 
@@ -12038,7 +12140,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             payload.history.value_columns[body_idx],
-            ColumnarValueColumn::JsonObjectXYStrings { .. }
+            ColumnarValueColumn::JsonObjectXYStrings(..)
         ));
         let decoded = payload.into_bundle().unwrap();
 
@@ -12117,29 +12219,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bundle_history_block_payload_still_decodes() {
-        let bundle = sample_block_bundle();
-        let legacy = serde_json::to_vec(&bundle).unwrap();
-        let compressed = lz4_flex::compress_prepend_size(&legacy);
-
-        let decoded = decode_history_block_payload(
-            LEGACY_HISTORY_BLOCK_CODEC,
-            LEGACY_HISTORY_BLOCK_FORMAT_VERSION,
-            &compressed,
-        )
-        .unwrap();
-
-        assert_eq!(decoded.txs, bundle.txs);
-        assert_eq!(decoded.reads, bundle.reads);
-        assert_eq!(decoded.history, bundle.history);
-    }
-
-    #[test]
     fn columnar_history_block_payload_rejects_mismatched_columns() {
         let bundle = sample_block_bundle();
         let mut payload = ColumnarHistoryBlockPayload::from_bundle(&bundle);
         payload.history.row_id.clear();
-        let encoded = serde_json::to_vec(&payload).unwrap();
+        let encoded = postcard::to_allocvec(&payload).unwrap();
         let compressed = lz4_flex::compress_prepend_size(&encoded);
 
         let error = decode_history_block_payload(

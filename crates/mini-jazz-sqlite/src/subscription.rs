@@ -1,6 +1,6 @@
 use crate::sync::QueryPredicateRecord;
 use crate::types::{RejectionInfo, RowDiff, RowView};
-use serde_json::Value as JsonValue;
+use crate::value::Value as JsonValue;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -114,7 +114,8 @@ impl RowsSubscription {
                 serde_json::json!({
                     "eq": value,
                     "limit": limit,
-                }),
+                })
+                .into(),
             )),
             last_rows: rows,
         }
@@ -137,7 +138,8 @@ impl RowsSubscription {
                     "eq": value,
                     "order_field": order_field,
                     "limit": limit,
-                }),
+                })
+                .into(),
             )),
             last_rows: rows,
         }
@@ -286,7 +288,7 @@ mod tests {
         RowView {
             table: "items".to_owned(),
             id: id.to_owned(),
-            values: BTreeMap::from([("title".to_owned(), json!(id))]),
+            values: BTreeMap::from([("title".to_owned(), json!(id).into())]),
             created_by: "alice".to_owned(),
             tx_id: format!("tx-{id}"),
             conflict_count: 0,

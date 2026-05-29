@@ -1,6 +1,6 @@
+use crate::value::Value as JsonValue;
 use crate::Result;
 use rusqlite::Connection;
-use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
@@ -339,9 +339,9 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           conflict_mode INTEGER NOT NULL,
           outcome INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
-          metadata_json TEXT,
-          writes_json TEXT NOT NULL DEFAULT '[]',
-          reads_json TEXT,
+          metadata TEXT,
+          writes_json BLOB NOT NULL DEFAULT X'0B',
+          reads_json BLOB,
           UNIQUE (node_num, local_epoch)
         );
 
@@ -356,7 +356,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
                tx.conflict_mode,
                tx.outcome,
                tx.created_at,
-               tx.metadata_json
+               tx.metadata
           FROM jazz_tx tx
           JOIN jazz_node node ON node.node_num = tx.node_num;
 
@@ -365,20 +365,20 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           tier INTEGER NOT NULL,
           observed_at INTEGER NOT NULL,
           authority_node_num INTEGER,
-          receipt_json TEXT,
+          receipt TEXT,
           PRIMARY KEY (tx_num, tier)
         ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS jazz_tx_rejection (
           tx_num INTEGER PRIMARY KEY,
           code TEXT NOT NULL,
-          detail_json TEXT NOT NULL
+          detail TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS jazz_tx_awaiting_dependency (
           tx_num INTEGER PRIMARY KEY,
           auth_user TEXT NOT NULL,
-          detail_json TEXT NOT NULL,
+          detail TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
 
@@ -420,9 +420,9 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           table_name TEXT NOT NULL,
           field_name TEXT NOT NULL,
           op TEXT NOT NULL,
-          value_json TEXT NOT NULL,
+          value TEXT NOT NULL,
           observed_at INTEGER NOT NULL,
-          PRIMARY KEY (branch_id, table_name, field_name, op, value_json)
+          PRIMARY KEY (branch_id, table_name, field_name, op, value)
         ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS history_blocks (
@@ -478,7 +478,7 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
         CREATE TABLE IF NOT EXISTS jazz_branch_backing (
           branch_id TEXT PRIMARY KEY,
           base_global_epoch INTEGER,
-          source_branch_ids_json TEXT NOT NULL,
+          source_branch_ids BLOB NOT NULL,
           created_at INTEGER NOT NULL
         ) WITHOUT ROWID;
 
@@ -487,8 +487,8 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           VALUES (1, 'main', NULL, 0, 0);
 
         INSERT OR IGNORE INTO jazz_branch_backing
-          (branch_id, base_global_epoch, source_branch_ids_json, created_at)
-          VALUES ('main', NULL, '[]', 0);
+          (branch_id, base_global_epoch, source_branch_ids, created_at)
+          VALUES ('main', NULL, X'0000000000000000', 0);
         "#,
     )?;
 
@@ -683,7 +683,7 @@ pub(crate) fn storage_column(field: &FieldDef) -> String {
 
 pub(crate) fn field_sql_value(
     field: &FieldDef,
-    value: &serde_json::Value,
+    value: &JsonValue,
     resolve_ref: impl FnOnce(&str, &str) -> crate::Result<i64>,
 ) -> crate::Result<rusqlite::types::Value> {
     if value.is_null() {
@@ -702,11 +702,15 @@ pub(crate) fn field_sql_value(
                 .ok_or_else(|| crate::Error::new(format!("expected text for {}", field.name)))?
                 .to_owned(),
         ),
-        FieldKind::Bytes => rusqlite::types::Value::Blob(hex_to_bytes(
-            value
-                .as_str()
-                .ok_or_else(|| crate::Error::new(format!("expected bytes for {}", field.name)))?,
-        )?),
+        FieldKind::Bytes => {
+            rusqlite::types::Value::Blob(if let Some(bytes) = value.as_bytes() {
+                bytes.to_vec()
+            } else {
+                hex_to_bytes(value.as_str().ok_or_else(|| {
+                    crate::Error::new(format!("expected bytes for {}", field.name))
+                })?)?
+            })
+        }
         FieldKind::Bool => rusqlite::types::Value::Integer(i64::from(
             value
                 .as_bool()
