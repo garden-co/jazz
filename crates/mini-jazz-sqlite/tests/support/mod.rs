@@ -92,11 +92,11 @@ impl Harness {
         self.dir.path().join(file_name)
     }
 
-    pub fn memory(&self, node_id: &str, user: &str) -> Result<Runtime> {
+    pub fn todo_memory(&self, node_id: &str, user: &str) -> Result<Runtime> {
         open_todo_app(Storage::Memory, node_id, user)
     }
 
-    pub fn durable(&self, file_name: &str, node_id: &str, user: &str) -> Result<Runtime> {
+    pub fn todo_durable(&self, file_name: &str, node_id: &str, user: &str) -> Result<Runtime> {
         open_todo_app(Storage::File(self.path(file_name)), node_id, user)
     }
 

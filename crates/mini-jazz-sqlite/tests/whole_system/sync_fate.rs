@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[test]
 fn query_scoped_sync_converges_memory_and_durable_nodes() {
     let harness = support::Harness::new();
-    let mut alice = harness.memory("alice-tab", "alice").unwrap();
+    let mut alice = harness.todo_memory("alice-tab", "alice").unwrap();
     let mut worker = harness
-        .durable("worker.sqlite", "alice-worker", "alice")
+        .todo_durable("worker.sqlite", "alice-worker", "alice")
         .unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
@@ -21,7 +21,7 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
 
     drop(worker);
     let reopened = harness
-        .durable("worker.sqlite", "alice-worker", "alice")
+        .todo_durable("worker.sqlite", "alice-worker", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap(), alice.open_todos().unwrap());
 }
@@ -29,9 +29,9 @@ fn query_scoped_sync_converges_memory_and_durable_nodes() {
 #[test]
 fn merged_query_refresh_bundle_applies_like_individual_bundles() {
     let harness = support::Harness::new();
-    let mut upstream = harness.memory("upstream", "alice").unwrap();
-    let mut separate_peer = harness.memory("separate-peer", "alice").unwrap();
-    let mut merged_peer = harness.memory("merged-peer", "alice").unwrap();
+    let mut upstream = harness.todo_memory("upstream", "alice").unwrap();
+    let mut separate_peer = harness.todo_memory("separate-peer", "alice").unwrap();
+    let mut merged_peer = harness.todo_memory("merged-peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -62,7 +62,7 @@ fn merged_query_refresh_bundle_applies_like_individual_bundles() {
 #[test]
 fn durable_query_reads_drive_reconnect_refresh_after_restart() {
     let harness = support::Harness::new();
-    let mut upstream = harness.memory("upstream", "alice").unwrap();
+    let mut upstream = harness.todo_memory("upstream", "alice").unwrap();
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
         .create_todo("todo-1", "Initially open", false, "project-1")
@@ -70,7 +70,9 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
 
     let query_reads: Vec<QueryReadRecord>;
     {
-        let mut worker = harness.durable("worker.sqlite", "worker", "alice").unwrap();
+        let mut worker = harness
+            .todo_durable("worker.sqlite", "worker", "alice")
+            .unwrap();
         let bundle = upstream.export_query_scope_open_todos().unwrap();
         query_reads = bundle.query_reads.clone();
         support::apply(bundle, &mut worker).unwrap();
@@ -91,7 +93,7 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         .unwrap();
 
     let mut reopened = harness
-        .durable("worker.sqlite", "worker-reopened", "alice")
+        .todo_durable("worker.sqlite", "worker-reopened", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
     assert!(reopened.observed_query_reads().unwrap().is_empty());
@@ -482,23 +484,23 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
 #[test]
 fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
     let harness = support::Harness::new();
-    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut tab = harness.todo_memory("alice-tab", "alice").unwrap();
     tab.create_project("project-1", "Spec work").unwrap();
     tab.create_todo("todo-1", "Survives tab restart", false, "project-1")
         .unwrap();
 
     {
         let mut worker = harness
-            .durable("worker.sqlite", "alice-worker", "alice")
+            .todo_durable("worker.sqlite", "alice-worker", "alice")
             .unwrap();
         support::apply(tab.export_query_scope_open_todos().unwrap(), &mut worker).unwrap();
         assert_eq!(worker.open_todos().unwrap(), tab.open_todos().unwrap());
     }
 
     let worker = harness
-        .durable("worker.sqlite", "alice-worker", "alice")
+        .todo_durable("worker.sqlite", "alice-worker", "alice")
         .unwrap();
-    let mut fresh_tab = harness.memory("alice-tab-restarted", "alice").unwrap();
+    let mut fresh_tab = harness.todo_memory("alice-tab-restarted", "alice").unwrap();
     assert!(fresh_tab.open_todos().unwrap().is_empty());
 
     support::apply(

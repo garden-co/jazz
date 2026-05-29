@@ -1028,7 +1028,9 @@ fn projection_rebuild_is_semantically_identical_to_current_reads_after_mixed_fat
 fn durable_reopen_preserves_projection_without_rebuild() {
     let harness = support::Harness::new();
     {
-        let mut worker = harness.durable("worker.sqlite", "worker", "alice").unwrap();
+        let mut worker = harness
+            .todo_durable("worker.sqlite", "worker", "alice")
+            .unwrap();
         worker.create_project("project-1", "Spec work").unwrap();
         worker
             .create_todo("todo-1", "Survive reopen", false, "project-1")
@@ -1036,7 +1038,7 @@ fn durable_reopen_preserves_projection_without_rebuild() {
     }
 
     let reopened = harness
-        .durable("worker.sqlite", "worker-reopened", "alice")
+        .todo_durable("worker.sqlite", "worker-reopened", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
     assert_eq!(
