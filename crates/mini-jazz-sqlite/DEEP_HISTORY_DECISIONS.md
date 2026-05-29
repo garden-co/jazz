@@ -1110,3 +1110,11 @@ Decision: do not split local history batches from receive history batches just t
 Why: local history rows are new by construction, so avoiding `OR REPLACE` looked like an easy write-path win. The canonical sample did not support it: append history-insert time got worse and the other scenarios were neutral. The shared `INSERT OR REPLACE` helper remains.
 
 Scope impact: the uncommitted plain-insert experiment was reverted.
+
+## Fri May 29 00:58:51 PDT 2026 - Preflight History Delta Before Applying Text Sidecar
+
+Decision: `apply_history_delta` now validates bundle headers and history block manifests before applying the text-op sidecar.
+
+Why: the receive path previously applied `text_ops_delta` first, then discovered bundle/schema incompatibility inside `apply_bundle`. That could leave orphan text ops behind for a delta whose row history was rejected. This is not full transactional apply yet, but it closes the most obvious sidecar-before-validation leak.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. A regression verifies that a schema-incompatible delta returns an error without advancing the receiver's text-op watermark.

@@ -2136,6 +2136,11 @@ impl Runtime {
         &mut self,
         delta: &HistoryDelta,
     ) -> Result<ApplyBundleProfile> {
+        self.validate_bundle_header_for_apply(&delta.bundle, true)?;
+        for block in &delta.blocks {
+            self.schema.table_def(&block.manifest.table)?;
+            validate_history_block_export_manifest(block)?;
+        }
         if !delta.text_ops_delta.is_empty() {
             let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
             crate::persisted_text_ops::apply_delta(
@@ -2152,13 +2157,11 @@ impl Runtime {
         self.apply_bundle_inner(bundle, true)
     }
 
-    fn apply_bundle_inner(
-        &mut self,
+    fn validate_bundle_header_for_apply(
+        &self,
         bundle: &Bundle,
         check_policy_fingerprint: bool,
-    ) -> Result<ApplyBundleProfile> {
-        let total_started = Instant::now();
-        let validation_started = Instant::now();
+    ) -> Result<()> {
         if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
             return Err(crate::Error::new(format!(
                 "unsupported bundle protocol version {}",
@@ -2187,6 +2190,17 @@ impl Runtime {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn apply_bundle_inner(
+        &mut self,
+        bundle: &Bundle,
+        check_policy_fingerprint: bool,
+    ) -> Result<ApplyBundleProfile> {
+        let total_started = Instant::now();
+        let validation_started = Instant::now();
+        self.validate_bundle_header_for_apply(bundle, check_policy_fingerprint)?;
         let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
         let begin_tx_started = Instant::now();
@@ -13000,6 +13014,37 @@ mod tests {
         assert_eq!(
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello sync"
+        );
+    }
+
+    #[test]
+    fn rejected_history_delta_does_not_apply_deep_text_sidecar() {
+        let alice_schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let bob_schema = SchemaDef::new().table("other_docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", alice_schema)
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", bob_schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "orphan candidate")
+            .unwrap();
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+
+        let err = bob.apply_history_delta(&delta).unwrap_err();
+
+        assert!(err.to_string().contains("incompatible schema fingerprint"));
+        assert_eq!(
+            bob.current_text_ops_watermark().unwrap(),
+            crate::persisted_text_ops::DeltaWatermark::default()
         );
     }
 
