@@ -476,6 +476,90 @@ fn branch_query_scope_exports_branch_policy_backing_row() {
 }
 
 #[test]
+fn for_branch_write_uses_branch_policy_and_backing_row_visibility() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+            table.write_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    alice.create_branch("draft-a", None).unwrap();
+    alice.checkout_branch("draft-a").unwrap();
+
+    let accepted = alice
+        .insert_row(
+            "todos",
+            "todo-allowed",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+    let rejected = alice
+        .insert_row(
+            "todos",
+            "todo-denied",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Denied")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+
+    assert!(alice
+        .transaction_info(&accepted)
+        .unwrap()
+        .rejection_code
+        .is_none());
+    assert_eq!(
+        alice.transaction_info(&rejected).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert_eq!(
+        alice
+            .read_rows("todos")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-allowed"]
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

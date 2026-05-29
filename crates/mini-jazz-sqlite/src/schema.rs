@@ -93,10 +93,15 @@ impl SchemaDef {
             ));
             for (branch_table, branch_policy) in &table.branch_policies {
                 parts.push(format!(
-                    "{table}:for_branch:{branch_table}:read:{read}",
+                    "{table}:for_branch:{branch_table}:read:{read}:write:{write}",
                     table = table.name,
                     read = branch_policy
                         .read_policy
+                        .as_ref()
+                        .map(|policy| policy.fingerprint_for_table(table))
+                        .unwrap_or_else(|| "deny".to_owned()),
+                    write = branch_policy
+                        .write_policy
                         .as_ref()
                         .map(|policy| policy.fingerprint_for_table(table))
                         .unwrap_or_else(|| "deny".to_owned()),
@@ -173,6 +178,7 @@ pub(crate) enum PolicyDef {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct BranchPolicyDef {
     pub(crate) read_policy: Option<PolicyDef>,
+    pub(crate) write_policy: Option<PolicyDef>,
 }
 
 impl PolicyDef {
@@ -362,6 +368,22 @@ impl TableBuilder {
         });
     }
 
+    pub fn write_for_branch_if_field_matches(
+        &mut self,
+        branch_table: &str,
+        field: &str,
+        branch_field: &str,
+    ) {
+        self.table
+            .branch_policies
+            .entry(branch_table.to_owned())
+            .or_default()
+            .write_policy = Some(PolicyDef::BranchFieldEquals {
+            field: field.to_owned(),
+            branch_field: branch_field.to_owned(),
+        });
+    }
+
     fn finish(self) -> TableDef {
         self.table
     }
@@ -545,6 +567,9 @@ fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
             let branch_table = schema.table_def(branch_table_name)?;
             if let Some(read_policy) = &branch_policy.read_policy {
                 validate_branch_policy(table, branch_table, read_policy)?;
+            }
+            if let Some(write_policy) = &branch_policy.write_policy {
+                validate_branch_policy(table, branch_table, write_policy)?;
             }
         }
     }

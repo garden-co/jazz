@@ -41,6 +41,13 @@ use it rather than silently falling back to the table's main read policy.
 Missing branch-view rules for a declared branch policy deny. Normal main reads
 never use branch-view policies.
 
+Branch-view write policies use the same backing-row context. A write may be
+allowed because the proposed row field matches a backing-row field. If the
+backing row is hidden or the branch-view write rule is missing for a table with
+branch policy, the write is denied. Denial is represented as rejected history
+and projection repair, consistent with ordinary local-first policy failure
+semantics.
+
 ## Server Permission Validation Flow
 
 Permission enforcement follows the current Jazz Tools server flow:
@@ -129,9 +136,9 @@ snapshots.
 Open issues:
 
 - exact SQL-lowerable policy IR
-- branch-view write policies
 - explicit inherit-main branch policy semantics
 - branch-view query-scope repair coverage
+- branch-view write policy read-set recording
 - how to bound recursive policy evaluation
 - edge policy-readiness strategy
 - redaction rules for policy denial/rejection explanations

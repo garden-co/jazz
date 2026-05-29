@@ -325,3 +325,13 @@ the branch metadata and todo history but hides the todo because its branch
 policy dependency is missing. Export now treats branch backing rows as policy
 dependencies and sends their main-branch visible history alongside the result
 scope.
+
+## 2026-05-29 00:16 PDT
+
+Ported the narrow `forBranch` write-policy shape too: branch writes can require
+the proposed row field to match a field on the app backing row, and hidden
+backing rows deny. Local denied writes still follow the existing prototype
+pattern: append rejected history, hide current, and expose rejection info rather
+than throwing synchronously. Remaining gap: branch backing rows used by write
+policy should be recorded as policy read-set facts for exclusive validation and
+sync diagnostics.

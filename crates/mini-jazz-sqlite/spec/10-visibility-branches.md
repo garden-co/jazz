@@ -212,16 +212,16 @@ Baseline branch features:
 - branch policy/write validation against branch overlay plus pinned base
 - branch query-scope repair scoped by branch id
 - replay-ordered branch source-list mutation
-- read-only branch-view policy over app backing rows and direct branch queries
+- branch-view read/write policy over app backing rows and direct branch queries
 
 Deferred branch features:
 
 - hot branch projections
 - metadata-only merge commits
 - product-grade branch merge APIs over multi-source graphs
-- branch-view write policies
 - inherit-main branch policies
 - branch-view query-scope repair coverage
+- branch-view write policy read-set recording
 
 Branch merge should preferably become a metadata transaction changing branch
 sources rather than copying rows. Multi-base conflicts should remain visible
