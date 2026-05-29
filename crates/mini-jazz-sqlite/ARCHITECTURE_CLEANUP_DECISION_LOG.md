@@ -682,3 +682,9 @@ regress.
 - Replaced wildcard runtime imports in `runtime::writes` and `runtime::write_batch` with explicit dependencies.
 - This is deliberately small but useful: these modules are now examples of the desired post-split shape, where write APIs declare the runtime helpers they actually depend on.
 - Focused storage/projection and transaction tests pass.
+
+## 2026-05-29 02:54 PDT - Tightened transaction-builder imports
+
+- Replaced the transaction-builder wildcard runtime import with explicit dependencies on transaction snapshots, write-core staging helpers, runtime state, and projection repair.
+- This makes the explicit transaction layer read more like its own API boundary instead of an extension of the old monolithic runtime namespace.
+- Focused transaction tests pass.
