@@ -746,3 +746,9 @@ regress.
 - Replaced the sync-export wildcard runtime import with explicit dependencies.
 - This keeps table-history, recursive-query, and exclusive-forwarding export surfaces visible as sync boundaries rather than ambient runtime helpers.
 - Focused recursive and exclusive-forwarding tests pass.
+
+## 2026-05-29 03:15 PDT - Tightened subscription imports
+
+- Replaced the subscription wildcard runtime import with explicit query/subscription/type dependencies.
+- This makes subscriptions read like a thin reactive layer over the real query APIs instead of another hidden owner of runtime internals.
+- Focused subscription tests pass.

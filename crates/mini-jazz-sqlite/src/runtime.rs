@@ -4,9 +4,7 @@ use crate::apply::{
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
-use crate::query_api::{
-    predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
-};
+use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::query_observation::{
     built_query_from_read, built_query_read_value, observed_ids_from_query_value, observed_row_ids,
     support_window_query,
@@ -14,13 +12,12 @@ use crate::query_observation::{
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::types::{ApplyBundleProfile, QueryExportProfile, ReadTier, RejectionInfo, RowView};
+use crate::types::{ApplyBundleProfile, QueryExportProfile, ReadTier, RowView};
 use crate::{
     branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set, tx,
     users, Result,
