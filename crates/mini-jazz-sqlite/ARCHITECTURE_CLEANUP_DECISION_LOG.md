@@ -261,3 +261,22 @@ Local cleanup continues with branch-record import. Branch metadata application
 already has phase shape: ensure branch records, sync source lists, and produce
 `branch_id -> branch_num` for later history application. Extract that so branch
 catalogue behavior is not an inline prelude to row history import.
+
+## 2026-05-28 23:57 PDT
+
+#952 explorer recommendation: the valuable minimal semantic slice is read-only
+`forBranch`: app-declared branch backing table, backing-row visibility, and row
+policy matching against backing-row fields for branch reads/direct branch
+queries. Defer branch writes/inheritance/export filtering until a clean
+`PolicyContext { branch }` boundary exists. Current spec already describes two
+policy layers for branch access, but implementation only has system
+`jazz_branch_backing`, not app-declared backing rows. I should avoid copying
+#952's route-layer-heavy policy code until policy lowering is cleaned up.
+
+## 2026-05-28 23:57 PDT
+
+Policy prep slice: replace anonymous `Option<branch_num>` policy lowering with
+an explicit read-scope enum. This does not implement app-declared branch backing
+rows yet, but it makes the next slice much less likely to blur main/current,
+branch, and snapshot semantics. This is the same lesson as auth/user naming:
+if the type only says `Option<i64>`, agents will guess and add hardcoded paths.

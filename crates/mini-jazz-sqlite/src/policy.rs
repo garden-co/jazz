@@ -6,6 +6,12 @@ use std::collections::BTreeMap;
 
 const MAX_POLICY_RECURSION_DEPTH: usize = 64;
 
+#[derive(Clone, Copy)]
+enum PolicyReadScope {
+    CurrentMain,
+    Branch { branch_num: i64 },
+}
+
 pub(crate) struct WriteCheck<'a> {
     pub(crate) db: &'a Connection,
     pub(crate) schema: &'a SchemaDef,
@@ -84,7 +90,9 @@ pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
                 "current",
                 &ref_table.read_policy,
                 check.user,
-                Some(check.branch_num),
+                PolicyReadScope::Branch {
+                    branch_num: check.branch_num,
+                },
                 0,
             )?;
             let count: i64 = check.db.query_row(
@@ -199,15 +207,12 @@ pub(crate) fn branch_read_policy_sql_for_alias(
     user: &str,
     branch_num: i64,
 ) -> Result<String> {
-    lower_policy(
-        schema,
-        table,
-        alias,
-        &table.read_policy,
-        user,
-        Some(branch_num),
-        0,
-    )
+    let scope = if branch_num == 1 {
+        PolicyReadScope::CurrentMain
+    } else {
+        PolicyReadScope::Branch { branch_num }
+    };
+    lower_policy(schema, table, alias, &table.read_policy, user, scope, 0)
 }
 
 pub(crate) fn snapshot_read_policy_sql_for_alias(
@@ -234,7 +239,7 @@ fn lower_policy(
     alias: &str,
     policy: &PolicyDef,
     user: &str,
-    branch_num: Option<i64>,
+    scope: PolicyReadScope,
     depth: usize,
 ) -> Result<String> {
     if depth > MAX_POLICY_RECURSION_DEPTH {
@@ -270,17 +275,18 @@ fn lower_policy(
                 &parent_alias,
                 &ref_table.read_policy,
                 user,
-                branch_num,
+                scope,
                 depth + 1,
             )?;
-            let branch_filter = branch_num
-                .map(|branch_num| {
+            let branch_filter = match scope {
+                PolicyReadScope::CurrentMain => String::new(),
+                PolicyReadScope::Branch { branch_num } => {
                     format!(
                         "AND {}",
                         effective_branch_sql(&parent_alias, &ref_table.name, branch_num)
                     )
-                })
-                .unwrap_or_default();
+                }
+            };
             Ok(format!(
                 "EXISTS (
                    SELECT 1
