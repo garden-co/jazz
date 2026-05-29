@@ -1627,7 +1627,7 @@ impl Runtime {
     }
 
     pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
-        let db = self.conn.transaction()?;
+        let db = self.conn.savepoint()?;
         let mut imported = 0;
         for block in blocks {
             self.schema.table_def(&block.manifest.table)?;
@@ -2155,17 +2155,23 @@ impl Runtime {
             self.schema.table_def(&block.manifest.table)?;
             validate_history_block_export_manifest(block)?;
         }
-        let text_watermark = crate::persisted_text_ops::current_watermark(&self.conn)?;
-        let max_history_block_id = self.conn.query_row(
-            "SELECT COALESCE(MAX(block_id), 0) FROM history_blocks",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
+        self.conn
+            .execute_batch("SAVEPOINT jazz_history_delta_apply")?;
         let result = self.profile_apply_history_delta_after_preflight(delta);
-        if result.is_err() {
-            rollback_partial_history_delta_apply(&self.conn, text_watermark, max_history_block_id)?;
+        match result {
+            Ok(profile) => {
+                self.conn
+                    .execute_batch("RELEASE SAVEPOINT jazz_history_delta_apply")?;
+                Ok(profile)
+            }
+            Err(err) => {
+                self.conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT jazz_history_delta_apply;
+                     RELEASE SAVEPOINT jazz_history_delta_apply;",
+                )?;
+                Err(err)
+            }
         }
-        result
     }
 
     fn profile_apply_history_delta_after_preflight(
@@ -2243,7 +2249,7 @@ impl Runtime {
         let validation_ms = duration_ms(validation_started.elapsed());
         let schema = self.schema.clone();
         let begin_tx_started = Instant::now();
-        let db = self.conn.transaction()?;
+        let db = self.conn.savepoint()?;
         let begin_tx_ms = duration_ms(begin_tx_started.elapsed());
 
         let branches_started = Instant::now();
@@ -7444,42 +7450,6 @@ fn validate_deep_text_root_exists(conn: &Connection, root: i64) -> Result<()> {
     crate::persisted_text_ops::root_len(conn, Some(root))
         .map(|_| ())
         .map_err(|err| crate::Error::new(format!("missing deep_text root {root}: {err}")))
-}
-
-fn rollback_partial_history_delta_apply(
-    conn: &Connection,
-    text_watermark: crate::persisted_text_ops::DeltaWatermark,
-    max_history_block_id: i64,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM history_block_text_root_range WHERE block_id > ?",
-        params![max_history_block_id],
-    )?;
-    conn.execute(
-        "DELETE FROM history_block_tx_index WHERE block_id > ?",
-        params![max_history_block_id],
-    )?;
-    conn.execute(
-        "DELETE FROM history_blocks WHERE block_id > ?",
-        params![max_history_block_id],
-    )?;
-    conn.execute(
-        "DELETE FROM jazz_text_snapshot WHERE snapshot_id > ?",
-        params![text_watermark.snapshot_id],
-    )?;
-    conn.execute(
-        "DELETE FROM jazz_text_op WHERE op_id > ?",
-        params![text_watermark.op_id],
-    )?;
-    conn.execute(
-        "DELETE FROM jazz_text_chunk
-         WHERE NOT EXISTS (
-           SELECT 1 FROM jazz_text_snapshot
-           WHERE instr(chunk_hashes, chunk_hash) > 0
-         )",
-        [],
-    )?;
-    Ok(())
 }
 
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {

@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:07:46 PDT 2026
+
+Decision: make `HistoryDelta` receive a real outer SQLite savepoint and let nested block/bundle import use savepoints too.
+
+Why: the compensation cleanup kept observable state coherent, but it was still a workaround. The actual runtime shape should be one receive envelope: text sidecar, sealed blocks, open bundle, and current/query repair either all land or all roll back. The first attempt at an outer savepoint failed because the inner block and bundle paths used `BEGIN`; switching those receive/import internals to savepoints preserves standalone behavior while allowing nested atomic apply.
+
+Scope impact: `profile_apply_history_delta` now wraps the full post-preflight apply in `SAVEPOINT jazz_history_delta_apply`. `import_history_blocks` and `apply_bundle_inner` use savepoints so they can run either standalone or nested under a larger receive. The earlier manual rollback helper is gone. Focused history-delta and history-block tests pass.
+
 ## Fri May 29 02:02:56 PDT 2026
 
 Decision: keep sealed-block deep-text root ranges range-shaped through sidecar export.
