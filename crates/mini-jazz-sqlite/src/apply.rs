@@ -1,7 +1,9 @@
 use crate::schema::SchemaDef;
 use crate::sync::{Bundle, BUNDLE_PROTOCOL_VERSION};
-use crate::Result;
-use std::collections::BTreeSet;
+use crate::{tx, Result};
+use rusqlite::{params, Connection};
+use serde_json::Value as JsonValue;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct BundleApplyPlan {
     policy_tables: BTreeSet<String>,
@@ -59,6 +61,122 @@ impl BundleApplyPlan {
     }
 }
 
+pub(crate) struct AppliedTxs {
+    pub(crate) tx_nums_by_id: BTreeMap<String, i64>,
+    pub(crate) tx_info_by_num: BTreeMap<i64, ApplyTxInfo>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ApplyTxInfo {
+    pub(crate) node_num: i64,
+    pub(crate) outcome: i64,
+    pub(crate) conflict_mode: i64,
+}
+
+pub(crate) fn apply_tx_records(db: &Connection, bundle: &Bundle) -> Result<AppliedTxs> {
+    let mut tx_nums_by_id = BTreeMap::new();
+    let mut tx_info_by_num = BTreeMap::new();
+    for tx_record in &bundle.txs {
+        let node_num = tx::ensure_node(db, &tx_record.node_id)?;
+        let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
+        db.execute(
+            "INSERT INTO jazz_tx
+             (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(tx_id) DO UPDATE SET
+               outcome = MAX(jazz_tx.outcome, excluded.outcome),
+               global_epoch = CASE
+                 WHEN jazz_tx.global_epoch IS NULL THEN excluded.global_epoch
+                 WHEN excluded.global_epoch IS NULL THEN jazz_tx.global_epoch
+                 ELSE MAX(jazz_tx.global_epoch, excluded.global_epoch)
+               END,
+               conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
+               metadata_json = CASE
+                 WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json
+                 ELSE jazz_tx.metadata_json
+               END",
+            params![
+                tx_record.tx_id,
+                node_num,
+                tx_record.local_epoch,
+                tx_record.global_epoch,
+                tx::KIND_DATA,
+                tx_record.conflict_mode,
+                tx_record.outcome,
+                tx_record.created_at,
+                metadata_json
+            ],
+        )?;
+        let tx_num = tx::tx_num(db, &tx_record.tx_id)?;
+        tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
+        tx_info_by_num.insert(tx_num, tx_apply_info(db, tx_num)?);
+        if tx_record.outcome == tx::OUTCOME_REJECTED {
+            if let Some(code) = &tx_record.rejection_code {
+                let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
+                db.execute(
+                    "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
+                     VALUES (?, ?, ?)
+                     ON CONFLICT(tx_num) DO UPDATE SET
+                       code = excluded.code,
+                       detail_json = CASE
+                         WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
+                         ELSE excluded.detail_json
+                       END",
+                    params![tx_num, code, detail_json],
+                )?;
+            }
+        }
+        if let Some(global_epoch) = tx_record.global_epoch {
+            db.execute(
+                "INSERT OR REPLACE INTO jazz_tx_receipt
+                 (tx_num, tier, observed_at, receipt_json)
+                 VALUES (?, ?, ?, '{}')",
+                params![tx_num, tx::TIER_GLOBAL, global_epoch],
+            )?;
+        }
+        for tier in &tx_record.receipt_tiers {
+            let observed_at = if *tier == tx::TIER_GLOBAL {
+                tx_record.global_epoch.unwrap_or(tx_record.created_at)
+            } else {
+                tx_record.created_at
+            };
+            db.execute(
+                "INSERT OR REPLACE INTO jazz_tx_receipt
+                 (tx_num, tier, observed_at, receipt_json)
+                 VALUES (?, ?, ?, '{}')",
+                params![tx_num, tier, observed_at],
+            )?;
+        }
+    }
+
+    Ok(AppliedTxs {
+        tx_nums_by_id,
+        tx_info_by_num,
+    })
+}
+
+pub(crate) fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
+    Ok(conn.query_row(
+        "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",
+        params![tx_num],
+        |row| {
+            Ok(ApplyTxInfo {
+                node_num: row.get(0)?,
+                outcome: row.get(1)?,
+                conflict_mode: row.get(2)?,
+            })
+        },
+    )?)
+}
+
+pub(crate) fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
+        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
+}
+
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
     for record in &bundle.history {
@@ -68,6 +186,18 @@ fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
         tables.insert(query_read.table.clone());
     }
     tables
+}
+
+fn tx_metadata_json(auth_user: Option<&str>) -> Result<String> {
+    let mut metadata = serde_json::Map::new();
+    if let Some(auth_user) = auth_user {
+        metadata.insert(
+            "auth_user".to_owned(),
+            JsonValue::String(auth_user.to_owned()),
+        );
+    }
+    serde_json::to_string(&JsonValue::Object(metadata))
+        .map_err(|err| crate::Error::new(err.to_string()))
 }
 
 fn bundle_touched_tables(bundle: &Bundle) -> BTreeSet<String> {

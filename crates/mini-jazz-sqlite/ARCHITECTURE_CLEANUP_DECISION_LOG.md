@@ -219,3 +219,11 @@ records inline inside `apply_bundle_inner`; that makes every sync/apply feature
 tempting to implement as another local scan. Introduce an `apply` module that
 can validate protocol/schema/policy compatibility and expose touched table sets
 as named facts for apply phases.
+
+## 2026-05-28 23:48 PDT
+
+Continue extracting apply phases: transaction record application is a coherent
+phase that produces exactly the identity map later phases need. Move tx import,
+receipt import, rejection detail import, and `ApplyTxInfo` lookup into the
+`apply` module so history/read application can depend on a named `AppliedTxs`
+result instead of a cluster of locals.

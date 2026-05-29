@@ -1,4 +1,6 @@
-use crate::apply::BundleApplyPlan;
+use crate::apply::{
+    apply_tx_records, encode_optional_json, tx_apply_info, ApplyTxInfo, BundleApplyPlan,
+};
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
 use crate::query_api::{
@@ -623,80 +625,7 @@ impl Runtime {
         let table_nums_by_name = crate::schema::table_nums(&db)?;
 
         let txs_started = ProfileTimer::start();
-        let mut tx_nums_by_id = BTreeMap::new();
-        let mut tx_info_by_num = BTreeMap::new();
-        for tx_record in &bundle.txs {
-            let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
-            let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
-            db.execute(
-                "INSERT INTO jazz_tx
-                 (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(tx_id) DO UPDATE SET
-                   outcome = MAX(jazz_tx.outcome, excluded.outcome),
-                   global_epoch = CASE
-                     WHEN jazz_tx.global_epoch IS NULL THEN excluded.global_epoch
-                     WHEN excluded.global_epoch IS NULL THEN jazz_tx.global_epoch
-                     ELSE MAX(jazz_tx.global_epoch, excluded.global_epoch)
-                   END,
-                   conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-                   metadata_json = CASE
-                     WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json
-                     ELSE jazz_tx.metadata_json
-                   END",
-                params![
-                    tx_record.tx_id,
-                    node_num,
-                    tx_record.local_epoch,
-                    tx_record.global_epoch,
-                    tx::KIND_DATA,
-                    tx_record.conflict_mode,
-                    tx_record.outcome,
-                    tx_record.created_at,
-                    metadata_json
-                ],
-            )?;
-            let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
-            tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
-            tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
-            if tx_record.outcome == tx::OUTCOME_REJECTED {
-                if let Some(code) = &tx_record.rejection_code {
-                    let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
-                    db.execute(
-                        "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
-                         VALUES (?, ?, ?)
-                         ON CONFLICT(tx_num) DO UPDATE SET
-                           code = excluded.code,
-                           detail_json = CASE
-                             WHEN excluded.detail_json = 'null' AND jazz_tx_rejection.detail_json != 'null' THEN jazz_tx_rejection.detail_json
-                             ELSE excluded.detail_json
-                           END",
-                        params![tx_num, code, detail_json],
-                    )?;
-                }
-            }
-            if let Some(global_epoch) = tx_record.global_epoch {
-                db.execute(
-                    "INSERT OR REPLACE INTO jazz_tx_receipt
-                     (tx_num, tier, observed_at, receipt_json)
-                     VALUES (?, ?, ?, '{}')",
-                    params![tx_num, tx::TIER_GLOBAL, global_epoch],
-                )?;
-            }
-            for tier in &tx_record.receipt_tiers {
-                let observed_at = if *tier == tx::TIER_GLOBAL {
-                    tx_record.global_epoch.unwrap_or(tx_record.created_at)
-                } else {
-                    tx_record.created_at
-                };
-                db.execute(
-                    "INSERT OR REPLACE INTO jazz_tx_receipt
-                     (tx_num, tier, observed_at, receipt_json)
-                     VALUES (?, ?, ?, '{}')",
-                    params![tx_num, tier, observed_at],
-                )?;
-            }
-        }
+        let applied_txs = apply_tx_records(&db, bundle)?;
         let txs_ms = txs_started.elapsed_ms();
 
         let reads_started = ProfileTimer::start();
@@ -709,7 +638,8 @@ impl Runtime {
              VALUES (?, ?, ?, ?, ?)",
         )?;
         for read_record in &bundle.reads {
-            let tx_num = tx_nums_by_id
+            let tx_num = applied_txs
+                .tx_nums_by_id
                 .get(&read_record.tx_id)
                 .copied()
                 .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
@@ -728,9 +658,13 @@ impl Runtime {
                 .observed_tx_id
                 .as_deref()
                 .map(|observed_tx_id| {
-                    tx_nums_by_id.get(observed_tx_id).copied().ok_or_else(|| {
-                        crate::Error::new("bundle read references missing observed tx")
-                    })
+                    applied_txs
+                        .tx_nums_by_id
+                        .get(observed_tx_id)
+                        .copied()
+                        .ok_or_else(|| {
+                            crate::Error::new("bundle read references missing observed tx")
+                        })
                 })
                 .transpose()?;
             insert_read_stmt.execute(params![
@@ -777,8 +711,8 @@ impl Runtime {
             schema: &schema,
             db: &db,
             local_node_num: self.node_num,
-            tx_nums_by_id: &tx_nums_by_id,
-            tx_info_by_num: &tx_info_by_num,
+            tx_nums_by_id: &applied_txs.tx_nums_by_id,
+            tx_info_by_num: &applied_txs.tx_info_by_num,
             branch_nums_by_id: &branch_nums_by_id,
             table_nums_by_name: &table_nums_by_name,
             row_nums_by_id: &mut row_nums_by_id,
@@ -5520,13 +5454,6 @@ fn tx_conflict_mode(conn: &Connection, tx_num: i64) -> Result<i64> {
     )?)
 }
 
-#[derive(Clone, Copy)]
-struct ApplyTxInfo {
-    node_num: i64,
-    outcome: i64,
-    conflict_mode: i64,
-}
-
 struct ApplyHistoryContext<'a> {
     schema: &'a SchemaDef,
     db: &'a Connection,
@@ -5538,20 +5465,6 @@ struct ApplyHistoryContext<'a> {
     row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
     row_nums_created_in_apply: &'a mut BTreeSet<i64>,
     user_nums_by_id: &'a mut BTreeMap<String, i64>,
-}
-
-fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {
-    Ok(conn.query_row(
-        "SELECT node_num, outcome, conflict_mode FROM jazz_tx WHERE tx_num = ?",
-        params![tx_num],
-        |row| {
-            Ok(ApplyTxInfo {
-                node_num: row.get(0)?,
-                outcome: row.get(1)?,
-                conflict_mode: row.get(2)?,
-            })
-        },
-    )?)
 }
 
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
@@ -5915,14 +5828,6 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     }
 }
 
-fn tx_metadata_json(auth_user: Option<&str>) -> Result<String> {
-    let metadata = match auth_user {
-        Some(user) => json!({ "auth_user": user }),
-        None => json!({}),
-    };
-    serde_json::to_string(&metadata).map_err(|err| crate::Error::new(err.to_string()))
-}
-
 fn parse_tx_auth_user_for_sqlite(
     metadata_json: &str,
     column: usize,
@@ -5956,14 +5861,6 @@ fn parse_rejection_detail_for_sqlite(
     } else {
         Ok(Some(detail))
     }
-}
-
-fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
-    value
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
-        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
 }
 
 fn export_reads_for_history(
