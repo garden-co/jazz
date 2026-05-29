@@ -617,3 +617,9 @@ regress.
 - Moved apply/dependency helper functions and `ApplyHistoryContext` into `runtime::sync_apply`, and moved `BatchedQueryScopeItem` into `runtime::query_export`.
 - `runtime.rs` is now about 117 lines and mostly contains imports, module wiring, `Runtime`, `QueryScopeOptions`, and tiny display/SQL helpers that are still shared across modules.
 - Focused sync-fate and transaction tests pass after the move.
+
+## 2026-05-29 02:30 PDT - Full mini-core validation still passes
+
+- Ran `cargo test -p mini-jazz-sqlite` after the runtime split and helper moves.
+- Result: 434 passed, 19 ignored placeholders, 0 failed.
+- This is an important checkpoint: the PR is no longer just a line shuffle, it has a full green baseline after the central runtime file was reduced to wiring.
