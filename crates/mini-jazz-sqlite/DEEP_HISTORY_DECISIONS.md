@@ -1,7 +1,18 @@
 # Deep History Implementation Decision Log
 
+Timebox restart: Thu May 28 22:29:56 PDT 2026
+Timebox target end: Fri May 29 04:29:56 PDT 2026
+
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
+
+## Thu May 28 22:44:41 PDT 2026
+
+Decision: move the append/document deep-history benchmarks onto the real `Runtime` deep-text API and coherent `HistoryDelta` path, even though it makes the current numbers worse in places.
+
+Why: the previous benchmark still had benchmark-only wiring around separate text-op sidecar databases and synthetic row fields. That was useful for proving storage shape, but it was no longer honest runtime behavior. The spike now needs to measure the API shape we would actually ship: schema-declared deep-text fields, Runtime-owned op tables, row roots in ordinary Jazz history/current rows, and one export/import envelope that carries bundle, blocks, and deep-text delta together.
+
+Scope impact: text benchmarks now call `append_deep_text`, `replace_deep_text_ranges`, `read_deep_text`, and `profile_apply_history_delta`. Deep-text op tables are included in SQLite storage totals. The first smoke run shows a new obvious issue: live incremental samples still export the full text-op delta, so sidecar-aware watermarks are the next sync-runtime target.
 
 ## Thu May 28 04:12:19 PDT 2026
 

@@ -460,9 +460,56 @@ impl Runtime {
         )
     }
 
+    pub fn replace_deep_text_ranges(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        patches: &[(usize, usize, String)],
+    ) -> Result<String> {
+        let mut root = self.current_deep_text_root(table_name, id, field_name)?;
+        for (start_byte, delete_bytes, insert) in patches {
+            root = crate::persisted_text_ops::replace_range(
+                &self.conn,
+                root,
+                *start_byte,
+                *delete_bytes,
+                insert,
+                256,
+            )?;
+        }
+        self.update_row(
+            table_name,
+            id,
+            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]),
+        )
+    }
+
     pub fn read_deep_text(&self, table_name: &str, id: &str, field_name: &str) -> Result<String> {
         let root = self.current_deep_text_root(table_name, id, field_name)?;
         crate::persisted_text_ops::materialize(&self.conn, root)
+    }
+
+    pub fn read_deep_text_at_node_epoch(
+        &self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        node_id: &str,
+        local_epoch: i64,
+    ) -> Result<Option<String>> {
+        let Some(row) = self.read_row_at_node_epoch(table_name, id, node_id, local_epoch)? else {
+            return Ok(None);
+        };
+        let root = row
+            .values
+            .get(field_name)
+            .and_then(JsonValue::as_u64)
+            .map(|root| root as i64)
+            .filter(|root| *root != 0);
+        Ok(Some(crate::persisted_text_ops::materialize(
+            &self.conn, root,
+        )?))
     }
 
     fn export_text_ops_delta(&self) -> Result<Vec<u8>> {
@@ -847,6 +894,23 @@ impl Runtime {
             Vec::new(),
             history,
         ))
+    }
+
+    pub fn export_table_history_since_node_epoch_delta(
+        &self,
+        table_name: &str,
+        node_id: &str,
+        after_local_epoch: i64,
+    ) -> Result<HistoryDelta> {
+        Ok(HistoryDelta {
+            bundle: self.export_table_history_since_node_epoch(
+                table_name,
+                node_id,
+                after_local_epoch,
+            )?,
+            blocks: Vec::new(),
+            text_ops_delta: self.export_text_ops_delta()?,
+        })
     }
 
     pub fn export_table_history_delta(
@@ -1859,6 +1923,13 @@ impl Runtime {
     }
 
     pub fn apply_history_delta(&mut self, delta: &HistoryDelta) -> Result<()> {
+        self.profile_apply_history_delta(delta).map(|_| ())
+    }
+
+    pub fn profile_apply_history_delta(
+        &mut self,
+        delta: &HistoryDelta,
+    ) -> Result<ApplyBundleProfile> {
         if !delta.text_ops_delta.is_empty() {
             let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
             crate::persisted_text_ops::apply_delta(
@@ -1868,7 +1939,7 @@ impl Runtime {
             )?;
         }
         self.import_history_blocks(&delta.blocks)?;
-        self.apply_bundle(&delta.bundle)
+        self.apply_bundle_inner(&delta.bundle, true)
     }
 
     pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {

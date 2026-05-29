@@ -1,9 +1,8 @@
 use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    persisted_text_ops, reset_runtime_write_phase_stats, take_runtime_write_phase_stats,
-    ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta,
-    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats,
-    SchemaDef, Storage, Value,
+    reset_runtime_write_phase_stats, take_runtime_write_phase_stats, ApplyBundleProfile,
+    HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta, QueryExportProfile, Result,
+    RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats, SchemaDef, Storage, Value,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -4452,12 +4451,10 @@ fn run_append_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
         compact_hot_tail: Some(hot_tail),
         reference_gzip_bytes: None,
         snapshot_every,
-        next_edit: Box::new(move |conn, root, _index, snapshot_every| {
+        next_edit: Box::new(move |writer, _index| {
             state_len += token.len();
-            Ok((
-                persisted_text_ops::append(conn, root, &token, snapshot_every)?,
-                state_len,
-            ))
+            writer.append_deep_text("documents", "doc", "body", &token)?;
+            Ok(state_len)
         }),
         notes: vec![
             format!(
@@ -4488,21 +4485,16 @@ fn run_automerge_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
         compact_hot_tail: Some(hot_tail),
         reference_gzip_bytes: Some(trace_bytes),
         snapshot_every,
-        next_edit: Box::new(move |conn, mut root, index, snapshot_every| {
+        next_edit: Box::new(move |writer, index| {
+            let mut patches = Vec::new();
             for (pos, del, ins) in &txns[index].patches {
                 let start = byte_index_for_char(&materialized, *pos)?;
                 let end = byte_index_for_char(&materialized, pos + del)?;
-                root = persisted_text_ops::replace_range(
-                    conn,
-                    root,
-                    start,
-                    end - start,
-                    ins,
-                    snapshot_every,
-                )?;
+                patches.push((start, end - start, ins.clone()));
                 materialized.replace_range(start..end, ins);
             }
-            Ok((root, materialized.len()))
+            writer.replace_deep_text_ranges("documents", "doc", "body", &patches)?;
+            Ok(materialized.len())
         }),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
@@ -4616,53 +4608,13 @@ struct TextOpsCaseInput {
     notes: Vec<String>,
 }
 
-type TextOpsEditFn = dyn FnMut(
-    &Connection,
-    persisted_text_ops::TextRoot,
-    usize,
-    usize,
-) -> BenchResult<(persisted_text_ops::TextRoot, usize)>;
-
-struct PendingTextOpWrite {
-    root: persisted_text_ops::TextRoot,
-    op_bytes: Vec<u8>,
-}
-
-fn flush_text_op_writes(
-    writer: &mut Runtime,
-    pending_writes: &mut Vec<PendingTextOpWrite>,
-) -> BenchResult<()> {
-    if pending_writes.is_empty() {
-        return Ok(());
-    }
-    let updates = pending_writes
-        .drain(..)
-        .map(|write| {
-            (
-                "doc".to_owned(),
-                map1(
-                    "body_root",
-                    json!(write.root.unwrap_or_default().to_string()),
-                )
-                .into_iter()
-                .chain(map1("body_op", json!(bytes_to_hex(&write.op_bytes))).into_iter())
-                .collect::<BTreeMap<String, serde_json::Value>>(),
-            )
-        })
-        .collect::<Vec<_>>();
-    writer.update_rows_batched("documents", updates)?;
-    Ok(())
-}
+type TextOpsEditFn = dyn FnMut(&mut Runtime, usize) -> BenchResult<usize>;
 
 fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
     let writer_db_path = tmp.path().join("writer.sqlite");
-    let writer_ops_path = tmp.path().join("writer-text-ops.sqlite");
-    let receiver_ops_path = tmp.path().join("receiver-text-ops.sqlite");
-    let cold_ops_path = tmp.path().join("cold-text-ops.sqlite");
     let schema = SchemaDef::new().table("documents", |table| {
-        table.text("body_root");
-        table.bytes("body_op");
+        table.deep_text("body");
     });
     let mut writer = Runtime::open_with_schema(
         Storage::File(writer_db_path.clone()),
@@ -4672,38 +4624,22 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     )?;
     let mut receiver =
         Runtime::open_with_schema(Storage::Memory, "receiver-node", "bob", schema.clone())?;
-    let mut writer_ops = Connection::open(&writer_ops_path)?;
-    let mut receiver_ops = Connection::open(&receiver_ops_path)?;
-    persisted_text_ops::install(&writer_ops)?;
-    persisted_text_ops::install(&receiver_ops)?;
-    let mut receiver_inline_watermark = 0i64;
 
-    let mut root = None;
-    let (initial_root, mut final_payload_bytes) =
-        (input.next_edit)(&writer_ops, root, 0, input.snapshot_every)?;
-    root = initial_root;
-    let initial_op_bytes = persisted_text_ops::inline_op_bytes(&writer_ops, root)?;
     writer.insert_row(
         "documents",
         "doc",
-        map2(
-            "body_root",
-            json!(root.unwrap_or_default().to_string()),
-            "body_op",
-            json!(bytes_to_hex(&initial_op_bytes)),
-        ),
+        BTreeMap::<String, serde_json::Value>::new(),
     )?;
-    let initial_bundle = writer.export_table_history("documents")?;
-    let initial_wire = encode_native_bundle(&initial_bundle)?;
-    let initial_bundle = decode_native_bundle(&initial_wire)?;
-    let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_bundle, "writer-node");
-    receiver.apply_bundle(&initial_bundle)?;
-    apply_inline_text_ops_from_bundle(
-        &initial_bundle,
-        &mut receiver_ops,
-        &mut receiver_inline_watermark,
-        input.snapshot_every,
-    )?;
+    let mut final_payload_bytes = (input.next_edit)(&mut writer, 0)?;
+    let initial_delta = writer.export_table_history_delta("documents", &[])?;
+    let initial_wire = encode_native_bundle(&initial_delta.bundle)?;
+    let initial_delta = HistoryDelta {
+        bundle: decode_native_bundle(&initial_wire)?,
+        blocks: initial_delta.blocks,
+        text_ops_delta: initial_delta.text_ops_delta,
+    };
+    let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_delta.bundle, "writer-node");
+    receiver.apply_history_delta(&initial_delta)?;
     let mut subscription = receiver.subscribe_rows("documents")?;
 
     let started = Instant::now();
@@ -4718,49 +4654,20 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut jazz_write_updates_per_transaction_total = 0usize;
     let mut jazz_write_updates_per_transaction_max = 0usize;
     let mut self_sample = SelfSample::from_env("text-ops-write")?;
-    let batch_window = deep_history_sqlite_tx_batch_window();
     input.notes.push(format!(
-        "SQLite transaction batching enabled for Jazz root writes and text op sidecar edits: flush window {} ms.",
-        batch_window.as_millis()
+        "Runtime deep_text column: Jazz row history stores compact text roots; text ops live in the Runtime-owned sidecar tables with snapshots every {} ops.",
+        input.snapshot_every
     ));
-    let mut pending_writes = Vec::new();
     let mut index = 1usize;
     if self_sample.is_enabled() {
         self_sample.start_after_first_sample()?;
     }
     while index < input.target_updates {
         let write_started = Instant::now();
-        let sidecar_tx = writer_ops.transaction()?;
-        let batch_started = Instant::now();
-        let mut should_sample = false;
-        loop {
-            let edit_started = Instant::now();
-            let (next_root, payload_bytes) =
-                (input.next_edit)(&sidecar_tx, root, index, input.snapshot_every)?;
-            root = next_root;
-            final_payload_bytes = payload_bytes;
-            let op_bytes = persisted_text_ops::inline_op_bytes(&sidecar_tx, root)?;
-            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.sidecar_edit, edit_started);
-            pending_writes.push(PendingTextOpWrite { root, op_bytes });
-            should_sample = should_sample
-                || (!self_sample.is_enabled() && index == 1)
-                || (index + 1).is_multiple_of(input.sample_every)
-                || index + 1 == input.target_updates;
-            index += 1;
-            if index >= input.target_updates
-                || should_sample
-                || batch_started.elapsed() >= batch_window
-            {
-                break;
-            }
-        }
-        let sidecar_commit_started = Instant::now();
-        sidecar_tx.commit()?;
-        DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.sidecar_commit, sidecar_commit_started);
         let jazz_write_started = Instant::now();
         reset_runtime_write_phase_stats();
-        let batch_updates = pending_writes.len();
-        flush_text_op_writes(&mut writer, &mut pending_writes)?;
+        final_payload_bytes = (input.next_edit)(&mut writer, index)?;
+        let batch_updates = 1;
         jazz_write_sqlite_transactions += 1;
         jazz_write_updates_per_transaction_total += batch_updates;
         jazz_write_updates_per_transaction_max =
@@ -4768,52 +4675,47 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
         DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
         write_only_ms += ms(write_started.elapsed());
+        let should_sample = (!self_sample.is_enabled() && index == 1)
+            || (index + 1).is_multiple_of(input.sample_every)
+            || index + 1 == input.target_updates;
+        index += 1;
 
         if should_sample {
             let receive_started = Instant::now();
             let export_started = Instant::now();
-            let bundle = if env_bool("MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER", false) {
-                writer.export_table_history_since_node_epoch(
+            let delta = if env_bool("MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER", false) {
+                writer.export_table_history_since_node_epoch_delta(
                     "documents",
                     "writer-node",
                     live_sync_writer_epoch,
                 )?
             } else {
-                writer.export_table_history("documents")?
+                writer.export_table_history_delta("documents", &[])?
             };
             live_sync_writer_epoch =
-                live_sync_writer_epoch.max(max_local_epoch_for_node(&bundle, "writer-node"));
+                live_sync_writer_epoch.max(max_local_epoch_for_node(&delta.bundle, "writer-node"));
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let encode_decode_started = Instant::now();
-            let wire = encode_native_bundle(&bundle)?;
-            let bundle = decode_native_bundle(&wire)?;
+            let wire = encode_native_bundle(&delta.bundle)?;
+            let delta = HistoryDelta {
+                bundle: decode_native_bundle(&wire)?,
+                blocks: delta.blocks,
+                text_ops_delta: delta.text_ops_delta,
+            };
             DeepHistoryPhaseReport::add_elapsed(
                 &mut phase_ms.live_encode_decode,
                 encode_decode_started,
             );
             let apply_started = Instant::now();
-            let profile = receiver.profile_apply_bundle(&bundle)?;
+            let profile = receiver.profile_apply_history_delta(&delta)?;
             add_apply_profile(&mut live_apply_profile, profile);
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_apply, apply_started);
-            let sidecar_apply_started = Instant::now();
-            apply_inline_text_ops_from_bundle(
-                &bundle,
-                &mut receiver_ops,
-                &mut receiver_inline_watermark,
-                input.snapshot_every,
-            )?;
-            DeepHistoryPhaseReport::add_elapsed(
-                &mut phase_ms.live_sidecar_apply,
-                sidecar_apply_started,
-            );
             let listener_started = Instant::now();
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
                 return Err("text op listener did not observe sampled edit".into());
             }
-            let rows = receiver.read_rows("documents")?;
-            let observed_root = row_root_id(&rows, "body_root")?;
-            let observed = persisted_text_ops::materialize(&receiver_ops, Some(observed_root))?;
+            let observed = receiver.read_deep_text("documents", "doc", "body")?;
             if observed.len() != final_payload_bytes {
                 return Err("text op listener materialized unexpected length".into());
             }
@@ -4852,10 +4754,10 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             compaction.uncompressed_bytes,
             compaction.compressed_bytes,
         ));
-        persisted_text_ops::snapshot(&writer_ops, root)?;
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
         let delta_wire = encode_native_bundle(&delta.bundle)?;
+        let text_ops_delta_bytes = delta.text_ops_delta.len();
         let decoded_delta = HistoryDelta {
             bundle: decode_native_bundle(&delta_wire)?,
             blocks: delta.blocks.clone(),
@@ -4869,35 +4771,21 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         native_export_ms = block_native_export_ms;
         let mut block_peer =
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
-        let block_peer_ops_path = tmp.path().join("block-peer-text-ops.sqlite");
-        let mut block_peer_ops = Connection::open(&block_peer_ops_path)?;
-        persisted_text_ops::install(&block_peer_ops)?;
-        let mut block_watermark = 0i64;
         let block_import_started = Instant::now();
         block_peer.apply_history_delta(&decoded_delta)?;
-        let block_history = block_peer.export_table_history("documents")?;
-        apply_inline_text_ops_from_bundle(
-            &block_history,
-            &mut block_peer_ops,
-            &mut block_watermark,
-            input.snapshot_every,
-        )?;
-        let block_rows = block_peer.read_rows("documents")?;
-        let block_root = row_root_id(&block_rows, "body_root")?;
-        let block_text = persisted_text_ops::materialize(&block_peer_ops, Some(block_root))?;
+        let block_text = block_peer.read_deep_text("documents", "doc", "body")?;
         if block_text.len() != final_payload_bytes {
             return Err("text op block import materialized unexpected length".into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
         phase_ms.native_import_apply += block_native_import_ms.unwrap_or(0.0);
         native_import_ms = block_native_import_ms;
-        native_sync_bytes = Some(delta_wire.len() + block_native_payload_bytes.unwrap_or(0));
+        native_sync_bytes =
+            Some(delta_wire.len() + block_native_payload_bytes.unwrap_or(0) + text_ops_delta_bytes);
     }
 
     let current_started = Instant::now();
-    let current_rows = writer.read_rows("documents")?;
-    let current_root = row_root_id(&current_rows, "body_root")?;
-    let current = persisted_text_ops::materialize(&writer_ops, Some(current_root))?;
+    let current = writer.read_deep_text("documents", "doc", "body")?;
     let current_read_ms = ms(current_started.elapsed());
     phase_ms.current_read += current_read_ms;
     if current.len() != final_payload_bytes {
@@ -4905,39 +4793,32 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     }
 
     let final_bundle_export_started = Instant::now();
-    let final_bundle = writer.export_table_history("documents")?;
+    let final_delta = writer.export_table_history_delta("documents", &[])?;
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.final_export, final_bundle_export_started);
     let final_encode_decode_started = Instant::now();
-    let final_wire = encode_native_bundle(&final_bundle)?;
+    let final_wire = encode_native_bundle(&final_delta.bundle)?;
     let final_bundle = decode_native_bundle(&final_wire)?;
+    let final_text_ops_delta_bytes = final_delta.text_ops_delta.len();
+    let final_delta = HistoryDelta {
+        bundle: final_bundle,
+        blocks: final_delta.blocks,
+        text_ops_delta: final_delta.text_ops_delta,
+    };
     DeepHistoryPhaseReport::add_elapsed(
         &mut phase_ms.final_encode_decode,
         final_encode_decode_started,
     );
     let final_bundle_export_ms = phase_ms.final_export + phase_ms.final_encode_decode;
     let final_bundle_bytes = final_wire.len();
-    let sidecar_bundle_bytes = 0;
+    let sidecar_bundle_bytes = final_text_ops_delta_bytes;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
-    let mut cold_ops = Connection::open(&cold_ops_path)?;
-    persisted_text_ops::install(&cold_ops)?;
-    let mut cold_watermark = 0i64;
     let cold_started = Instant::now();
     let cold_apply_started = Instant::now();
-    let profile = cold.profile_apply_bundle(&final_bundle)?;
+    let profile = cold.profile_apply_history_delta(&final_delta)?;
     add_apply_profile(&mut cold_apply_profile, profile);
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
-    let cold_sidecar_started = Instant::now();
-    apply_inline_text_ops_from_bundle(
-        &final_bundle,
-        &mut cold_ops,
-        &mut cold_watermark,
-        input.snapshot_every,
-    )?;
-    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_sidecar_apply, cold_sidecar_started);
     let cold_verify_started = Instant::now();
-    let cold_rows = cold.read_rows("documents")?;
-    let cold_root = row_root_id(&cold_rows, "body_root")?;
-    let cold_text = persisted_text_ops::materialize(&cold_ops, Some(cold_root))?;
+    let cold_text = cold.read_deep_text("documents", "doc", "body")?;
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_read_and_verify, cold_verify_started);
     let cold_load_ms = ms(cold_started.elapsed());
     if cold_text.len() != final_payload_bytes {
@@ -4945,25 +4826,20 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     }
 
     let historical_epochs = historical_read_epochs_for_case(
-        &final_bundle,
+        &final_delta.bundle,
         &writer.history_block_manifests("documents")?,
         "doc",
     );
     let historical_started = Instant::now();
     let mut historical_read_count = 0;
     for epoch in &historical_epochs {
-        if let Some(row) =
-            writer.read_row_at_node_epoch("documents", "doc", "writer-node", *epoch)?
-        {
-            let historical_root = row
-                .values
-                .get("body_root")
-                .and_then(Value::as_str)
-                .ok_or("historical text op row missing body_root")?;
-            let historical_text = persisted_text_ops::materialize(
-                &writer_ops,
-                Some(historical_root.parse::<i64>()?),
-            )?;
+        if let Some(historical_text) = writer.read_deep_text_at_node_epoch(
+            "documents",
+            "doc",
+            "body",
+            "writer-node",
+            *epoch,
+        )? {
             if historical_text.len() <= final_payload_bytes {
                 historical_read_count += 1;
             }
@@ -4971,7 +4847,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     }
     let historical_read_total_ms = ms(historical_started.elapsed());
     phase_ms.historical_reads += historical_read_total_ms;
-    let tx_info_ids = sampled_tx_ids_from_bundle(&final_bundle);
+    let tx_info_ids = sampled_tx_ids_from_bundle(&final_delta.bundle);
     let tx_info_started = Instant::now();
     for tx_id in &tx_info_ids {
         writer.transaction_info(tx_id)?;
@@ -4980,15 +4856,13 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     phase_ms.transaction_info_reads += transaction_info_total_ms;
     let transaction_info_count = tx_info_ids.len();
     let writer_stats = writer.storage_stats()?;
-    let sidecar_database_bytes = persisted_text_ops::database_bytes(&writer_ops)?;
     let database_bytes = writer_stats.database_bytes;
     let live_database_bytes = writer_stats.live_database_bytes;
     let total_file_bytes = writer_stats.total_file_bytes;
     let mut notes = input.notes;
-    notes.push(format!(
-        "Text op local materialization cache bytes excluded from storage totals: database {}. Inline op payloads are stored in Jazz history/current rows.",
-        sidecar_database_bytes
-    ));
+    notes.push(
+        "Deep-text op tables are Runtime-owned and included in SQLite storage totals.".to_owned(),
+    );
 
     Ok(DeepHistoryCaseReport {
         target_updates: input.target_updates,
@@ -5087,45 +4961,6 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         },
         notes,
     })
-}
-
-fn apply_inline_text_ops_from_bundle(
-    bundle: &Bundle,
-    target: &mut Connection,
-    watermark: &mut i64,
-    snapshot_every: usize,
-) -> BenchResult<()> {
-    let mut ops = bundle
-        .history
-        .iter()
-        .filter(|record| record.table == "documents" && record.row_id == "doc")
-        .filter_map(|record| {
-            let root = record
-                .values
-                .get("body_root")
-                .and_then(Value::as_str)?
-                .parse::<i64>()
-                .ok()?;
-            let op = record.values.get("body_op")?;
-            let op_bytes = if let Some(bytes) = op.as_bytes() {
-                bytes.to_vec()
-            } else {
-                hex_to_bytes(op.as_str()?).ok()?
-            };
-            Some((root, op_bytes))
-        })
-        .collect::<Vec<_>>();
-    ops.sort_by_key(|(root, _)| *root);
-    let tx = target.transaction()?;
-    for (root, op_bytes) in ops {
-        if root <= *watermark {
-            continue;
-        }
-        persisted_text_ops::apply_inline_op(&tx, &op_bytes, snapshot_every)?;
-        *watermark = root;
-    }
-    tx.commit()?;
-    Ok(())
 }
 
 fn run_naive_deep_history_case(
@@ -5696,14 +5531,6 @@ fn canvas_position_json(frame: usize) -> String {
     serde_json::json!({ "x": x, "y": y }).to_string()
 }
 
-fn row_root_id(rows: &[mini_jazz_sqlite::RowView], field: &str) -> BenchResult<i64> {
-    rows.first()
-        .and_then(|row| row.values.get(field))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing text op root field".into())
-        .and_then(|value| value.parse::<i64>().map_err(Into::into))
-}
-
 fn text_document_schema() -> SchemaDef {
     SchemaDef::new().table("documents", |table| {
         table.text("body");
@@ -5714,51 +5541,6 @@ fn map1(key: &str, value: serde_json::Value) -> BTreeMap<String, serde_json::Val
     let mut map = BTreeMap::new();
     map.insert(key.to_owned(), value);
     map
-}
-
-fn map2(
-    key1: &str,
-    value1: serde_json::Value,
-    key2: &str,
-    value2: serde_json::Value,
-) -> BTreeMap<String, serde_json::Value> {
-    let mut map = BTreeMap::new();
-    map.insert(key1.to_owned(), value1);
-    map.insert(key2.to_owned(), value2);
-    map
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn hex_to_bytes(value: &str) -> BenchResult<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return Err("hex bytes value has odd length".into());
-    }
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    let raw = value.as_bytes();
-    for idx in (0..raw.len()).step_by(2) {
-        let high = hex_nibble(raw[idx])?;
-        let low = hex_nibble(raw[idx + 1])?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_nibble(byte: u8) -> BenchResult<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("invalid hex bytes value".into()),
-    }
 }
 
 fn average(values: &[f64]) -> Option<f64> {
