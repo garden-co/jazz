@@ -1,5 +1,7 @@
 use crate::auth::RuntimeAuth;
-use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
+use crate::query_api::{
+    predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
+};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
@@ -3789,14 +3791,11 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<RowsSubscription> {
-        let rows = self.query(predicate_query(
+        self.subscribe_query(predicate_query(
             table_name,
             field_name,
             QueryConditionOp::Eq,
-            value.clone(),
-        ))?;
-        Ok(RowsSubscription::where_eq(
-            table_name, field_name, value, rows,
+            value,
         ))
     }
 
@@ -3806,11 +3805,11 @@ impl Runtime {
         field_name: &str,
         needle: &str,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_contains(
+        self.subscribe_query(predicate_query(
             table_name,
             field_name,
-            needle,
-            self.read_rows_where_contains(table_name, field_name, needle)?,
+            QueryConditionOp::Contains,
+            JsonValue::String(needle.to_owned()),
         ))
     }
 
@@ -3820,11 +3819,11 @@ impl Runtime {
         field_name: &str,
         values: Vec<JsonValue>,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_in(
+        self.subscribe_query(predicate_query(
             table_name,
             field_name,
-            values.clone(),
-            self.read_rows_where_in(table_name, field_name, values)?,
+            QueryConditionOp::In,
+            JsonValue::Array(values),
         ))
     }
 
@@ -3834,11 +3833,11 @@ impl Runtime {
         field_name: &str,
         value: JsonValue,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_ne(
+        self.subscribe_query(predicate_query(
             table_name,
             field_name,
-            value.clone(),
-            self.read_rows_where_ne(table_name, field_name, value)?,
+            QueryConditionOp::Ne,
+            value,
         ))
     }
 
@@ -3849,13 +3848,20 @@ impl Runtime {
         value: JsonValue,
         limit: usize,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_eq_top_created_at_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            limit,
-            self.read_rows_where_eq_top_created_at_desc(table_name, field_name, value, limit)?,
-        ))
+        self.subscribe_query(BuiltQuery {
+            table: table_name.to_owned(),
+            conditions: vec![QueryCondition {
+                column: field_name.to_owned(),
+                op: QueryConditionOp::Eq,
+                value,
+            }],
+            order_by: vec![QueryOrderBy {
+                column: "$createdAt".to_owned(),
+                direction: QueryDirection::Desc,
+            }],
+            limit: Some(limit),
+            offset: None,
+        })
     }
 
     pub fn subscribe_rows_where_eq_top_field_desc(
@@ -3866,20 +3872,20 @@ impl Runtime {
         order_field_name: &str,
         limit: usize,
     ) -> Result<RowsSubscription> {
-        Ok(RowsSubscription::where_eq_top_field_desc(
-            table_name,
-            field_name,
-            value.clone(),
-            order_field_name,
-            limit,
-            self.read_rows_where_eq_top_field_desc(
-                table_name,
-                field_name,
+        self.subscribe_query(BuiltQuery {
+            table: table_name.to_owned(),
+            conditions: vec![QueryCondition {
+                column: field_name.to_owned(),
+                op: QueryConditionOp::Eq,
                 value,
-                order_field_name,
-                limit,
-            )?,
-        ))
+            }],
+            order_by: vec![QueryOrderBy {
+                column: order_field_name.to_owned(),
+                direction: QueryDirection::Desc,
+            }],
+            limit: Some(limit),
+            offset: None,
+        })
     }
 
     pub fn subscribe_observed_query(&self, read: &QueryReadRecord) -> Result<RowsSubscription> {

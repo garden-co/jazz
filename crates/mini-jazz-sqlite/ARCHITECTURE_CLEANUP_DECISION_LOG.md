@@ -85,3 +85,16 @@ the existing row API instead of adding table-specific code paths.
 Known limitation for this slice: commit materialization still uses current
 write paths, not the transaction start snapshot. The #945 "writes applied to
 start snapshot" semantics remain a later red/green slice.
+
+## 2026-05-28 22:53 PDT
+
+Checked #973 again. Head moved to `bc06bf3c1d55bb00784af55ad249df0777c326f5`
+and merge state remains dirty. Continue to avoid integrating its code directly.
+
+## 2026-05-28 22:53 PDT
+
+Next cleanup target: subscription convenience APIs. They currently preserve old
+per-operator subscription query variants even though the generic `BuiltQuery`
+path exists. This encourages future PRs to add subscription-specific hardcoded
+logic. Move ordinary predicate/page subscription constructors onto
+`BuiltQuery`; keep special observed/recursive compatibility only where needed.
