@@ -630,3 +630,9 @@ regress.
 - Implemented restore-then-resume semantics with `catch_unwind`/`resume_unwind`.
 - This is a small API hardening slice but it matters for the cleanup theme: scoped runtime APIs should behave like real boundaries, not best-effort fixture conveniences.
 - Focused restore/auth/branch-query tests pass.
+
+## 2026-05-29 02:36 PDT - Started removing broad runtime wildcard imports
+
+- Replaced `use super::*` with explicit imports in the newly touched `runtime::session`, `runtime::branches`, and `runtime::storage_admin` modules.
+- This is intentionally incremental: the large modules still use broad imports, but new/modified boundary modules should show future agents the desired direction.
+- Focused restore and storage/projection tests pass.

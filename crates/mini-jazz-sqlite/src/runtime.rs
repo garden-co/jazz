@@ -22,12 +22,11 @@ use crate::sync::{
 };
 use crate::time::now_ms;
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, QueryExportProfile, ReadTier, RejectionInfo, RowView,
-    StorageStats, TransactionInfo,
+    ApplyBundleProfile, QueryExportProfile, ReadTier, RejectionInfo, RowView, TransactionInfo,
 };
 use crate::{
-    branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set,
-    schema, stats, storage, tx, users, Result, Storage,
+    branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set, tx,
+    users, Result,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
