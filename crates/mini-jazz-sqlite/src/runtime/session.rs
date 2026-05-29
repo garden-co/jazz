@@ -19,7 +19,7 @@ impl Runtime {
         Self::open_with_schema_and_auth(storage, node_id, RuntimeAuth::trusted_admin(), schema_def)
     }
 
-    pub fn open_trusted_with_session_user(
+    pub fn open_trusted_as_user(
         storage: Storage,
         node_id: &str,
         user: &str,
@@ -71,7 +71,7 @@ impl Runtime {
         self.auth.is_trusted()
     }
 
-    pub fn session_user(&self) -> &str {
+    pub fn current_policy_user(&self) -> &str {
         self.policy_user()
     }
 
@@ -144,6 +144,6 @@ mod tests {
         }));
 
         assert!(result.is_err());
-        assert_eq!(runtime.session_user(), ADMIN_SYSTEM_USER);
+        assert_eq!(runtime.current_policy_user(), ADMIN_SYSTEM_USER);
     }
 }

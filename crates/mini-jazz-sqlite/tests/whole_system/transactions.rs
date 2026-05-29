@@ -602,8 +602,7 @@ fn exclusive_transaction_mode_survives_sync() {
 fn exclusive_forwarding_export_marks_only_selected_transaction() {
     let schema = support::notes_schema();
     let mut edge =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "edge", "service", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "edge", "service", schema).unwrap();
 
     let first_tx = edge
         .insert_row(
@@ -790,13 +789,9 @@ fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
             table.ref_("project", "projects");
             table.write_if_ref_readable("project");
         });
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     let project_tx = authority
@@ -859,13 +854,9 @@ fn untrusted_exclusive_transaction_rejects_stale_policy_read_set() {
 #[test]
 fn untrusted_exclusive_transaction_rejects_stale_row_update_read_set() {
     let schema = support::notes_schema();
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     let original_tx = authority
@@ -927,13 +918,9 @@ fn untrusted_exclusive_transaction_rejects_stale_row_update_read_set() {
 #[test]
 fn untrusted_exclusive_transaction_rejects_stale_absent_row_read_set() {
     let schema = support::notes_schema();
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     let note_tx = writer
@@ -987,13 +974,9 @@ fn untrusted_exclusive_transaction_rejects_stale_absent_row_read_set() {
 #[test]
 fn untrusted_exclusive_transaction_rejects_stale_absent_row_from_new_source_branch() {
     let schema = support::notes_schema();
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     writer.create_branch("merge", None).unwrap();
@@ -1048,13 +1031,9 @@ fn untrusted_exclusive_transaction_rejects_stale_absent_row_from_new_source_bran
 #[test]
 fn untrusted_exclusive_transaction_rejects_stale_source_branch_row_read_set() {
     let schema = support::notes_schema();
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     authority.create_branch("left", None).unwrap();
@@ -1118,13 +1097,9 @@ fn untrusted_exclusive_transaction_rejects_stale_source_branch_row_read_set() {
 #[test]
 fn untrusted_exclusive_delete_rejects_stale_source_branch_row_read_set() {
     let schema = support::notes_schema();
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     authority.create_branch("left", None).unwrap();
@@ -1194,13 +1169,9 @@ fn branch_exclusive_transaction_observes_inherited_base_read_version() {
             table.ref_("project", "projects");
             table.write_if_ref_readable("project");
         });
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     let project_tx = authority
@@ -1254,13 +1225,9 @@ fn untrusted_exclusive_validation_handles_new_branch_records() {
             table.ref_("project", "projects");
             table.write_if_ref_readable("project");
         });
-    let mut authority = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "authority",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut authority =
+        Runtime::open_trusted_as_user(Storage::Memory, "authority", "alice", schema.clone())
+            .unwrap();
     let mut writer = Runtime::open_with_schema(Storage::Memory, "writer", "alice", schema).unwrap();
 
     let project_tx = authority

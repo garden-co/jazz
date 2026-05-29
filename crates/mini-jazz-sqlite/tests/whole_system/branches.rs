@@ -4,8 +4,7 @@ use super::*;
 fn direct_branch_query_matches_checkout_without_changing_current_branch() {
     let schema = support::tasks_schema();
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     let base_tx = alice
         .insert_row(
@@ -108,8 +107,7 @@ fn branch_local_write_is_invisible_on_main() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -460,8 +458,7 @@ fn branch_scoped_export_excludes_unrelated_branch_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -508,8 +505,7 @@ fn branch_scoped_built_query_export_excludes_unrelated_branch_repair_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -564,8 +560,7 @@ fn branch_scoped_built_query_export_excludes_unrelated_versions_of_same_row() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice
         .insert_row(
@@ -1217,8 +1212,7 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1269,8 +1263,7 @@ fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1326,8 +1319,7 @@ fn branch_equality_query_uses_effective_branch_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1380,8 +1372,7 @@ fn branch_ordered_query_applies_effective_policy_before_pagination() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     let visible_project_tx = alice
         .insert_row(
@@ -1537,8 +1528,7 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();
@@ -3095,8 +3085,7 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();

@@ -220,7 +220,7 @@ pub fn sync_table_untrusted(
 ) -> Result<()> {
     target.apply_untrusted_bundle_as_user(
         &source.export_table_history(table_name)?,
-        source.session_user(),
+        source.current_policy_user(),
     )
 }
 

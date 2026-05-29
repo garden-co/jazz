@@ -183,8 +183,7 @@ fn long_acyclic_recursive_policy_chain_is_sql_lowerable() {
         });
     }
     let mut writer =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "writer", "alice", schema.clone())
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "writer", "alice", schema.clone()).unwrap();
     let mut reader =
         Runtime::open_with_schema(Storage::Memory, "reader", "alice", schema.clone()).unwrap();
 

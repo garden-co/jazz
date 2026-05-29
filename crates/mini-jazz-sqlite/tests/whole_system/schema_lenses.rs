@@ -455,8 +455,7 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", old_schema.clone())
             .unwrap();
     let mut bob =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "bob-node", "bob", old_schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "bob-node", "bob", old_schema).unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
 
     alice
@@ -483,7 +482,7 @@ fn renamed_ref_lens_participates_in_untrusted_write_policy_validation() {
 
     edge.apply_untrusted_bundle_as_user(
         &bob.export_table_history("todos").unwrap(),
-        bob.session_user(),
+        bob.current_policy_user(),
     )
     .unwrap();
 
@@ -583,8 +582,7 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
             table.write_if_ref_readable("workspace");
         });
     let mut alice =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", old_schema)
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", old_schema).unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", new_schema).unwrap();
 
     alice
@@ -625,7 +623,7 @@ fn renamed_ref_lens_exports_transitive_write_policy_dependencies_for_untrusted_e
     assert!(exported.contains(&("projects", "project-1")));
     assert!(exported.contains(&("orgs", "org-1")));
 
-    edge.apply_untrusted_bundle_as_user(&bundle, alice.session_user())
+    edge.apply_untrusted_bundle_as_user(&bundle, alice.current_policy_user())
         .unwrap();
 
     assert_eq!(edge.transaction_info(&tx).unwrap().rejection_code, None);

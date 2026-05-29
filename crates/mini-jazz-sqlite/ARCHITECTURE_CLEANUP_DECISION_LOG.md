@@ -770,3 +770,9 @@ regress.
 - Replaced the query-export wildcard runtime import with explicit dependencies.
 - This makes the query export surface name its profile, query API, observation, row-id, history-export, and bundle-construction dependencies directly.
 - Focused query-matrix and sync-fate tests pass, and `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:20 PDT - Clarified policy-user naming
+
+- Renamed the public `session_user()` accessor to `current_policy_user()` so auth forwarding reads as policy evaluation context, not as an inherent identity of trusted peers.
+- Renamed the trusted constructor from the session-shaped wording to `open_trusted_as_user`, matching `run_as_user` and making the remaining construction-time shortcut easier to spot for future migration.
+- Focused policy tests pass, and `cargo check -p mini-jazz-sqlite` is green.

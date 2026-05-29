@@ -835,7 +835,7 @@ fn untrusted_acceptance_uses_authority_policy_not_sender_policy_fingerprint() {
     let bundle = writer.export_table_history("notes").unwrap();
     assert_ne!(bundle.policy_fingerprint, edge.local_policy_fingerprint());
 
-    edge.apply_untrusted_bundle_as_user(&bundle, writer.session_user())
+    edge.apply_untrusted_bundle_as_user(&bundle, writer.current_policy_user())
         .unwrap();
     assert_eq!(edge.read_rows("notes").unwrap().len(), 1);
 
@@ -850,7 +850,7 @@ fn untrusted_acceptance_uses_authority_policy_not_sender_policy_fingerprint() {
     )
     .unwrap();
     rejecting_edge
-        .apply_untrusted_bundle_as_user(&bundle, writer.session_user())
+        .apply_untrusted_bundle_as_user(&bundle, writer.current_policy_user())
         .unwrap();
     assert_eq!(rejecting_edge.read_rows("notes").unwrap().len(), 1);
     assert_eq!(
@@ -1375,7 +1375,7 @@ fn trusted_edge_authoritatively_rejects_untrusted_policy_violation_on_apply() {
 }
 
 #[test]
-fn core_validates_forwarded_exclusive_transaction_with_session_user() {
+fn core_validates_forwarded_exclusive_transaction_with_policy_user() {
     let harness = support::Harness::new();
     let schema = SchemaDef::new()
         .table("projects", |table| {
@@ -2103,7 +2103,7 @@ fn branch_write_policy_does_not_use_parent_from_different_branch() {
 
     edge.apply_untrusted_bundle_as_user(
         &bob.export_table_history("todos").unwrap(),
-        bob.session_user(),
+        bob.current_policy_user(),
     )
     .unwrap();
     edge.checkout_branch("draft").unwrap();
@@ -2265,8 +2265,7 @@ fn trusted_edge_validates_branch_recursive_write_policy_against_pinned_base() {
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
     let mut bob =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "bob-node", "bob", schema.clone())
-            .unwrap();
+        Runtime::open_trusted_as_user(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
 
     let alice_org_tx = alice
@@ -2329,7 +2328,7 @@ fn trusted_edge_validates_branch_recursive_write_policy_against_pinned_base() {
 
     edge.apply_untrusted_bundle_as_user(
         &alice.export_table_history("todos").unwrap(),
-        alice.session_user(),
+        alice.current_policy_user(),
     )
     .unwrap();
     edge.checkout_branch("draft").unwrap();
@@ -2345,16 +2344,11 @@ fn trusted_edge_rejects_untrusted_delete_policy_violation() {
         table.text("title");
         table.write_if_created_by_user();
     });
-    let mut alice = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "alice-node",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
-    let mut bob =
-        Runtime::open_trusted_with_session_user(Storage::Memory, "bob-node", "bob", schema.clone())
+    let mut alice =
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema.clone())
             .unwrap();
+    let mut bob =
+        Runtime::open_trusted_as_user(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
 
     let alice_tx = alice
@@ -2372,7 +2366,7 @@ fn trusted_edge_rejects_untrusted_delete_policy_violation() {
     let delete_tx = bob.delete_row("docs", "doc-1").unwrap();
     edge.apply_untrusted_bundle_as_user(
         &bob.export_table_history("docs").unwrap(),
-        bob.session_user(),
+        bob.current_policy_user(),
     )
     .unwrap();
 
@@ -2411,7 +2405,7 @@ fn created_by_write_policy_allows_self_create_but_rejects_other_writer() {
 
     let alice_bundle = alice.export_table_history("docs").unwrap();
     support::apply(alice_bundle.clone(), &mut bob).unwrap();
-    support::apply_untrusted_as_user(alice_bundle, &mut edge, alice.session_user()).unwrap();
+    support::apply_untrusted_as_user(alice_bundle, &mut edge, alice.current_policy_user()).unwrap();
     edge.accept_transaction_at_edge(&create_tx).unwrap();
 
     let update_tx = support::run_as_user(&mut bob, "bob", |bob| {
@@ -3042,13 +3036,9 @@ fn trusted_edge_accepts_untrusted_recursive_write_when_bundle_contains_transitiv
             table.ref_("project", "projects");
             table.write_if_ref_readable("project");
         });
-    let mut alice = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "alice-node",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut alice =
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema.clone())
+            .unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
 
     alice
@@ -3089,7 +3079,7 @@ fn trusted_edge_accepts_untrusted_recursive_write_when_bundle_contains_transitiv
     assert!(exported.contains(&("projects", "project-1")));
     assert!(exported.contains(&("orgs", "org-1")));
 
-    edge.apply_untrusted_bundle_as_user(&bundle, alice.session_user())
+    edge.apply_untrusted_bundle_as_user(&bundle, alice.current_policy_user())
         .unwrap();
 
     let rows = edge.read_rows("todos").unwrap();
@@ -3115,13 +3105,9 @@ fn trusted_edge_reports_missing_transitive_policy_dependency() {
             table.ref_("project", "projects");
             table.write_if_ref_readable("project");
         });
-    let mut alice = Runtime::open_trusted_with_session_user(
-        Storage::Memory,
-        "alice-node",
-        "alice",
-        schema.clone(),
-    )
-    .unwrap();
+    let mut alice =
+        Runtime::open_trusted_as_user(Storage::Memory, "alice-node", "alice", schema.clone())
+            .unwrap();
     let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
 
     alice
@@ -3156,7 +3142,7 @@ fn trusted_edge_reports_missing_transitive_policy_dependency() {
         .history
         .retain(|record| !(record.table == "orgs" && record.row_id == "org-1"));
 
-    edge.apply_untrusted_bundle_as_user(&bundle, alice.session_user())
+    edge.apply_untrusted_bundle_as_user(&bundle, alice.current_policy_user())
         .unwrap();
 
     assert!(edge.read_rows("todos").unwrap().is_empty());
