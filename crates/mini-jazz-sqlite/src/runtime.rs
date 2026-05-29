@@ -1,6 +1,6 @@
 use crate::apply::{
     apply_branch_records, apply_query_read_records, apply_read_records, apply_tx_records,
-    encode_optional_json, tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
+    tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
@@ -1926,7 +1926,7 @@ impl Runtime {
         code: &str,
         detail: Option<JsonValue>,
     ) -> Result<()> {
-        let detail_json = encode_optional_json(detail.as_ref())?;
+        let detail_json = tx::encode_optional_json(detail.as_ref())?;
         let db = self.conn.transaction()?;
         let tx_num = tx::reject_with_detail_json(&db, tx_id, code, &detail_json)?;
         clear_transaction_awaiting_dependency(&db, tx_num)?;

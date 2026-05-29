@@ -174,7 +174,7 @@ pub(crate) fn apply_tx_records(db: &Connection, bundle: &Bundle) -> Result<Appli
         tx_info_by_num.insert(tx_num, tx_apply_info(db, tx_num)?);
         if tx_record.outcome == tx::OUTCOME_REJECTED {
             if let Some(code) = &tx_record.rejection_code {
-                let detail_json = encode_optional_json(tx_record.rejection_detail.as_ref())?;
+                let detail_json = tx::encode_optional_json(tx_record.rejection_detail.as_ref())?;
                 db.execute(
                     "INSERT INTO jazz_tx_rejection (tx_num, code, detail_json)
                      VALUES (?, ?, ?)
@@ -321,14 +321,6 @@ pub(crate) fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInf
             })
         },
     )?)
-}
-
-pub(crate) fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
-    value
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
-        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
 }
 
 fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {

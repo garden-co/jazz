@@ -1,5 +1,6 @@
 use crate::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value as JsonValue;
 
 pub(crate) const KIND_DATA: i64 = 1;
 pub(crate) const MODE_MERGEABLE: i64 = 1;
@@ -95,6 +96,14 @@ pub(crate) fn tx_num(conn: &Connection, tx_id: &str) -> Result<i64> {
 
 pub(crate) fn reject(conn: &Connection, tx_id: &str, code: &str) -> Result<i64> {
     reject_with_detail_json(conn, tx_id, code, "null")
+}
+
+pub(crate) fn encode_optional_json(value: Option<&JsonValue>) -> Result<String> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| crate::Error::new(format!("invalid JSON detail: {err}")))
+        .map(|value| value.unwrap_or_else(|| "null".to_owned()))
 }
 
 pub(crate) fn reject_with_detail_json(

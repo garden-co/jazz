@@ -280,3 +280,10 @@ an explicit read-scope enum. This does not implement app-declared branch backing
 rows yet, but it makes the next slice much less likely to blur main/current,
 branch, and snapshot semantics. This is the same lesson as auth/user naming:
 if the type only says `Option<i64>`, agents will guess and add hardcoded paths.
+
+## 2026-05-28 23:59 PDT
+
+Apply-refactor reviewer found no correctness issues, but noted one misleading
+boundary: `encode_optional_json` is generic rejection-detail/tx fate machinery,
+not apply-specific. Move it to `tx.rs` where `reject_with_detail_json` already
+lives.
