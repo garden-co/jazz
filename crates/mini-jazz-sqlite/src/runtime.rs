@@ -3533,6 +3533,10 @@ impl Runtime {
                 crate::Error::new(format!("unknown query field {}", query_read.field))
             })?;
         let branch_num = branch::checkout(db, &query_read.branch_id)?;
+        if matches!(field.kind, FieldKind::DeepText) {
+            Self::apply_deep_text_query_scope_repair(db, table, field, query_read, branch_num)?;
+            return Ok(());
+        }
         let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
         let predicate_sql = query_predicate::sql(field, &predicate_column, &query_read.op)?;
         let predicate_value = query_predicate::value(field, &query_read.op, &query_read.value, db)?;
@@ -3565,6 +3569,47 @@ impl Runtime {
                 predicate_value
             ],
         )?;
+        Ok(())
+    }
+
+    fn apply_deep_text_query_scope_repair(
+        db: &Connection,
+        table: &crate::schema::TableDef,
+        field: &FieldDef,
+        query_read: &QueryReadRecord,
+        branch_num: i64,
+    ) -> Result<()> {
+        let matching_history = query_scope_deep_text_repair_row_nums(
+            db,
+            table,
+            field,
+            &query_read.op,
+            &query_read.value,
+        )?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let matching_current = current_deep_text_predicate_row_nums(
+            db,
+            table,
+            field,
+            &query_read.op,
+            &query_read.value,
+        )?;
+        for row_num in matching_current {
+            if matching_history.contains(&row_num) {
+                continue;
+            }
+            db.execute(
+                &format!(
+                    "DELETE FROM {}
+                     WHERE j_branch_num = ?
+                       AND row_num = ?
+                       AND is_deleted = 0",
+                    crate::schema::current_table(&query_read.table)
+                ),
+                params![branch_num, row_num],
+            )?;
+        }
         Ok(())
     }
 
@@ -11750,6 +11795,9 @@ fn query_scope_repair_row_nums(
         .iter()
         .find(|candidate| candidate.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    if matches!(field.kind, FieldKind::DeepText) {
+        return query_scope_deep_text_repair_row_nums(conn, table, field, op, value);
+    }
     if op == "in" {
         let mut row_nums = Vec::new();
         for value in value
@@ -11887,6 +11935,9 @@ fn query_scope_rejected_tx_ids(
         .iter()
         .find(|candidate| candidate.name == field_name)
         .ok_or_else(|| crate::Error::new(format!("unknown query field {field_name}")))?;
+    if matches!(field.kind, FieldKind::DeepText) {
+        return query_scope_deep_text_rejected_tx_ids(conn, table, field, op, value);
+    }
     let predicate_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
     let predicate_sql = query_predicate::sql(field, &format!("h.{predicate_column}"), op)?;
     let predicate_value = query_predicate::value(field, op, value, conn)?;
@@ -11906,6 +11957,138 @@ fn query_scope_rejected_tx_ids(
     tx_ids
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn query_scope_deep_text_repair_row_nums(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field: &FieldDef,
+    op: &str,
+    value: &JsonValue,
+) -> Result<Vec<i64>> {
+    let predicate = deep_text_query_predicate(op, value)?;
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT DISTINCT h.row_num, h.{column}
+         FROM {} h
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         WHERE h.{column} IS NOT NULL
+           AND tx.outcome != ?
+         ORDER BY h.row_num",
+        crate::schema::history_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut row_nums = Vec::new();
+    for row in rows {
+        let (row_num, root_id) = row?;
+        if predicate.matches(&deep_text_value_for_root(conn, root_id)?) {
+            row_nums.push(row_num);
+        }
+    }
+    row_nums.sort();
+    row_nums.dedup();
+    Ok(row_nums)
+}
+
+fn query_scope_deep_text_rejected_tx_ids(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field: &FieldDef,
+    op: &str,
+    value: &JsonValue,
+) -> Result<Vec<String>> {
+    let predicate = deep_text_query_predicate(op, value)?;
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT DISTINCT tx.tx_id, h.{column}
+         FROM {} h
+         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         WHERE h.{column} IS NOT NULL
+           AND tx.outcome = ?
+         ORDER BY tx.tx_num",
+        crate::schema::history_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![tx::OUTCOME_REJECTED], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut tx_ids = Vec::new();
+    for row in rows {
+        let (tx_id, root_id) = row?;
+        if predicate.matches(&deep_text_value_for_root(conn, root_id)?) {
+            tx_ids.push(tx_id);
+        }
+    }
+    tx_ids.sort();
+    tx_ids.dedup();
+    Ok(tx_ids)
+}
+
+fn current_deep_text_predicate_row_nums(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    field: &FieldDef,
+    op: &str,
+    value: &JsonValue,
+) -> Result<Vec<i64>> {
+    let predicate = deep_text_query_predicate(op, value)?;
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let sql = format!(
+        "SELECT row_num, {column}
+         FROM {}
+         WHERE {column} IS NOT NULL
+           AND is_deleted = 0",
+        crate::schema::current_table(&table.name),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    let mut row_nums = Vec::new();
+    for row in rows {
+        let (row_num, root_id) = row?;
+        if predicate.matches(&deep_text_value_for_root(conn, root_id)?) {
+            row_nums.push(row_num);
+        }
+    }
+    row_nums.sort();
+    row_nums.dedup();
+    Ok(row_nums)
+}
+
+fn deep_text_value_for_root(conn: &Connection, root_id: i64) -> Result<JsonValue> {
+    if root_id == 0 {
+        return Ok(JsonValue::from(""));
+    }
+    Ok(JsonValue::from(crate::persisted_text_ops::materialize(
+        conn,
+        Some(root_id),
+    )?))
+}
+
+struct DeepTextQueryPredicate {
+    op: String,
+    value: JsonValue,
+}
+
+impl DeepTextQueryPredicate {
+    fn matches(&self, field_value: &JsonValue) -> bool {
+        json_predicate_matches(field_value, &self.op, &self.value).unwrap_or(false)
+    }
+}
+
+fn deep_text_query_predicate(op: &str, value: &JsonValue) -> Result<DeepTextQueryPredicate> {
+    if matches!(op, "eq" | "ne" | "contains" | "in") {
+        Ok(DeepTextQueryPredicate {
+            op: op.to_owned(),
+            value: value.clone(),
+        })
+    } else {
+        Err(crate::Error::new(format!(
+            "unsupported deep_text predicate op {op}"
+        )))
+    }
 }
 
 fn rejected_tx_ids_for_row_nums(
@@ -13188,15 +13371,24 @@ mod tests {
     fn deep_text_columns_can_be_queried_like_text_at_the_public_boundary() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
+            table.text("rank");
         });
         let mut alice =
             Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
         alice
-            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("rank".to_owned(), JsonValue::from("b"))]),
+            )
             .unwrap();
         alice
-            .insert_row("docs", "doc-2", BTreeMap::<String, JsonValue>::new())
+            .insert_row(
+                "docs",
+                "doc-2",
+                BTreeMap::from([("rank".to_owned(), JsonValue::from("a"))]),
+            )
             .unwrap();
         alice
             .append_deep_text("docs", "doc-1", "body", "hello searchable text")
@@ -13215,6 +13407,25 @@ mod tests {
             rows[0].values["body"],
             JsonValue::from("hello searchable text")
         );
+        let created_rows = alice
+            .read_rows_where_eq_top_created_at_desc(
+                "docs",
+                "body",
+                JsonValue::from("hello searchable text"),
+                1,
+            )
+            .unwrap();
+        assert_eq!(created_rows[0].id, "doc-1");
+        let ranked_rows = alice
+            .read_rows_where_eq_top_field_desc(
+                "docs",
+                "body",
+                JsonValue::from("hello searchable text"),
+                "rank",
+                1,
+            )
+            .unwrap();
+        assert_eq!(ranked_rows[0].id, "doc-1");
     }
 
     #[test]
@@ -13356,6 +13567,43 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != "doc-2"));
+    }
+
+    #[test]
+    fn deep_text_query_delta_can_use_text_predicate() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .insert_row("docs", "doc-2", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "needle text")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-2", "body", "plain text")
+            .unwrap();
+
+        let delta = alice
+            .export_query_where_contains_history_delta("docs", "body", "needle", &[])
+            .unwrap();
+        bob.apply_history_delta(&delta).unwrap();
+
+        let rows = bob
+            .read_rows_where_contains("docs", "body", "needle")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "doc-1");
+        assert_eq!(rows[0].values["body"], JsonValue::from("needle text"));
     }
 
     #[test]

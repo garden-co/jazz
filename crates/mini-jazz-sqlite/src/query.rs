@@ -234,6 +234,24 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
+        if matches!(field.kind, FieldKind::DeepText) {
+            let created_at_by_id = current_created_at_by_row_id(self.conn, table_name)?;
+            return values
+                .iter()
+                .map(|value| {
+                    let mut rows =
+                        self.read_rows_where_eq(table_name, field_name, value.clone())?;
+                    rows.sort_by(|left, right| {
+                        created_at_by_id
+                            .get(&right.id)
+                            .cmp(&created_at_by_id.get(&left.id))
+                            .then_with(|| left.id.cmp(&right.id))
+                    });
+                    rows.truncate(limit);
+                    Ok(rows)
+                })
+                .collect();
+        }
         let field_columns = table
             .fields
             .iter()
@@ -377,6 +395,18 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
+        if matches!(field.kind, FieldKind::DeepText)
+            || matches!(order_field.kind, FieldKind::DeepText)
+        {
+            let mut rows = self.read_rows_where_eq(table_name, field_name, value)?;
+            rows.sort_by(|left, right| {
+                json_sort_key(right.values.get(order_field_name))
+                    .cmp(&json_sort_key(left.values.get(order_field_name)))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            rows.truncate(limit);
+            return Ok(rows);
+        }
         let field_columns = table
             .fields
             .iter()
@@ -485,6 +515,22 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
+        if matches!(field.kind, FieldKind::DeepText)
+            || matches!(order_field.kind, FieldKind::DeepText)
+        {
+            return values
+                .iter()
+                .map(|value| {
+                    self.read_rows_where_eq_top_field_desc(
+                        table_name,
+                        field_name,
+                        value.clone(),
+                        order_field_name,
+                        limit,
+                    )
+                })
+                .collect();
+        }
         let field_columns = table
             .fields
             .iter()

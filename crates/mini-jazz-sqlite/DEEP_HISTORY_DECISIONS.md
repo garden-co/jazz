@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:09:33 PDT 2026
+
+Decision: make `deep_text` predicates work through ordered queries and query-delta repair by materializing text at the public/runtime boundary.
+
+Why: the first real-runtime API pass materialized `deep_text` for ordinary row reads and simple equality/contains/in predicates, but ordered helpers and receiver-side query repair still reached for the underlying integer root columns. That leaked storage details into user-visible query APIs and made `contains` query sync fail on receive.
+
+Scope impact: ordered `eq_top_created_at_desc` and `eq_top_field_desc` now fall back to materialized row sorting whenever the predicate or order field is `deep_text`. Query-delta repair can evaluate `deep_text` predicates by materializing roots from current/history rows. This path is intentionally a correctness-first fallback; if `deep_text` queries become hot, we can add a proper text index later without changing public semantics.
+
 ## Thu May 28 22:44:41 PDT 2026
 
 Decision: move the append/document deep-history benchmarks onto the real `Runtime` deep-text API and coherent `HistoryDelta` path, even though it makes the current numbers worse in places.
