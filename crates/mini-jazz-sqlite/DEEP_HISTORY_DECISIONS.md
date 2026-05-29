@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:16:24 PDT 2026
+
+Decision: reject internal deep-text roots at the public row-write API boundary.
+
+Why: the runtime stores `deep_text` fields as integer roots in current/history rows, and internal sync/history paths need to write those roots. Public app writes should still treat the field as semantic text. Letting app code pass an integer root would leak storage details and could create rows pointing at arbitrary or missing text-op history.
+
+Scope impact: `insert_row`, `update_row`, batched row writes, upsert, and conflict-resolution writes validate that any public `deep_text` value is text-shaped before entering the internal row writer. Internal deep-text edit and sync paths still use root values directly.
+
 ## Fri May 29 01:12:08 PDT 2026
 
 Decision: validate that received deep-text roots are materializable before importing their row history.

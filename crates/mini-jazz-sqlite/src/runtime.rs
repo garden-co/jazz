@@ -729,6 +729,9 @@ impl Runtime {
         mode: BatchedWriteMode,
     ) -> Result<Vec<String>> {
         let table = self.schema.table_def(table_name)?.clone();
+        for (_, values) in &writes {
+            validate_public_deep_text_write_values(&table, values)?;
+        }
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
         let write_sql = AppWriteSql::new(&table);
@@ -869,6 +872,7 @@ impl Runtime {
         op: i64,
     ) -> Result<String> {
         let table = self.schema.table_def(table_name)?.clone();
+        validate_public_deep_text_write_values(&table, &values)?;
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
         let write_sql = AppWriteSql::new(&table);
@@ -7349,6 +7353,28 @@ fn validate_write_fields(
     Ok(())
 }
 
+fn validate_public_deep_text_write_values(
+    table: &crate::schema::TableDef,
+    values: &BTreeMap<String, JsonValue>,
+) -> Result<()> {
+    for field in &table.fields {
+        if !matches!(field.kind, FieldKind::DeepText) {
+            continue;
+        }
+        let Some(value) = values.get(&field.name) else {
+            continue;
+        };
+        if value.is_null() || value.as_str().is_some() {
+            continue;
+        }
+        return Err(crate::Error::new(format!(
+            "deep_text field {}.{} expects a text value at the public API boundary",
+            table.name, field.name
+        )));
+    }
+    Ok(())
+}
+
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
 }
@@ -13284,6 +13310,27 @@ mod tests {
             bob.read_rows("docs").unwrap()[0].values["body"],
             JsonValue::from("goodbye")
         );
+    }
+
+    #[test]
+    fn public_row_writes_do_not_accept_internal_deep_text_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        let err = alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from(7_i64))]),
+            )
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("expects a text value at the public API boundary"));
     }
 
     #[test]
