@@ -7261,7 +7261,7 @@ fn insert_apply_history_batches(
             );
             let mut values = Vec::with_capacity(chunk.len() * row_width);
             for row in chunk {
-                values.extend(row.iter().cloned());
+                values.extend(row.iter());
             }
             db.prepare_cached(&sql)?
                 .execute(params_from_iter(values.iter()))?;

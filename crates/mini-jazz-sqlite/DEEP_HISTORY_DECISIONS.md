@@ -1422,3 +1422,11 @@ Decision: keep the existing ordered maps/sets inside receive/apply for now.
 Why: a measured hash-map experiment was mixed-to-worse. Transaction bookkeeping sometimes improved a little, but history apply got slower enough that receive/update did not improve. The likely cost is noisier iteration/hash overhead around tiny-to-medium per-bundle maps.
 
 Scope impact: the uncommitted code experiment was reverted; only this decision-log note remains.
+
+## Fri May 29 03:23:40 PDT 2026 - Bind History Batch Values By Reference
+
+Decision: history batch insertion now binds references to the already-built row values instead of cloning each `rusqlite::Value` into a second flat buffer.
+
+Why: history insertion is a persistent hot path for both local writes and receive/import. Copying values just to hand them to SQLite adds avoidable memory traffic, especially once app values are binary/text payloads.
+
+Scope impact: SQL shape and batch sizes are unchanged. This only removes transient copies during parameter binding.
