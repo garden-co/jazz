@@ -903,4 +903,4 @@ regress.
 
 - Moved `history_records_for_tx` from `sync_apply` to `history_export`, since both exclusive forwarding export and awaiting-dependency revalidation need it.
 - This removes the remaining concrete dependency from sync export into sync apply and makes the export/apply boundary less leaky.
-- `cargo check -p mini-jazz-sqlite` is green.
+- `cargo check -p mini-jazz-sqlite` is green. Focused exclusive-forwarding and awaiting-dependency tests also pass.
