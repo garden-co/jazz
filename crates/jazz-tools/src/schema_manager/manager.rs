@@ -2591,6 +2591,61 @@ mod tests {
     }
 
     #[test]
+    fn permissions_head_without_bundle_does_not_deny_local_writes() {
+        use crate::query_manager::session::{Session, WriteContext};
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let bundle = PermissionsBundleState {
+            schema_hash,
+            version: 1,
+            parent_bundle_object_id: None,
+            permissions,
+        };
+        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
+
+        manager
+            .process_catalogue_update(
+                manager.permissions_head_object_id(),
+                &manager.permissions_head_metadata(),
+                &encode_permissions_head(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    bundle_object_id,
+                ),
+            )
+            .expect("head should process");
+
+        assert!(
+            manager.pending_permissions_head.is_some(),
+            "bundle should be pending while only the head has arrived",
+        );
+
+        let write_context = WriteContext::from_session(Session::new("test-user"));
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(ObjectId::new())),
+            ("name".to_string(), Value::Text("Alice".into())),
+            ("email".to_string(), Value::Text("alice@example.com".into())),
+        ]);
+
+        manager
+            .insert(&mut storage, "users", values, None, Some(&write_context))
+            .expect(
+                "writes in the head-before-bundle gap should not be denied by a missing policy",
+            );
+    }
+
+    #[test]
     fn repersisting_rehydrated_permissions_keeps_unchanged_entries_stable() {
         let app_id = test_app_id();
         let schema = make_schema_v2();
