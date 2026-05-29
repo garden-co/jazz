@@ -13529,6 +13529,37 @@ mod tests {
     }
 
     #[test]
+    fn compacted_deep_text_roots_are_indexed_as_ranges() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        for _ in 0..300 {
+            alice
+                .append_deep_text("docs", "doc-1", "body", "x")
+                .unwrap();
+        }
+        alice.compact_all_history(0, 1).unwrap();
+
+        let range_count: i64 = alice
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM history_block_text_root_range",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(range_count, 1);
+        let indexed_roots = history_block_text_roots(&alice.conn, 1).unwrap();
+        assert_eq!(indexed_roots.len(), 300);
+    }
+
+    #[test]
     fn deep_text_columns_can_be_queried_like_text_at_the_public_boundary() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
