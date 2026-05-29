@@ -4611,6 +4611,19 @@ struct TextOpsCaseInput {
 
 type TextOpsEditFn = dyn FnMut(usize) -> BenchResult<(DeepTextEdit, usize)>;
 
+fn read_document_body_from_rows(runtime: &Runtime) -> BenchResult<String> {
+    let rows = runtime.read_rows("documents")?;
+    let row = rows
+        .iter()
+        .find(|row| row.id == "doc")
+        .ok_or("documents/doc was not visible")?;
+    row.values
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "documents/doc body was not materialized as text".into())
+}
+
 fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
     let writer_db_path = tmp.path().join("writer.sqlite");
@@ -4729,7 +4742,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             if diffs.is_empty() {
                 return Err("text op listener did not observe sampled edit".into());
             }
-            let observed = receiver.read_deep_text("documents", "doc", "body")?;
+            let observed = read_document_body_from_rows(&receiver)?;
             if observed.len() != final_payload_bytes {
                 return Err("text op listener materialized unexpected length".into());
             }
@@ -4782,7 +4795,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             Runtime::open_with_schema(Storage::Memory, "block-peer-node", "bob", schema.clone())?;
         let block_import_started = Instant::now();
         block_peer.apply_history_delta(&decoded_delta)?;
-        let block_text = block_peer.read_deep_text("documents", "doc", "body")?;
+        let block_text = read_document_body_from_rows(&block_peer)?;
         if block_text.len() != final_payload_bytes {
             return Err("text op block import materialized unexpected length".into());
         }
@@ -4793,7 +4806,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     }
 
     let current_started = Instant::now();
-    let current = writer.read_deep_text("documents", "doc", "body")?;
+    let current = read_document_body_from_rows(&writer)?;
     let current_read_ms = ms(current_started.elapsed());
     phase_ms.current_read += current_read_ms;
     if current.len() != final_payload_bytes {
@@ -4818,7 +4831,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     add_apply_profile(&mut cold_apply_profile, profile);
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
     let cold_verify_started = Instant::now();
-    let cold_text = cold.read_deep_text("documents", "doc", "body")?;
+    let cold_text = read_document_body_from_rows(&cold)?;
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_read_and_verify, cold_verify_started);
     let cold_load_ms = ms(cold_started.elapsed());
     if cold_text.len() != final_payload_bytes {

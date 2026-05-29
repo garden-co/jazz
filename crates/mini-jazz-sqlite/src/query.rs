@@ -2001,7 +2001,7 @@ fn row_to_view(
     for (idx, field) in table.fields.iter().enumerate() {
         values.insert(
             field.name.clone(),
-            sql_value_to_json(conn, field, &raw[idx + 2])?,
+            sql_value_to_public_json(conn, field, &raw[idx + 2])?,
         );
     }
     Ok(RowView {
@@ -2095,6 +2095,22 @@ pub(crate) fn sql_value_to_json(
             "unexpected SQL value for field {}",
             field.name
         ))),
+    }
+}
+
+fn sql_value_to_public_json(
+    conn: &Connection,
+    field: &FieldDef,
+    value: &rusqlite::types::Value,
+) -> Result<JsonValue> {
+    match (&field.kind, value) {
+        (FieldKind::DeepText, rusqlite::types::Value::Integer(value)) => {
+            let root = if *value == 0 { None } else { Some(*value) };
+            Ok(JsonValue::String(crate::persisted_text_ops::materialize(
+                conn, root,
+            )?))
+        }
+        _ => sql_value_to_json(conn, field, value),
     }
 }
 

@@ -12956,7 +12956,7 @@ mod tests {
             "hello Ada"
         );
         let row = alice.read_rows("docs").unwrap().remove(0);
-        assert!(row.values["body"].as_u64().unwrap() > 0);
+        assert_eq!(row.values["body"], JsonValue::from("hello Ada"));
     }
 
     #[test]

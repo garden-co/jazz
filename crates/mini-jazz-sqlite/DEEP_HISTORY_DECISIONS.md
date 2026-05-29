@@ -1046,3 +1046,11 @@ Decision: do not keep the attempted `ON CONFLICT DO NOTHING` receive-tx fast pat
 Why: most benchmark receive bundles contain new transactions, so avoiding the `DO UPDATE` branch looked plausible. In practice it did not improve `txs_ms`, and it added fallback complexity for conflict/update cases. The existing single upsert path remains simpler and competitive.
 
 Scope impact: the uncommitted receive-tx fast path was reverted. Apply sub-timers remain.
+
+## Fri May 29 00:20:07 PDT 2026 - Materialize Deep-Text Columns At The Public Row Boundary
+
+Decision: public `read_rows` now exposes `deep_text` fields as normal text strings, while storage/history/export internals keep using compact numeric text roots.
+
+Why: the opt-in deep-history text column should behave like a real user column at the runtime API boundary. Requiring callers or benchmarks to read a sidecar root and then call `read_deep_text` made the experiment feel like plumbing instead of runtime behavior. The row-query layer is the last-mile boundary where materialization belongs; bundle/history code still needs roots for efficient sync and compaction.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. The canonical Block+Ops sample now verifies current/cold/live text reads through `read_rows`; append current-read timing rose from about 0.55 ms to 0.76 ms because it now measures the public materialization path.
