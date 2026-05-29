@@ -19,3 +19,12 @@ pre-commit:
     starters-parity:
       glob: "starters/**"
       run: node dev/scripts/check-starters-parity.mjs
+    # Type-check the docs snippet packages. `--only` skips the topological
+    # `^build` chain, which otherwise drags in jazz-rn's native (NDK) build —
+    # not needed to type-check the snippets. Requires jazz-tools to be built.
+    docs-snippets:
+      glob: "examples/docs/**"
+      run: pnpm turbo run build --filter='./examples/docs/*' --only
+    docs-site-types:
+      glob: "docs/**"
+      run: pnpm --filter docs types:check

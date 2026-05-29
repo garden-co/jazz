@@ -11,5 +11,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  {#snippet children()}{/snippet}
+  {#snippet children()}
+    <!-- Insert your app's main component -->
+  {/snippet}
 </JazzSvelteProvider>

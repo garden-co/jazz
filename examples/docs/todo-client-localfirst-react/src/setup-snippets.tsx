@@ -29,6 +29,7 @@ export function AppWithRuntimeSources() {
       }}
       fallback={<p>Loading...</p>}
     >
+      {/* Your app's main component */}
       <TodoList />
     </JazzProvider>
   );
