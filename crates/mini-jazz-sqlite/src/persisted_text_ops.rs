@@ -1,7 +1,7 @@
 use crate::{Error, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const CHUNK_BYTES: usize = 4096;
 const DELTA_MAGIC: &[u8; 5] = b"JTOP1";
@@ -147,6 +147,13 @@ pub fn materialize(conn: &Connection, root: TextRoot) -> Result<String> {
     for op in ops {
         let start = op.start_byte as usize;
         let delete_bytes = op.delete_bytes as usize;
+        if start > text.len()
+            || start + delete_bytes > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(start + delete_bytes)
+        {
+            return Err(Error::new(format!("invalid text op range {}", op.op_id)));
+        }
         text.replace_range(start..start + delete_bytes, &op.insert_text);
     }
     Ok(text)
@@ -547,23 +554,58 @@ fn validate_delta_references(
 ) -> Result<()> {
     let incoming_ops = ops.iter().map(|op| op.op_id).collect::<BTreeSet<_>>();
     let mut op_exists_stmt = conn.prepare_cached("SELECT 1 FROM jazz_text_op WHERE op_id = ?")?;
+    let mut root_len_stmt =
+        conn.prepare_cached("SELECT resulting_len FROM jazz_text_op WHERE op_id = ?")?;
+    let mut incoming_lengths = BTreeMap::new();
     for op in ops {
-        let Some(parent_op_id) = op.parent_op_id else {
-            continue;
+        let parent_len = if let Some(parent_op_id) = op.parent_op_id {
+            if parent_op_id >= op.op_id {
+                return Err(Error::new(format!(
+                    "text op {} parent {} is not older",
+                    op.op_id, parent_op_id
+                )));
+            }
+            if let Some(parent_len) = incoming_lengths.get(&parent_op_id).copied() {
+                parent_len
+            } else if incoming_ops.contains(&parent_op_id) {
+                return Err(Error::new(format!(
+                    "text op parent {parent_op_id} for op {} appears after child",
+                    op.op_id
+                )));
+            } else {
+                root_len_stmt
+                    .query_row(params![parent_op_id], |row| row.get::<_, i64>(0))
+                    .optional()?
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "missing text op parent {parent_op_id} for op {}",
+                            op.op_id
+                        ))
+                    })?
+            }
+        } else {
+            0
         };
-        if incoming_ops.contains(&parent_op_id) {
-            continue;
-        }
-        let parent_exists = op_exists_stmt
-            .query_row(params![parent_op_id], |_| Ok(()))
-            .optional()?
-            .is_some();
-        if !parent_exists {
+        if op.start_byte < 0 || op.delete_bytes < 0 {
             return Err(Error::new(format!(
-                "missing text op parent {parent_op_id} for op {}",
+                "text op {} has negative range",
                 op.op_id
             )));
         }
+        if op.start_byte > parent_len || op.start_byte + op.delete_bytes > parent_len {
+            return Err(Error::new(format!(
+                "text op {} range out of bounds",
+                op.op_id
+            )));
+        }
+        let expected_len = parent_len + op.insert_text.len() as i64 - op.delete_bytes;
+        if op.resulting_len != expected_len {
+            return Err(Error::new(format!(
+                "text op {} resulting length mismatch",
+                op.op_id
+            )));
+        }
+        incoming_lengths.insert(op.op_id, op.resulting_len);
     }
 
     let mut incoming_chunks = BTreeSet::new();
@@ -1128,5 +1170,25 @@ mod tests {
         let err = apply_delta(&target, &corrupted, &mut DeltaWatermark::default()).unwrap_err();
 
         assert!(err.to_string().contains("chunk hash"));
+    }
+
+    #[test]
+    fn binary_delta_rejects_invalid_op_range() {
+        let target = open_text_store();
+        let ops = vec![TextOpRow {
+            op_id: 1,
+            parent_op_id: None,
+            start_byte: 7,
+            delete_bytes: 0,
+            insert_text: "oops".to_owned(),
+            resulting_len: 4,
+        }];
+        let mut payload = Vec::new();
+        encode_delta_payload(&mut payload, &ops, &[], &[]);
+        let encoded = lz4_flex::compress_prepend_size(&payload);
+
+        let err = apply_delta(&target, &encoded, &mut DeltaWatermark::default()).unwrap_err();
+
+        assert!(err.to_string().contains("range out of bounds"));
     }
 }

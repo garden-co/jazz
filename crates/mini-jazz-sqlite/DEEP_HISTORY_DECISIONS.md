@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:20:57 PDT 2026
+
+Decision: validate deep-text op range structure before importing a text-op delta.
+
+Why: parent/chunk existence is not enough. A malicious or corrupt delta could include an op with a valid parent but an impossible byte range or bogus resulting length, leaving a root that fails only when an app later materializes it. The sidecar decoder can cheaply validate op id ordering, parent length, range bounds, and resulting length before any rows are inserted.
+
+Scope impact: `persisted_text_ops::apply_delta` now rejects invalid ranges, negative ranges, non-older parents, and resulting-length mismatches. `materialize` also returns an error instead of panicking if an invalid range somehow exists in storage.
+
 ## Fri May 29 02:18:49 PDT 2026
 
 Decision: ordinary public `deep_text` assignments that do not change text should reuse the existing root.
