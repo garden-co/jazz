@@ -696,3 +696,9 @@ regress.
 - Converted restart tests from "worker remembers query descriptors" to "client replays query descriptors" while preserving the same refresh/repair assertions.
 - Unignored the invariant that durable observed query reads are connection-local.
 - Focused `after_restart`, `query_read`, and restarted subscription tests pass.
+
+## 2026-05-29 02:58 PDT - Full validation passes after connection-local query descriptors
+
+- Ran `cargo test -p mini-jazz-sqlite` after the observed-query semantic flip and restart test migrations.
+- Result: 436 passed, 18 ignored placeholders, 0 failed.
+- This gives the PR a new green baseline after a product-shaped behavior change, not just module movement.
