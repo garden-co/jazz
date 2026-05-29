@@ -1270,3 +1270,11 @@ Decision: when ordinary batched row writes set a `deep_text` field more than onc
 Why: current projection is intentionally deferred inside write batches, so reading the current table while normalizing a later deep-text string can see a stale or missing root. The correct source is the same batch-local row state used for ordinary field merging.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. A regression upserts the same deep-text row twice in one SQLite batch and verifies both the final text and the first historical version.
+
+## Fri May 29 02:36:39 PDT 2026 - Query Deltas Carry Text-Op Watermarks
+
+Decision: top-field history delta options now carry a deep-text sidecar watermark through the ordinary query-scope export path, instead of always exporting sidecar roots from zero.
+
+Why: top-field refresh is a real observed-query sync path. If the receiver already has old text ops, repeated refreshes should only carry the new sidecar ops required by the changed row versions. This keeps the public API closer to a cursor-shaped sync model without introducing a larger cursor abstraction yet.
+
+Scope impact: a runtime regression covers a second top-field HistoryDelta exporting exactly one new text op after the first refresh watermark.

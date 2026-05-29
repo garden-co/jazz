@@ -118,6 +118,7 @@ struct QueryScopeDeltaOptions<'a> {
     ref_include_fields: &'a [&'a str],
     extra_row_ids: &'a [String],
     remote_block_manifests: &'a [HistoryBlockManifest],
+    text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
 }
 
 struct BatchedQueryScopeItem {
@@ -185,6 +186,7 @@ impl<'a> QueryScopeDeltaOptions<'a> {
             ref_include_fields: &[],
             extra_row_ids: &[],
             remote_block_manifests,
+            text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
         }
     }
 }
@@ -2797,6 +2799,7 @@ impl Runtime {
                         ref_include_fields: &[],
                         extra_row_ids: &observed_ids_from_query_value(&read.value)?,
                         remote_block_manifests,
+                        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
                     },
                 )
             }
@@ -5172,6 +5175,7 @@ impl Runtime {
                 ref_include_fields: &[],
                 extra_row_ids: &previous_observed_ids,
                 remote_block_manifests,
+                text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
             },
         )
     }
@@ -5230,6 +5234,7 @@ impl Runtime {
                 ref_include_fields: &[],
                 extra_row_ids: &options.previous_observed_ids,
                 remote_block_manifests: &options.remote_block_manifests,
+                text_ops_watermark: options.text_ops_watermark,
             },
         )
     }
@@ -6173,7 +6178,7 @@ impl Runtime {
         let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
             &bundle,
             &blocks,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            options.text_ops_watermark,
         )?;
         Ok(HistoryDelta {
             bundle,
@@ -14104,6 +14109,83 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != "doc-2"));
+    }
+
+    #[test]
+    fn top_field_query_delta_can_increment_deep_text_sidecar_from_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("folder");
+            table.text("rank");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([
+                    ("folder".to_owned(), JsonValue::from("kept")),
+                    ("rank".to_owned(), JsonValue::from("b")),
+                ]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let first_delta = alice
+            .export_query_where_eq_top_field_desc_history_delta(
+                "docs",
+                "folder",
+                "kept",
+                "rank",
+                1,
+                &[],
+            )
+            .unwrap();
+        bob.apply_history_delta(&first_delta).unwrap();
+        let text_watermark = bob.current_text_ops_watermark().unwrap();
+
+        alice
+            .append_deep_text("docs", "doc-1", "body", " again")
+            .unwrap();
+        let second_delta = alice
+            .export_query_where_eq_top_field_desc_history_delta_with_options(
+                "docs",
+                "folder",
+                "kept",
+                TopFieldHistoryDeltaOptions::new("rank", 1)
+                    .with_previous_observed_ids(vec!["doc-1".to_owned()])
+                    .with_text_ops_watermark(text_watermark),
+            )
+            .unwrap();
+
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &first_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &second_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        assert_eq!(stats.ops, 1);
+
+        bob.apply_history_delta(&second_delta).unwrap();
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello again"
+        );
     }
 
     #[test]
