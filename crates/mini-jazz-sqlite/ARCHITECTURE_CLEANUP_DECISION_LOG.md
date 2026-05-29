@@ -563,3 +563,9 @@ regress.
 - Moved top-N read helpers into `runtime::reads`, the explicit `transaction()` constructor into `runtime::transaction_builder`, and `session_user_for_test` into `runtime::session`.
 - These were leftovers from earlier extractions and are a good example of the cleanup rule for this PR: if a method has an obvious semantic owner, move it there even if the raw line count is small.
 - Focused transaction tests pass after the move.
+
+## 2026-05-29 02:11 PDT - Full mini-core test passes after the runtime split
+
+- Ran `cargo test -p mini-jazz-sqlite` after the session/read/write/query-export/query-refresh/sync-export/sync-apply module extractions.
+- Result: 434 passed, 19 ignored placeholders, 0 failed.
+- Disk is still tight on this machine, but the warm Rust target cache was enough for a full validation pass.
