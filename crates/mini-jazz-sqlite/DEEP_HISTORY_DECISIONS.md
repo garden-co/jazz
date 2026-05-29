@@ -1014,3 +1014,11 @@ Decision: apply decoded deep-text sidecar deltas with multi-row `INSERT` chunks 
 Why: sync/import receives sidecar data as one logical delta, but the apply path still inserted each text op row separately. Batching keeps the durable table layout unchanged while reducing statement count for large text deltas.
 
 Scope impact: the canonical sample shows small import/apply movement rather than a dramatic win, but this is a cleaner production-shaped receive path and keeps text sidecar apply aligned with the batched Jazz bundle apply. Full `mini-jazz-sqlite` tests pass.
+
+## Thu May 28 23:55:36 PDT 2026 - Batch Local History Inserts
+
+Decision: local SQLite write batches now defer app-history row inserts and flush them with the same multi-row insert helper used by bundle apply.
+
+Why: every logical Jazz update still needs its own history row, but a 10ms SQLite transaction does not need one `INSERT` statement per row. The write path can finish validation, tx creation, read/write tuple recording, and current projection repair, then persist the accumulated history rows before commit.
+
+Scope impact: this preserves one Jazz tx/history row per update while cutting local `history_insert_ms` substantially in the canonical sample. Full `mini-jazz-sqlite` tests pass.

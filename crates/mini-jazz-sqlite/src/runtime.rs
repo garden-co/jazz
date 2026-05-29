@@ -507,6 +507,7 @@ impl Runtime {
         let mut row_num_cache = BTreeMap::new();
         let mut visible_tx_cache = BTreeMap::new();
         let mut effective_values_cache = BTreeMap::new();
+        let mut history_rows_by_table = BTreeMap::new();
         let mut materialized_text = if edits
             .iter()
             .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
@@ -550,6 +551,11 @@ impl Runtime {
                 visible_tx_cache: Some(&mut visible_tx_cache),
                 effective_values_cache: Some(&mut effective_values_cache),
                 write_current_projection: index == last_edit_index,
+                history_rows_batch: Some(
+                    history_rows_by_table
+                        .entry(table_name.to_owned())
+                        .or_insert_with(Vec::new),
+                ),
             })?;
             next_local_epoch += 1;
             if !outcome.allowed {
@@ -566,6 +572,9 @@ impl Runtime {
             }
             tx_ids.push(outcome.tx_id);
         }
+        let history_insert_started = Instant::now();
+        insert_apply_history_batches(&db, &self.schema, &mut history_rows_by_table)?;
+        add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
         let commit_started = Instant::now();
         db.commit()?;
         add_write_phase(|stats| &mut stats.commit_ms, commit_started);
@@ -732,6 +741,7 @@ impl Runtime {
         let mut row_num_cache = BTreeMap::new();
         let mut visible_tx_cache = BTreeMap::new();
         let mut effective_values_cache = BTreeMap::new();
+        let mut history_rows_by_table = BTreeMap::new();
         let last_write_index_by_id = writes
             .iter()
             .enumerate()
@@ -789,6 +799,11 @@ impl Runtime {
                 visible_tx_cache: Some(&mut visible_tx_cache),
                 effective_values_cache: Some(&mut effective_values_cache),
                 write_current_projection: last_write_index_by_id.get(&id) == Some(&index),
+                history_rows_batch: Some(
+                    history_rows_by_table
+                        .entry(table_name.to_owned())
+                        .or_insert_with(Vec::new),
+                ),
             })?;
             next_local_epoch += 1;
             if !outcome.allowed {
@@ -805,6 +820,9 @@ impl Runtime {
             }
             tx_ids.push(outcome.tx_id);
         }
+        let history_insert_started = Instant::now();
+        insert_apply_history_batches(&db, &self.schema, &mut history_rows_by_table)?;
+        add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
         let commit_started = Instant::now();
         db.commit()?;
         add_write_phase(|stats| &mut stats.commit_ms, commit_started);
@@ -882,6 +900,7 @@ impl Runtime {
             visible_tx_cache: None,
             effective_values_cache: None,
             write_current_projection: true,
+            history_rows_batch: None,
         })?;
         if !outcome.allowed {
             let reject_started = Instant::now();
@@ -6687,6 +6706,7 @@ struct InsertRowInTx<'a> {
     visible_tx_cache: Option<&'a mut BTreeMap<i64, Option<i64>>>,
     effective_values_cache: Option<&'a mut EffectiveValuesCache>,
     write_current_projection: bool,
+    history_rows_batch: Option<&'a mut Vec<Vec<rusqlite::types::Value>>>,
 }
 
 type EffectiveValuesCache = BTreeMap<(String, i64), BTreeMap<String, JsonValue>>;
@@ -7065,11 +7085,15 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         rusqlite::types::Value::Integer(created_by_num),
         rusqlite::types::Value::Integer(updated_by_num),
     ]);
-    let history_insert_started = Instant::now();
-    args.db
-        .prepare_cached(&args.write_sql.history_sql)?
-        .execute(params_from_iter(sql_values.iter()))?;
-    add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
+    if let Some(history_rows) = args.history_rows_batch.as_deref_mut() {
+        history_rows.push(sql_values.clone());
+    } else {
+        let history_insert_started = Instant::now();
+        args.db
+            .prepare_cached(&args.write_sql.history_sql)?
+            .execute(params_from_iter(sql_values.iter()))?;
+        add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
+    }
     if !args.compact_tx_tuples {
         let record_tx_write_started = Instant::now();
         record_tx_write(args.db, tx_num, &table.name, row_num, args.op)?;
@@ -8125,6 +8149,7 @@ impl<'a> TransactionBuilder<'a> {
                         visible_tx_cache: None,
                         effective_values_cache: None,
                         write_current_projection: true,
+                        history_rows_batch: None,
                     })?;
                     allowed &= outcome.allowed;
                 }
