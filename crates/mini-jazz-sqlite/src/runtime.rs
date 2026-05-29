@@ -2318,6 +2318,9 @@ impl Runtime {
             )?;
         }
         self.import_history_blocks(&delta.blocks)?;
+        if !delta.blocks.is_empty() {
+            rebuild_current_projection_from_sealed_blocks(&self.conn, &self.schema)?;
+        }
         self.apply_bundle_inner(&delta.bundle, true, true)
     }
 
@@ -14591,7 +14594,7 @@ mod tests {
                 .append_deep_text("docs", "doc-1", "body", "x")
                 .unwrap();
         }
-        alice.compact_table_accepted_history("docs", 1, 1).unwrap();
+        alice.compact_table_accepted_history("docs", 0, 1).unwrap();
         assert!(!alice.history_block_manifests("docs").unwrap().is_empty());
         alice
             .insert_row(

@@ -1462,3 +1462,11 @@ Decision: add a regression test where a `comments` query includes a referenced `
 Why: the first implementation of multi-table block selection still did not seed referenced rows that had no open history in the bundle. The test caught that; the fix now explicitly seeds ref-included row ids before selecting missing blocks.
 
 Scope impact: the test keeps one hot doc row open so the referenced row becomes current-visible after apply, while still requiring the older `docs` block to be exported. A fully sealed referenced row becoming current-visible from only a block remains a separate design question.
+
+## Fri May 29 03:50:56 PDT 2026 - Repair Current Projection After Block Import
+
+Decision: `HistoryDelta` apply now rebuilds current projection candidates from imported sealed blocks inside the same outer savepoint before applying the open bundle.
+
+Why: `hot_tail = 0` compaction is allowed, and a real sync delta may legitimately carry a row only as a sealed block. Importing the block without repairing current made the history durable but not current-visible on the receiver. The existing block-aware rebuild helper was only exposed through explicit projection rebuild; apply should use it when it imports blocks.
+
+Scope impact: fully sealed referenced rows in query/ref-include deltas can become visible after apply. If the open bundle also contains a newer version, normal bundle apply runs afterward and wins. The rollback test still passes because the rebuild happens inside the `HistoryDelta` savepoint.
