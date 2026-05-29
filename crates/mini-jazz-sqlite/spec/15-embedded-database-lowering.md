@@ -38,6 +38,8 @@ CREATE TABLE jazz_tx (
   conflict_mode INTEGER NOT NULL,
   outcome INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
+  reads_jsonb BLOB,
+  writes_jsonb BLOB NOT NULL,
   metadata_blob BLOB NOT NULL,
   UNIQUE (node_num, local_epoch)
 );
@@ -70,6 +72,22 @@ rejection detail. `jazz_tx_awaiting_dependency` is the selected prototype
 lowering for `awaiting_deps`: the hot transaction outcome remains `pending`,
 while the side table records the durable wait reason and the user context needed
 to re-run authority policy validation after missing facts arrive.
+
+`reads_jsonb` and `writes_jsonb` are compact JSONB-style tuple columns for the
+ordinary read/write facts that remain hot for sync, validation, and diagnostics.
+The representation should be queryable enough for common transaction lookups;
+fully opaque binary blobs are not the preferred baseline for these tuples. A
+`NULL` reads column may encode the common implicit previous-local dependency
+when the only read dependency is the writer node's immediately preceding local
+epoch; an explicit empty array means no read dependencies.
+
+Cold transaction metadata should be compactable with the history it describes.
+Open `jazz_tx` rows are the hot working set. Sealed history blocks may carry
+the archived transaction records, tuple columns, rejection diagnostics, and
+receipt facts needed to interpret compacted row versions. This means old
+transaction info can be served from blocks without keeping all old transactions
+expanded in the hot `jazz_tx` table. Accepted and rejected transaction metadata
+should be compacted into their corresponding accepted/rejected block families.
 
 `global_epoch` is intentionally not unique. Multiple transactions may share one
 authority epoch. Indexes should support lookup/order by `(global_epoch, tx_num)`
@@ -136,6 +154,27 @@ for the expected complexity. History table ordering and primary keys should
 therefore be chosen with compression locality in mind: nearby archived ranges
 should tend to contain related table/layout/row/history data so redundant
 append-only history can compress well inside ordinary SQLite tables.
+
+Sealed history blocks are the selected userland compression boundary. They live
+inside ordinary SQLite tables, not below SQLite as a custom VFS. Each block has
+a manifest containing table/layout, accepted-or-rejected kind, row/tx ranges,
+payload hash, compressed byte size, and any side indexes needed to discover the
+block for sync and point reads. Payloads are columnar and compressed, currently
+with LZ4 as the practical browser-compatible baseline. Blocks are immutable
+once written.
+
+Branch bases, visible heads, and cold row histories are all allowed to live only
+inside sealed blocks. Implementations may retain recent open rows for
+performance, but branch correctness and current projection rebuild must not
+depend on that retention.
+
+Promoted text columns use a prescribed sidecar lowering because row roots alone
+are not self-contained. The sidecar stores immutable text operations, periodic
+snapshots, and content-addressed snapshot chunks. Current/history rows store
+roots into that sidecar. Sidecar sync deltas carry the operations, snapshots,
+and chunks needed for roots referenced by exported row history or sealed
+blocks. Public APIs and query results materialize text; only storage/sync
+internals observe roots.
 
 ### 26.3 Branch View Tables
 

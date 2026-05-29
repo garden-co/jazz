@@ -17,6 +17,13 @@ Bundles contain:
 - catalogue entries when needed
 - file/blob metadata and bytes when in scope and authorized
 
+The canonical deep-history transfer unit is a `HistoryDelta`: one logical
+message containing the ordinary bundle, sealed history block exports, and any
+sidecar bytes required by promoted text columns. The receiver applies a
+`HistoryDelta` atomically. A sender should not require the receiver to apply a
+row bundle and separately remember to apply matching block or text-sidecar
+payloads.
+
 The current prototype bundle shape is:
 
 ```text
@@ -54,14 +61,44 @@ they may retain previously learned rows outside active scopes until an
 asynchronous eviction policy decides the data is no longer useful or permitted
 to keep.
 
+Query repair is the sync work needed to make a receiver's previously observed
+query result converge when rows leave scope, change ordering, become rejected,
+or become hidden by branch/policy/catalogue changes. Repair data may be ordinary
+open history, sealed blocks, observed facts, tombstones, or branch/source
+metadata. If a repair row is cold, the delta must be able to carry its sealed
+block rather than relying on an open history tail.
+
 Bundle assembly must dedupe concrete history rows and transaction records even
 when the same row is included for multiple reasons: result, dependency, policy,
 repair, snapshot base, and branch provenance.
+
+Query-scope and recursive/ref-include exports must select missing sealed blocks
+for every row represented in the outgoing bundle, not only the primary queried
+table. Included rows, policy dependency rows, repair rows, branch/source rows,
+and referenced rows can all carry cold history. Block selection still filters
+against receiver manifests and branch-base visibility.
 
 Transport compression should operate over the connection or stream, not over
 individual bundles, rows, or payload cells. The sync layer should preserve
 self-describing bundle frames while allowing the transport to compress across a
 larger redundancy window.
+
+Receiver state is part of sync cursor design. A receiver should be able to
+summarize the sealed history blocks it already has plus the promoted-text
+sidecar watermark it has applied. The sender exports against that state so it
+does not resend known blocks or known text operations. The prototype represents
+this as export options containing block manifests and a text-op watermark; a
+production protocol may encode the same facts as an explicit sync cursor.
+
+The promoted-text sidecar watermark is currently global to a store: it records
+the latest text operation and snapshot known by the receiver. This is simple
+and works when text operations are assigned in one monotonic sidecar sequence,
+but it can over-send in sparse multi-document or multi-column sync: a receiver
+may know recent operations for one document while missing older operations for
+another, and one global watermark cannot express that shape. A future cursor may
+split the watermark by table/row/column or by sidecar shard. The semantic
+requirement is that receivers never observe row roots without the sidecar data
+needed to materialize them.
 
 Table-scope and query-scope exports have different obligations. Table-scope
 exports include table tombstones needed to converge table replicas. Query-scope

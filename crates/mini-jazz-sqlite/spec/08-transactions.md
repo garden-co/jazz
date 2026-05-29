@@ -13,7 +13,7 @@ Every transaction has:
 - transaction kind
 - outcome
 - durability receipts/frontier
-- creation time
+- transaction creation time
 - typed metadata containing write facts and persisted observed facts
 
 Transaction kinds include:
@@ -60,6 +60,21 @@ The local write path:
 6. updates or invalidates current projections
 7. commits the embedded database transaction
 8. publishes local subscription diffs
+
+Runtime implementations may group many logical Jazz transactions into one
+embedded-database transaction for throughput. This batching must not coalesce
+Jazz semantics: each logical update still receives its own transaction id,
+node-local epoch, history row set, read/write facts, outcome, and subscription
+effects. The embedded transaction is only the durability boundary used to write
+several already-distinct Jazz transactions at once.
+
+Transaction creation time is metadata about when the logical transaction was
+created, not row creation time. A batching implementation may assign one
+transaction creation timestamp to several logical transactions in the same
+short ingest slice, because ordering is determined by node/local epoch and
+global epoch. Application row `created_at` remains immutable for the logical
+row after insert; later row versions update row `updated_at` or equivalent
+update metadata instead.
 
 Patch updates preserve omitted fields from the effective visible row. The
 effective base may be a current branch row, a row inherited from branch sources,

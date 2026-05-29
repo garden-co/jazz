@@ -17,8 +17,7 @@ migrations/
 
 - structural schema
 - relations
-- scalar types such as text, deep-history text, boolean, integer, real,
-  timestamp, UUID, and bytes
+- scalar types such as text, boolean, integer, real, timestamp, UUID, and bytes
 - enums, arrays, refs, JSON schemas, defaults, and nullability
 - merge strategies
 - explicit `indexOnly(...)` declarations
@@ -43,12 +42,23 @@ schema versions differ only by index declarations or merge strategy
 declarations, the system should derive automatic lens compatibility because row
 value shape did not change.
 
-Deep-history text is an opt-in text storage strategy for fields expected to
-accumulate long edit histories. Semantically it is still a text value in the row
-schema, but the physical current/history row stores an opaque text root while
-the runtime owns the append/edit op log, snapshots, sync delta, and historical
-materialization. Ordinary text remains the default for short or rarely edited
-fields.
+Text is one semantic schema type. Implementations may start a text field in the
+ordinary inline representation and promote it to the deep-history text lowering
+after observing edit pressure such as repeated appends or short range
+replacements. Promotion is a physical storage decision, not a schema-visible
+type change: public row writes still accept text, public row reads and ordinary
+queries still expose text, lenses see text, and sync peers learn the extra
+sidecar state through the history-delta protocol.
+
+The promoted deep-history text lowering is prescribed because it affects
+storage and sync format. Physical current/history rows store compact opaque text
+roots, while the runtime owns a text operation log, periodic snapshots,
+content-addressed snapshot chunks, sidecar deltas, and historical
+materialization. Product APIs may expose efficient append and range-edit
+operations, but callers are not required to manufacture or observe text roots.
+The prototype currently uses an explicit `deep_text` field declaration to force
+this lowering in benchmarks; the intended product contract is automatic or
+planner-driven promotion behind the ordinary text type.
 
 Physical storage layouts are not created for every catalogue/schema version.
 The engine should create a new physical layout only when structural storage

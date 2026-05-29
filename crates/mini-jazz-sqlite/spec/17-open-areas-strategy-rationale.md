@@ -78,6 +78,13 @@ Required benchmark families:
   - historical snapshot by global epoch
   - full-system snapshot export by global epoch
   - historical "as of wall-clock time" queries
+- **Deep row history**
+  - append-heavy text streams
+  - short random-run text edits
+  - high-frequency scalar/presence updates
+  - cold current reads after history compaction
+  - historical point reads from sealed blocks
+  - sync/export/apply when rows and transaction metadata are block-backed
 - **Browser topology**
   - cold open
   - worker startup
@@ -338,11 +345,22 @@ current important families are:
 - transaction granularity
 - multi-tenant many-user pages
 - wide-schema/narrow-sync path
+- deep-history text and presence workloads: append streams, short random-run
+  edits, and high-frequency coordinate updates
 
 Detailed scenario descriptions and numeric runs belong in benchmark reports,
 PR descriptions, and decision logs rather than in the normative spec. The spec
 should capture the product-shaped design pressure and the optimization
 recommendations that survive those experiments.
+
+Deep-history workloads should be benchmarked as real runtime behavior, not as
+parallel benchmark-only storage paths. Important measurements include
+per-update write time, incremental sync/export/apply time, cold import/load
+time, historical point-read time, live database bytes versus final payload or
+source gzip, and native bundle bytes before transport stream compression. The
+goal is for long edit histories to stay efficient in storage, memory, sync, and
+historical reads while preserving one logical Jazz transaction/history version
+per update.
 
 ## Appendix A: Working Prototype Status And Strategy
 
@@ -428,6 +446,10 @@ Implemented slices so far:
 - cycle rejection and bounded acyclic recursive policy lowering
 - narrow schema lenses for renamed fields and refs
 - system-column prefix escaping
+- sealed history blocks for compacted accepted and rejected history
+- block-native history deltas with receiver block manifests
+- promoted text prototype via an explicit `deep_text` field kind, text-op
+  sidecar, sidecar watermarks, and `HistoryDelta` integration
 
 Tests should be product-shaped integration tests using projects, todos, Alice,
 Bob, and a core authority.
@@ -513,6 +535,12 @@ Known implementation tensions:
 
 - Query-scope repair currently uses local history that ever matched a supported
   equality predicate. This is correct for the prototype but can over-export.
+- The prototype exposes promoted text through an explicit `deep_text` schema
+  kind. The intended product direction is implicit promotion behind ordinary
+  text once edit pressure justifies the sidecar lowering.
+- The prototype currently uses a global text sidecar watermark. This may
+  over-send in sparse multi-document or multi-column sync and should evolve
+  into a richer cursor if measurements show it matters.
 - Projection repair is intentionally broad in several incoming-sync paths.
 - Recursive policy/query lowering works for narrow acyclic cases, but helper
   SQL is duplicated and needs consolidation.
@@ -606,6 +634,7 @@ Future work may revisit:
   conflicts, or historical queries too slow or complex
 - payload compression for special large metadata/blob cases
 - userland history-block compression
+- automatic text promotion thresholds and sidecar sharding/cursor design
 - opaque policy proofs
 - compact encrypted indexes
 - query-scope repair via durable observed-fact indexes rather than broad

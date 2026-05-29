@@ -26,6 +26,29 @@ JSON payload, with generated/side indexes added only for proven hot historical
 queries. Current projection remains columnar because ordinary reads, policies,
 subscriptions, and indexes are hot.
 
+Cold accepted history should be compactable into sealed history blocks stored
+inside the embedded database. A block contains many row versions and the
+transaction metadata needed to interpret them, encoded in a columnar,
+compression-friendly payload. Blocks are many-per-row over time, may contain
+multiple rows when the compaction policy chooses a table/range batch, and are
+indexed by manifest metadata so sync and point reads can find relevant blocks
+without scanning every payload.
+
+Rejected history is also eligible for compaction, but rejected versions and
+rejected transaction diagnostics should be sealed separately from accepted
+history. This keeps accepted sync/export paths small while preserving rejected
+state for diagnostics, repair, and audit-oriented inspection. The spec does not
+prescribe compaction timing or frequency; it requires that compacted accepted
+and rejected history remain semantically decodable and syncable.
+
+The number of recent open history rows retained per logical row is a runtime
+compaction policy. Keeping a hot tail reduces short-term decode work; keeping a
+hot tail of zero is valid and means even a visible head row may exist only in a
+sealed block. Correctness must not depend on visible heads, branch bases, or
+old transaction metadata remaining open. Current projection rebuild, historical
+point reads, branch reads, and sync apply must be able to recover the needed
+state from sealed blocks.
+
 Ordinary deletes are append-only history rows. Restore/undelete is also
 append-only: restoring a deleted row writes a new transaction/version derived
 from preserved deleted-row values rather than erasing or mutating the delete
@@ -40,6 +63,22 @@ not resurrect truncated state from stale history.
 
 Main must have a current projection for fast ordinary reads. Current projection
 rows contain the resolved visible row value plus conflict metadata.
+
+Within one embedded-database transaction, an implementation may defer current
+projection writes for intermediate versions that are not externally observable
+until commit. For example, a short ingest batch may append many logical Jazz
+transactions for the same row, keep the batch-local effective row in memory,
+and write only the final current projection row before commit. This is valid
+only if every logical transaction/history row and read/write fact is still
+recorded and the committed projection is identical to deterministic rebuild
+from the committed history.
+
+Incoming sync that imports sealed blocks must repair current projection from
+the imported block contents before publishing effects. The repair is scoped to
+the imported blocks and then ordinary open-history apply may overwrite it with
+newer visible candidates. This lets a query delta or table delta make a fully
+sealed row visible without forcing the receiver to decode unrelated local
+blocks.
 
 Projection rebuild:
 
