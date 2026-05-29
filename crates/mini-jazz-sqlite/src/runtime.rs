@@ -1832,21 +1832,6 @@ impl Runtime {
             .iter()
             .map(|record| record.tx_id.as_str())
             .collect::<BTreeSet<_>>();
-        let mut upsert_tx_stmt = db.prepare_cached(
-            "INSERT INTO jazz_tx
-             (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(node_num, local_epoch) DO UPDATE SET
-               outcome = MAX(jazz_tx.outcome, excluded.outcome),
-               global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
-               conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-               metadata = COALESCE(excluded.metadata, jazz_tx.metadata)
-             RETURNING tx_num, node_num, outcome, conflict_mode, global_epoch,
-               EXISTS(
-                 SELECT 1 FROM jazz_tx_awaiting_dependency awaiting
-                 WHERE awaiting.tx_num = jazz_tx.tx_num
-               )",
-        )?;
         let mut upsert_rejection_stmt = db.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail)
              VALUES (?, ?, ?)",
@@ -1856,6 +1841,7 @@ impl Runtime {
              (tx_num, tier, observed_at, receipt)
              VALUES (?, ?, ?, '{}')",
         )?;
+        let mut pending_tx_upserts = Vec::new();
         for tx_record in &bundle.txs {
             if let Some(cached) = self
                 .applied_tx_cache
@@ -1878,37 +1864,35 @@ impl Runtime {
                 }
             };
             let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
-            let (tx_num, info) = upsert_tx_stmt.query_row(
-                params![
-                    node_num,
-                    tx_record.local_epoch,
-                    tx_record.global_epoch,
-                    tx::KIND_DATA,
-                    tx_record.conflict_mode,
-                    tx_record.outcome,
-                    tx_record.created_at,
-                    metadata
-                ],
-                |row| {
-                    let tx_num = row.get(0)?;
-                    Ok((
-                        tx_num,
-                        ApplyTxInfo {
-                            node_num: row.get(1)?,
-                            outcome: row.get(2)?,
-                            conflict_mode: row.get(3)?,
-                            global_epoch: row.get(4)?,
-                            has_awaiting_dependency: row.get(5)?,
-                        },
-                    ))
-                },
+            pending_tx_upserts.push(PendingApplyTxUpsert {
+                tx_id: tx_record.tx_id.clone(),
+                node_num,
+                local_epoch: tx_record.local_epoch,
+                global_epoch: tx_record.global_epoch,
+                conflict_mode: tx_record.conflict_mode,
+                outcome: tx_record.outcome,
+                created_at: tx_record.created_at,
+                metadata,
+            });
+        }
+        for chunk in pending_tx_upserts.chunks(500) {
+            upsert_apply_txs(
+                &db,
+                chunk,
+                &tx_ids_with_history,
+                &mut tx_nums_by_id,
+                &mut tx_info_by_num,
+                &mut pending_applied_tx_cache,
             )?;
-            tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
-            tx_info_by_num.insert(tx_num, info);
-            if tx_ids_with_history.contains(tx_record.tx_id.as_str()) {
-                pending_applied_tx_cache
-                    .insert(tx_record.tx_id.clone(), CachedAppliedTx { tx_num, info });
+        }
+        for tx_record in &bundle.txs {
+            if already_applied_tx_ids.contains(&tx_record.tx_id) {
+                continue;
             }
+            let tx_num = tx_nums_by_id
+                .get(&tx_record.tx_id)
+                .copied()
+                .ok_or_else(|| crate::Error::new("bundle tx was not upserted"))?;
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail = encode_optional_value_text(tx_record.rejection_detail.as_ref())?;
@@ -1929,7 +1913,6 @@ impl Runtime {
         }
         drop(upsert_receipt_stmt);
         drop(upsert_rejection_stmt);
-        drop(upsert_tx_stmt);
         let txs_ms = duration_ms(txs_started.elapsed());
 
         let reads_started = Instant::now();
@@ -7738,6 +7721,96 @@ struct ApplyTxInfo {
     conflict_mode: i64,
     global_epoch: Option<i64>,
     has_awaiting_dependency: bool,
+}
+
+struct PendingApplyTxUpsert {
+    tx_id: String,
+    node_num: i64,
+    local_epoch: i64,
+    global_epoch: Option<i64>,
+    conflict_mode: i64,
+    outcome: i64,
+    created_at: i64,
+    metadata: Option<String>,
+}
+
+fn upsert_apply_txs(
+    db: &Connection,
+    pending: &[PendingApplyTxUpsert],
+    tx_ids_with_history: &BTreeSet<&str>,
+    tx_nums_by_id: &mut BTreeMap<String, i64>,
+    tx_info_by_num: &mut BTreeMap<i64, ApplyTxInfo>,
+    pending_applied_tx_cache: &mut BTreeMap<String, CachedAppliedTx>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (0..pending.len())
+        .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT INTO jazz_tx
+         (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata)
+         VALUES {placeholders}
+         ON CONFLICT(node_num, local_epoch) DO UPDATE SET
+           outcome = MAX(jazz_tx.outcome, excluded.outcome),
+           global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
+           conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
+           metadata = COALESCE(excluded.metadata, jazz_tx.metadata)
+         RETURNING tx_num, node_num, local_epoch, outcome, conflict_mode, global_epoch,
+           EXISTS(
+             SELECT 1 FROM jazz_tx_awaiting_dependency awaiting
+             WHERE awaiting.tx_num = jazz_tx.tx_num
+           )"
+    );
+    let mut values = Vec::with_capacity(pending.len() * 8);
+    let tx_ids_by_key = pending
+        .iter()
+        .map(|record| ((record.node_num, record.local_epoch), record.tx_id.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for record in pending {
+        values.extend([
+            rusqlite::types::Value::Integer(record.node_num),
+            rusqlite::types::Value::Integer(record.local_epoch),
+            record
+                .global_epoch
+                .map(rusqlite::types::Value::Integer)
+                .unwrap_or(rusqlite::types::Value::Null),
+            rusqlite::types::Value::Integer(tx::KIND_DATA),
+            rusqlite::types::Value::Integer(record.conflict_mode),
+            rusqlite::types::Value::Integer(record.outcome),
+            rusqlite::types::Value::Integer(record.created_at),
+            record
+                .metadata
+                .clone()
+                .map(rusqlite::types::Value::Text)
+                .unwrap_or(rusqlite::types::Value::Null),
+        ]);
+    }
+    let mut stmt = db.prepare_cached(&sql)?;
+    let mut rows = stmt.query(params_from_iter(values.iter()))?;
+    while let Some(row) = rows.next()? {
+        let tx_num = row.get(0)?;
+        let node_num = row.get(1)?;
+        let local_epoch = row.get(2)?;
+        let tx_id = tx_ids_by_key
+            .get(&(node_num, local_epoch))
+            .ok_or_else(|| crate::Error::new("upserted unknown tx"))?;
+        let info = ApplyTxInfo {
+            node_num,
+            outcome: row.get(3)?,
+            conflict_mode: row.get(4)?,
+            global_epoch: row.get(5)?,
+            has_awaiting_dependency: row.get(6)?,
+        };
+        tx_nums_by_id.insert((*tx_id).to_owned(), tx_num);
+        tx_info_by_num.insert(tx_num, info);
+        if tx_ids_with_history.contains(*tx_id) {
+            pending_applied_tx_cache.insert((*tx_id).to_owned(), CachedAppliedTx { tx_num, info });
+        }
+    }
+    Ok(())
 }
 
 fn cached_tx_matches_record(cached: ApplyTxInfo, record: &TxRecord) -> bool {

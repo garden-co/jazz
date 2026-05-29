@@ -843,3 +843,11 @@ Decision: teach the experimental incremental live export path to export tx recor
 Why: in the realtime single-writer path, all newly exported history belongs to one writer node and a contiguous local-epoch range. Going through `jazz_tx_public` reconstructs tx ids in SQL and forces string matching. The range exporter resolves `node_num` once, builds tx ids in Rust, and falls back to the generic tx-id exporter only for missing cross-node dependencies.
 
 Scope impact: live export/update with the incremental env flag moved from roughly `0.0461 -> 0.0395` ms for append, `0.0457 -> 0.0396` ms for Automerge, and `0.0452 -> 0.0392` ms for canvas in the sample run. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:51:48 PDT 2026 - Batch Tx Upserts During Bundle Apply
+
+Decision: apply bundle tx records with multi-row `INSERT ... ON CONFLICT ... RETURNING` chunks instead of one upsert statement per tx.
+
+Why: after direct tuple writes and incremental export, receive still paid one SQLite tx-row upsert for every incoming Jazz transaction. Live bundles in the benchmark contain hundreds of txs from the same ingest slice, so the receive path should use that batch shape while preserving the same durable `jazz_tx` rows and cache eligibility checks.
+
+Scope impact: with the incremental live-export env flag enabled, apply `txs_ms/update` moved from roughly `0.0102 -> 0.0088` ms for append, `0.0102 -> 0.0086` ms for Automerge, and `0.0104 -> 0.0087` ms for canvas. Total apply/update moved from roughly `0.0332 -> 0.0324`, `0.0332 -> 0.0316`, and `0.0326 -> 0.0308` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.
