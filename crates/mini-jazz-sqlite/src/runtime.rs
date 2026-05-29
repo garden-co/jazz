@@ -45,6 +45,50 @@ pub struct Runtime {
     history_block_cache_order: RefCell<VecDeque<i64>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct RuntimeWritePhaseStats {
+    pub update_prelookup_ms: f64,
+    pub begin_transaction_ms: f64,
+    pub next_epoch_ms: f64,
+    pub tx_create_ms: f64,
+    pub upsert_probe_ms: f64,
+    pub validate_fields_ms: f64,
+    pub row_lookup_ms: f64,
+    pub effective_values_ms: f64,
+    pub tx_tuple_ms: f64,
+    pub policy_ms: f64,
+    pub sql_value_encode_ms: f64,
+    pub creation_metadata_ms: f64,
+    pub history_insert_ms: f64,
+    pub record_tx_write_ms: f64,
+    pub current_upsert_ms: f64,
+    pub reject_cleanup_ms: f64,
+    pub commit_ms: f64,
+}
+
+thread_local! {
+    static WRITE_PHASE_STATS: RefCell<RuntimeWritePhaseStats> =
+        RefCell::new(RuntimeWritePhaseStats::default());
+}
+
+fn add_write_phase(slot: impl FnOnce(&mut RuntimeWritePhaseStats) -> &mut f64, started: Instant) {
+    WRITE_PHASE_STATS.with(|stats| {
+        *slot(&mut stats.borrow_mut()) += started.elapsed().as_secs_f64() * 1000.0;
+    });
+}
+
+pub fn reset_runtime_write_phase_stats() {
+    WRITE_PHASE_STATS.with(|stats| *stats.borrow_mut() = RuntimeWritePhaseStats::default());
+}
+
+pub fn take_runtime_write_phase_stats() -> RuntimeWritePhaseStats {
+    WRITE_PHASE_STATS.with(|stats| {
+        let value = *stats.borrow();
+        *stats.borrow_mut() = RuntimeWritePhaseStats::default();
+        value
+    })
+}
+
 struct AwaitingDependencyTx {
     tx_num: i64,
     tx_id: String,
@@ -341,7 +385,9 @@ impl Runtime {
     where
         V: IntoValueMap,
     {
+        let prelookup_started = Instant::now();
         self.physical_row_num_for(id)?;
+        add_write_phase(|stats| &mut stats.update_prelookup_ms, prelookup_started);
         self.write_row(table_name, id, values.into_value_map(), 2)
     }
 
@@ -390,23 +436,49 @@ impl Runtime {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
+        let write_sql = AppWriteSql::new(&table);
+        let begin_started = Instant::now();
         let db = self.conn.transaction()?;
+        add_write_phase(|stats| &mut stats.begin_transaction_ms, begin_started);
+        let user_num = users::ensure_user(&db, &user)?;
+        let table_num = crate::schema::table_num(&db, &table.name)?;
+        let mut creation_metadata_cache = BTreeMap::new();
+        let mut row_num_cache = BTreeMap::new();
+        let mut visible_tx_cache = BTreeMap::new();
+        let next_epoch_started = Instant::now();
+        let mut next_local_epoch = tx::next_local_epoch(&db, self.node_num)?;
+        add_write_phase(|stats| &mut stats.next_epoch_ms, next_epoch_started);
         let mut tx_ids = Vec::with_capacity(writes.len());
         for (id, values) in writes {
             let now = now_ms();
-            let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+            let tx_create_started = Instant::now();
+            let (tx_num, tx_id) = tx::create_tx_at_local_epoch(
+                &db,
+                self.node_num,
+                &self.node_id,
+                next_local_epoch,
+                now,
+                tx::MODE_MERGEABLE,
+                tx::OUTCOME_PENDING,
+                None,
+            )?;
+            add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
+            next_local_epoch += 1;
             let op = match mode {
                 BatchedWriteMode::Insert => 1,
                 BatchedWriteMode::Update => 2,
                 BatchedWriteMode::Upsert => {
+                    let upsert_probe_started = Instant::now();
                     if row_has_current_branch_value(&db, table_name, &id, self.branch_num)? {
+                        add_write_phase(|stats| &mut stats.upsert_probe_ms, upsert_probe_started);
                         2
                     } else {
+                        add_write_phase(|stats| &mut stats.upsert_probe_ms, upsert_probe_started);
                         1
                     }
                 }
             };
-            let allowed = insert_row_in_tx(InsertRowInTx {
+            let outcome = insert_row_in_tx(InsertRowInTx {
                 db: &db,
                 schema: &self.schema,
                 table_name,
@@ -416,23 +488,33 @@ impl Runtime {
                 branch_num: self.branch_num,
                 now,
                 user: &user,
+                user_num,
                 bypass_policy,
                 op,
+                write_sql: &write_sql,
+                table_num,
+                compact_tx_tuples: self.branch_num == 1,
+                creation_metadata_cache: Some(&mut creation_metadata_cache),
+                row_num_cache: Some(&mut row_num_cache),
+                visible_tx_cache: Some(&mut visible_tx_cache),
             })?;
-            let row_num = row_num(&db, &id)?;
-            if !allowed {
+            if !outcome.allowed {
+                let reject_started = Instant::now();
                 tx::reject(&db, &tx_id, "policy_denied")?;
                 db.execute(
                     &format!(
                         "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
                         crate::schema::current_table(&table.name)
                     ),
-                    params![row_num, self.branch_num, tx_num],
+                    params![outcome.row_num, self.branch_num, tx_num],
                 )?;
+                add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
             }
             tx_ids.push(tx_id);
         }
+        let commit_started = Instant::now();
         db.commit()?;
+        add_write_phase(|stats| &mut stats.commit_ms, commit_started);
         Ok(tx_ids)
     }
 
@@ -475,10 +557,17 @@ impl Runtime {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
+        let write_sql = AppWriteSql::new(&table);
+        let begin_started = Instant::now();
         let db = self.conn.transaction()?;
+        add_write_phase(|stats| &mut stats.begin_transaction_ms, begin_started);
+        let user_num = users::ensure_user(&db, &user)?;
+        let table_num = crate::schema::table_num(&db, &table.name)?;
         let now = now_ms();
+        let tx_create_started = Instant::now();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        let allowed = insert_row_in_tx(InsertRowInTx {
+        add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
+        let outcome = insert_row_in_tx(InsertRowInTx {
             db: &db,
             schema: &self.schema,
             table_name,
@@ -488,21 +577,31 @@ impl Runtime {
             branch_num: self.branch_num,
             now,
             user: &user,
+            user_num,
             bypass_policy,
             op,
+            write_sql: &write_sql,
+            table_num,
+            compact_tx_tuples: self.branch_num == 1,
+            creation_metadata_cache: None,
+            row_num_cache: None,
+            visible_tx_cache: None,
         })?;
-        let row_num = row_num(&db, id)?;
-        if !allowed {
+        if !outcome.allowed {
+            let reject_started = Instant::now();
             tx::reject(&db, &tx_id, "policy_denied")?;
             db.execute(
                 &format!(
                     "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
                     crate::schema::current_table(&table.name)
                 ),
-                params![row_num, self.branch_num, tx_num],
+                params![outcome.row_num, self.branch_num, tx_num],
             )?;
+            add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
         }
+        let commit_started = Instant::now();
         db.commit()?;
+        add_write_phase(|stats| &mut stats.commit_ms, commit_started);
         Ok(tx_id)
     }
 
@@ -6103,8 +6202,76 @@ struct InsertRowInTx<'a> {
     branch_num: i64,
     now: i64,
     user: &'a str,
+    user_num: i64,
     bypass_policy: bool,
     op: i64,
+    write_sql: &'a AppWriteSql,
+    table_num: i64,
+    compact_tx_tuples: bool,
+    creation_metadata_cache: Option<&'a mut BTreeMap<i64, (i64, i64)>>,
+    row_num_cache: Option<&'a mut BTreeMap<String, i64>>,
+    visible_tx_cache: Option<&'a mut BTreeMap<i64, Option<i64>>>,
+}
+
+struct InsertRowOutcome {
+    allowed: bool,
+    row_num: i64,
+}
+
+struct AppWriteSql {
+    history_sql: String,
+    current_sql: String,
+}
+
+impl AppWriteSql {
+    fn new(table: &crate::schema::TableDef) -> Self {
+        let mut history_columns = vec![
+            "row_num".to_owned(),
+            "tx_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "op".to_owned(),
+        ];
+        history_columns.extend(
+            table
+                .fields
+                .iter()
+                .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field))),
+        );
+        history_columns.extend([
+            "j_created_at".to_owned(),
+            "j_updated_at".to_owned(),
+            "j_created_by".to_owned(),
+            "j_updated_by".to_owned(),
+        ]);
+        let mut current_columns = vec![
+            "row_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "visible_tx_num".to_owned(),
+            "is_deleted".to_owned(),
+        ];
+        current_columns.extend(history_columns.iter().skip(4).cloned());
+        Self {
+            history_sql: insert_or_replace_sql(
+                &crate::schema::history_table(&table.name),
+                &history_columns,
+            ),
+            current_sql: insert_or_replace_sql(
+                &crate::schema::current_table(&table.name),
+                &current_columns,
+            ),
+        }
+    }
+}
+
+fn insert_or_replace_sql(table: &str, columns: &[String]) -> String {
+    let placeholders = (0..columns.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
+        columns.join(", ")
+    )
 }
 
 struct EffectiveWriteValues<'a> {
@@ -6131,6 +6298,13 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
         }
         return Ok(values);
     }
+    if table
+        .fields
+        .iter()
+        .all(|field| args.patch_values.contains_key(&field.name))
+    {
+        return Ok(args.patch_values.clone());
+    }
     let mut current = effective::row_values(
         args.db,
         args.schema,
@@ -6143,10 +6317,27 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
     Ok(current)
 }
 
-fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
+fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
     let table = args.schema.table_def(args.table_name)?;
+    let validate_started = Instant::now();
     validate_write_fields(table, args.values)?;
-    let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
+    add_write_phase(|stats| &mut stats.validate_fields_ms, validate_started);
+    let row_lookup_started = Instant::now();
+    let cached_row_num = args
+        .row_num_cache
+        .as_deref_mut()
+        .and_then(|cache| cache.get(args.id).copied());
+    let (row_num, row_id_created) = if let Some(row_num) = cached_row_num {
+        (row_num, false)
+    } else {
+        let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
+        if let Some(cache) = args.row_num_cache.as_deref_mut() {
+            cache.insert(args.id.to_owned(), row_num);
+        }
+        (row_num, row_id_created)
+    };
+    add_write_phase(|stats| &mut stats.row_lookup_ms, row_lookup_started);
+    let effective_started = Instant::now();
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
         schema: args.schema,
@@ -6157,7 +6348,34 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         patch_values: args.values,
         op: args.op,
     })?;
-    if args.op == 1 {
+    add_write_phase(|stats| &mut stats.effective_values_ms, effective_started);
+    let tx_tuple_started = Instant::now();
+    if args.compact_tx_tuples {
+        let (read_reason, observed_tx_num) = if args.op == 1 {
+            if row_id_created {
+                (read_set::REASON_ABSENT, None)
+            } else {
+                let observed_tx_num = cached_current_visible_tx_num(&mut args, row_num)?;
+                let reason = if observed_tx_num.is_some() {
+                    2
+                } else {
+                    read_set::REASON_ABSENT
+                };
+                (reason, observed_tx_num)
+            }
+        } else {
+            (2, cached_current_visible_tx_num(&mut args, row_num)?)
+        };
+        tx::set_single_row_read_write(
+            args.db,
+            args.tx_num,
+            args.table_num,
+            row_num,
+            args.op,
+            read_reason,
+            observed_tx_num,
+        )?;
+    } else if args.op == 1 {
         if row_id_created {
             read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
         } else {
@@ -6179,6 +6397,8 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             2,
         )?;
     }
+    add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
+    let policy_started = Instant::now();
     record_policy_read_set_for_write(
         args.db,
         args.schema,
@@ -6199,13 +6419,9 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             user: args.user,
             op: args.op,
         })?;
+    add_write_phase(|stats| &mut stats.policy_ms, policy_started);
 
-    let mut columns = vec![
-        "row_num".to_owned(),
-        "tx_num".to_owned(),
-        "j_branch_num".to_owned(),
-        "op".to_owned(),
-    ];
+    let encode_started = Instant::now();
     let mut sql_values = vec![
         rusqlite::types::Value::Integer(row_num),
         rusqlite::types::Value::Integer(args.tx_num),
@@ -6217,66 +6433,94 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         let value = effective_values
             .get(&field.name)
             .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
-        columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
-            field,
-        )));
         sql_values.push(crate::schema::field_sql_value(
             field,
             value,
             |ref_table, row_id| ensure_row_id(args.db, ref_table, row_id),
         )?);
     }
-    columns.extend([
-        "j_created_at".to_owned(),
-        "j_updated_at".to_owned(),
-        "j_created_by".to_owned(),
-        "j_updated_by".to_owned(),
-    ]);
-    let (created_at, created_by) = if args.op == 1 {
-        (args.now, args.user.to_owned())
+    add_write_phase(|stats| &mut stats.sql_value_encode_ms, encode_started);
+    let creation_metadata_started = Instant::now();
+    let (created_at, created_by_num) = if args.op == 1 {
+        (args.now, args.user_num)
     } else {
-        current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
-            .unwrap_or((args.now, args.user.to_owned()))
+        let cached = args
+            .creation_metadata_cache
+            .as_deref_mut()
+            .and_then(|cache| cache.get(&row_num).copied());
+        let metadata = if let Some(metadata) = cached {
+            Some(metadata)
+        } else {
+            let metadata =
+                current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?;
+            if let (Some(cache), Some(metadata)) =
+                (args.creation_metadata_cache.as_deref_mut(), metadata)
+            {
+                cache.insert(row_num, metadata);
+            }
+            metadata
+        };
+        metadata.unwrap_or((args.now, args.user_num))
     };
-    let created_by_num = users::ensure_user(args.db, &created_by)?;
-    let updated_by_num = users::ensure_user(args.db, args.user)?;
+    let updated_by_num = args.user_num;
+    add_write_phase(
+        |stats| &mut stats.creation_metadata_ms,
+        creation_metadata_started,
+    );
     sql_values.extend([
         rusqlite::types::Value::Integer(created_at),
         rusqlite::types::Value::Integer(args.now),
         rusqlite::types::Value::Integer(created_by_num),
         rusqlite::types::Value::Integer(updated_by_num),
     ]);
-    insert_dynamic(
-        args.db,
-        &crate::schema::history_table(&table.name),
-        &columns,
-        &sql_values,
-    )?;
-    record_tx_write(args.db, args.tx_num, &table.name, row_num, args.op)?;
+    let history_insert_started = Instant::now();
+    args.db
+        .prepare_cached(&args.write_sql.history_sql)?
+        .execute(params_from_iter(sql_values.iter()))?;
+    add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
+    if !args.compact_tx_tuples {
+        let record_tx_write_started = Instant::now();
+        record_tx_write(args.db, args.tx_num, &table.name, row_num, args.op)?;
+        add_write_phase(
+            |stats| &mut stats.record_tx_write_ms,
+            record_tx_write_started,
+        );
+    }
 
     if allowed {
-        let mut current_columns = vec![
-            "row_num".to_owned(),
-            "j_branch_num".to_owned(),
-            "visible_tx_num".to_owned(),
-            "is_deleted".to_owned(),
-        ];
         let mut current_values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(args.branch_num),
             rusqlite::types::Value::Integer(args.tx_num),
             rusqlite::types::Value::Integer(0),
         ];
-        current_columns.extend(columns.iter().skip(4).cloned());
         current_values.extend(sql_values.iter().skip(4).cloned());
-        insert_dynamic(
-            args.db,
-            &crate::schema::current_table(&table.name),
-            &current_columns,
-            &current_values,
-        )?;
+        let current_upsert_started = Instant::now();
+        args.db
+            .prepare_cached(&args.write_sql.current_sql)?
+            .execute(params_from_iter(current_values.iter()))?;
+        add_write_phase(|stats| &mut stats.current_upsert_ms, current_upsert_started);
+        if let Some(cache) = args.visible_tx_cache.as_deref_mut() {
+            cache.insert(row_num, Some(args.tx_num));
+        }
     }
-    Ok(allowed)
+    Ok(InsertRowOutcome { allowed, row_num })
+}
+
+fn cached_current_visible_tx_num(
+    args: &mut InsertRowInTx<'_>,
+    row_num: i64,
+) -> Result<Option<i64>> {
+    if let Some(cache) = args.visible_tx_cache.as_deref_mut() {
+        if let Some(value) = cache.get(&row_num).copied() {
+            return Ok(value);
+        }
+        let value = current_visible_tx_num(args.db, args.table_name, row_num, args.branch_num)?;
+        cache.insert(row_num, value);
+        Ok(value)
+    } else {
+        current_visible_tx_num(args.db, args.table_name, row_num, args.branch_num)
+    }
 }
 
 fn validate_write_fields(
@@ -6667,24 +6911,19 @@ fn current_creation_metadata(
     table_name: &str,
     row_num: i64,
     branch_num: i64,
-) -> Result<Option<(i64, String)>> {
-    let metadata = conn
-        .query_row(
-            &format!(
-                "SELECT j_created_at, j_created_by
+) -> Result<Option<(i64, i64)>> {
+    conn.query_row(
+        &format!(
+            "SELECT j_created_at, j_created_by
              FROM {}
              WHERE row_num = ? AND j_branch_num = ? AND is_deleted = 0",
-                crate::schema::current_table(table_name)
-            ),
-            params![row_num, branch_num],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?;
-    metadata
-        .map(|(created_at, created_by_num)| {
-            users::user_id(conn, created_by_num).map(|created_by| (created_at, created_by))
-        })
-        .transpose()
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn exclusive_write_conflict_exists(
@@ -7113,6 +7352,7 @@ impl<'a> TransactionBuilder<'a> {
         }
         let db = self.runtime.conn.transaction()?;
         let now = now_ms();
+        let user_num = users::ensure_user(&db, &user)?;
         let (tx_num, tx_id) = tx::create_tx_with_options(
             &db,
             self.runtime.node_num,
@@ -7131,7 +7371,10 @@ impl<'a> TransactionBuilder<'a> {
                     values,
                     op,
                 } => {
-                    allowed &= insert_row_in_tx(InsertRowInTx {
+                    let table_def = self.runtime.schema.table_def(&table)?;
+                    let write_sql = AppWriteSql::new(table_def);
+                    let table_num = crate::schema::table_num(&db, &table_def.name)?;
+                    let outcome = insert_row_in_tx(InsertRowInTx {
                         db: &db,
                         schema: &self.runtime.schema,
                         table_name: &table,
@@ -7141,9 +7384,17 @@ impl<'a> TransactionBuilder<'a> {
                         branch_num: self.runtime.branch_num,
                         now,
                         user: &user,
+                        user_num,
                         bypass_policy,
                         op,
+                        write_sql: &write_sql,
+                        table_num,
+                        compact_tx_tuples: false,
+                        creation_metadata_cache: None,
+                        row_num_cache: None,
+                        visible_tx_cache: None,
                     })?;
+                    allowed &= outcome.allowed;
                 }
                 Mutation::DeleteRow { table, id } => {
                     let table_def = self.runtime.schema.table_def(&table)?;

@@ -20,7 +20,10 @@ mod users;
 pub mod value;
 
 pub use error::{Error, Result};
-pub use runtime::Runtime;
+pub use runtime::{
+    reset_runtime_write_phase_stats, take_runtime_write_phase_stats, Runtime,
+    RuntimeWritePhaseStats,
+};
 pub use schema::SchemaDef;
 pub use storage::Storage;
 pub use subscription::RowsSubscription;

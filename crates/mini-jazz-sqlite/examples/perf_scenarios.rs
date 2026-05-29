@@ -1,7 +1,8 @@
 use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
 use mini_jazz_sqlite::{
-    persisted_text_ops, ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy,
-    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, SchemaDef, Storage, Value,
+    persisted_text_ops, reset_runtime_write_phase_stats, take_runtime_write_phase_stats,
+    ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy, QueryExportProfile, Result,
+    RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats, SchemaDef, Storage, Value,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -10,8 +11,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::io::Write;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
@@ -263,7 +263,62 @@ struct DeepHistoryCaseReport {
     bundle_to_reference_gzip_ratio: Option<f64>,
     extrapolated_write_ms_for_target: Option<f64>,
     extrapolated_database_bytes_for_target: Option<i64>,
+    phase_ms: DeepHistoryPhaseReport,
     notes: Vec<String>,
+}
+
+#[derive(Default, Serialize)]
+struct DeepHistoryPhaseReport {
+    sidecar_edit: f64,
+    sidecar_commit: f64,
+    jazz_write: f64,
+    live_export: f64,
+    live_encode_decode: f64,
+    live_apply: f64,
+    live_sidecar_apply: f64,
+    live_listener_and_verify: f64,
+    compaction: f64,
+    reclaim: f64,
+    native_export: f64,
+    native_import_apply: f64,
+    final_export: f64,
+    final_encode_decode: f64,
+    cold_apply: f64,
+    cold_sidecar_apply: f64,
+    cold_read_and_verify: f64,
+    current_read: f64,
+    historical_reads: f64,
+    transaction_info_reads: f64,
+    jazz_write_detail: RuntimeWritePhaseStats,
+    jazz_write_sqlite_transactions: usize,
+    jazz_write_updates_per_transaction_avg: Option<f64>,
+    jazz_write_updates_per_transaction_max: usize,
+}
+
+impl DeepHistoryPhaseReport {
+    fn add_elapsed(slot: &mut f64, started: Instant) {
+        *slot += ms(started.elapsed());
+    }
+}
+
+fn add_write_detail(total: &mut RuntimeWritePhaseStats, sample: RuntimeWritePhaseStats) {
+    total.update_prelookup_ms += sample.update_prelookup_ms;
+    total.begin_transaction_ms += sample.begin_transaction_ms;
+    total.next_epoch_ms += sample.next_epoch_ms;
+    total.tx_create_ms += sample.tx_create_ms;
+    total.upsert_probe_ms += sample.upsert_probe_ms;
+    total.validate_fields_ms += sample.validate_fields_ms;
+    total.row_lookup_ms += sample.row_lookup_ms;
+    total.effective_values_ms += sample.effective_values_ms;
+    total.tx_tuple_ms += sample.tx_tuple_ms;
+    total.policy_ms += sample.policy_ms;
+    total.sql_value_encode_ms += sample.sql_value_encode_ms;
+    total.creation_metadata_ms += sample.creation_metadata_ms;
+    total.history_insert_ms += sample.history_insert_ms;
+    total.record_tx_write_ms += sample.record_tx_write_ms;
+    total.current_upsert_ms += sample.current_upsert_ms;
+    total.reject_cleanup_ms += sample.reject_cleanup_ms;
+    total.commit_ms += sample.commit_ms;
 }
 
 #[derive(Serialize)]
@@ -4617,6 +4672,12 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut receive_samples = Vec::new();
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
+    let mut phase_ms = DeepHistoryPhaseReport::default();
+    let mut jazz_write_detail = RuntimeWritePhaseStats::default();
+    let mut jazz_write_sqlite_transactions = 0usize;
+    let mut jazz_write_updates_per_transaction_total = 0usize;
+    let mut jazz_write_updates_per_transaction_max = 0usize;
+    let mut self_sample = SelfSample::from_env("text-ops-write")?;
     let batch_window = deep_history_sqlite_tx_batch_window();
     input.notes.push(format!(
         "SQLite transaction batching enabled for Jazz root writes and text op sidecar edits: flush window {} ms.",
@@ -4624,20 +4685,25 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     ));
     let mut pending_writes = Vec::new();
     let mut index = 1usize;
+    if self_sample.is_enabled() {
+        self_sample.start_after_first_sample()?;
+    }
     while index < input.target_updates {
         let write_started = Instant::now();
         let sidecar_tx = writer_ops.transaction()?;
         let batch_started = Instant::now();
         let mut should_sample = false;
         loop {
+            let edit_started = Instant::now();
             let (next_root, payload_bytes) =
                 (input.next_edit)(&sidecar_tx, root, index, input.snapshot_every)?;
             root = next_root;
             final_payload_bytes = payload_bytes;
             let op_bytes = persisted_text_ops::inline_op_bytes(&sidecar_tx, root)?;
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.sidecar_edit, edit_started);
             pending_writes.push(PendingTextOpWrite { root, op_bytes });
             should_sample = should_sample
-                || index == 1
+                || (!self_sample.is_enabled() && index == 1)
                 || (index + 1).is_multiple_of(input.sample_every)
                 || index + 1 == input.target_updates;
             index += 1;
@@ -4648,22 +4714,48 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
                 break;
             }
         }
+        let sidecar_commit_started = Instant::now();
         sidecar_tx.commit()?;
+        DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.sidecar_commit, sidecar_commit_started);
+        let jazz_write_started = Instant::now();
+        reset_runtime_write_phase_stats();
+        let batch_updates = pending_writes.len();
         flush_text_op_writes(&mut writer, &mut pending_writes)?;
+        jazz_write_sqlite_transactions += 1;
+        jazz_write_updates_per_transaction_total += batch_updates;
+        jazz_write_updates_per_transaction_max =
+            jazz_write_updates_per_transaction_max.max(batch_updates);
+        add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
+        DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
         write_only_ms += ms(write_started.elapsed());
 
         if should_sample {
             let receive_started = Instant::now();
+            let export_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
+            let encode_decode_started = Instant::now();
             let wire = encode_native_bundle(&bundle)?;
             let bundle = decode_native_bundle(&wire)?;
+            DeepHistoryPhaseReport::add_elapsed(
+                &mut phase_ms.live_encode_decode,
+                encode_decode_started,
+            );
+            let apply_started = Instant::now();
             receiver.profile_apply_bundle(&bundle)?;
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_apply, apply_started);
+            let sidecar_apply_started = Instant::now();
             apply_inline_text_ops_from_bundle(
                 &bundle,
                 &mut receiver_ops,
                 &mut receiver_inline_watermark,
                 input.snapshot_every,
             )?;
+            DeepHistoryPhaseReport::add_elapsed(
+                &mut phase_ms.live_sidecar_apply,
+                sidecar_apply_started,
+            );
+            let listener_started = Instant::now();
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
                 return Err("text op listener did not observe sampled edit".into());
@@ -4674,11 +4766,19 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             if observed.len() != final_payload_bytes {
                 return Err("text op listener materialized unexpected length".into());
             }
+            DeepHistoryPhaseReport::add_elapsed(
+                &mut phase_ms.live_listener_and_verify,
+                listener_started,
+            );
             let receive_ms = ms(receive_started.elapsed());
             sampled_receive_total_ms += receive_ms;
             receive_samples.push(receive_ms);
         }
+        if !self_sample.is_enabled() {
+            self_sample.start_after_first_sample()?;
+        }
     }
+    self_sample.finish()?;
     let total_loop_ms = ms(started.elapsed());
 
     let mut block_native_export_ms = None;
@@ -4689,7 +4789,9 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut native_export_ms = None;
     let mut native_import_ms = None;
     if let Some(hot_tail) = input.compact_hot_tail {
+        let compaction_started = Instant::now();
         let compaction = writer.compact_table_accepted_history("documents", hot_tail, hot_tail)?;
+        DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.compaction, compaction_started);
         input.notes.push(format!(
             "Root history block compaction: hot tail {}, sealed rows {}, blocks {}, sealed tx rows {}, uncompressed bytes {}, compressed bytes {}.",
             hot_tail,
@@ -4705,6 +4807,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         let delta_wire = encode_native_bundle(&delta.bundle)?;
         let delta_bundle = decode_native_bundle(&delta_wire)?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
+        phase_ms.native_export += block_native_export_ms.unwrap_or(0.0);
         block_native_blocks = Some(delta.blocks.len());
         block_native_payload_bytes =
             Some(delta.blocks.iter().map(|block| block.payload.len()).sum());
@@ -4731,6 +4834,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             return Err("text op block import materialized unexpected length".into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
+        phase_ms.native_import_apply += block_native_import_ms.unwrap_or(0.0);
         native_import_ms = block_native_import_ms;
         native_sync_bytes = Some(delta_wire.len() + block_native_payload_bytes.unwrap_or(0));
     }
@@ -4740,15 +4844,22 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let current_root = row_root_id(&current_rows, "body_root")?;
     let current = persisted_text_ops::materialize(&writer_ops, Some(current_root))?;
     let current_read_ms = ms(current_started.elapsed());
+    phase_ms.current_read += current_read_ms;
     if current.len() != final_payload_bytes {
         return Err("text op current read materialized unexpected length".into());
     }
 
     let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("documents")?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.final_export, final_bundle_export_started);
+    let final_encode_decode_started = Instant::now();
     let final_wire = encode_native_bundle(&final_bundle)?;
     let final_bundle = decode_native_bundle(&final_wire)?;
-    let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
+    DeepHistoryPhaseReport::add_elapsed(
+        &mut phase_ms.final_encode_decode,
+        final_encode_decode_started,
+    );
+    let final_bundle_export_ms = phase_ms.final_export + phase_ms.final_encode_decode;
     let final_bundle_bytes = final_wire.len();
     let sidecar_bundle_bytes = 0;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
@@ -4756,16 +4867,22 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     persisted_text_ops::install(&cold_ops)?;
     let mut cold_watermark = 0i64;
     let cold_started = Instant::now();
+    let cold_apply_started = Instant::now();
     cold.profile_apply_bundle(&final_bundle)?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
+    let cold_sidecar_started = Instant::now();
     apply_inline_text_ops_from_bundle(
         &final_bundle,
         &mut cold_ops,
         &mut cold_watermark,
         input.snapshot_every,
     )?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_sidecar_apply, cold_sidecar_started);
+    let cold_verify_started = Instant::now();
     let cold_rows = cold.read_rows("documents")?;
     let cold_root = row_root_id(&cold_rows, "body_root")?;
     let cold_text = persisted_text_ops::materialize(&cold_ops, Some(cold_root))?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_read_and_verify, cold_verify_started);
     let cold_load_ms = ms(cold_started.elapsed());
     if cold_text.len() != final_payload_bytes {
         return Err("text op cold load materialized unexpected length".into());
@@ -4797,12 +4914,14 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         }
     }
     let historical_read_total_ms = ms(historical_started.elapsed());
+    phase_ms.historical_reads += historical_read_total_ms;
     let tx_info_ids = sampled_tx_ids_from_bundle(&final_bundle);
     let tx_info_started = Instant::now();
     for tx_id in &tx_info_ids {
         writer.transaction_info(tx_id)?;
     }
     let transaction_info_total_ms = ms(tx_info_started.elapsed());
+    phase_ms.transaction_info_reads += transaction_info_total_ms;
     let transaction_info_count = tx_info_ids.len();
     let writer_stats = writer.storage_stats()?;
     let sidecar_database_bytes = persisted_text_ops::database_bytes(&writer_ops)?;
@@ -4894,6 +5013,20 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             .and_then(|bytes| ratio_usize(final_bundle_bytes + sidecar_bundle_bytes, bytes)),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
+        phase_ms: DeepHistoryPhaseReport {
+            jazz_write_detail,
+            jazz_write_sqlite_transactions,
+            jazz_write_updates_per_transaction_avg: if jazz_write_sqlite_transactions == 0 {
+                None
+            } else {
+                Some(
+                    jazz_write_updates_per_transaction_total as f64
+                        / jazz_write_sqlite_transactions as f64,
+                )
+            },
+            jazz_write_updates_per_transaction_max,
+            ..phase_ms
+        },
         notes,
     })
 }
@@ -4969,25 +5102,50 @@ fn run_naive_deep_history_case(
     let mut receive_samples = Vec::new();
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
+    let mut phase_ms = DeepHistoryPhaseReport::default();
+    let mut jazz_write_detail = RuntimeWritePhaseStats::default();
+    let mut jazz_write_sqlite_transactions = 0usize;
+    let mut jazz_write_updates_per_transaction_total = 0usize;
+    let mut jazz_write_updates_per_transaction_max = 0usize;
+    let mut self_sample = SelfSample::from_env(input.table)?;
     let mut completed_updates = 0;
     let mut last_value = String::new();
     let mut stopped_early = false;
     let mut stop_reason = None;
     let mut notes = input.notes;
     let write_batch_size = input.write_batch_size.unwrap_or(1).max(1);
+    let batch_window = deep_history_sqlite_tx_batch_window();
+    let mut batch_started_at: Option<Instant> = None;
     let mut pending_updates = Vec::new();
     if write_batch_size > 1 {
         notes.push(format!(
             "SQLite write batching enabled: up to {write_batch_size} logical Jazz txs per SQLite commit."
         ));
+    } else {
+        notes.push(format!(
+            "SQLite transaction batching enabled for row writes: flush window {} ms.",
+            batch_window.as_millis()
+        ));
     }
 
+    if self_sample.is_enabled() {
+        self_sample.start_after_first_sample()?;
+    }
     for index in 0..input.target_updates {
         if Instant::now() >= deadline {
             if !pending_updates.is_empty() {
                 let write_started = Instant::now();
+                let jazz_write_started = Instant::now();
+                reset_runtime_write_phase_stats();
+                let batch_updates = pending_updates.len();
                 let tx_ids = writer
                     .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                jazz_write_sqlite_transactions += 1;
+                jazz_write_updates_per_transaction_total += batch_updates;
+                jazz_write_updates_per_transaction_max =
+                    jazz_write_updates_per_transaction_max.max(batch_updates);
+                add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
+                DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
                 write_only_ms += ms(write_started.elapsed());
                 written_tx_ids.extend(tx_ids);
             }
@@ -4998,52 +5156,96 @@ fn run_naive_deep_history_case(
         let value = (input.next_value)(index)?;
         last_value = value.clone();
         completed_updates += 1;
-        if write_batch_size == 1 {
+        if pending_updates.is_empty() {
+            batch_started_at = Some(Instant::now());
+        }
+        pending_updates.push((input.row_id.to_owned(), map1(input.field, json!(value))));
+        let time_window_elapsed = batch_started_at
+            .map(|started| started.elapsed() >= batch_window)
+            .unwrap_or(false);
+        let size_window_elapsed = write_batch_size > 1 && pending_updates.len() >= write_batch_size;
+        let should_flush = size_window_elapsed
+            || time_window_elapsed
+            || (!self_sample.is_enabled() && index == 0)
+            || (index + 1) % input.sample_every == 0
+            || index + 1 == input.target_updates;
+        if should_flush {
             let write_started = Instant::now();
-            let tx_id =
-                writer.update_row(input.table, input.row_id, map1(input.field, json!(value)))?;
+            let jazz_write_started = Instant::now();
+            reset_runtime_write_phase_stats();
+            let batch_updates = pending_updates.len();
+            let tx_ids =
+                writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+            jazz_write_sqlite_transactions += 1;
+            jazz_write_updates_per_transaction_total += batch_updates;
+            jazz_write_updates_per_transaction_max =
+                jazz_write_updates_per_transaction_max.max(batch_updates);
+            add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
             write_only_ms += ms(write_started.elapsed());
-            written_tx_ids.push(tx_id);
-        } else {
-            pending_updates.push((input.row_id.to_owned(), map1(input.field, json!(value))));
-            let should_flush = pending_updates.len() >= write_batch_size
-                || index == 0
-                || (index + 1) % input.sample_every == 0
-                || index + 1 == input.target_updates;
-            if should_flush {
-                let write_started = Instant::now();
-                let tx_ids = writer
-                    .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
-                write_only_ms += ms(write_started.elapsed());
-                written_tx_ids.extend(tx_ids);
-            }
+            written_tx_ids.extend(tx_ids);
+            batch_started_at = None;
         }
 
-        if index == 0 || (index + 1) % input.sample_every == 0 || index + 1 == input.target_updates
+        if (!self_sample.is_enabled() && index == 0)
+            || (index + 1) % input.sample_every == 0
+            || index + 1 == input.target_updates
         {
             if !pending_updates.is_empty() {
                 let write_started = Instant::now();
+                let jazz_write_started = Instant::now();
+                reset_runtime_write_phase_stats();
+                let batch_updates = pending_updates.len();
                 let tx_ids = writer
                     .update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+                jazz_write_sqlite_transactions += 1;
+                jazz_write_updates_per_transaction_total += batch_updates;
+                jazz_write_updates_per_transaction_max =
+                    jazz_write_updates_per_transaction_max.max(batch_updates);
+                add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
+                DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
                 write_only_ms += ms(write_started.elapsed());
                 written_tx_ids.extend(tx_ids);
+                batch_started_at = None;
             }
             let receive_started = Instant::now();
+            let export_started = Instant::now();
             let bundle = writer.export_table_history(input.table)?;
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
+            let apply_started = Instant::now();
             receiver.profile_apply_bundle(&bundle)?;
+            DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_apply, apply_started);
+            let listener_started = Instant::now();
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
                 return Err("live listener did not observe sampled edit".into());
             }
+            DeepHistoryPhaseReport::add_elapsed(
+                &mut phase_ms.live_listener_and_verify,
+                listener_started,
+            );
             let receive_ms = ms(receive_started.elapsed());
             sampled_receive_total_ms += receive_ms;
             receive_samples.push(receive_ms);
         }
+        if !self_sample.is_enabled() {
+            self_sample.start_after_first_sample()?;
+        }
     }
+    self_sample.finish()?;
     if !pending_updates.is_empty() {
         let write_started = Instant::now();
+        let jazz_write_started = Instant::now();
+        reset_runtime_write_phase_stats();
+        let batch_updates = pending_updates.len();
         let tx_ids =
             writer.update_rows_batched(input.table, std::mem::take(&mut pending_updates))?;
+        jazz_write_sqlite_transactions += 1;
+        jazz_write_updates_per_transaction_total += batch_updates;
+        jazz_write_updates_per_transaction_max =
+            jazz_write_updates_per_transaction_max.max(batch_updates);
+        add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
+        DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
         write_only_ms += ms(write_started.elapsed());
         written_tx_ids.extend(tx_ids);
     }
@@ -5067,6 +5269,7 @@ fn run_naive_deep_history_case(
             writer.compact_table_accepted_history(input.table, hot_tail, hot_tail)?
         };
         let compaction_ms = ms(compaction_started.elapsed());
+        phase_ms.compaction += compaction_ms;
         if let Some(max_rows_per_block) = input.compact_max_rows_per_block {
             notes.push(format!(
                 "History block row cap: at most {max_rows_per_block} sealed history rows per block."
@@ -5086,6 +5289,7 @@ fn run_naive_deep_history_case(
             let reclaim_started = Instant::now();
             writer.reclaim_storage()?;
             let reclaim_ms = ms(reclaim_started.elapsed());
+            phase_ms.reclaim += reclaim_ms;
             notes.push(format!(
                 "SQLite storage reclaim after compaction: {:.2} ms.",
                 reclaim_ms
@@ -5094,6 +5298,7 @@ fn run_naive_deep_history_case(
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta(input.table, &[])?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
+        phase_ms.native_export += block_native_export_ms.unwrap_or(0.0);
         let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
         block_native_blocks = Some(delta.blocks.len());
         block_native_payload_bytes = Some(
@@ -5128,17 +5333,23 @@ fn run_naive_deep_history_case(
             .into());
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
+        phase_ms.native_import_apply += block_native_import_ms.unwrap_or(0.0);
         native_import_ms = block_native_import_ms;
     }
     let bundle_export_started = Instant::now();
     let bundle = writer.export_table_history(input.table)?;
     let bundle_export_ms = ms(bundle_export_started.elapsed());
+    phase_ms.final_export += bundle_export_ms;
     let bundle_summary = BundleSummary::from(&bundle)?;
     let cold_schema = input.schema.clone();
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
     let cold_started = Instant::now();
+    let cold_apply_started = Instant::now();
     cold.profile_apply_bundle(&bundle)?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
+    let cold_verify_started = Instant::now();
     let cold_rows = cold.read_rows(input.table)?;
+    DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_read_and_verify, cold_verify_started);
     let cold_load_ms = ms(cold_started.elapsed());
     if cold_rows.len() != 1 {
         return Err(format!("expected one cold-loaded row, got {}", cold_rows.len()).into());
@@ -5146,6 +5357,7 @@ fn run_naive_deep_history_case(
     let current_started = Instant::now();
     let rows = writer.read_rows(input.table)?;
     let current_read_ms = ms(current_started.elapsed());
+    phase_ms.current_read += current_read_ms;
     let final_payload = rows
         .first()
         .and_then(|row| row.values.get(input.field))
@@ -5169,12 +5381,14 @@ fn run_naive_deep_history_case(
         }
     }
     let historical_read_total_ms = ms(historical_started.elapsed());
+    phase_ms.historical_reads += historical_read_total_ms;
     let tx_info_ids = sampled_tx_ids(&written_tx_ids);
     let tx_info_started = Instant::now();
     for tx_id in &tx_info_ids {
         writer.transaction_info(tx_id)?;
     }
     let transaction_info_total_ms = ms(tx_info_started.elapsed());
+    phase_ms.transaction_info_reads += transaction_info_total_ms;
     let transaction_info_count = tx_info_ids.len();
     let stats = writer.storage_stats()?;
     drop(writer);
@@ -5301,6 +5515,20 @@ fn run_naive_deep_history_case(
             .and_then(|bytes| ratio_usize(bundle_summary.bytes, bytes)),
         extrapolated_write_ms_for_target,
         extrapolated_database_bytes_for_target,
+        phase_ms: DeepHistoryPhaseReport {
+            jazz_write_detail,
+            jazz_write_sqlite_transactions,
+            jazz_write_updates_per_transaction_avg: if jazz_write_sqlite_transactions == 0 {
+                None
+            } else {
+                Some(
+                    jazz_write_updates_per_transaction_total as f64
+                        / jazz_write_sqlite_transactions as f64,
+                )
+            },
+            jazz_write_updates_per_transaction_max,
+            ..phase_ms
+        },
         notes,
     })
 }
@@ -5655,6 +5883,71 @@ fn env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+struct SelfSample {
+    output: Option<String>,
+    label: String,
+    seconds: String,
+    interval_ms: usize,
+    warmup_ms: usize,
+    child: Option<Child>,
+}
+
+impl SelfSample {
+    fn from_env(label: impl Into<String>) -> BenchResult<Self> {
+        Ok(Self {
+            output: env::var("MINI_JAZZ_PERF_SELF_SAMPLE_WRITE").ok(),
+            label: label.into(),
+            seconds: env::var("MINI_JAZZ_PERF_SELF_SAMPLE_SECONDS")
+                .unwrap_or_else(|_| "5".to_owned()),
+            interval_ms: env_usize("MINI_JAZZ_PERF_SELF_SAMPLE_INTERVAL_MS", 1).max(1),
+            warmup_ms: env_usize("MINI_JAZZ_PERF_SELF_SAMPLE_WARMUP_MS", 0),
+            child: None,
+        })
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.output.is_some() || self.child.is_some()
+    }
+
+    fn start_after_first_sample(&mut self) -> BenchResult<()> {
+        let Some(output) = self.output.take() else {
+            return Ok(());
+        };
+        let pid = std::process::id().to_string();
+        eprintln!(
+            "MINI_JAZZ_PERF_SELF_SAMPLE_START label={} pid={} seconds={} interval_ms={} output={}",
+            self.label, pid, self.seconds, self.interval_ms, output
+        );
+        let child = Command::new("sample")
+            .arg(pid)
+            .arg(&self.seconds)
+            .arg(self.interval_ms.to_string())
+            .arg("-mayDie")
+            .arg("-file")
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        self.child = Some(child);
+        if self.warmup_ms > 0 {
+            std::thread::sleep(Duration::from_millis(self.warmup_ms as u64));
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> BenchResult<()> {
+        if let Some(mut child) = self.child.take() {
+            let status = child.wait()?;
+            eprintln!(
+                "MINI_JAZZ_PERF_SELF_SAMPLE_DONE label={} status={}",
+                self.label, status
+            );
+        }
+        Ok(())
+    }
 }
 
 fn median_f64(mut values: Vec<f64>) -> f64 {

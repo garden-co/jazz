@@ -47,6 +47,13 @@ pub(crate) fn create_tx(
     )
 }
 
+pub(crate) fn next_local_epoch(conn: &Connection, node_num: i64) -> Result<i64> {
+    Ok(conn
+        .prepare_cached("SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?")?
+        .query_row(params![node_num], |row| row.get::<_, i64>(0))
+        .unwrap_or(1))
+}
+
 pub(crate) fn create_tx_with_options(
     conn: &Connection,
     node_num: i64,
@@ -56,11 +63,31 @@ pub(crate) fn create_tx_with_options(
     outcome: i64,
     global_epoch: Option<i64>,
 ) -> Result<(i64, String)> {
-    let next_epoch = conn
-        .prepare_cached("SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?")?
-        .query_row(params![node_num], |row| row.get::<_, i64>(0))
-        .unwrap_or(1);
-    let tx_id = format!("tx-{node_id}-{next_epoch}");
+    let local_epoch = next_local_epoch(conn, node_num)?;
+    create_tx_at_local_epoch(
+        conn,
+        node_num,
+        node_id,
+        local_epoch,
+        now,
+        conflict_mode,
+        outcome,
+        global_epoch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_tx_at_local_epoch(
+    conn: &Connection,
+    node_num: i64,
+    node_id: &str,
+    local_epoch: i64,
+    now: i64,
+    conflict_mode: i64,
+    outcome: i64,
+    global_epoch: Option<i64>,
+) -> Result<(i64, String)> {
+    let tx_id = format!("tx-{node_id}-{local_epoch}");
     conn.prepare_cached(
         "INSERT INTO jazz_tx
           (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata, writes_json, reads_json)
@@ -68,7 +95,7 @@ pub(crate) fn create_tx_with_options(
     )?
     .execute(params![
         node_num,
-        next_epoch,
+        local_epoch,
         global_epoch,
         KIND_DATA,
         conflict_mode,
@@ -95,6 +122,30 @@ pub(crate) fn append_write(
     op: i64,
 ) -> Result<()> {
     append_writes(conn, tx_num, [PackedWrite(table_num, row_num, op)])
+}
+
+pub(crate) fn set_single_row_read_write(
+    conn: &Connection,
+    tx_num: i64,
+    table_num: i64,
+    row_num: i64,
+    op: i64,
+    read_reason: i64,
+    observed_tx_num: Option<i64>,
+) -> Result<()> {
+    let writes = format!("[[{table_num},{row_num},{op}]]");
+    let observed = observed_tx_num
+        .map(|tx_num| tx_num.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    let reads = format!("[[{table_num},{row_num},{read_reason},{observed}]]");
+    conn.prepare_cached(
+        "UPDATE jazz_tx
+            SET writes_json = jsonb(?),
+                reads_json = jsonb(?)
+          WHERE tx_num = ?",
+    )?
+    .execute(params![writes, reads, tx_num])?;
+    Ok(())
 }
 
 pub(crate) fn append_writes(
@@ -158,6 +209,25 @@ pub(crate) fn append_reads(
     tx_num: i64,
     new_reads: impl IntoIterator<Item = PackedRead>,
 ) -> Result<()> {
+    let new_reads = new_reads.into_iter().collect::<Vec<_>>();
+    if new_reads.is_empty() {
+        return Ok(());
+    }
+    if new_reads.len() == 1 {
+        let PackedRead(table_num, row_num, reason, observed_tx_num) = new_reads[0];
+        let changed = conn
+            .prepare_cached(
+                "UPDATE jazz_tx
+                    SET reads_json = jsonb_array(jsonb_array(?, ?, ?, ?))
+                  WHERE tx_num = ?
+                    AND reads_json IS NULL
+                    AND writes_json = jsonb('[]')",
+            )?
+            .execute(params![table_num, row_num, reason, observed_tx_num, tx_num])?;
+        if changed > 0 {
+            return Ok(());
+        }
+    }
     let state = tuple_state(conn, tx_num)?;
     let implicit: Vec<PackedRead> = state
         .previous_tx_num

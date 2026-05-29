@@ -19,16 +19,6 @@ pub(crate) fn user_num(conn: &Connection, user_id: &str) -> Result<i64> {
     .ok_or_else(|| Error::new(format!("unknown user {user_id}")))
 }
 
-pub(crate) fn user_id(conn: &Connection, user_num: i64) -> Result<String> {
-    conn.query_row(
-        "SELECT user_id FROM jazz_user WHERE user_num = ?",
-        params![user_num],
-        |row| row.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| Error::new(format!("unknown user num {user_num}")))
-}
-
 pub(crate) fn user_id_expr(alias: &str, column: &str) -> String {
     format!("(SELECT user_id FROM jazz_user WHERE user_num = {alias}.{column})")
 }
