@@ -2010,6 +2010,7 @@ impl Runtime {
             current_candidates: BTreeMap::new(),
             writes_by_tx: BTreeMap::new(),
             already_applied_tx_ids: &already_applied_tx_ids,
+            history_sql_by_table: BTreeMap::new(),
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
@@ -3157,12 +3158,6 @@ impl Runtime {
             .copied()
             .map(Ok)
             .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
-        let mut columns = vec![
-            "row_num".to_owned(),
-            "tx_num".to_owned(),
-            "j_branch_num".to_owned(),
-            "op".to_owned(),
-        ];
         let mut values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(tx_num),
@@ -3175,9 +3170,6 @@ impl Runtime {
                 .get(&field.name)
                 .or_else(|| record.values.get(&field.storage_name))
                 .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
-            columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
-                field,
-            )));
             values.push(crate::schema::field_sql_value(
                 field,
                 value,
@@ -3186,12 +3178,6 @@ impl Runtime {
                 },
             )?);
         }
-        columns.extend([
-            "j_created_at".to_owned(),
-            "j_updated_at".to_owned(),
-            "j_created_by".to_owned(),
-            "j_updated_by".to_owned(),
-        ]);
         let created_by_num =
             cached_ensure_user(context.db, context.user_nums_by_id, &record.created_by)?;
         let updated_by_num =
@@ -3202,12 +3188,14 @@ impl Runtime {
             rusqlite::types::Value::Integer(created_by_num),
             rusqlite::types::Value::Integer(updated_by_num),
         ]);
-        insert_dynamic(
-            context.db,
-            &crate::schema::history_table(&record.table),
-            &columns,
-            &values,
-        )?;
+        let history_sql = context
+            .history_sql_by_table
+            .entry(record.table.clone())
+            .or_insert_with(|| AppWriteSql::new(table).history_sql.clone());
+        context
+            .db
+            .prepare_cached(history_sql)?
+            .execute(params_from_iter(values.iter()))?;
         let table_num = context
             .table_nums_by_name
             .get(&record.table)
@@ -7701,6 +7689,7 @@ struct ApplyHistoryContext<'a> {
     current_candidates: BTreeMap<(String, i64, i64), CurrentCandidate>,
     writes_by_tx: BTreeMap<i64, Vec<tx::PackedWrite>>,
     already_applied_tx_ids: &'a BTreeSet<String>,
+    history_sql_by_table: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
