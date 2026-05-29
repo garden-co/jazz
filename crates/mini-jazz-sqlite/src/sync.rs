@@ -6,15 +6,6 @@ use std::collections::BTreeMap;
 
 pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
 
-pub fn encode_bundle(bundle: &Bundle) -> Result<Vec<u8>> {
-    serde_json::to_vec(bundle).map_err(|err| crate::Error::new(format!("encode bundle: {err}")))
-}
-
-pub fn decode_bundle(encoded: &[u8]) -> Result<Bundle> {
-    serde_json::from_slice(encoded)
-        .map_err(|err| crate::Error::new(format!("decode bundle: {err}")))
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     #[serde(default = "default_bundle_protocol_version")]

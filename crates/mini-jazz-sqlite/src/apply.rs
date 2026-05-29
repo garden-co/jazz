@@ -7,7 +7,6 @@ use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct BundleApplyPlan {
-    policy_tables: BTreeSet<String>,
     touched_tables: BTreeSet<String>,
 }
 
@@ -47,18 +46,12 @@ impl BundleApplyPlan {
         }
 
         Ok(Self {
-            policy_tables,
             touched_tables: bundle_touched_tables(bundle),
         })
     }
 
     pub(crate) fn touched_tables(&self) -> &BTreeSet<String> {
         &self.touched_tables
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn policy_tables(&self) -> &BTreeSet<String> {
-        &self.policy_tables
     }
 }
 

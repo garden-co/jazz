@@ -2495,8 +2495,8 @@ fn query_predicate_reads_survive_bundle_serialization() {
     let bundle = alice
         .export_query_where_contains("notes", "body", "predicate")
         .unwrap();
-    let encoded = mini_jazz_sqlite::sync::encode_bundle(&bundle).unwrap();
-    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+    let encoded = serde_json::to_vec(&bundle).unwrap();
+    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
     assert_eq!(decoded.query_reads[0].op, "contains");
@@ -2524,8 +2524,8 @@ fn native_query_read_records_roundtrip_equality_operator() {
     let bundle = alice
         .export_query_where_eq("tasks", "done", json!(false))
         .unwrap();
-    let encoded = mini_jazz_sqlite::sync::encode_bundle(&bundle).unwrap();
-    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+    let encoded = serde_json::to_vec(&bundle).unwrap();
+    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
     assert_eq!(decoded.query_reads[0].op, "eq");

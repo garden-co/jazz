@@ -16,7 +16,6 @@ mod sync_apply;
 mod sync_export;
 mod transaction_builder;
 mod transaction_status;
-mod write_batch;
 mod write_core;
 mod writes;
 #[allow(unused_imports)]

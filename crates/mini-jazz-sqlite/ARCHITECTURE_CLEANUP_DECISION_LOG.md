@@ -934,3 +934,15 @@ regress.
 - Re-ran `cargo test -p mini-jazz-sqlite` after the final log/audit pass.
 - Result: 440 passed, 18 ignored placeholders, 0 failed.
 - Open stacked PRs against the SQLite spike base are #974 (this cleanup PR), #973 (moving deep-history/perf PR), and #945 (Nico transaction-isolation spec/tests).
+
+## 2026-05-29 11:57 PDT - Simplification pass after review feedback
+
+- Guido's review correctly called out over-abstraction. The batched logical write API from the #973 scout pass was only used by tests and added public runtime surface plus a private mode enum/helper for speculative performance flexibility.
+- Removed `insert_rows_batched`, `update_rows_batched`, `upsert_rows_batched`, the `write_batch` runtime module, and the four tests that existed only to justify that API.
+- Decision: this architecture cleanup PR should keep semantics and boundaries that are needed by the core or by imported PR tests, but should not carry convenience/performance APIs just because they look plausible.
+
+## 2026-05-29 11:57 PDT - Removed speculative native bundle codec wrapper
+
+- Re-applied the same standard to `sync::encode_bundle` / `sync::decode_bundle`. They were public helpers around `serde_json::{to_vec, from_slice}` and existed only to reserve a future native binary codec boundary.
+- Removed the helpers and kept the actual serialization regressions using direct JSON serialization, because JSON is the current concrete representation in this prototype.
+- Decision: the future binary/columnar codec can introduce a real codec API when there is an implementation or caller that needs it.

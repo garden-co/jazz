@@ -994,7 +994,7 @@ fn older_untagged_bundles_decode_as_protocol_version_one() {
 }
 
 #[test]
-fn native_bundles_roundtrip_protocol_metadata() {
+fn bundles_roundtrip_protocol_metadata_through_json() {
     let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
@@ -1003,8 +1003,8 @@ fn native_bundles_roundtrip_protocol_metadata() {
         .unwrap();
 
     let exported = alice.export_query_scope_open_todos().unwrap();
-    let encoded = mini_jazz_sqlite::sync::encode_bundle(&exported).unwrap();
-    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+    let encoded = serde_json::to_vec(&exported).unwrap();
+    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.protocol_version, 1);
     assert_eq!(decoded.schema_fingerprint, exported.schema_fingerprint);
