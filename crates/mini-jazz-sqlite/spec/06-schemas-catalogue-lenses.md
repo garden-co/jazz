@@ -58,8 +58,10 @@ materialization. Product APIs may expose efficient append and range-edit
 operations, but callers are not required to manufacture or observe text roots.
 The prototype still has an explicit `deep_text` field declaration to force this
 lowering in benchmarks, and also supports implicit promotion for ordinary text
-fields edited through the incremental text APIs. The intended product contract
-is automatic or planner-driven promotion behind the ordinary text type.
+fields once a string crosses a prototype byte threshold. All text APIs should
+work over both inline and promoted representations; the API used to write the
+text must not determine whether later reads, writes, queries, history, or sync
+can interpret it.
 
 Physical storage layouts are not created for every catalogue/schema version.
 The engine should create a new physical layout only when structural storage

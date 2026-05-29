@@ -145,6 +145,7 @@ type TopFieldRefreshValue = (JsonValue, Vec<String>);
 type TopCreatedAtRefreshKey = (String, String, String, usize);
 type TopCreatedAtRefreshValue = (JsonValue, Vec<String>);
 const DEEP_TEXT_APPEND_MATERIALIZE_BATCH_THRESHOLD: usize = 16;
+const TEXT_AUTO_PROMOTE_BYTES: usize = 256;
 
 enum QueryRefreshPlan {
     Predicate {
@@ -7698,11 +7699,11 @@ fn normalize_deep_text_write_values(
     args: &mut InsertRowInTx<'_>,
     table: &crate::schema::TableDef,
     row_num: i64,
-    row_id_created: bool,
+    _row_id_created: bool,
 ) -> Result<Option<BTreeMap<String, JsonValue>>> {
     let mut normalized = None;
     for field in &table.fields {
-        if !matches!(field.kind, FieldKind::DeepText) {
+        if !matches!(field.kind, FieldKind::Text | FieldKind::DeepText) {
             continue;
         }
         let Some(value) = args.values.get(&field.name) else {
@@ -7717,12 +7718,45 @@ fn normalize_deep_text_write_values(
             .as_deref()
             .and_then(|cache| cache.get(&effective_cache_key))
             .and_then(|values| values.get(&field.name))
-            .and_then(JsonValue::as_u64)
+            .and_then(text_root_value)
             .map(|root| root as i64)
             .filter(|root| *root != 0);
+        let should_promote_new_text =
+            matches!(field.kind, FieldKind::DeepText) || text.len() >= TEXT_AUTO_PROMOTE_BYTES;
         let root = if let Some(root) = cached_root {
             Some(root)
-        } else if args.op == 1 && row_id_created {
+        } else if matches!(field.kind, FieldKind::Text) {
+            if args.op == 1 {
+                if !should_promote_new_text {
+                    continue;
+                }
+                None
+            } else {
+                let promoted_root = current_promoted_text_root_in_tx(
+                    args.db,
+                    args.schema,
+                    args.branch_num,
+                    args.table_name,
+                    args.id,
+                    &field.name,
+                )?;
+                if promoted_root.is_none() && !should_promote_new_text {
+                    continue;
+                }
+                if promoted_root.is_some() {
+                    promoted_root
+                } else {
+                    current_deep_text_root_in_tx(
+                        args.db,
+                        args.schema,
+                        args.branch_num,
+                        args.table_name,
+                        args.id,
+                        &field.name,
+                    )?
+                }
+            }
+        } else if args.op == 1 {
             None
         } else {
             current_deep_text_root_in_tx(
@@ -7749,9 +7783,14 @@ fn normalize_deep_text_write_values(
                 256,
             )?
         };
+        let root_value = if matches!(field.kind, FieldKind::DeepText) {
+            deep_text_root_value(root)
+        } else {
+            promoted_text_root_value(root)
+        };
         normalized
             .get_or_insert_with(|| args.values.clone())
-            .insert(field.name.clone(), deep_text_root_value(root));
+            .insert(field.name.clone(), root_value);
     }
     Ok(normalized)
 }
@@ -8000,18 +8039,23 @@ fn current_deep_text_root_in_tx(
     }
     let row_num = row_num(conn, id)?;
     let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let value = conn.query_row(
-        &format!(
-            "SELECT {column}
+    let value = conn
+        .query_row(
+            &format!(
+                "SELECT {column}
              FROM {}
              WHERE row_num = ?
                AND j_branch_num = ?
                AND is_deleted = 0",
-            crate::schema::current_table(table_name)
-        ),
-        params![row_num, branch_num],
-        |row| row.get::<_, rusqlite::types::Value>(0),
-    )?;
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, branch_num],
+            |row| row.get::<_, rusqlite::types::Value>(0),
+        )
+        .optional()?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
     match value {
         rusqlite::types::Value::Integer(0) => Ok(None),
         rusqlite::types::Value::Integer(value) => Ok(Some(value)),
@@ -8023,6 +8067,49 @@ fn current_deep_text_root_in_tx(
             "unexpected stored text value for {}",
             field.name
         ))),
+    }
+}
+
+fn current_promoted_text_root_in_tx(
+    conn: &Connection,
+    schema: &SchemaDef,
+    branch_num: i64,
+    table_name: &str,
+    id: &str,
+    field_name: &str,
+) -> Result<crate::persisted_text_ops::TextRoot> {
+    let table = schema.table_def(table_name)?;
+    let field = table
+        .fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
+    if !matches!(field.kind, FieldKind::Text) {
+        return Ok(None);
+    }
+    let row_num = row_num(conn, id)?;
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let value = conn
+        .query_row(
+            &format!(
+                "SELECT {column}
+                 FROM {}
+                 WHERE row_num = ?
+                   AND j_branch_num = ?
+                   AND is_deleted = 0",
+                crate::schema::current_table(table_name)
+            ),
+            params![row_num, branch_num],
+            |row| row.get::<_, rusqlite::types::Value>(0),
+        )
+        .optional()?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        rusqlite::types::Value::Integer(0) => Ok(None),
+        rusqlite::types::Value::Integer(value) => Ok(Some(value)),
+        _ => Ok(None),
     }
 }
 
@@ -13902,8 +13989,10 @@ mod tests {
         let stored = alice
             .conn
             .query_row(
-                "SELECT typeof(body), body FROM docs__schema_v1_current WHERE row_num = 1",
-                [],
+                "SELECT typeof(body), body
+                 FROM docs__schema_v1_current
+                 WHERE row_num = (SELECT row_num FROM jazz_row_id WHERE row_id = ?)",
+                ["doc-1"],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .unwrap();
@@ -13917,6 +14006,92 @@ mod tests {
             bob.read_rows("docs").unwrap()[0].values["body"],
             JsonValue::from("hello promoted")
         );
+    }
+
+    #[test]
+    fn ordinary_text_field_auto_promotes_by_length() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+        let long_text = "a".repeat(TEXT_AUTO_PROMOTE_BYTES);
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from(long_text.clone()))]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from(long_text.clone())
+        );
+        let stored = alice
+            .conn
+            .query_row(
+                "SELECT typeof(body), body
+                 FROM docs__schema_v1_current
+                 WHERE row_num = (SELECT row_num FROM jazz_row_id WHERE row_id = ?)",
+                ["doc-1"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "integer");
+        assert!(stored.1 > 0);
+
+        let edited_text = format!("{long_text}!");
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from(edited_text.clone()))]),
+            )
+            .unwrap();
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from(edited_text.clone())
+        );
+
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!delta.text_ops_delta.is_empty());
+        bob.apply_history_delta(&delta).unwrap();
+        assert_eq!(
+            bob.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from(edited_text)
+        );
+    }
+
+    #[test]
+    fn short_ordinary_text_stays_inline_until_promoted() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("short"))]),
+            )
+            .unwrap();
+
+        let stored = alice
+            .conn
+            .query_row(
+                "SELECT typeof(body), body FROM docs__schema_v1_current WHERE row_num = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("text".to_owned(), "short".to_owned()));
     }
 
     #[test]

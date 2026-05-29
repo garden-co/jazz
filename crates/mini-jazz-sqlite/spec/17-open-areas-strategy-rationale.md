@@ -449,7 +449,7 @@ Implemented slices so far:
 - sealed history blocks for compacted accepted and rejected history
 - block-native history deltas with receiver block manifests
 - promoted text prototype via an explicit `deep_text` field kind, implicit
-  ordinary-text promotion through incremental edit APIs, text-op sidecar,
+  ordinary-text promotion above a prototype length threshold, text-op sidecar,
   current sidecar watermarks, and `HistoryDelta` integration
 
 Tests should be product-shaped integration tests using projects, todos, Alice,
@@ -538,9 +538,9 @@ Known implementation tensions:
   equality predicate. This is correct for the prototype but can over-export.
 - The prototype still exposes promoted text through an explicit `deep_text`
   schema kind for benchmarks, and now also supports implicit promotion of
-  ordinary text when callers use the incremental edit APIs. The remaining
-  product gap is automatic promotion based on observed edit pressure without
-  requiring the caller to choose an edit-specific API.
+  ordinary text based on length. The remaining product gap is tuning the
+  promotion policy from realistic workloads, including whether edit frequency,
+  append patterns, or historical depth should contribute alongside length.
 - The prototype currently uses a global text sidecar watermark. The intended
   protocol direction is to derive sidecar possession from known row versions
   and sealed blocks instead, making text sidecar bytes dependency closure for
