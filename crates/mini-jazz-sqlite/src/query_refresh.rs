@@ -1,4 +1,4 @@
-use crate::query_observation::observed_ids_from_query_value;
+use crate::observed_query::{self, ObservedQuery};
 use crate::sync::QueryReadRecord;
 use crate::Result;
 use serde_json::Value as JsonValue;
@@ -55,83 +55,68 @@ pub(crate) fn plan_refreshes(
     let mut singles = Vec::new();
 
     for read in reads {
-        if read.branch_id == current_branch_id
-            && matches!(read.op.as_str(), "eq" | "ne" | "contains" | "in")
-        {
-            predicate_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    read.op.clone(),
-                ))
-                .or_default()
-                .push((read.value.clone(), Vec::new()));
+        if read.branch_id != current_branch_id {
+            singles.push(QueryRefreshPlan::Single(read.clone()));
             continue;
         }
-        if read.branch_id == current_branch_id && read.op == "recursive_refs" {
-            let Some(root_id) = read.value.as_str() else {
-                return Err(crate::Error::new("recursive refs expects root id string"));
-            };
-            recursive_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                ))
-                .or_default()
-                .push(root_id.to_owned());
-            continue;
+        match observed_query::decode(read)? {
+            ObservedQuery::Predicate { op, value } => {
+                predicate_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                        op.as_str().to_owned(),
+                    ))
+                    .or_default()
+                    .push((value, Vec::new()));
+            }
+            ObservedQuery::RecursiveRefs { root_id } => {
+                recursive_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                    ))
+                    .or_default()
+                    .push(root_id);
+            }
+            ObservedQuery::TopCreatedAt {
+                value,
+                limit,
+                observed_ids,
+            } => {
+                top_created_at_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                        limit,
+                    ))
+                    .or_default()
+                    .push((value, observed_ids));
+            }
+            ObservedQuery::TopField {
+                value,
+                order_field,
+                limit,
+                observed_ids,
+            } => {
+                top_field_groups
+                    .entry((
+                        read.table.clone(),
+                        read.field.clone(),
+                        read.branch_id.clone(),
+                        order_field,
+                        limit,
+                    ))
+                    .or_default()
+                    .push((value, observed_ids));
+            }
+            ObservedQuery::Built { .. } | ObservedQuery::Absent => {
+                singles.push(QueryRefreshPlan::Single(read.clone()));
+            }
         }
-        if read.branch_id == current_branch_id && read.op == "eq_top_created_at_desc" {
-            let value = read
-                .value
-                .get("eq")
-                .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-            let limit = read
-                .value
-                .get("limit")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-            top_created_at_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    limit as usize,
-                ))
-                .or_default()
-                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
-            continue;
-        }
-        if read.branch_id == current_branch_id && read.op == "eq_top_field_desc" {
-            let value = read
-                .value
-                .get("eq")
-                .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-            let order_field = read
-                .value
-                .get("order_field")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-            let limit = read
-                .value
-                .get("limit")
-                .and_then(JsonValue::as_u64)
-                .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-            top_field_groups
-                .entry((
-                    read.table.clone(),
-                    read.field.clone(),
-                    read.branch_id.clone(),
-                    order_field.to_owned(),
-                    limit as usize,
-                ))
-                .or_default()
-                .push((value.clone(), observed_ids_from_query_value(&read.value)?));
-            continue;
-        }
-        singles.push(QueryRefreshPlan::Single(read.clone()));
     }
 
     let mut plans = Vec::new();

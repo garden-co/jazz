@@ -1,8 +1,8 @@
 use super::Runtime;
+use crate::observed_query::{self, ObservedQuery, PredicateOp};
 use crate::query_api::{
     predicate_query, BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy,
 };
-use crate::query_observation::built_query_from_read;
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::QueryReadRecord;
 use crate::types::{ReadTier, RejectionInfo, RowView};
@@ -142,76 +142,62 @@ impl Runtime {
                 "observed query branch is not checked out",
             ));
         }
-        match read.op.as_str() {
-            "eq" => self.subscribe_rows_where_eq(&read.table, &read.field, read.value.clone()),
-            "ne" => self.subscribe_rows_where_ne(&read.table, &read.field, read.value.clone()),
-            "contains" => {
-                let Some(needle) = read.value.as_str() else {
+        match observed_query::decode(read)? {
+            ObservedQuery::Predicate {
+                op: PredicateOp::Eq,
+                value,
+            } => self.subscribe_rows_where_eq(&read.table, &read.field, value),
+            ObservedQuery::Predicate {
+                op: PredicateOp::Ne,
+                value,
+            } => self.subscribe_rows_where_ne(&read.table, &read.field, value),
+            ObservedQuery::Predicate {
+                op: PredicateOp::Contains,
+                value,
+            } => {
+                let Some(needle) = value.as_str() else {
                     return Err(crate::Error::new("contains expects a string value"));
                 };
                 self.subscribe_rows_where_contains(&read.table, &read.field, needle)
             }
-            "in" => {
-                let Some(values) = read.value.as_array() else {
+            ObservedQuery::Predicate {
+                op: PredicateOp::In,
+                value,
+            } => {
+                let Some(values) = value.as_array() else {
                     return Err(crate::Error::new("in predicate expects an array value"));
                 };
                 self.subscribe_rows_where_in(&read.table, &read.field, values.clone())
             }
-            "recursive_refs" => {
-                let Some(root_id) = read.value.as_str() else {
-                    return Err(crate::Error::new("recursive refs expects root id string"));
-                };
-                Ok(RowsSubscription::where_recursive_refs(
-                    &read.table,
-                    root_id,
-                    &read.field,
-                    self.read_recursive_refs(&read.table, root_id, &read.field)?,
-                ))
-            }
-            "eq_top_created_at_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.subscribe_rows_where_eq_top_created_at_desc(
+            ObservedQuery::RecursiveRefs { root_id } => Ok(RowsSubscription::where_recursive_refs(
+                &read.table,
+                &root_id,
+                &read.field,
+                self.read_recursive_refs(&read.table, &root_id, &read.field)?,
+            )),
+            ObservedQuery::TopCreatedAt { value, limit, .. } => self
+                .subscribe_rows_where_eq_top_created_at_desc(
                     &read.table,
                     &read.field,
-                    value.clone(),
-                    limit as usize,
-                )
-            }
-            "eq_top_field_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-                let order_field = read
-                    .value
-                    .get("order_field")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-                self.subscribe_rows_where_eq_top_field_desc(
-                    &read.table,
-                    &read.field,
-                    value.clone(),
-                    order_field,
-                    limit as usize,
-                )
-            }
-            "query" => self.subscribe_query(built_query_from_read(read)?),
-            op => Err(crate::Error::new(format!(
-                "unsupported observed subscription query {op}"
-            ))),
+                    value,
+                    limit,
+                ),
+            ObservedQuery::TopField {
+                value,
+                order_field,
+                limit,
+                ..
+            } => self.subscribe_rows_where_eq_top_field_desc(
+                &read.table,
+                &read.field,
+                value,
+                &order_field,
+                limit,
+            ),
+            ObservedQuery::Built { query, .. } => self.subscribe_query(query),
+            ObservedQuery::Absent => Err(crate::Error::new(
+                "absent query reads cannot be subscribed directly",
+            )),
         }
     }
 

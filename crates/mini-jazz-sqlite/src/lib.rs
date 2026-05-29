@@ -3,6 +3,7 @@ mod auth;
 mod branch;
 mod effective;
 mod error;
+mod observed_query;
 mod policy;
 mod policy_read_set;
 mod profile;

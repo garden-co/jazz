@@ -789,3 +789,10 @@ regress.
 - This keeps implementation-inspection and maintenance hooks available for invariants/benchmarks while making the main runtime API less like a test toolbox.
 - Updated tests and perf scenarios to use the explicit admin surface.
 - Focused storage/generic tests pass, and `cargo check -p mini-jazz-sqlite --examples` is green.
+
+## 2026-05-29 03:37 PDT - Centralized observed-query decoding
+
+- Added `observed_query` as a typed decoder for persisted query-read records while preserving the existing wire/storage shape.
+- Routed refresh planning, single refresh export, and observed-query subscriptions through the typed decoder instead of each surface reparsing string ops and JSON payloads independently.
+- This does not solve the long-term descriptor identity/schema question, but it makes unsupported/query-shape handling more exhaustive and harder to grow ad hoc.
+- Focused subscription, query-read, and sync-fate tests pass, and `cargo check -p mini-jazz-sqlite` is green.

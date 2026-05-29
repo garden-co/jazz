@@ -1,8 +1,7 @@
 use super::{export_txs, include_branch_record, make_bundle, Runtime};
+use crate::observed_query::{self, ObservedQuery, PredicateOp};
 use crate::query_api::{predicate_query, QueryConditionOp};
-use crate::query_observation::{
-    built_query_from_read, observed_ids_from_query_value, support_window_query,
-};
+use crate::query_observation::support_window_query;
 use crate::query_refresh::QueryRefreshPlan;
 use crate::sync::{Bundle, QueryReadRecord};
 use crate::{branch, Result};
@@ -77,80 +76,68 @@ impl Runtime {
         if read.branch_id != branch::id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new("query refresh branch is not checked out"));
         }
-        match read.op.as_str() {
-            "eq" => self.export_query_where_eq(&read.table, &read.field, read.value.clone()),
-            "ne" => self.export_query_where_ne(&read.table, &read.field, read.value.clone()),
-            "contains" => {
-                let Some(needle) = read.value.as_str() else {
+        match observed_query::decode(read)? {
+            ObservedQuery::Predicate {
+                op: PredicateOp::Eq,
+                value,
+            } => self.export_query_where_eq(&read.table, &read.field, value),
+            ObservedQuery::Predicate {
+                op: PredicateOp::Ne,
+                value,
+            } => self.export_query_where_ne(&read.table, &read.field, value),
+            ObservedQuery::Predicate {
+                op: PredicateOp::Contains,
+                value,
+            } => {
+                let Some(needle) = value.as_str() else {
                     return Err(crate::Error::new("contains expects a string value"));
                 };
                 self.export_query_where_contains(&read.table, &read.field, needle)
             }
-            "in" => {
-                let Some(values) = read.value.as_array() else {
+            ObservedQuery::Predicate {
+                op: PredicateOp::In,
+                value,
+            } => {
+                let Some(values) = value.as_array() else {
                     return Err(crate::Error::new("in predicate expects an array value"));
                 };
                 self.export_query_where_in(&read.table, &read.field, values.clone())
             }
-            "recursive_refs" => {
-                let Some(root_id) = read.value.as_str() else {
-                    return Err(crate::Error::new("recursive refs expects root id string"));
-                };
-                self.export_recursive_refs(&read.table, root_id, &read.field)
+            ObservedQuery::RecursiveRefs { root_id } => {
+                self.export_recursive_refs(&read.table, &root_id, &read.field)
             }
-            "eq_top_created_at_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top created query expects eq value"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.export_query_where_eq_top_created_at_desc_with_previous_observed(
-                    &read.table,
-                    &read.field,
-                    value.clone(),
-                    limit as usize,
-                    observed_ids_from_query_value(&read.value)?,
-                )
-            }
-            "eq_top_field_desc" => {
-                let value = read
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| crate::Error::new("top field query expects eq value"))?;
-                let order_field = read
-                    .value
-                    .get("order_field")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| crate::Error::new("top field query expects order_field"))?;
-                let limit = read
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| crate::Error::new("top field query expects numeric limit"))?;
-                self.export_query_where_eq_top_field_desc_with_previous_observed(
-                    &read.table,
-                    &read.field,
-                    value.clone(),
-                    order_field,
-                    limit as usize,
-                    observed_ids_from_query_value(&read.value)?,
-                )
-            }
-            "query" => {
-                let query = built_query_from_read(read)?;
+            ObservedQuery::TopCreatedAt {
+                value,
+                limit,
+                observed_ids,
+            } => self.export_query_where_eq_top_created_at_desc_with_previous_observed(
+                &read.table,
+                &read.field,
+                value,
+                limit,
+                observed_ids,
+            ),
+            ObservedQuery::TopField {
+                value,
+                order_field,
+                limit,
+                observed_ids,
+            } => self.export_query_where_eq_top_field_desc_with_previous_observed(
+                &read.table,
+                &read.field,
+                value,
+                &order_field,
+                limit,
+                observed_ids,
+            ),
+            ObservedQuery::Built {
+                query,
+                observed_ids,
+            } => {
                 let rows = self.query(support_window_query(&query)?)?;
-                self.export_built_query_scope_with_previous_observed(
-                    query,
-                    rows,
-                    &[],
-                    observed_ids_from_query_value(&read.value)?,
-                )
+                self.export_built_query_scope_with_previous_observed(query, rows, &[], observed_ids)
             }
-            "absent" => {
+            ObservedQuery::Absent => {
                 if read.field == "id" {
                     let Some(row_id) = read.value.as_str() else {
                         return Err(crate::Error::new("absent id expects string value"));
@@ -192,9 +179,6 @@ impl Runtime {
                     Vec::new(),
                 ))
             }
-            op => Err(crate::Error::new(format!(
-                "unsupported observed query refresh {op}"
-            ))),
         }
     }
 }
