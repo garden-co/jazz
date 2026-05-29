@@ -569,3 +569,9 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after the session/read/write/query-export/query-refresh/sync-export/sync-apply module extractions.
 - Result: 434 passed, 19 ignored placeholders, 0 failed.
 - Disk is still tight on this machine, but the warm Rust target cache was enough for a full validation pass.
+
+## 2026-05-29 02:12 PDT - Noted query-descriptor persistence as a semantic cleanup target
+
+- While checking for remaining broken-window patterns, I found the old durable observed-query descriptor behavior is still present: query reads are stored in SQLite and several tests assert refresh after runtime restart.
+- This conflicts with the newer design direction that downstream clients should replay/resubscribe queries on reconnect and that query descriptors should not be persisted on disk.
+- I am not flipping that behavior inside this broad architecture PR because it would require a dedicated semantic migration of restart/reconnect tests. The module split makes the later change more tractable: `runtime::query_refresh` owns listing/forget/export of observed descriptors, while apply-side recording remains an apply concern.
