@@ -1,7 +1,7 @@
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
-use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, Operation, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
@@ -2517,6 +2517,7 @@ impl Runtime {
                 values: &visible_row.values,
                 user: &user,
                 op: 3,
+                created_by: Some(&visible_row.created_by),
             })?;
 
         let field_columns = table
@@ -4501,6 +4502,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             values: &effective_values,
             user: args.user,
             op: args.op,
+            created_by: (args.op == 1).then_some(args.user),
         })?;
 
     let mut columns = vec![
@@ -4666,13 +4668,11 @@ struct LocalWriteCheck<'a> {
     values: &'a BTreeMap<String, JsonValue>,
     user: &'a str,
     op: i64,
+    created_by: Option<&'a str>,
 }
 
 fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
     let policy = write_policy_for_op(check.table, check.op);
-    if check.op == 1 && matches!(policy, PolicyDef::CreatedByUser) {
-        return Ok(true);
-    }
     policy::write_allowed(policy::WriteCheck {
         db: check.db,
         schema: check.schema,
@@ -4682,6 +4682,7 @@ fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
         branch_num: check.branch_num,
         values: check.values,
         user: check.user,
+        created_by: check.created_by,
     })
 }
 
@@ -4690,6 +4691,17 @@ fn write_policy_for_op(table: &crate::schema::TableDef, op: i64) -> &PolicyDef {
         table.delete_policy()
     } else {
         &table.write_policy
+    }
+}
+
+fn inherited_ref_policy_field(policy: &PolicyDef) -> Option<&str> {
+    match policy {
+        PolicyDef::Inherits {
+            operation: Operation::Select,
+            via_column,
+            ..
+        } => Some(via_column),
+        _ => None,
     }
 }
 
@@ -4710,7 +4722,7 @@ fn policy_denial_detail_for_history_record(
             "dependency_row_id": dependency.1,
         }));
     }
-    if let PolicyDef::RefReadable { field } = policy {
+    if let Some(field) = inherited_ref_policy_field(policy) {
         if let Some(dependency) = unavailable_policy_dependency(conn, table, record, tx_num, field)?
         {
             return Ok(json!({
@@ -5075,7 +5087,7 @@ fn record_policy_read_set_for_write(
     branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
-    let PolicyDef::RefReadable { field } = policy else {
+    let Some(field) = inherited_ref_policy_field(policy) else {
         return Ok(());
     };
     let field = table
@@ -5115,7 +5127,7 @@ fn record_policy_read_dependencies_for_row(
     branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
-    let PolicyDef::RefReadable { field } = policy else {
+    let Some(field) = inherited_ref_policy_field(policy) else {
         return Ok(());
     };
     let field = table
@@ -5546,6 +5558,7 @@ impl<'a> TransactionBuilder<'a> {
                             values: &visible_row.values,
                             user: &user,
                             op: 3,
+                            created_by: Some(&visible_row.created_by),
                         })?;
                     let field_columns = table_def
                         .fields
@@ -5785,9 +5798,6 @@ fn write_allowed_for_history_record(
         .ok_or_else(|| crate::Error::new("untrusted policy validation requires auth user"))?;
     let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
     let policy = write_policy_for_op(table, record.op);
-    if record.op == 3 && matches!(policy, PolicyDef::CreatedByUser) {
-        return Ok(record.created_by == user);
-    }
     policy::write_allowed(policy::WriteCheck {
         db: conn,
         schema,
@@ -5797,6 +5807,7 @@ fn write_allowed_for_history_record(
         branch_num,
         values: &record.values,
         user,
+        created_by: Some(&record.created_by),
     })
 }
 
@@ -6323,7 +6334,7 @@ fn export_snapshot_policy_dependency_history(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(table_name)?;
-    let PolicyDef::RefReadable { field } = &table.read_policy else {
+    let Some(field) = inherited_ref_policy_field(&table.read_policy) else {
         return Ok(Vec::new());
     };
     let field = table
@@ -6415,7 +6426,7 @@ fn export_snapshot_policy_dependency_history_for_query_scope_at_depth(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(table_name)?;
-    let PolicyDef::RefReadable { field } = &table.read_policy else {
+    let Some(field) = inherited_ref_policy_field(&table.read_policy) else {
         return Ok(Vec::new());
     };
     let field = table
@@ -6516,54 +6527,91 @@ fn export_policy_dependency_history(
     let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
     match args.policy {
-        PolicyDef::AllowAll
-        | PolicyDef::CreatedByUser
-        | PolicyDef::RowIdEqualsUser
-        | PolicyDef::UserRefEqualsSession { .. } => Ok(Vec::new()),
-        PolicyDef::GroupMember => export_group_membership_policy_dependencies(visibility, args),
-        PolicyDef::GroupRefMember { .. } => {
-            export_group_membership_policy_dependencies(visibility, args)
-        }
-        PolicyDef::ProjectMember => {
-            let project_row_nums = args.child_row_nums.map(|rows| rows.to_vec());
-            export_project_membership_policy_dependencies(visibility, args, project_row_nums)
-        }
-        PolicyDef::ProjectRefMember { field } => {
-            let field = table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-            let FieldKind::Ref {
-                table: parent_table,
-            } = &field.kind
-            else {
-                return Err(crate::Error::new(format!(
-                    "policy field {} is not a ref",
-                    field.name
-                )));
-            };
-            if parent_table != "projects" {
-                return Err(crate::Error::new(format!(
-                    "policy field {} must reference projects",
-                    field.name
-                )));
+        PolicyDef::True
+        | PolicyDef::False
+        | PolicyDef::Cmp { .. }
+        | PolicyDef::SessionCmp { .. }
+        | PolicyDef::IsNull { .. }
+        | PolicyDef::SessionIsNull { .. }
+        | PolicyDef::IsNotNull { .. }
+        | PolicyDef::SessionIsNotNull { .. }
+        | PolicyDef::Contains { .. }
+        | PolicyDef::SessionContains { .. }
+        | PolicyDef::In { .. }
+        | PolicyDef::InList { .. }
+        | PolicyDef::SessionInList { .. }
+        | PolicyDef::Exists { .. }
+        | PolicyDef::ExistsRel { .. } => Ok(Vec::new()),
+        PolicyDef::InheritsReferencing {
+            operation,
+            source_table,
+            via_column,
+            ..
+        } => {
+            if *operation != Operation::Select {
+                return Err(crate::Error::new(
+                    "mini-sqlite policies only lower SELECT inheritance today",
+                ));
             }
-            let project_row_nums = current_ref_row_nums_for_children(
-                conn,
-                args.table_name,
-                field,
-                args.branch_nums,
-                args.child_row_nums,
-            )?;
-            export_project_membership_policy_dependencies(visibility, args, Some(project_row_nums))
+            let source_def = schema.table_def(source_table)?;
+            if source_table == "group_members"
+                && via_column == "group"
+                && source_def
+                    .read_policy
+                    .is_user_or_ref_readable("user", "member_group")
+            {
+                export_group_membership_policy_dependencies(visibility, args)
+            } else if source_table == "project_members"
+                && via_column == "project"
+                && source_def
+                    .read_policy
+                    .is_user_or_ref_readable("user", "group")
+            {
+                let project_row_nums = args.child_row_nums.map(|rows| rows.to_vec());
+                export_project_membership_policy_dependencies(visibility, args, project_row_nums)
+            } else {
+                Ok(Vec::new())
+            }
         }
-        PolicyDef::RefReadable { field } => {
+        PolicyDef::And(children) | PolicyDef::Or(children) => {
+            let mut records = Vec::new();
+            for child in children {
+                records.extend(export_policy_dependency_history(
+                    visibility,
+                    PolicyDependencyExport {
+                        table_name: args.table_name,
+                        policy: child,
+                        branch_nums: args.branch_nums,
+                        child_row_nums: args.child_row_nums,
+                    },
+                )?);
+            }
+            Ok(records)
+        }
+        PolicyDef::Not(child) => export_policy_dependency_history(
+            visibility,
+            PolicyDependencyExport {
+                table_name: args.table_name,
+                policy: child,
+                branch_nums: args.branch_nums,
+                child_row_nums: args.child_row_nums,
+            },
+        ),
+        PolicyDef::Inherits {
+            operation,
+            via_column,
+            ..
+        } => {
+            if *operation != Operation::Select {
+                return Err(crate::Error::new(
+                    "mini-sqlite policies only lower SELECT inheritance today",
+                ));
+            }
             let field = table
                 .fields
                 .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+                .find(|candidate| candidate.name == *via_column)
+                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {via_column}")))?;
             let FieldKind::Ref {
                 table: parent_table,
             } = &field.kind
@@ -6594,6 +6642,7 @@ fn export_policy_dependency_history(
                      JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
                      WHERE current.is_deleted = 0
                        AND {}
+                       AND current.{ref_column} IS NOT NULL
                        AND current_tx.outcome != {}
                        AND {policy_sql}",
                     crate::schema::current_table(args.table_name),
@@ -6676,34 +6725,6 @@ fn export_project_membership_policy_dependencies(
     Ok(records)
 }
 
-fn current_ref_row_nums_for_children(
-    conn: &Connection,
-    table_name: &str,
-    field: &FieldDef,
-    branch_nums: &[i64],
-    child_row_nums: Option<&[i64]>,
-) -> Result<Vec<i64>> {
-    let ref_column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-    let sql = format!(
-        "SELECT DISTINCT current.{ref_column}
-         FROM {} current
-         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
-         WHERE current.is_deleted = 0
-           AND {}
-           AND {}
-           AND tx.outcome != {}",
-        crate::schema::current_table(table_name),
-        branch_filter_sql("current", branch_nums),
-        row_num_filter_sql("current", child_row_nums),
-        tx::OUTCOME_REJECTED,
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let row_nums = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(row_nums)
-}
-
 fn current_group_member_row_nums_for_groups(
     conn: &Connection,
     user: &str,
@@ -6722,17 +6743,16 @@ fn current_group_member_row_nums_for_groups(
            JOIN jazz_tx direct_tx ON direct_tx.tx_num = direct.visible_tx_num
            WHERE direct.is_deleted = 0
              AND {direct_branch_filter}
-             AND direct.member = ?
+             AND direct.user_row_num = (SELECT row_num FROM jazz_row_id WHERE row_id = ?)
              AND direct_tx.outcome != {}
            UNION
            SELECT nested.group_row_num, nested.row_num
            FROM {} nested
            JOIN jazz_tx nested_tx ON nested_tx.tx_num = nested.visible_tx_num
            JOIN reachable parent ON 1 = 1
-           JOIN jazz_row_id parent_ids ON parent_ids.row_num = parent.group_row_num
            WHERE nested.is_deleted = 0
              AND {nested_branch_filter}
-             AND nested.member = ('group:' || parent_ids.row_id)
+             AND nested.member_group_row_num = parent.group_row_num
              AND nested_tx.outcome != {}
          )
          SELECT DISTINCT member_row_num
@@ -6744,7 +6764,7 @@ fn current_group_member_row_nums_for_groups(
     );
     let mut stmt = conn.prepare(&sql)?;
     let row_nums = stmt
-        .query_map(params![format!("user:{user}")], |row| row.get::<_, i64>(0))?
+        .query_map(params![user], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(row_nums)
 }
@@ -6811,7 +6831,7 @@ fn export_policy_dependency_history_for_query_scope_at_depth(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
-    let PolicyDef::RefReadable { field } = args.policy else {
+    let Some(field) = inherited_ref_policy_field(args.policy) else {
         return Ok(Vec::new());
     };
     let field = table
@@ -6889,6 +6909,7 @@ fn scoped_policy_parent_row_nums(
          WHERE current.row_num IN ({child_row_nums})
            AND current.is_deleted = 0
            AND {}
+           AND current.{ref_column} IS NOT NULL
            AND current_tx.outcome != {}",
         crate::schema::current_table(table_name),
         branch_filter_sql("current", branch_nums),
@@ -7976,10 +7997,6 @@ fn history_row_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
         Some(row_nums) => format!("{alias}.row_num IN ({})", integer_list_sql(row_nums)),
         None => "1 = 1".to_owned(),
     }
-}
-
-fn row_num_filter_sql(alias: &str, row_nums: Option<&[i64]>) -> String {
-    history_row_filter_sql(alias, row_nums)
 }
 
 fn history_branch_filter_sql(alias: &str, branch_nums: Option<&[i64]>) -> String {

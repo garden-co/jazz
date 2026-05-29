@@ -1,4 +1,4 @@
-use crate::schema::{FieldKind, PolicyDef, SchemaDef, TableDef};
+use crate::schema::{FieldKind, Operation, PolicyDef, SchemaDef, TableDef};
 use crate::{policy, tx, Result};
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 
@@ -135,24 +135,73 @@ impl ReadVisibility<'_> {
             ));
         }
         match policy {
-            PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
-            PolicyDef::CreatedByUser => Ok(format!(
-                "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
-                self.user.replace('\'', "''")
-            )),
-            PolicyDef::RowIdEqualsUser
-            | PolicyDef::UserRefEqualsSession { .. }
-            | PolicyDef::GroupMember
-            | PolicyDef::GroupRefMember { .. }
-            | PolicyDef::ProjectMember
-            | PolicyDef::ProjectRefMember { .. } => policy::branch_read_policy_sql_for_alias(
+            PolicyDef::True => Ok("1 = 1".to_owned()),
+            PolicyDef::False => Ok("0 = 1".to_owned()),
+            PolicyDef::Cmp { .. }
+            | PolicyDef::SessionCmp { .. }
+            | PolicyDef::IsNull { .. }
+            | PolicyDef::SessionIsNull { .. }
+            | PolicyDef::IsNotNull { .. }
+            | PolicyDef::SessionIsNotNull { .. }
+            | PolicyDef::Contains { .. }
+            | PolicyDef::SessionContains { .. }
+            | PolicyDef::In { .. }
+            | PolicyDef::InList { .. }
+            | PolicyDef::SessionInList { .. }
+            | PolicyDef::Exists { .. }
+            | PolicyDef::ExistsRel { .. }
+            | PolicyDef::InheritsReferencing { .. } => policy::branch_read_policy_sql_for_alias(
                 self.schema,
                 table,
                 alias,
                 self.user,
                 self.branch_num,
             ),
-            PolicyDef::RefReadable { field } => {
+            PolicyDef::And(children) => {
+                if children.is_empty() {
+                    return Ok("1 = 1".to_owned());
+                }
+                let parts = children
+                    .iter()
+                    .map(|child| {
+                        self.lower_effective_branch_policy(
+                            table,
+                            alias,
+                            child,
+                            base_epoch,
+                            depth + 1,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(format!("({})", parts.join(" AND ")))
+            }
+            PolicyDef::Or(children) => {
+                if children.is_empty() {
+                    return Ok("0 = 1".to_owned());
+                }
+                let parts = children
+                    .iter()
+                    .map(|child| {
+                        self.lower_effective_branch_policy(
+                            table,
+                            alias,
+                            child,
+                            base_epoch,
+                            depth + 1,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(format!("({})", parts.join(" OR ")))
+            }
+            PolicyDef::Not(child) => Ok(format!(
+                "NOT ({})",
+                self.lower_effective_branch_policy(table, alias, child, base_epoch, depth + 1)?
+            )),
+            PolicyDef::Inherits {
+                operation: Operation::Select,
+                via_column: field,
+                ..
+            } => {
                 let field = table
                     .fields
                     .iter()
@@ -247,6 +296,9 @@ impl ReadVisibility<'_> {
                     tx::OUTCOME_REJECTED,
                 ))
             }
+            PolicyDef::Inherits { .. } => Err(crate::Error::new(
+                "mini-sqlite policies only lower SELECT inheritance today",
+            )),
         }
     }
 }

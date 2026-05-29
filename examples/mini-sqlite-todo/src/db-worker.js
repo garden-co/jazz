@@ -191,7 +191,7 @@ async function seedDirectory() {
     insertMissing(
       "group_members",
       member.id,
-      { member: member.member, group: member.group },
+      groupMemberValues(member.member, member.group),
       groupMemberIds,
     );
   }
@@ -230,10 +230,38 @@ function ensureProjectMembers(project, projectMemberIds) {
     insertMissing(
       "project_members",
       `project-member-${project.id}-${slug(member)}`,
-      { project: project.id, member },
+      projectMemberValues(project.id, member),
       projectMemberIds,
     );
   }
+}
+
+function groupMemberValues(member, group) {
+  const ref = splitMemberRef(member);
+  return {
+    user: ref.user,
+    member_group: ref.group,
+    group,
+  };
+}
+
+function projectMemberValues(project, member) {
+  const ref = splitMemberRef(member);
+  return {
+    project,
+    user: ref.user,
+    group: ref.group,
+  };
+}
+
+function splitMemberRef(member) {
+  if (member.startsWith("user:")) {
+    return { user: member.slice("user:".length), group: null };
+  }
+  if (member.startsWith("group:")) {
+    return { user: null, group: member.slice("group:".length) };
+  }
+  return { user: null, group: null };
 }
 
 function insertMissing(table, id, values, ids) {

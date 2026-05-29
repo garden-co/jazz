@@ -3,7 +3,7 @@ use crate::query_api::{
 };
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
-use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, Operation, PolicyDef, SchemaDef};
 use crate::types::RowView;
 use crate::{branch, policy, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
@@ -1987,7 +1987,12 @@ impl QueryContext<'_> {
             return Ok(rows);
         }
         let table = self.schema.table_def(table_name)?;
-        let PolicyDef::RefReadable { field } = &table.read_policy else {
+        let PolicyDef::Inherits {
+            operation: Operation::Select,
+            via_column: field,
+            ..
+        } = &table.read_policy
+        else {
             return Ok(rows);
         };
         let field = table
@@ -2027,7 +2032,7 @@ impl QueryContext<'_> {
             && self.branch_num != 1
             && base_epoch.is_some()
             && (query.limit.is_some() || query.offset.is_some())
-            && matches!(table.read_policy, PolicyDef::RefReadable { .. })
+            && matches!(table.read_policy, PolicyDef::Inherits { .. })
     }
 
     fn row_view_visible_in_branch(
@@ -2041,16 +2046,25 @@ impl QueryContext<'_> {
         }
         let table = self.schema.table_def(table_name)?;
         match &table.read_policy {
-            PolicyDef::AllowAll => Ok(true),
-            PolicyDef::CreatedByUser => Ok(row.created_by == self.user),
-            PolicyDef::RowIdEqualsUser => Ok(row.id == self.user),
-            PolicyDef::UserRefEqualsSession { field } => {
-                Ok(row.values.get(field).and_then(JsonValue::as_str) == Some(self.user))
-            }
-            PolicyDef::GroupMember
-            | PolicyDef::GroupRefMember { .. }
-            | PolicyDef::ProjectMember
-            | PolicyDef::ProjectRefMember { .. } => {
+            PolicyDef::True => Ok(true),
+            PolicyDef::False => Ok(false),
+            PolicyDef::Cmp { .. }
+            | PolicyDef::SessionCmp { .. }
+            | PolicyDef::IsNull { .. }
+            | PolicyDef::SessionIsNull { .. }
+            | PolicyDef::IsNotNull { .. }
+            | PolicyDef::SessionIsNotNull { .. }
+            | PolicyDef::Contains { .. }
+            | PolicyDef::SessionContains { .. }
+            | PolicyDef::In { .. }
+            | PolicyDef::InList { .. }
+            | PolicyDef::SessionInList { .. }
+            | PolicyDef::Exists { .. }
+            | PolicyDef::ExistsRel { .. }
+            | PolicyDef::InheritsReferencing { .. }
+            | PolicyDef::And(_)
+            | PolicyDef::Or(_)
+            | PolicyDef::Not(_) => {
                 let row_num = row_num(self.conn, &row.id)?;
                 let policy_sql = policy::branch_read_policy_sql_for_alias(
                     self.schema,
@@ -2077,7 +2091,11 @@ impl QueryContext<'_> {
                 )?;
                 Ok(count > 0)
             }
-            PolicyDef::RefReadable { field } => {
+            PolicyDef::Inherits {
+                operation: Operation::Select,
+                via_column: field,
+                ..
+            } => {
                 let field = table
                     .fields
                     .iter()
@@ -2102,6 +2120,7 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
+            PolicyDef::Inherits { .. } => Ok(false),
         }
     }
 
