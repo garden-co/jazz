@@ -173,8 +173,8 @@ insert statement, and deep-text batches carry depth-since-snapshot in memory
 instead of querying the parent/snapshot tables for every edit.
 `Block+Ops18` keeps the same format but makes block import more runtime-honest:
 when a `HistoryDelta` imports sealed blocks, receivers rebuild current
-projection candidates from those blocks inside the same apply savepoint before
-applying the open bundle.
+projection candidates from those imported blocks inside the same apply savepoint
+before applying the open bundle.
 
 ## Timing Fields
 

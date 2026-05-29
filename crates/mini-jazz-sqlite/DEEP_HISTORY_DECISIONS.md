@@ -1470,3 +1470,11 @@ Decision: `HistoryDelta` apply now rebuilds current projection candidates from i
 Why: `hot_tail = 0` compaction is allowed, and a real sync delta may legitimately carry a row only as a sealed block. Importing the block without repairing current made the history durable but not current-visible on the receiver. The existing block-aware rebuild helper was only exposed through explicit projection rebuild; apply should use it when it imports blocks.
 
 Scope impact: fully sealed referenced rows in query/ref-include deltas can become visible after apply. If the open bundle also contains a newer version, normal bundle apply runs afterward and wins. The rollback test still passes because the rebuild happens inside the `HistoryDelta` savepoint.
+
+## Fri May 29 03:56:36 PDT 2026 - Scope Block Current Repair To Imported Blocks
+
+Decision: `HistoryDelta` apply repairs current projection from the block exports in the delta, rather than decoding every accepted block already in the local database.
+
+Why: the correctness boundary is the imported delta. Re-reading unrelated local blocks would make import cost grow with database age instead of delta size, which is exactly the deep-history shape we are trying to avoid.
+
+Scope impact: explicit `rebuild_current_projection()` still scans all sealed blocks. Delta apply stays scoped to newly imported accepted blocks and then lets the open bundle apply newer candidates.

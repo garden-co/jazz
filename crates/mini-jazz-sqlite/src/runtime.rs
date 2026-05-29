@@ -2319,7 +2319,11 @@ impl Runtime {
         }
         self.import_history_blocks(&delta.blocks)?;
         if !delta.blocks.is_empty() {
-            rebuild_current_projection_from_sealed_blocks(&self.conn, &self.schema)?;
+            rebuild_current_projection_from_history_block_exports(
+                &self.conn,
+                &self.schema,
+                &delta.blocks,
+            )?;
         }
         self.apply_bundle_inner(&delta.bundle, true, true)
     }
@@ -11074,7 +11078,7 @@ fn rebuild_current_projection_from_sealed_blocks(
     conn: &Connection,
     schema: &SchemaDef,
 ) -> Result<()> {
-    let mut latest = BTreeMap::<(String, String, String), (TxRecord, HistoryRecord)>::new();
+    let mut block_payloads = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT codec, format_version, payload
          FROM history_blocks
@@ -11089,7 +11093,37 @@ fn rebuild_current_projection_from_sealed_blocks(
         ))
     })?;
     for row in rows {
-        let (codec, format_version, payload) = row?;
+        block_payloads.push(row?);
+    }
+    rebuild_current_projection_from_block_payloads(conn, schema, block_payloads)
+}
+
+fn rebuild_current_projection_from_history_block_exports(
+    conn: &Connection,
+    schema: &SchemaDef,
+    blocks: &[HistoryBlockExport],
+) -> Result<()> {
+    let block_payloads = blocks
+        .iter()
+        .filter(|block| block.manifest.kind == "accepted")
+        .map(|block| {
+            (
+                block.manifest.codec.clone(),
+                block.manifest.format_version,
+                block.payload.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rebuild_current_projection_from_block_payloads(conn, schema, block_payloads)
+}
+
+fn rebuild_current_projection_from_block_payloads(
+    conn: &Connection,
+    schema: &SchemaDef,
+    block_payloads: Vec<(String, i64, Vec<u8>)>,
+) -> Result<()> {
+    let mut latest = BTreeMap::<(String, String, String), (TxRecord, HistoryRecord)>::new();
+    for (codec, format_version, payload) in block_payloads {
         let bundle = decode_history_block_payload(&codec, format_version, &payload)?;
         let txs = bundle
             .txs
