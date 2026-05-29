@@ -1094,3 +1094,11 @@ Decision: native bundle export now omits read records that are derived solely fr
 Why: after local storage learned the implicit-read representation, export was immediately expanding it back through `jazz_tx_read`. That wasted wire bytes and made receive apply rebuild explicit read JSON that was intentionally absent on the sender.
 
 Scope impact: full `mini-jazz-sqlite` tests pass, including a focused round trip that omits implicit reads from a bundle and still reconstructs `transaction_previous_read_rows`. Canonical native sync bytes dropped from about 38.4k to 31.8k for append, 51.0k to 37.5k for Automerge, and 198.5k to 186.9k for canvas. Sampled receive/update also improved because apply sees far fewer explicit read rows.
+
+## Fri May 29 00:48:05 PDT 2026 - Specialize Receive Tuple Updates With Implicit Reads
+
+Decision: `set_received_read_write_tuple_batch` now uses a narrower two-column update when every tuple in a chunk has writes but no explicit reads.
+
+Why: after preserving implicit reads over native export, most receive tuple updates only need to set `writes_json` and leave `reads_json = NULL`. The old path still built a three-column incoming table and ran a CASE expression for reads on every row.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. Canonical timing is mostly neutral for text and improves canvas receive in the first sample, because canvas now imports many write-only tx tuples.

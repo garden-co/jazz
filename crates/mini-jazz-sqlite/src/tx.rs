@@ -214,6 +214,28 @@ pub(crate) fn set_received_read_write_tuple_batch(
         if chunk.is_empty() {
             continue;
         }
+        if chunk.iter().all(|tuple| tuple.reads.is_none()) {
+            let placeholders = (0..chunk.len())
+                .map(|_| "(?, ?)")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "WITH incoming(tx_num, writes_json) AS (VALUES {placeholders})
+                 UPDATE jazz_tx
+                    SET writes_json = jsonb(incoming.writes_json),
+                        reads_json = NULL
+                   FROM incoming
+                  WHERE jazz_tx.tx_num = incoming.tx_num"
+            );
+            let mut values = Vec::with_capacity(chunk.len() * 2);
+            for tuple in chunk {
+                values.push(rusqlite::types::Value::Integer(tuple.tx_num));
+                values.push(rusqlite::types::Value::Text(encode_writes(&tuple.writes)));
+            }
+            conn.prepare_cached(&sql)?
+                .execute(rusqlite::params_from_iter(values.iter()))?;
+            continue;
+        }
         let placeholders = (0..chunk.len())
             .map(|_| "(?, ?, ?)")
             .collect::<Vec<_>>()
