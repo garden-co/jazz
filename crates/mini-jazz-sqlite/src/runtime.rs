@@ -7297,14 +7297,15 @@ fn normalize_deep_text_write_values(
                 &field.name,
             )?
         };
-        let current_len = crate::persisted_text_ops::root_len(args.db, root)? as usize;
+        let current_text = crate::persisted_text_ops::materialize(args.db, root)?;
+        let (start_byte, delete_bytes, insert) = text_replacement_diff(&current_text, text);
         let root = crate::persisted_text_ops::replace_range_known_len(
             args.db,
             root,
-            current_len,
-            0,
-            current_len,
-            text,
+            current_text.len(),
+            start_byte,
+            delete_bytes,
+            insert,
             256,
         )?;
         normalized
@@ -7365,6 +7366,40 @@ fn validate_public_deep_text_write_values(
         )));
     }
     Ok(())
+}
+
+fn text_replacement_diff<'a>(old: &str, new: &'a str) -> (usize, usize, &'a str) {
+    let mut prefix = 0;
+    let max_prefix = old.len().min(new.len());
+    while prefix < max_prefix
+        && old.as_bytes()[prefix] == new.as_bytes()[prefix]
+        && old.is_char_boundary(prefix + 1)
+        && new.is_char_boundary(prefix + 1)
+    {
+        prefix += 1;
+    }
+    while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+
+    let mut suffix = 0;
+    let max_suffix = old.len().min(new.len()) - prefix;
+    while suffix < max_suffix
+        && old.as_bytes()[old.len() - suffix - 1] == new.as_bytes()[new.len() - suffix - 1]
+        && old.is_char_boundary(old.len() - suffix - 1)
+        && new.is_char_boundary(new.len() - suffix - 1)
+    {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    (prefix, old_end - prefix, &new[prefix..new_end])
 }
 
 fn validate_history_deep_text_root(
@@ -13351,6 +13386,66 @@ mod tests {
             bob.read_rows("docs").unwrap()[0].values["body"],
             JsonValue::from("goodbye")
         );
+    }
+
+    #[test]
+    fn ordinary_deep_text_string_updates_store_compact_diff_ops() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("hello world"))]),
+            )
+            .unwrap();
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("hello brave world"))]),
+            )
+            .unwrap();
+
+        let (start_byte, delete_bytes, insert_text): (i64, i64, String) = alice
+            .conn
+            .query_row(
+                "SELECT start_byte, delete_bytes, insert_text
+                 FROM jazz_text_op
+                 ORDER BY op_id DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (start_byte, delete_bytes, insert_text.as_str()),
+            (6, 0, "brave ")
+        );
+        assert_eq!(
+            alice.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello brave world"
+        );
+    }
+
+    #[test]
+    fn text_replacement_diff_uses_utf8_boundaries() {
+        let old = "hello café world";
+        let new = "hello café brave world";
+
+        let (start, delete, insert) = text_replacement_diff(old, new);
+
+        assert!(old.is_char_boundary(start));
+        assert!(old.is_char_boundary(start + delete));
+        assert!(new.is_char_boundary(start));
+        assert!(new.is_char_boundary(start + insert.len()));
+        let mut patched = old.to_owned();
+        patched.replace_range(start..start + delete, insert);
+        assert_eq!(patched, new);
     }
 
     #[test]

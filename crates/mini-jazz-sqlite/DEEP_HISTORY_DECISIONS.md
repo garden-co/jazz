@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:47:10 PDT 2026
+
+Decision: generic public string writes to `deep_text` fields should store a minimal replacement op, not a whole-value replacement.
+
+Why: the opt-in field should behave like semantic text at the app API boundary. Callers may use `append_deep_text` / `replace_deep_text_range` when they know the edit, but a normal `update_row` that sets the new full string should still get the storage benefit of the text sidecar. Replacing the entire old text on every generic update would make the API easy to misuse and would hide the cost behind a seemingly normal text assignment.
+
+Scope impact: public row-write normalization now materializes the current text and computes a UTF-8-boundary prefix/suffix diff, then writes one compact replace op for the changed middle. The benchmark scenarios mostly use explicit edit APIs, so this is a runtime-honesty improvement rather than a new canonical column.
+
 ## Fri May 29 01:42:25 PDT 2026
 
 Decision: fail closed when raw `Bundle` apply sees `deep_text` roots.
