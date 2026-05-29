@@ -5,7 +5,7 @@
   const { id }: { id: string } = $props();
 
   const db = getDb();
-  const todos = new QuerySubscription(app.todos.where({ id }).limit(1));
+  const todos = new QuerySubscription(() => app.todos.where({ id }).limit(1));
   const todo = $derived(todos.current?.[0]);
 </script>
 

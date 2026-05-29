@@ -11,5 +11,5 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  <slot />
+  {#snippet children()}{/snippet}
 </JazzSvelteProvider>
