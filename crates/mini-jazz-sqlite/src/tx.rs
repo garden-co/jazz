@@ -114,6 +114,53 @@ pub(crate) fn create_tx_at_local_epoch(
     Ok((tx_num, tx_id))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_tx_at_local_epoch_with_single_row_read_write(
+    conn: &Connection,
+    node_num: i64,
+    node_id: &str,
+    local_epoch: i64,
+    now: i64,
+    conflict_mode: i64,
+    outcome: i64,
+    global_epoch: Option<i64>,
+    table_num: i64,
+    row_num: i64,
+    op: i64,
+    read_reason: i64,
+    observed_tx_num: Option<i64>,
+) -> Result<(i64, String)> {
+    let tx_id = format!("tx-{node_id}-{local_epoch}");
+    let writes = encode_writes(&[PackedWrite(table_num, row_num, op)]);
+    let reads = encode_reads(&[PackedRead(table_num, row_num, read_reason, observed_tx_num)]);
+    conn.prepare_cached(
+        "INSERT INTO jazz_tx
+          (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata, writes_json, reads_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, jsonb(?), jsonb(?))",
+    )?
+    .execute(params![
+        node_num,
+        local_epoch,
+        global_epoch,
+        KIND_DATA,
+        conflict_mode,
+        outcome,
+        now,
+        writes,
+        reads
+    ])?;
+    let tx_num = conn.last_insert_rowid();
+    if let Some(global_epoch) = global_epoch {
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt)
+             VALUES (?, ?, ?, '{}')",
+        )?
+        .execute(params![tx_num, TIER_GLOBAL, global_epoch])?;
+    }
+    Ok((tx_num, tx_id))
+}
+
 pub(crate) fn append_write(
     conn: &Connection,
     tx_num: i64,

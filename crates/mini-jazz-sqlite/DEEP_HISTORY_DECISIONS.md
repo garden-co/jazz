@@ -827,3 +827,11 @@ Decision: when receiving a bundle, collect read tuples and write tuples first, t
 Why: the previous receive path appended reads before applying history and appended writes after applying history. For the common one-row transaction, that made two `jazz_tx` updates per received tx. The new path keeps the same row-per-update history model and JSONB tuple columns, but writes the received tuple state in one durable update.
 
 Scope impact: with the incremental live-export env flag enabled, live apply/update moved from roughly `0.0380 -> 0.0331` ms for append, `0.0372 -> 0.0331` ms for Automerge, and `0.0366 -> 0.0325` ms for canvas. `reads_ms` drops from about `0.0085` to `0.0021` ms/update; `history_ms` rises slightly because it now owns the combined tuple write. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:40:38 PDT 2026 - Insert Local Tx Tuples Directly
+
+Decision: for batched local single-row writes, defer creating the `jazz_tx` row until the row number and read tuple are known, then insert the tx with `writes_json` and `reads_json` already populated.
+
+Why: the hot local write path was creating a tx row and then immediately updating that same row to fill the compact read/write tuple columns. That made tuple maintenance a full SQLite update per application update. The deferred insert keeps the same one-jazz-history-row-per-update semantics, but turns tx tuple maintenance into part of the tx insert itself. While here, field validation stopped rebuilding a schema-field set for every write.
+
+Scope impact: with the incremental live-export env flag enabled, write-only/update moved from roughly `0.0559 -> 0.0496` ms for append, `0.0855 -> 0.0824` ms for Automerge, and `0.0302 -> 0.0249` ms for canvas. `tx_tuple_ms` drops to near zero; `tx_create_ms` rises slightly because it now includes tuple payload insertion. `cargo test -q -p mini-jazz-sqlite` passes.

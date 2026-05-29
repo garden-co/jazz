@@ -459,19 +459,6 @@ impl Runtime {
         let mut tx_ids = Vec::with_capacity(writes.len());
         for (id, values) in writes {
             let now = now_ms();
-            let tx_create_started = Instant::now();
-            let (tx_num, tx_id) = tx::create_tx_at_local_epoch(
-                &db,
-                self.node_num,
-                &self.node_id,
-                next_local_epoch,
-                now,
-                tx::MODE_MERGEABLE,
-                tx::OUTCOME_PENDING,
-                None,
-            )?;
-            add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
-            next_local_epoch += 1;
             let op = match mode {
                 BatchedWriteMode::Insert => 1,
                 BatchedWriteMode::Update => 2,
@@ -492,7 +479,15 @@ impl Runtime {
                 table_name,
                 id: &id,
                 values: &values,
-                tx_num,
+                tx_num: None,
+                deferred_tx: Some(DeferredTxInsert {
+                    node_num: self.node_num,
+                    node_id: &self.node_id,
+                    local_epoch: next_local_epoch,
+                    conflict_mode: tx::MODE_MERGEABLE,
+                    outcome: tx::OUTCOME_PENDING,
+                    global_epoch: None,
+                }),
                 branch_num: self.branch_num,
                 now,
                 user: &user,
@@ -506,19 +501,20 @@ impl Runtime {
                 row_num_cache: Some(&mut row_num_cache),
                 visible_tx_cache: Some(&mut visible_tx_cache),
             })?;
+            next_local_epoch += 1;
             if !outcome.allowed {
                 let reject_started = Instant::now();
-                tx::reject(&db, &tx_id, "policy_denied")?;
+                tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
                 db.execute(
                     &format!(
                         "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
                         crate::schema::current_table(&table.name)
                     ),
-                    params![outcome.row_num, self.branch_num, tx_num],
+                    params![outcome.row_num, self.branch_num, outcome.tx_num],
                 )?;
                 add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
             }
-            tx_ids.push(tx_id);
+            tx_ids.push(outcome.tx_id);
         }
         let commit_started = Instant::now();
         db.commit()?;
@@ -581,7 +577,8 @@ impl Runtime {
             table_name,
             id,
             values: &values,
-            tx_num,
+            tx_num: Some(tx_num),
+            deferred_tx: None,
             branch_num: self.branch_num,
             now,
             user: &user,
@@ -6289,7 +6286,8 @@ struct InsertRowInTx<'a> {
     table_name: &'a str,
     id: &'a str,
     values: &'a BTreeMap<String, JsonValue>,
-    tx_num: i64,
+    tx_num: Option<i64>,
+    deferred_tx: Option<DeferredTxInsert<'a>>,
     branch_num: i64,
     now: i64,
     user: &'a str,
@@ -6304,9 +6302,20 @@ struct InsertRowInTx<'a> {
     visible_tx_cache: Option<&'a mut BTreeMap<i64, Option<i64>>>,
 }
 
+struct DeferredTxInsert<'a> {
+    node_num: i64,
+    node_id: &'a str,
+    local_epoch: i64,
+    conflict_mode: i64,
+    outcome: i64,
+    global_epoch: Option<i64>,
+}
+
 struct InsertRowOutcome {
     allowed: bool,
     row_num: i64,
+    tx_num: i64,
+    tx_id: String,
 }
 
 struct AppWriteSql {
@@ -6441,6 +6450,8 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
     })?;
     add_write_phase(|stats| &mut stats.effective_values_ms, effective_started);
     let tx_tuple_started = Instant::now();
+    let mut tx_id = String::new();
+    let tx_num;
     if args.compact_tx_tuples {
         let (read_reason, observed_tx_num) = if args.op == 1 {
             if row_id_created {
@@ -6457,38 +6468,72 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         } else {
             (2, cached_current_visible_tx_num(&mut args, row_num)?)
         };
-        tx::set_single_row_read_write(
-            args.db,
-            args.tx_num,
-            args.table_num,
-            row_num,
-            args.op,
-            read_reason,
-            observed_tx_num,
-        )?;
+        if let Some(deferred_tx) = args.deferred_tx {
+            add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
+            let tx_create_started = Instant::now();
+            let created = tx::create_tx_at_local_epoch_with_single_row_read_write(
+                args.db,
+                deferred_tx.node_num,
+                deferred_tx.node_id,
+                deferred_tx.local_epoch,
+                args.now,
+                deferred_tx.conflict_mode,
+                deferred_tx.outcome,
+                deferred_tx.global_epoch,
+                args.table_num,
+                row_num,
+                args.op,
+                read_reason,
+                observed_tx_num,
+            )?;
+            add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
+            tx_num = created.0;
+            tx_id = created.1;
+        } else {
+            tx_num = args
+                .tx_num
+                .ok_or_else(|| crate::Error::new("missing tx for row write"))?;
+            tx::set_single_row_read_write(
+                args.db,
+                tx_num,
+                args.table_num,
+                row_num,
+                args.op,
+                read_reason,
+                observed_tx_num,
+            )?;
+            add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
+        }
     } else if args.op == 1 {
+        tx_num = args
+            .tx_num
+            .ok_or_else(|| crate::Error::new("missing tx for row write"))?;
         if row_id_created {
-            read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
+            read_set::record_tx_absent_read(args.db, tx_num, args.table_name, row_num)?;
         } else {
             read_set::record_tx_create_read(
                 args.db,
-                args.tx_num,
+                tx_num,
                 args.table_name,
                 row_num,
                 args.branch_num,
             )?;
         }
+        add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
     } else {
+        tx_num = args
+            .tx_num
+            .ok_or_else(|| crate::Error::new("missing tx for row write"))?;
         read_set::record_tx_read(
             args.db,
-            args.tx_num,
+            tx_num,
             args.table_name,
             row_num,
             args.branch_num,
             2,
         )?;
+        add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
     }
-    add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
     let policy_started = Instant::now();
     record_policy_read_set_for_write(
         args.db,
@@ -6497,7 +6542,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         &table.write_policy,
         &effective_values,
         args.branch_num,
-        args.tx_num,
+        tx_num,
     )?;
     let allowed = args.bypass_policy
         || local_write_allowed(LocalWriteCheck {
@@ -6515,7 +6560,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
     let encode_started = Instant::now();
     let mut sql_values = vec![
         rusqlite::types::Value::Integer(row_num),
-        rusqlite::types::Value::Integer(args.tx_num),
+        rusqlite::types::Value::Integer(tx_num),
         rusqlite::types::Value::Integer(args.branch_num),
         rusqlite::types::Value::Integer(args.op),
     ];
@@ -6571,7 +6616,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
     add_write_phase(|stats| &mut stats.history_insert_ms, history_insert_started);
     if !args.compact_tx_tuples {
         let record_tx_write_started = Instant::now();
-        record_tx_write(args.db, args.tx_num, &table.name, row_num, args.op)?;
+        record_tx_write(args.db, tx_num, &table.name, row_num, args.op)?;
         add_write_phase(
             |stats| &mut stats.record_tx_write_ms,
             record_tx_write_started,
@@ -6582,7 +6627,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         let mut current_values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(args.branch_num),
-            rusqlite::types::Value::Integer(args.tx_num),
+            rusqlite::types::Value::Integer(tx_num),
             rusqlite::types::Value::Integer(0),
         ];
         current_values.extend(sql_values.iter().skip(4).cloned());
@@ -6592,10 +6637,15 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
             .execute(params_from_iter(current_values.iter()))?;
         add_write_phase(|stats| &mut stats.current_upsert_ms, current_upsert_started);
         if let Some(cache) = args.visible_tx_cache.as_deref_mut() {
-            cache.insert(row_num, Some(args.tx_num));
+            cache.insert(row_num, Some(tx_num));
         }
     }
-    Ok(InsertRowOutcome { allowed, row_num })
+    Ok(InsertRowOutcome {
+        allowed,
+        row_num,
+        tx_num,
+        tx_id,
+    })
 }
 
 fn cached_current_visible_tx_num(
@@ -6618,13 +6668,8 @@ fn validate_write_fields(
     table: &crate::schema::TableDef,
     values: &BTreeMap<String, JsonValue>,
 ) -> Result<()> {
-    let schema_fields = table
-        .fields
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect::<BTreeSet<_>>();
     for field_name in values.keys() {
-        if !schema_fields.contains(field_name.as_str()) {
+        if !table.fields.iter().any(|field| field.name == *field_name) {
             return Err(crate::Error::new(format!(
                 "unknown field {} on table {}",
                 field_name, table.name
@@ -7471,7 +7516,8 @@ impl<'a> TransactionBuilder<'a> {
                         table_name: &table,
                         id: &id,
                         values: &values,
-                        tx_num,
+                        tx_num: Some(tx_num),
+                        deferred_tx: None,
                         branch_num: self.runtime.branch_num,
                         now,
                         user: &user,
