@@ -1,6 +1,6 @@
 use super::write_core::{
-    exclusive_write_conflict_exists, insert_row_in_tx, stage_delete_row_in_tx, DeleteReadSetMode,
-    InsertRowInTx, StageDeleteInTx, WriteOp,
+    exclusive_write_conflict_exists, insert_row_in_tx, stage_delete_row_in_tx, InsertRowInTx,
+    StageDeleteInTx, WriteOp,
 };
 use super::Runtime;
 use crate::rows::ensure_row_id;
@@ -294,7 +294,6 @@ impl TransactionBuilder<'_> {
                         now,
                         user: &user,
                         bypass_policy,
-                        read_set: DeleteReadSetMode::RecordPreviousRow,
                     })?;
                 }
             }

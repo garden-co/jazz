@@ -416,6 +416,34 @@ fn transaction_causality_is_recorded_at_row_granularity() {
 }
 
 #[test]
+fn direct_delete_records_previous_row_read_set() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let create_tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Delete me")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let delete_tx = alice.delete_row("notes", "note-1").unwrap();
+
+    assert_eq!(
+        alice.transaction_previous_read_rows(&delete_tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+    assert_eq!(
+        alice.transaction_observed_read_rows(&delete_tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned(), Some(create_tx))]
+    );
+}
+
+#[test]
 fn rejected_fate_repairs_query_scope_and_survives_replay() {
     let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
     let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();

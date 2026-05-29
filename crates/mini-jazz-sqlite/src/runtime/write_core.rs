@@ -47,13 +47,6 @@ pub(super) struct StageDeleteInTx<'a> {
     pub(super) now: i64,
     pub(super) user: &'a str,
     pub(super) bypass_policy: bool,
-    pub(super) read_set: DeleteReadSetMode,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DeleteReadSetMode {
-    AlreadyCoveredByWriteCall,
-    RecordPreviousRow,
 }
 
 struct EffectiveWriteValues<'a> {
@@ -251,16 +244,14 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
 pub(super) fn stage_delete_row_in_tx(args: StageDeleteInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     let row_num = row_num(args.db, args.id)?;
-    if matches!(args.read_set, DeleteReadSetMode::RecordPreviousRow) {
-        read_set::record_tx_read(
-            args.db,
-            args.tx_num,
-            args.table_name,
-            row_num,
-            args.branch_num,
-            2,
-        )?;
-    }
+    read_set::record_tx_read(
+        args.db,
+        args.tx_num,
+        args.table_name,
+        row_num,
+        args.branch_num,
+        2,
+    )?;
     policy_read_set::record_for_write(policy_read_set::WritePolicyReadSet {
         conn: args.db,
         schema: args.schema,

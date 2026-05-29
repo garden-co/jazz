@@ -170,6 +170,72 @@ fn tiered_built_queries_read_previous_settled_version_when_local_current_is_newe
 }
 
 #[test]
+fn tiered_built_queries_preserve_history_timestamps_for_default_and_updated_at_order() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let old_tx = alice
+        .insert_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&old_tx, 1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let new_tx = alice
+        .insert_row(
+            "notes",
+            "note-new",
+            BTreeMap::from([
+                ("body".to_owned(), json!("new")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&new_tx, 2).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let update_tx = alice
+        .update_row(
+            "notes",
+            "note-old",
+            BTreeMap::from([("body".to_owned(), json!("old updated"))]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&update_tx, 3).unwrap();
+
+    let all_notes = BuiltQuery::from_json_value(json!({ "table": "notes" })).unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(all_notes, ReadTier::Global)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-new", "note-old"]
+    );
+
+    let updated_at_desc = BuiltQuery::from_json_value(json!({
+        "table": "notes",
+        "orderBy": [["$updatedAt", "desc"]]
+    }))
+    .unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(updated_at_desc, ReadTier::Global)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-old", "note-new"]
+    );
+}
+
+#[test]
 fn tiered_table_subscription_updates_only_after_requested_settlement() {
     let schema = support::notes_schema();
     let mut alice =

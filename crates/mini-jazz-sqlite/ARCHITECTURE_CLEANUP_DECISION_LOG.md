@@ -708,3 +708,11 @@ regress.
 - Replaced outdated spec caveats that treated connection-local query descriptors as future/unsafe storage-only work.
 - The spec now says the prototype clears descriptors on runtime open and relies on downstream replay, while keeping explicit query settlement and compact reconnect summaries as remaining protocol work.
 - This keeps the spec aligned with the green implementation rather than leaving a contradiction for reviewers.
+
+## 2026-05-29 03:08 PDT - Fixed review findings on tiered built queries, delete read sets, and query descriptor dedupe
+
+- Added `updated_at` to semantic `RowView` and selected history timestamps for tiered built-query rows, so global/edge built queries sort by real history timestamps and `$updatedAt` conditions/order use update time rather than create time.
+- Direct `delete_row` now records the previous-row read set just like explicit transaction deletes, making delete causality visible for validation/replay.
+- Extracted `query_descriptor` as the live descriptor registry boundary and dedupes windowed descriptors by descriptor identity without treating `observed_ids` as part of the primary interest identity.
+- Added focused regressions for tiered timestamp ordering, direct delete read sets, and windowed descriptor replacement.
+- Focused query-read, tiered, and delete test suites pass.

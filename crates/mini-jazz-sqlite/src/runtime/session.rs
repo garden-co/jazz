@@ -55,7 +55,7 @@ impl Runtime {
     ) -> Result<Self> {
         let conn = storage::open(storage)?;
         schema::install(&conn, &schema_def)?;
-        conn.execute("DELETE FROM jazz_query_read", [])?;
+        crate::query_descriptor::clear(&conn)?;
         let node_num = tx::ensure_node(&conn, node_id)?;
         Ok(Self {
             conn,

@@ -290,23 +290,7 @@ pub(crate) fn apply_read_records(
 }
 
 pub(crate) fn apply_query_read_records(db: &Connection, bundle: &Bundle) -> Result<()> {
-    for query_read in &bundle.query_reads {
-        db.execute(
-            "INSERT OR REPLACE INTO jazz_query_read
-             (branch_id, table_name, field_name, op, value_json, observed_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                query_read.branch_id,
-                query_read.table,
-                query_read.field,
-                query_read.op,
-                serde_json::to_string(&query_read.value)
-                    .map_err(|err| crate::Error::new(err.to_string()))?,
-                now_ms()
-            ],
-        )?;
-    }
-    Ok(())
+    crate::query_descriptor::apply_records(db, bundle)
 }
 
 pub(crate) fn tx_apply_info(conn: &Connection, tx_num: i64) -> Result<ApplyTxInfo> {

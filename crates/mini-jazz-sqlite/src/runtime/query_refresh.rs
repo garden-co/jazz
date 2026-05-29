@@ -2,30 +2,7 @@ use super::*;
 
 impl Runtime {
     pub fn observed_query_reads(&self) -> Result<Vec<QueryReadRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT branch_id, table_name, field_name, op, value_json
-             FROM jazz_query_read
-             ORDER BY branch_id, table_name, field_name, op, value_json",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let value_json: String = row.get(4)?;
-            let value = serde_json::from_str(&value_json).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(QueryReadRecord {
-                branch_id: row.get(0)?,
-                table: row.get(1)?,
-                field: row.get(2)?,
-                op: row.get(3)?,
-                value,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        crate::query_descriptor::list(&self.conn)
     }
 
     pub fn export_observed_query_refreshes(&self) -> Result<Vec<Bundle>> {
@@ -85,23 +62,7 @@ impl Runtime {
     }
 
     pub fn forget_observed_query_read(&mut self, read: &QueryReadRecord) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM jazz_query_read
-             WHERE branch_id = ?
-               AND table_name = ?
-               AND field_name = ?
-               AND op = ?
-               AND value_json = ?",
-            params![
-                read.branch_id,
-                read.table,
-                read.field,
-                read.op,
-                serde_json::to_string(&read.value)
-                    .map_err(|err| crate::Error::new(err.to_string()))?
-            ],
-        )?;
-        Ok(())
+        crate::query_descriptor::forget(&self.conn, read)
     }
 
     fn export_query_read_refresh(&self, read: &QueryReadRecord) -> Result<Bundle> {

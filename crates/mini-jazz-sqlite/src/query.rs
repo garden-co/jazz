@@ -138,6 +138,7 @@ impl QueryContext<'_> {
         select_columns.extend(field_columns.iter().cloned());
         select_columns.push("j_query_created_by".to_owned());
         select_columns.push("j_query_created_at".to_owned());
+        select_columns.push("j_query_updated_at".to_owned());
         let mut sql = format!(
             "WITH candidates AS (
                {candidates_sql}
@@ -158,7 +159,7 @@ impl QueryContext<'_> {
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 2;
+        let row_width = 2 + table.fields.len() + 3;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -267,7 +268,7 @@ impl QueryContext<'_> {
             QueryColumn::Id => Ok(JsonValue::String(row.id.clone())),
             QueryColumn::CreatedBy => Ok(JsonValue::String(row.created_by.clone())),
             QueryColumn::CreatedAt => Ok(JsonValue::Number(row.created_at.into())),
-            QueryColumn::UpdatedAt => Ok(JsonValue::Number(row.created_at.into())),
+            QueryColumn::UpdatedAt => Ok(JsonValue::Number(row.updated_at.into())),
             QueryColumn::Field(field) => Ok(row
                 .values
                 .get(&field.name)
@@ -490,6 +491,7 @@ impl QueryContext<'_> {
             users::user_id_expr("current", "j_created_by")
         ));
         select_columns.push("current.j_created_at".to_owned());
+        select_columns.push("current.j_updated_at".to_owned());
         let mut sql = format!(
             "SELECT {}
              FROM {} current
@@ -511,7 +513,7 @@ impl QueryContext<'_> {
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 2;
+        let row_width = 2 + table.fields.len() + 3;
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -2029,6 +2031,8 @@ impl QueryContext<'_> {
             "{} AS j_created_by",
             users::user_id_expr("h", "j_created_by")
         ));
+        select_columns.push("h.j_created_at".to_owned());
+        select_columns.push("h.j_updated_at".to_owned());
         let branch_placeholders = placeholders(branch_nums.len());
         let tx_tier_sql = tier_visibility_sql("tx", tier);
         let newer_tier_sql = tier_visibility_sql("newer_tx", tier);
@@ -2081,7 +2085,7 @@ impl QueryContext<'_> {
             params.push(rusqlite::types::Value::Integer(max_global_epoch));
         }
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = 3 + table.fields.len() + 3;
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -3109,17 +3113,23 @@ fn row_to_view(
             sql_value_to_json(conn, field, &raw[idx + 2])?,
         );
     }
+    let created_at = raw
+        .get(3 + table.fields.len())
+        .map(|value| integer_value(value, "j_created_at"))
+        .transpose()?
+        .unwrap_or(0);
     Ok(RowView {
         table: table_name.to_owned(),
         id: text_value(&raw[0], "row_id")?,
         tx_id: text_value(&raw[1], "tx_id")?,
         values,
         created_by: text_value(&raw[2 + table.fields.len()], "j_created_by")?,
-        created_at: raw
-            .get(3 + table.fields.len())
-            .map(|value| integer_value(value, "j_created_at"))
+        created_at,
+        updated_at: raw
+            .get(4 + table.fields.len())
+            .map(|value| integer_value(value, "j_updated_at"))
             .transpose()?
-            .unwrap_or(0),
+            .unwrap_or(created_at),
         conflict_count: 0,
     })
 }

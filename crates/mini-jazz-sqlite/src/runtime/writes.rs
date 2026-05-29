@@ -1,6 +1,5 @@
 use super::write_core::{
-    insert_row_in_tx, stage_delete_row_in_tx, DeleteReadSetMode, InsertRowInTx, StageDeleteInTx,
-    WriteOp,
+    insert_row_in_tx, stage_delete_row_in_tx, InsertRowInTx, StageDeleteInTx, WriteOp,
 };
 use super::Runtime;
 use crate::rows::row_num;
@@ -123,7 +122,6 @@ impl Runtime {
             now,
             user: &user,
             bypass_policy,
-            read_set: DeleteReadSetMode::AlreadyCoveredByWriteCall,
         })?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;

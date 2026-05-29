@@ -17,6 +17,7 @@ pub struct RowView {
     pub id: String,
     pub values: BTreeMap<String, JsonValue>,
     pub created_at: i64,
+    pub updated_at: i64,
     pub created_by: String,
     pub tx_id: String,
     pub conflict_count: usize,

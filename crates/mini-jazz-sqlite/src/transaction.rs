@@ -57,6 +57,7 @@ impl TransactionSnapshot {
                             id: id.to_owned(),
                             values: BTreeMap::new(),
                             created_at: 0,
+                            updated_at: 0,
                             created_by: author.to_owned(),
                             tx_id: String::new(),
                             conflict_count: 0,

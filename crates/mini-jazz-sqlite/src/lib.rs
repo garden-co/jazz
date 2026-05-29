@@ -9,6 +9,7 @@ mod profile;
 mod projection;
 mod query;
 mod query_api;
+mod query_descriptor;
 mod query_observation;
 mod query_predicate;
 mod query_refresh;

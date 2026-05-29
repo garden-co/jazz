@@ -1838,6 +1838,42 @@ fn top_created_at_query_read_refresh_batches_same_shape_queries() {
 }
 
 #[test]
+fn observed_window_query_refresh_replaces_descriptor_instead_of_accumulating_pages() {
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-old", "Old open", false, "project-1")
+        .unwrap();
+    let initial = alice
+        .export_query_where_eq_top_created_at_desc("todos", "done", json!(false), 1)
+        .unwrap();
+    peer.apply_bundle(&initial).unwrap();
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 1);
+    assert_eq!(
+        peer.observed_query_reads().unwrap()[0].value["observed_ids"],
+        json!(["todo-old"])
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    alice
+        .create_todo("todo-new", "New open", false, "project-1")
+        .unwrap();
+
+    for refresh in alice
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let observed = peer.observed_query_reads().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].value["observed_ids"], json!(["todo-new"]));
+}
+
+#[test]
 fn predicate_query_read_refresh_batches_same_shape_queries() {
     let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
     let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
