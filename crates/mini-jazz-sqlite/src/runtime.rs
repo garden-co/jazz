@@ -8431,24 +8431,43 @@ fn upsert_apply_txs(
     let mut stmt = db.prepare_cached(&sql)?;
     let mut rows = stmt.query(params_from_iter(values.iter()))?;
     while let Some(row) = rows.next()? {
-        let tx_num = row.get(0)?;
-        let node_num = row.get(1)?;
-        let local_epoch = row.get(2)?;
-        let tx_id = tx_ids_by_key
-            .get(&(node_num, local_epoch))
-            .ok_or_else(|| crate::Error::new("upserted unknown tx"))?;
-        let info = ApplyTxInfo {
-            node_num,
-            outcome: row.get(3)?,
-            conflict_mode: row.get(4)?,
-            global_epoch: row.get(5)?,
-            has_awaiting_dependency: row.get(6)?,
-        };
-        tx_nums_by_id.insert((*tx_id).to_owned(), tx_num);
-        tx_info_by_num.insert(tx_num, info);
-        if tx_ids_with_history.contains(*tx_id) {
-            pending_applied_tx_cache.insert((*tx_id).to_owned(), CachedAppliedTx { tx_num, info });
-        }
+        record_applied_tx_row(
+            row,
+            &tx_ids_by_key,
+            tx_ids_with_history,
+            tx_nums_by_id,
+            tx_info_by_num,
+            pending_applied_tx_cache,
+        )?;
+    }
+    Ok(())
+}
+
+fn record_applied_tx_row(
+    row: &rusqlite::Row<'_>,
+    tx_ids_by_key: &BTreeMap<(i64, i64), &str>,
+    tx_ids_with_history: &BTreeSet<&str>,
+    tx_nums_by_id: &mut BTreeMap<String, i64>,
+    tx_info_by_num: &mut BTreeMap<i64, ApplyTxInfo>,
+    pending_applied_tx_cache: &mut BTreeMap<String, CachedAppliedTx>,
+) -> Result<()> {
+    let tx_num = row.get(0)?;
+    let node_num = row.get(1)?;
+    let local_epoch = row.get(2)?;
+    let tx_id = tx_ids_by_key
+        .get(&(node_num, local_epoch))
+        .ok_or_else(|| crate::Error::new("upserted unknown tx"))?;
+    let info = ApplyTxInfo {
+        node_num,
+        outcome: row.get(3)?,
+        conflict_mode: row.get(4)?,
+        global_epoch: row.get(5)?,
+        has_awaiting_dependency: row.get(6)?,
+    };
+    tx_nums_by_id.insert((*tx_id).to_owned(), tx_num);
+    tx_info_by_num.insert(tx_num, info);
+    if tx_ids_with_history.contains(*tx_id) {
+        pending_applied_tx_cache.insert((*tx_id).to_owned(), CachedAppliedTx { tx_num, info });
     }
     Ok(())
 }

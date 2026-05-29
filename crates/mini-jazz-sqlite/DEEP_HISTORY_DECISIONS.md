@@ -1038,3 +1038,11 @@ Decision: keep receive/apply sub-timers for history insert, tx tuple update, and
 Why: `history_ms` was too broad to choose the next apply optimization honestly. The new profile fields show tuple updates and history inserts separately. A trial fast path that constructed one-read/one-write tuple JSONB directly in SQLite was slower than the existing batched `jsonb(?)` update, so it was reverted.
 
 Scope impact: no storage semantics changed. The benchmark JSON now exposes more detailed apply timing, and the full `mini-jazz-sqlite` suite passes.
+
+## Fri May 29 00:13:37 PDT 2026 - Rejected Insert-Only Receive Tx Fast Path
+
+Decision: do not keep the attempted `ON CONFLICT DO NOTHING` receive-tx fast path.
+
+Why: most benchmark receive bundles contain new transactions, so avoiding the `DO UPDATE` branch looked plausible. In practice it did not improve `txs_ms`, and it added fallback complexity for conflict/update cases. The existing single upsert path remains simpler and competitive.
+
+Scope impact: the uncommitted receive-tx fast path was reverted. Apply sub-timers remain.
