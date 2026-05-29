@@ -105,3 +105,11 @@ Continue #945 integration: transaction reads now snapshot correctly, but commit
 materialization still risks merging patch updates against latest current state.
 Next slice: use the transaction start snapshot as the effective base for staged
 row updates, so omitted fields come from the start row, not from a later commit.
+
+## 2026-05-28 22:57 PDT
+
+Folded the #945 isolation semantics into the split spec after getting green
+tests: start-snapshot transaction reads, own staged write overlay, isolation
+from other staged writes/later commits, and patch update materialization against
+the start snapshot. Remaining gap: branch conflict candidate preservation inside
+transaction reads still needs a focused test/implementation pass.

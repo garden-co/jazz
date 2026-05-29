@@ -61,6 +61,22 @@ The local write path:
 7. commits the embedded database transaction
 8. publishes local subscription diffs
 
+Transaction isolation:
+
+- A transaction reads from a consistent semantic snapshot captured when the
+  transaction builder starts.
+- Reads inside a transaction include the transaction's own staged writes layered
+  over the start snapshot.
+- Reads inside a transaction do not include staged writes from other
+  transactions.
+- Writes committed by other transactions after the transaction starts are not
+  visible to transaction reads.
+- Patch updates inside a transaction merge omitted fields from the transaction
+  start snapshot, not from later current state.
+- This is semantic isolation over Jazz visibility. It must preserve branch
+  visibility, policy filtering, lenses, and conflict candidates; it is not only
+  a raw SQLite transaction isolation level.
+
 Patch updates preserve omitted fields from the effective visible row. The
 effective base may be a current branch row, a row inherited from branch sources,
 or a pinned historical base snapshot. Unknown user fields fail closed before

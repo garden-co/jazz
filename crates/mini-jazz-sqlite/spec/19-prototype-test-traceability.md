@@ -60,6 +60,10 @@ Coverage labels:
 - `generic_transaction_delete_records_previous_row_read_set`: D.9, D.11
 - `exclusive_transaction_rejects_same_row_conflict`: D.11, D.12
 - `generic_transaction_delete_shadows_pinned_base_row`: D.5, D.3
+- `transaction_reads_are_fixed_to_start_snapshot`: D.2
+- `transaction_reads_include_own_staged_writes`: D.2
+- `transactions_do_not_see_each_others_staged_writes`: D.2
+- `transaction_patch_updates_are_applied_to_start_snapshot`: D.2
 - `global_epoch_can_accept_multiple_transactions`: D.2, D.3
 
 #### `sync_fate.rs`

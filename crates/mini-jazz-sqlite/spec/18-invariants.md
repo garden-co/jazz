@@ -27,6 +27,11 @@ feature exists.
 - One simple write creates one sealed transaction.
 - One explicit transaction may contain multiple row mutations and still seals as
   one transaction.
+- Explicit transaction reads use a start snapshot, include their own staged
+  writes, exclude other transactions' staged writes, and exclude commits that
+  happen after the transaction starts.
+- Explicit transaction patch updates use the transaction start snapshot as the
+  base for omitted fields.
 - An explicit transaction with no staged mutations is a no-op and creates no
   transaction record.
 - Multiple staged mutations to the same row in one explicit transaction
