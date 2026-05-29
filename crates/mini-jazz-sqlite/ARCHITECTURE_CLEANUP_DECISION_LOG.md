@@ -575,3 +575,9 @@ regress.
 - While checking for remaining broken-window patterns, I found the old durable observed-query descriptor behavior is still present: query reads are stored in SQLite and several tests assert refresh after runtime restart.
 - This conflicts with the newer design direction that downstream clients should replay/resubscribe queries on reconnect and that query descriptors should not be persisted on disk.
 - I am not flipping that behavior inside this broad architecture PR because it would require a dedicated semantic migration of restart/reconnect tests. The module split makes the later change more tractable: `runtime::query_refresh` owns listing/forget/export of observed descriptors, while apply-side recording remains an apply concern.
+
+## 2026-05-29 02:14 PDT - Read context construction moved into the read module
+
+- Moved `query_context`, `query_context_at_tier`, and `read_visibility` into `runtime::reads`.
+- These are read-surface constructors used by several sibling modules, so they are now explicit `pub(super)`/`pub(crate)` helpers instead of tail-end methods in the central runtime file.
+- Focused query-matrix tests pass after the move.

@@ -1,6 +1,31 @@
 use super::*;
 
 impl Runtime {
+    pub(super) fn query_context(&self) -> query::QueryContext<'_> {
+        self.query_context_at_tier(ReadTier::Local)
+    }
+
+    pub(crate) fn query_context_at_tier(&self, read_tier: ReadTier) -> query::QueryContext<'_> {
+        query::QueryContext {
+            conn: &self.conn,
+            schema: &self.schema,
+            branch_num: self.branch_num,
+            user: self.policy_user(),
+            bypass_policy: self.bypasses_policy(),
+            read_tier,
+        }
+    }
+
+    pub(super) fn read_visibility(&self) -> ReadVisibility<'_> {
+        ReadVisibility {
+            conn: &self.conn,
+            schema: &self.schema,
+            branch_num: self.branch_num,
+            user: self.policy_user(),
+            bypass_policy: self.bypasses_policy(),
+        }
+    }
+
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         self.query_context().read_rows(table_name)
     }
