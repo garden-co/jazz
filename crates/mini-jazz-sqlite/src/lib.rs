@@ -23,7 +23,7 @@ pub use error::{Error, Result};
 pub use persisted_text_ops::DeltaWatermark;
 pub use runtime::{
     reset_runtime_write_phase_stats, take_runtime_write_phase_stats, DeepTextEdit, Runtime,
-    RuntimeWritePhaseStats,
+    RuntimeWritePhaseStats, TextEdit,
 };
 pub use schema::SchemaDef;
 pub use storage::Storage;

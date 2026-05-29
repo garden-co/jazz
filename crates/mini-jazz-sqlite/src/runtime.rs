@@ -93,6 +93,8 @@ pub enum DeepTextEdit {
     ReplaceRanges(Vec<(usize, usize, String)>),
 }
 
+pub type TextEdit = DeepTextEdit;
+
 pub fn reset_runtime_write_phase_stats() {
     WRITE_PHASE_STATS.with(|stats| *stats.borrow_mut() = RuntimeWritePhaseStats::default());
 }
@@ -434,6 +436,21 @@ impl Runtime {
         )
     }
 
+    pub fn append_text(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        text: &str,
+    ) -> Result<String> {
+        self.write_text_edit(
+            table_name,
+            id,
+            field_name,
+            &TextEdit::Append(text.to_owned()),
+        )
+    }
+
     pub fn append_deep_text(
         &mut self,
         table_name: &str,
@@ -441,11 +458,23 @@ impl Runtime {
         field_name: &str,
         text: &str,
     ) -> Result<String> {
-        self.write_deep_text_edit(
+        self.append_text(table_name, id, field_name, text)
+    }
+
+    pub fn replace_text_range(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        start_byte: usize,
+        delete_bytes: usize,
+        insert: &str,
+    ) -> Result<String> {
+        self.write_text_edit(
             table_name,
             id,
             field_name,
-            &DeepTextEdit::Append(text.to_owned()),
+            &TextEdit::ReplaceRanges(vec![(start_byte, delete_bytes, insert.to_owned())]),
         )
     }
 
@@ -458,11 +487,21 @@ impl Runtime {
         delete_bytes: usize,
         insert: &str,
     ) -> Result<String> {
-        self.write_deep_text_edit(
+        self.replace_text_range(table_name, id, field_name, start_byte, delete_bytes, insert)
+    }
+
+    pub fn replace_text_ranges(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        patches: &[(usize, usize, String)],
+    ) -> Result<String> {
+        self.write_text_edit(
             table_name,
             id,
             field_name,
-            &DeepTextEdit::ReplaceRanges(vec![(start_byte, delete_bytes, insert.to_owned())]),
+            &TextEdit::ReplaceRanges(patches.to_vec()),
         )
     }
 
@@ -473,25 +512,20 @@ impl Runtime {
         field_name: &str,
         patches: &[(usize, usize, String)],
     ) -> Result<String> {
-        self.write_deep_text_edit(
-            table_name,
-            id,
-            field_name,
-            &DeepTextEdit::ReplaceRanges(patches.to_vec()),
-        )
+        self.replace_text_ranges(table_name, id, field_name, patches)
     }
 
-    /// Applies several deep-text edits for one row in one SQLite transaction.
+    /// Applies several text edits for one row in one SQLite transaction.
     ///
     /// Each edit still creates its own Jazz transaction/history row. The batching only groups the
     /// SQLite work, so sync and point-in-time semantics stay per edit while fast ingest avoids one
     /// SQLite commit per keystroke/token/frame.
-    pub fn edit_deep_texts_batched(
+    pub fn edit_texts_batched(
         &mut self,
         table_name: &str,
         id: &str,
         field_name: &str,
-        edits: &[DeepTextEdit],
+        edits: &[TextEdit],
     ) -> Result<Vec<String>> {
         if edits.is_empty() {
             return Ok(Vec::new());
@@ -531,7 +565,7 @@ impl Runtime {
         let mut materialized_text = if edits.len() >= DEEP_TEXT_APPEND_MATERIALIZE_BATCH_THRESHOLD
             || edits
                 .iter()
-                .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
+                .any(|edit| matches!(edit, TextEdit::ReplaceRanges(_)))
         {
             Some(crate::persisted_text_ops::materialize(&db, root)?)
         } else {
@@ -629,15 +663,25 @@ impl Runtime {
         Ok(tx_ids)
     }
 
-    fn write_deep_text_edit(
+    pub fn edit_deep_texts_batched(
         &mut self,
         table_name: &str,
         id: &str,
         field_name: &str,
-        edit: &DeepTextEdit,
+        edits: &[DeepTextEdit],
+    ) -> Result<Vec<String>> {
+        self.edit_texts_batched(table_name, id, field_name, edits)
+    }
+
+    fn write_text_edit(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        edit: &TextEdit,
     ) -> Result<String> {
         Ok(self
-            .edit_deep_texts_batched(table_name, id, field_name, std::slice::from_ref(edit))?
+            .edit_texts_batched(table_name, id, field_name, std::slice::from_ref(edit))?
             .into_iter()
             .next()
             .unwrap_or_default())
@@ -676,7 +720,7 @@ impl Runtime {
 
     /// Returns receiver-state options for exporting a table delta to this runtime.
     ///
-    /// The options include both sealed history block manifests and the current deep-text sidecar
+    /// The options include both sealed history block manifests and the current text sidecar
     /// watermark, so senders can avoid resending compacted blocks and text ops this receiver
     /// already has.
     pub fn history_delta_export_options_for_table(
@@ -2402,7 +2446,7 @@ impl Runtime {
             && !deep_text_roots_for_bundle(&self.schema, bundle)?.is_empty()
         {
             return Err(crate::Error::new(
-                "bundle contains deep_text roots; use HistoryDelta so text sidecar data is included",
+                "bundle contains text sidecar roots; use HistoryDelta so sidecar data is included",
             ));
         }
         let validation_ms = duration_ms(validation_started.elapsed());
@@ -14092,6 +14136,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, ("text".to_owned(), "short".to_owned()));
+    }
+
+    #[test]
+    fn neutral_text_edit_api_promotes_ordinary_text() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("hello"))]),
+            )
+            .unwrap();
+        alice
+            .append_text("docs", "doc-1", "body", " world")
+            .unwrap();
+        alice
+            .replace_text_range("docs", "doc-1", "body", 6, 5, "Ada")
+            .unwrap();
+
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("hello Ada")
+        );
+        let stored = alice
+            .conn
+            .query_row(
+                "SELECT typeof(body), body FROM docs__schema_v1_current WHERE row_num = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "integer");
+        assert!(stored.1 > 0);
     }
 
     #[test]

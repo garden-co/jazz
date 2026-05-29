@@ -191,7 +191,7 @@ pub struct HistoryBlockExport {
 pub struct HistoryDelta {
     pub bundle: Bundle,
     pub blocks: Vec<HistoryBlockExport>,
-    /// Compact binary sidecar delta for any `deep_text` roots referenced by the bundle/blocks.
+    /// Compact binary sidecar delta for promoted text roots referenced by the bundle/blocks.
     pub text_ops_delta: Vec<u8>,
 }
 
@@ -199,7 +199,7 @@ pub struct HistoryDelta {
 pub struct HistoryDeltaExportOptions {
     /// Sealed history blocks the receiver already has.
     pub remote_block_manifests: Vec<HistoryBlockManifest>,
-    /// Latest deep-text sidecar op/snapshot the receiver already has.
+    /// Latest text sidecar op/snapshot the receiver already has.
     pub text_ops_watermark: crate::DeltaWatermark,
 }
 
