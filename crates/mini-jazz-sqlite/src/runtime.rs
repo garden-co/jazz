@@ -2785,6 +2785,10 @@ impl Runtime {
         self.query_context().debug_sql_for_built_query(query)
     }
 
+    pub(crate) fn explain_built_query(&self, query: &BuiltQuery) -> Result<query::SqliteQueryPlan> {
+        self.query_context().explain_built_query(query)
+    }
+
     pub fn read_rows_where_contains(
         &self,
         table_name: &str,

@@ -326,12 +326,11 @@ function userName(userId) {
 
 function visibleScope() {
   const startedAt = performance.now();
-  const projects = db
-    .query({
-      table: "projects",
-      orderBy: [["title", "asc"]],
-    })
-    .map((row) => ({ id: row.id, title: row.values.title }));
+  const projectQuery = {
+    table: "projects",
+    orderBy: [["title", "asc"]],
+  };
+  const projects = db.query(projectQuery).map((row) => ({ id: row.id, title: row.values.title }));
   const groups = db
     .query({
       table: "groups",

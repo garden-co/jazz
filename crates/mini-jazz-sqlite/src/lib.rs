@@ -24,7 +24,7 @@ mod types;
 mod users;
 
 pub use error::{Error, Result};
-pub use query::SqliteQueryDebug;
+pub use query::{SqliteQueryDebug, SqliteQueryPlan, SqliteQueryPlanRow};
 pub use query_api::{BuiltQuery, QueryCondition, QueryConditionOp, QueryDirection, QueryOrderBy};
 pub use runtime::Runtime;
 pub use schema::SchemaDef;

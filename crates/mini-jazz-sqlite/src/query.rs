@@ -33,6 +33,21 @@ pub struct SqliteQueryDebug {
     pub params: Vec<JsonValue>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SqliteQueryPlan {
+    pub sql: String,
+    pub params: Vec<JsonValue>,
+    pub plan: Vec<SqliteQueryPlanRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SqliteQueryPlanRow {
+    pub id: i64,
+    pub parent: i64,
+    pub notused: i64,
+    pub detail: String,
+}
+
 pub(crate) struct LoweredQueryRowScope {
     pub(crate) ctes: Vec<String>,
     pub(crate) select_sql: String,
@@ -60,6 +75,27 @@ impl LoweredBuiltQuery {
             sql: self.sql.clone(),
             params: self.params.iter().map(sqlite_param_to_json).collect(),
         }
+    }
+
+    fn explain_query_plan(&self, conn: &Connection) -> Result<SqliteQueryPlan> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", self.sql))?;
+        let rows = stmt.query_map(params_from_iter(self.params.iter()), |row| {
+            Ok(SqliteQueryPlanRow {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                notused: row.get(2)?,
+                detail: row.get(3)?,
+            })
+        })?;
+        let plan = rows
+            .map(|row| row.map_err(crate::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(SqliteQueryPlan {
+            sql: self.sql.clone(),
+            params: self.params.iter().map(sqlite_param_to_json).collect(),
+            plan,
+        })
     }
 }
 
@@ -158,6 +194,12 @@ impl QueryContext<'_> {
     pub(crate) fn debug_sql_for_built_query(&self, query: &BuiltQuery) -> Result<SqliteQueryDebug> {
         let table = self.schema.table_def(&query.table)?;
         Ok(self.lower_built_query(query, table)?.debug())
+    }
+
+    pub(crate) fn explain_built_query(&self, query: &BuiltQuery) -> Result<SqliteQueryPlan> {
+        let table = self.schema.table_def(&query.table)?;
+        self.lower_built_query(query, table)?
+            .explain_query_plan(self.conn)
     }
 
     pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {

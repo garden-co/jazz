@@ -82,6 +82,7 @@ impl SchemaDef {
                 table.ref_("project", "projects");
                 table.text("member");
                 table.index("by_member", ["member", "project"]);
+                table.index("by_project_member", ["project", "member"]);
                 table.read_if_project_ref_member("project");
             })
             .table("todos", |table| {
@@ -103,6 +104,7 @@ impl SchemaDef {
                 table.ref_("todo", "todos");
                 table.ref_("label", "labels");
                 table.index("by_todo", ["todo"]);
+                table.index("by_todo_created", ["todo", "$createdAt"]);
                 table.index("by_label", ["label"]);
                 table.read_if_ref_readable("todo");
             })
@@ -780,7 +782,7 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
             index
                 .columns
                 .iter()
-                .map(|column| index_storage_column_name(column)),
+                .map(|column| index_storage_column_name(table, column)),
         );
         columns.push("row_num".to_owned());
         conn.execute_batch(&format!(
@@ -869,10 +871,16 @@ pub(crate) fn storage_column_name(column: &str) -> String {
     quote_ident(&storage)
 }
 
-fn index_storage_column_name(column: &str) -> String {
+fn index_storage_column_name(table: &TableDef, column: &str) -> String {
     match column {
         "$createdAt" => format!("{} DESC", quote_ident("j_created_at")),
-        other => storage_column_name(other),
+        "$updatedAt" => quote_ident("j_updated_at"),
+        other => table
+            .fields
+            .iter()
+            .find(|field| field.name == other)
+            .map(|field| quote_ident(&storage_column(field)))
+            .unwrap_or_else(|| storage_column_name(other)),
     }
 }
 

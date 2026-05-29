@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, SchemaDef, Storage};
+use mini_jazz_sqlite::{
+    BuiltQuery, RowsSubscription, Runtime, SchemaDef, SqliteQueryPlan, SqliteQueryPlanRow, Storage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+
+const SLOW_QUERY_LOG_THRESHOLD_MS: f64 = 1_000.0;
 
 #[wasm_bindgen(start)]
 pub fn install_panic_hook() {
@@ -200,15 +204,109 @@ impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = query)]
     pub fn query(&self, query: JsValue) -> Result<JsValue, JsValue> {
         let query = parse_built_query(query)?;
-        log_sqlite_query("query", self.runtime.debug_query_sql(&query).ok());
-        to_js_value(self.runtime.query(query).map_err(to_js_error)?)
+        let debug = self.runtime.debug_query_sql(&query).ok();
+        let table = query.table.clone();
+        let started_at = js_sys::Date::now();
+        match self.runtime.query(query.clone()) {
+            Ok(rows) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let row_count = rows.len();
+                let value = to_js_value(rows)?;
+                if should_log_sqlite_timing(duration_ms, false) {
+                    let plan = explain_query_for_log(&self.runtime, &query);
+                    log_sqlite_query(
+                        "query",
+                        table,
+                        debug,
+                        plan,
+                        duration_ms,
+                        Some(row_count),
+                        None,
+                    );
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let message = error.to_string();
+                if should_log_sqlite_timing(duration_ms, true) {
+                    let plan = explain_query_for_log(&self.runtime, &query);
+                    log_sqlite_query(
+                        "query",
+                        table,
+                        debug,
+                        plan,
+                        duration_ms,
+                        None,
+                        Some(message),
+                    );
+                }
+                Err(to_js_error(error))
+            }
+        }
     }
 
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: JsValue) -> Result<JsValue, JsValue> {
         let query = parse_built_query(query)?;
-        log_sqlite_query("one", self.runtime.debug_query_sql(&query).ok());
-        to_js_value(self.runtime.one(query).map_err(to_js_error)?)
+        let debug = self.runtime.debug_query_sql(&query).ok();
+        let table = query.table.clone();
+        let started_at = js_sys::Date::now();
+        match self.runtime.one(query.clone()) {
+            Ok(row) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let row_count = usize::from(row.is_some());
+                let value = to_js_value(row)?;
+                if should_log_sqlite_timing(duration_ms, false) {
+                    let plan = explain_query_for_log(&self.runtime, &query);
+                    log_sqlite_query(
+                        "one",
+                        table,
+                        debug,
+                        plan,
+                        duration_ms,
+                        Some(row_count),
+                        None,
+                    );
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let message = error.to_string();
+                if should_log_sqlite_timing(duration_ms, true) {
+                    let plan = explain_query_for_log(&self.runtime, &query);
+                    log_sqlite_query("one", table, debug, plan, duration_ms, None, Some(message));
+                }
+                Err(to_js_error(error))
+            }
+        }
+    }
+
+    #[wasm_bindgen(js_name = explainQuery)]
+    pub fn explain_query(&self, query: JsValue) -> Result<JsValue, JsValue> {
+        let query = parse_built_query(query)?;
+        let table = query.table.clone();
+        let started_at = js_sys::Date::now();
+        match self.runtime.explain_query_plan(&query) {
+            Ok(plan) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let plan_rows = plan.plan.len();
+                let value = to_js_value(plan)?;
+                if should_log_sqlite_timing(duration_ms, false) {
+                    log_sqlite_operation("explainQuery", table, duration_ms, Some(plan_rows), None);
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let message = error.to_string();
+                if should_log_sqlite_timing(duration_ms, true) {
+                    log_sqlite_operation("explainQuery", table, duration_ms, None, Some(message));
+                }
+                Err(to_js_error(error))
+            }
+        }
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -218,8 +316,42 @@ impl MiniJazzRuntime {
         callback: js_sys::Function,
     ) -> Result<u32, JsValue> {
         let query = parse_built_query(query)?;
-        log_sqlite_query("subscribe", self.runtime.debug_query_sql(&query).ok());
-        let subscription = self.runtime.subscribe_query(query).map_err(to_js_error)?;
+        let debug = self.runtime.debug_query_sql(&query).ok();
+        let table = query.table.clone();
+        let started_at = js_sys::Date::now();
+        let subscription = match self.runtime.subscribe_query(query.clone()) {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let message = error.to_string();
+                if should_log_sqlite_timing(duration_ms, true) {
+                    let plan = explain_query_for_log(&self.runtime, &query);
+                    log_sqlite_query(
+                        "subscribe",
+                        table,
+                        debug,
+                        plan,
+                        duration_ms,
+                        None,
+                        Some(message),
+                    );
+                }
+                return Err(to_js_error(error));
+            }
+        };
+        let duration_ms = js_sys::Date::now() - started_at;
+        if should_log_sqlite_timing(duration_ms, false) {
+            let plan = explain_query_for_log(&self.runtime, &query);
+            log_sqlite_query(
+                "subscribe",
+                table,
+                debug,
+                plan,
+                duration_ms,
+                Some(subscription.initial_delta().all.len()),
+                None,
+            );
+        }
         let initial = subscription.initial_delta();
         let initial = to_js_value(initial)?;
         let id = self.next_subscription_id;
@@ -253,7 +385,38 @@ impl MiniJazzRuntime {
 
     #[wasm_bindgen(js_name = readRows)]
     pub fn read_rows(&self, table_name: &str) -> Result<JsValue, JsValue> {
-        to_js_value(self.runtime.read_rows(table_name).map_err(to_js_error)?)
+        let started_at = js_sys::Date::now();
+        match self.runtime.read_rows(table_name) {
+            Ok(rows) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let row_count = rows.len();
+                let value = to_js_value(rows)?;
+                if should_log_sqlite_timing(duration_ms, false) {
+                    log_sqlite_operation(
+                        "readRows",
+                        table_name.to_owned(),
+                        duration_ms,
+                        Some(row_count),
+                        None,
+                    );
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let duration_ms = js_sys::Date::now() - started_at;
+                let message = error.to_string();
+                if should_log_sqlite_timing(duration_ms, true) {
+                    log_sqlite_operation(
+                        "readRows",
+                        table_name.to_owned(),
+                        duration_ms,
+                        None,
+                        Some(message),
+                    );
+                }
+                Err(to_js_error(error))
+            }
+        }
     }
 
     #[wasm_bindgen(js_name = storageStats)]
@@ -369,11 +532,107 @@ impl MiniJazzRuntime {
     }
 }
 
-fn log_sqlite_query(operation: &str, debug: Option<mini_jazz_sqlite::SqliteQueryDebug>) {
-    let Some(debug) = debug else {
-        return;
+#[derive(Serialize)]
+struct SqliteTimingLog {
+    table: String,
+    duration_ms: f64,
+    row_count: Option<usize>,
+    sql: Option<String>,
+    params: Option<Vec<JsonValue>>,
+    plan: Option<String>,
+    plan_rows: Option<Vec<SqliteQueryPlanRow>>,
+    error: Option<String>,
+}
+
+fn log_sqlite_query(
+    operation: &str,
+    table: String,
+    debug: Option<mini_jazz_sqlite::SqliteQueryDebug>,
+    plan: Option<SqliteQueryPlan>,
+    duration_ms: f64,
+    row_count: Option<usize>,
+    error: Option<String>,
+) {
+    let plan_text = plan
+        .as_ref()
+        .map(|plan| format_sqlite_query_plan(&plan.plan));
+    let log = SqliteTimingLog {
+        table,
+        duration_ms,
+        row_count,
+        sql: debug.as_ref().map(|debug| debug.sql.clone()),
+        params: debug.map(|debug| debug.params),
+        plan: plan_text,
+        plan_rows: plan.map(|plan| plan.plan),
+        error,
     };
-    let Ok(value) = to_js_value(debug) else {
+    log_to_console(&format!("[mini-jazz-sqlite] {operation}"), &log);
+}
+
+fn log_sqlite_operation(
+    operation: &str,
+    table: String,
+    duration_ms: f64,
+    row_count: Option<usize>,
+    error: Option<String>,
+) {
+    let log = SqliteTimingLog {
+        table,
+        duration_ms,
+        row_count,
+        sql: None,
+        params: None,
+        plan: None,
+        plan_rows: None,
+        error,
+    };
+    log_to_console(&format!("[mini-jazz-sqlite] {operation}"), &log);
+}
+
+fn explain_query_for_log(runtime: &Runtime, query: &BuiltQuery) -> Option<SqliteQueryPlan> {
+    runtime.explain_query_plan(query).ok()
+}
+
+fn should_log_sqlite_timing(duration_ms: f64, is_error: bool) -> bool {
+    is_error || duration_ms >= SLOW_QUERY_LOG_THRESHOLD_MS
+}
+
+fn format_sqlite_query_plan(rows: &[SqliteQueryPlanRow]) -> String {
+    let mut children_by_parent = BTreeMap::<i64, Vec<&SqliteQueryPlanRow>>::new();
+    let mut ids = BTreeSet::new();
+    for row in rows {
+        ids.insert(row.id);
+        children_by_parent.entry(row.parent).or_default().push(row);
+    }
+
+    let roots = rows
+        .iter()
+        .filter(|row| row.parent == 0 || !ids.contains(&row.parent))
+        .collect::<Vec<_>>();
+    let mut lines = vec!["QUERY PLAN".to_owned()];
+    append_plan_rows(&mut lines, &roots, &children_by_parent, "");
+    lines.join("\n")
+}
+
+fn append_plan_rows(
+    lines: &mut Vec<String>,
+    rows: &[&SqliteQueryPlanRow],
+    children_by_parent: &BTreeMap<i64, Vec<&SqliteQueryPlanRow>>,
+    prefix: &str,
+) {
+    for (idx, row) in rows.iter().enumerate() {
+        let is_last = idx + 1 == rows.len();
+        let connector = if is_last { "`--" } else { "|--" };
+        lines.push(format!("{prefix}{connector}{}", row.detail));
+        if let Some(children) = children_by_parent.get(&row.id) {
+            let next_prefix = format!("{}{}", prefix, if is_last { "   " } else { "|  " });
+            append_plan_rows(lines, children, children_by_parent, &next_prefix);
+        }
+    }
+}
+
+fn log_to_console(label: &str, payload: &impl Serialize) {
+    let Ok(value) = to_js_value(payload) else {
         return;
     };
     let global = js_sys::global();
@@ -388,11 +647,7 @@ fn log_sqlite_query(operation: &str, debug: Option<mini_jazz_sqlite::SqliteQuery
     let Ok(method) = method.dyn_into::<js_sys::Function>() else {
         return;
     };
-    let _ = method.call2(
-        &console,
-        &JsValue::from_str(&format!("[mini-jazz-sqlite] {operation} SQL")),
-        &value,
-    );
+    let _ = method.call2(&console, &JsValue::from_str(label), &value);
 }
 
 fn parse_values(value: JsValue) -> Result<BTreeMap<String, JsonValue>, JsValue> {

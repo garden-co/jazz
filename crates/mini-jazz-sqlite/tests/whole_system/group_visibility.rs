@@ -81,6 +81,26 @@ fn mini_sqlite_todo_fixture_allows_group_reads_but_only_authors_can_delete_todos
     });
 }
 
+#[test]
+fn mini_sqlite_todo_fixture_explains_project_visibility_query() {
+    let mut db = Runtime::open_trusted_with_schema(
+        Storage::Memory,
+        "seed-node",
+        SchemaDef::mini_sqlite_todo_fixture(),
+    )
+    .unwrap();
+
+    seed_group_visibility_fixture(&mut db);
+
+    db.run_as_user("user-alice", |alice| {
+        let plan = alice.explain_query_plan(&project_list_query()).unwrap();
+
+        assert!(plan.sql.contains("SELECT"));
+        assert!(!plan.plan.is_empty());
+        assert!(plan.plan.iter().any(|row| !row.detail.is_empty()));
+    });
+}
+
 fn seed_group_visibility_fixture(db: &mut Runtime) {
     for (id, name) in [
         ("user-alice", "Alice"),
@@ -254,6 +274,14 @@ fn open_todos_query(db: &Runtime) -> Vec<RowView> {
         }))
         .unwrap(),
     )
+    .unwrap()
+}
+
+fn project_list_query() -> BuiltQuery {
+    BuiltQuery::from_json_value(json!({
+        "table": "projects",
+        "orderBy": [["title", "asc"]]
+    }))
     .unwrap()
 }
 

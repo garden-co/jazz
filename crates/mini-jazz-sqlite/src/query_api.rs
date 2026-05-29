@@ -161,6 +161,10 @@ impl Runtime {
         self.debug_sql_for_built_query(query)
     }
 
+    pub fn explain_query_plan(&self, query: &BuiltQuery) -> Result<crate::query::SqliteQueryPlan> {
+        self.explain_built_query(query)
+    }
+
     pub fn one(&self, query: BuiltQuery) -> Result<Option<RowView>> {
         Ok(self.query(query)?.into_iter().next())
     }
