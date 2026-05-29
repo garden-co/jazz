@@ -1356,13 +1356,16 @@ impl SchemaManager {
             parent_bundle_object_id,
             bundle_object_id,
         };
-        self.query_manager.require_authorization_schema();
         if let Some(current_head) = self.current_permissions_head
             && current_head.version > head.version
         {
             return Ok(());
         }
         self.current_permissions_head = Some(head);
+        // Defer flipping row_policy_mode to Enforcing until apply succeeds —
+        // apply_permissions_head calls set_authorization_schema which sets it.
+        // Flipping earlier denies writes against tables whose explicit policy
+        // lives in the not-yet-arrived bundle.
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;
         } else {
