@@ -121,3 +121,11 @@ of `runtime.rs`. The first implementation worked, but leaving it in the giant
 runtime file would preserve the broken-window pattern. Target module:
 `src/transaction.rs` owns `TransactionSnapshot`; runtime/builder orchestration
 can stay in `runtime.rs` until a larger write-pipeline extraction is safe.
+
+## 2026-05-28 23:00 PDT
+
+Start a small #952 integration slice: direct branch queries. This is valuable
+even before full branch backing-row permission policies because it makes branch
+context an explicit query parameter instead of forcing tests to mutate checkout.
+Implementation should be generic over `BuiltQuery` and must restore the previous
+checkout even if the query fails.

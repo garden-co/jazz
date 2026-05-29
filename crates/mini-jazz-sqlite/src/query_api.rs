@@ -157,6 +157,10 @@ impl Runtime {
         self.read_rows_for_built_query(&query)
     }
 
+    pub fn query_branch(&mut self, branch_id: &str, query: BuiltQuery) -> Result<Vec<RowView>> {
+        self.query_in_branch(branch_id, |runtime| runtime.query(query))
+    }
+
     pub fn one(&self, query: BuiltQuery) -> Result<Option<RowView>> {
         Ok(self.query(query)?.into_iter().next())
     }

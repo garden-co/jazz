@@ -2352,6 +2352,22 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn query_in_branch<T>(
+        &mut self,
+        branch_id: &str,
+        query: impl FnOnce(&mut Runtime) -> Result<T>,
+    ) -> Result<T> {
+        let previous_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        self.checkout_branch(branch_id)?;
+        let result = query(self);
+        let restore_result = self.checkout_branch(&previous_branch_id);
+        match (result, restore_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     pub fn branches(&self) -> Result<Vec<BranchInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT branch_num, branch_id, base_global_epoch

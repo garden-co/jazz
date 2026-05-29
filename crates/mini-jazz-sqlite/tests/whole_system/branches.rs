@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn direct_branch_query_matches_checkout_without_changing_current_branch() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("main title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("title".to_owned(), json!("draft title"))]),
+        )
+        .unwrap();
+    alice.checkout_branch("main").unwrap();
+
+    let query = BuiltQuery {
+        table: "tasks".to_owned(),
+        conditions: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+
+    let draft_rows = alice.query_branch("draft", query).unwrap();
+    assert_eq!(draft_rows[0].values["title"], json!("draft title"));
+
+    let current_rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(current_rows[0].values["title"], json!("main title"));
+}
+
+#[test]
 fn branch_sources_reject_direct_and_indirect_cycles() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
