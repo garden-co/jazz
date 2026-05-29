@@ -173,15 +173,21 @@ impl Runtime {
 
     pub fn read_rows_with_conflict_meta(&self, table_name: &str) -> Result<Vec<RowView>> {
         let mut rows = self.read_rows(table_name)?;
-        if rows.is_empty() {
-            let mut candidate_ids = self.conflict_candidate_row_ids(table_name)?;
-            candidate_ids.sort();
-            candidate_ids.dedup();
-            for row_id in candidate_ids {
-                let candidates = self.read_row_candidates(table_name, &row_id)?;
-                if candidates.len() > 1 {
-                    rows.extend(candidates);
-                }
+        let mut visible_ids = rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut candidate_ids = self.conflict_candidate_row_ids(table_name)?;
+        candidate_ids.sort();
+        candidate_ids.dedup();
+        for row_id in candidate_ids {
+            if visible_ids.contains(&row_id) {
+                continue;
+            }
+            let candidates = self.read_row_candidates(table_name, &row_id)?;
+            if candidates.len() > 1 {
+                visible_ids.insert(row_id);
+                rows.extend(candidates);
             }
         }
         for row in &mut rows {

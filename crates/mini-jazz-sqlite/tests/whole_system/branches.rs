@@ -1572,6 +1572,72 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
 }
 
 #[test]
+fn branch_conflict_metadata_includes_conflicts_when_other_rows_are_visible() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice.create_branch("left", None).unwrap();
+    alice.checkout_branch("left").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-conflict",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Left title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("right", None).unwrap();
+    alice.checkout_branch("right").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-conflict",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Right title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice.create_branch("solo", None).unwrap();
+    alice.checkout_branch("solo").unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-visible",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    alice
+        .create_branch_from_branches("merge", &["left", "right", "solo"])
+        .unwrap();
+    alice.checkout_branch("merge").unwrap();
+
+    let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.id == "task-conflict" && row.conflict_count == 2)
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.id == "task-visible" && row.conflict_count == 0)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn branch_conflict_metadata_surfaces_through_filtered_query() {
     let schema = SchemaDef::new().table("tasks", |table| {
         table.text("title");

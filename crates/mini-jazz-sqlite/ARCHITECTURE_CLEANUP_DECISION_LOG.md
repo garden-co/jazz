@@ -807,3 +807,9 @@ regress.
 - Renamed raw `Harness::memory` / `Harness::durable` helpers to `todo_memory` / `todo_durable` so tests must opt into the todo fixture by name.
 - Kept generic topology recipes named `memory` because they accept an explicit schema and model reusable topologies rather than a default app universe.
 - Focused sync-fate and invariant-coverage tests pass.
+
+## 2026-05-29 03:43 PDT - Made conflict-meta reads consistent with mixed visible/conflict rows
+
+- `read_rows_with_conflict_meta` now always considers source-branch conflict candidates, not only when the ordinary visible result is empty.
+- Added a regression where a merge branch has both an ordinary visible row and a separate conflicted row; the API now returns both conflict candidates plus the ordinary row.
+- Focused conflict and branch tests pass.
