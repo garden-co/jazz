@@ -10,6 +10,8 @@ use support::FixtureRuntimeExt;
 
 #[path = "whole_system/branches.rs"]
 mod branches;
+#[path = "whole_system/connection.rs"]
+mod connection;
 #[path = "whole_system/generic_schema.rs"]
 mod generic_schema;
 #[path = "whole_system/invariant_coverage.rs"]

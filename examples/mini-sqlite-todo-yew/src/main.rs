@@ -257,18 +257,10 @@ mod app {
     }
 
     fn summary_text(state: &TodoState) -> String {
-        let mut parts = vec![
+        let parts = vec![
             format!("{} OPFS current rows", format_count(state.current_rows)),
             format!("page {}", state.query.page + 1),
-            format!("main query {:.2} ms", state.main_query_ms),
-            format!("export {:.2} ms", state.export_ms),
-            format!("OPFS apply {:.2} ms", state.worker_apply_ms),
-            format!("OPFS query {:.2} ms", state.worker_query_ms),
-            format!("round trip {:.2} ms", state.worker_round_trip_ms),
         ];
-        if state.generate_ms > 0.0 {
-            parts.push(format!("generate {:.2} s", state.generate_ms / 1000.0));
-        }
         format!("{}.", parts.join(". "))
     }
 

@@ -1,9 +1,10 @@
 use crate::browser_worker::{
     BrowserStorageStats, RuntimeRequestId, RuntimeWorkerInput, RuntimeWorkerOutput,
-    WorkerSyncProfile,
 };
 use crate::worker_bridge::WorkerClient;
-use js_sys::{Date, Function, Promise};
+use js_sys::{Function, Promise};
+use mini_jazz_sqlite::connection::{DownstreamConnectionManager, DownstreamConnectionSubscription};
+use mini_jazz_sqlite::protocol::{ClientMessage, ServerMessage, SettlementTier};
 use mini_jazz_sqlite::{
     sync::Bundle, BuiltQuery, RowView, RowsSubscription, Runtime, SchemaDef, Storage, StorageStats,
     SubscriptionDelta,
@@ -33,17 +34,6 @@ pub struct BrowserRuntimeStatus {
     pub syncing: bool,
     pub error: String,
     pub worker_storage_stats: BrowserStorageStats,
-    pub last_sync: BrowserSyncProfile,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct BrowserSyncProfile {
-    pub main_export_ms: f64,
-    pub main_subscription_ms: f64,
-    pub worker_apply_ms: f64,
-    pub worker_query_ms: f64,
-    pub worker_export_ms: f64,
-    pub round_trip_ms: f64,
 }
 
 #[derive(Clone)]
@@ -54,28 +44,21 @@ pub struct BrowserRuntime {
 struct Inner {
     main: Runtime,
     worker: WorkerClient<RuntimeWorkerInput, RuntimeWorkerOutput>,
+    connection_manager: DownstreamConnectionManager,
     subscriptions: BTreeMap<SubscriptionId, BrowserRowsSubscription>,
     next_subscription_id: SubscriptionId,
     next_request_id: RuntimeRequestId,
-    pending_syncs: BTreeMap<RuntimeRequestId, PendingSync>,
-    pending_hydrates: BTreeMap<RuntimeRequestId, PendingHydrate>,
+    pending_syncs: BTreeSet<RuntimeRequestId>,
+    pending_hydrates: BTreeSet<RuntimeRequestId>,
+    pending_protocols: BTreeSet<RuntimeRequestId>,
     status: BrowserRuntimeStatus,
     on_status: Callback<BrowserRuntimeStatus>,
 }
 
 struct BrowserRowsSubscription {
-    query: BuiltQuery,
+    connection_subscription: DownstreamConnectionSubscription,
     subscription: RowsSubscription,
     callback: Callback<SubscriptionDelta>,
-}
-
-struct PendingSync {
-    started_at_ms: f64,
-    main_export_ms: f64,
-}
-
-struct PendingHydrate {
-    started_at_ms: f64,
 }
 
 type PendingSubscriptionNotification = (Callback<SubscriptionDelta>, SubscriptionDelta);
@@ -92,6 +75,13 @@ impl BrowserRuntime {
             config.schema.clone(),
         )
         .map_err(error_message)?;
+        let mut connection_manager = DownstreamConnectionManager::new(
+            format!("{}-session", config.main_node_id),
+            config.main_node_id.clone(),
+            main.local_schema_fingerprint(),
+            main.local_policy_fingerprint(),
+        );
+        let opening_client_messages = connection_manager.open().map_err(error_message)?;
         let runtime_slot = Rc::new(RefCell::new(None::<BrowserRuntime>));
         let worker = WorkerClient::spawn("./worker_loader.js?v=generic-runtime", {
             let runtime_slot = runtime_slot.clone();
@@ -106,11 +96,13 @@ impl BrowserRuntime {
             inner: Rc::new(RefCell::new(Inner {
                 main,
                 worker,
+                connection_manager,
                 subscriptions: BTreeMap::new(),
                 next_subscription_id: 0,
                 next_request_id: 0,
-                pending_syncs: BTreeMap::new(),
-                pending_hydrates: BTreeMap::new(),
+                pending_syncs: BTreeSet::new(),
+                pending_hydrates: BTreeSet::new(),
+                pending_protocols: BTreeSet::new(),
                 status: BrowserRuntimeStatus::default(),
                 on_status,
             })),
@@ -124,6 +116,7 @@ impl BrowserRuntime {
                 user: config.user,
                 schema: config.schema,
                 hydrate_queries: config.hydrate_queries,
+                client_messages: opening_client_messages,
             })?;
             Ok(())
         })?;
@@ -183,14 +176,19 @@ impl BrowserRuntime {
                 .next_subscription_id
                 .checked_add(1)
                 .ok_or_else(|| "subscription id overflow".to_owned())?;
+            let (connection_subscription, client_messages) = inner
+                .connection_manager
+                .subscribe(query.clone(), SettlementTier::Local)
+                .map_err(error_message)?;
             inner.subscriptions.insert(
                 id,
                 BrowserRowsSubscription {
-                    query,
+                    connection_subscription,
                     subscription,
                     callback: callback.clone(),
                 },
             );
+            inner.send_protocol_messages(client_messages)?;
             Ok((id, initial, callback))
         })?;
         callback.emit(initial);
@@ -198,10 +196,20 @@ impl BrowserRuntime {
     }
 
     pub fn unsubscribe(&self, id: SubscriptionId) {
-        let _ = self.with_inner(|inner| {
-            inner.subscriptions.remove(&id);
+        let result = self.with_inner(|inner| {
+            if let Some(entry) = inner.subscriptions.remove(&id) {
+                let client_messages = inner
+                    .connection_manager
+                    .unsubscribe(&entry.connection_subscription)
+                    .map_err(error_message)?;
+                inner.send_protocol_messages(client_messages)?;
+            }
             Ok(())
         });
+        match result {
+            Ok(()) => self.emit_status(),
+            Err(error) => self.set_error(error),
+        }
     }
 
     pub fn sync_queries(&self, queries: Vec<BuiltQuery>) -> Result<(), String> {
@@ -249,11 +257,7 @@ impl BrowserRuntime {
     }
 
     pub fn refresh_subscriptions(&self) -> Result<(), String> {
-        let result = self.with_inner(|inner| {
-            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
-            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
-            Ok(notifications)
-        });
+        let result = self.with_inner(|inner| inner.refresh_subscriptions());
         match result {
             Ok(notifications) => {
                 self.emit_notifications(notifications);
@@ -279,14 +283,19 @@ impl BrowserRuntime {
         let result = match output {
             RuntimeWorkerOutput::Opened {
                 bundles,
+                server_messages,
                 storage_stats,
-            } => self.apply_opened(bundles, storage_stats),
+            } => self.apply_opened(bundles, server_messages, storage_stats),
             RuntimeWorkerOutput::Applied {
                 request_id,
-                bundles,
-                profile,
+                server_messages,
                 storage_stats,
-            } => self.apply_synced(request_id, bundles, profile, storage_stats),
+            } => self.apply_synced(request_id, server_messages, storage_stats),
+            RuntimeWorkerOutput::Protocol {
+                request_id,
+                server_messages,
+                storage_stats,
+            } => self.apply_protocol(request_id, server_messages, storage_stats),
             RuntimeWorkerOutput::Exported { request_id, bundle } => {
                 self.apply_hydrated(request_id, vec![bundle])
             }
@@ -318,18 +327,20 @@ impl BrowserRuntime {
     fn apply_opened(
         &self,
         bundles: Vec<Bundle>,
+        server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
     ) -> Result<Vec<PendingSubscriptionNotification>, String> {
         self.with_inner(|inner| {
             for bundle in bundles {
                 inner.main.apply_bundle(&bundle).map_err(error_message)?;
             }
-            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
+            let client_messages = inner.apply_protocol_messages(server_messages)?;
+            inner.send_protocol_messages(client_messages)?;
+            let notifications = inner.refresh_subscriptions()?;
             inner.status.ready = true;
             inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
             inner.status.worker_storage_stats = storage_stats;
-            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
             Ok(notifications)
         })
     }
@@ -337,24 +348,36 @@ impl BrowserRuntime {
     fn apply_synced(
         &self,
         request_id: RuntimeRequestId,
-        bundles: Vec<Bundle>,
-        worker_profile: WorkerSyncProfile,
+        server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
     ) -> Result<Vec<PendingSubscriptionNotification>, String> {
         self.with_inner(|inner| {
-            let pending = inner.pending_syncs.remove(&request_id);
-            for bundle in bundles {
-                inner.main.apply_bundle(&bundle).map_err(error_message)?;
+            if !inner.pending_syncs.remove(&request_id) {
+                return Ok(Vec::new());
             }
-            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
-            if let Some(pending) = pending {
-                inner.status.last_sync.main_export_ms = pending.main_export_ms;
-                inner.status.last_sync.round_trip_ms = Date::now() - pending.started_at_ms;
+            let client_messages = inner.apply_protocol_messages(server_messages)?;
+            inner.send_protocol_messages(client_messages)?;
+            let notifications = inner.refresh_subscriptions()?;
+            inner.status.worker_storage_stats = storage_stats;
+            inner.status.syncing = inner.has_pending_work();
+            inner.status.error.clear();
+            Ok(notifications)
+        })
+    }
+
+    fn apply_protocol(
+        &self,
+        request_id: RuntimeRequestId,
+        server_messages: Vec<ServerMessage>,
+        storage_stats: BrowserStorageStats,
+    ) -> Result<Vec<PendingSubscriptionNotification>, String> {
+        self.with_inner(|inner| {
+            if !inner.pending_protocols.remove(&request_id) {
+                return Ok(Vec::new());
             }
-            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
-            inner.status.last_sync.worker_apply_ms = worker_profile.apply_ms;
-            inner.status.last_sync.worker_query_ms = worker_profile.refresh_query_ms;
-            inner.status.last_sync.worker_export_ms = worker_profile.refresh_export_ms;
+            let client_messages = inner.apply_protocol_messages(server_messages)?;
+            inner.send_protocol_messages(client_messages)?;
+            let notifications = inner.refresh_subscriptions()?;
             inner.status.worker_storage_stats = storage_stats;
             inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
@@ -368,16 +391,13 @@ impl BrowserRuntime {
         bundles: Vec<Bundle>,
     ) -> Result<Vec<PendingSubscriptionNotification>, String> {
         self.with_inner(|inner| {
-            let pending = inner.pending_hydrates.remove(&request_id);
-            let Some(pending) = pending else {
+            if !inner.pending_hydrates.remove(&request_id) {
                 return Ok(Vec::new());
-            };
+            }
             for bundle in bundles {
                 inner.main.apply_bundle(&bundle).map_err(error_message)?;
             }
-            let (notifications, main_subscription_ms) = inner.refresh_subscriptions()?;
-            inner.status.last_sync.round_trip_ms = Date::now() - pending.started_at_ms;
-            inner.status.last_sync.main_subscription_ms = main_subscription_ms;
+            let notifications = inner.refresh_subscriptions()?;
             inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
             Ok(notifications)
@@ -403,6 +423,7 @@ impl BrowserRuntime {
             inner.status.error = error;
             inner.pending_syncs.clear();
             inner.pending_hydrates.clear();
+            inner.pending_protocols.clear();
         }
         self.emit_status();
     }
@@ -410,48 +431,36 @@ impl BrowserRuntime {
 
 impl Inner {
     fn sync_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+        self.ensure_ready()?;
         if queries.is_empty() {
             return Ok(());
         }
 
-        let export_started_at = Date::now();
         let bundles = queries
             .into_iter()
             .map(|query| self.main.export_query(query).map_err(error_message))
             .collect::<Result<Vec<_>, _>>()?;
-        let main_export_ms = Date::now() - export_started_at;
-        let refresh_queries = self.subscription_queries();
+        let client_messages = self.replay_connection_subscriptions()?;
         let request_id = self.next_request_id()?;
 
-        self.pending_syncs.insert(
-            request_id,
-            PendingSync {
-                started_at_ms: Date::now(),
-                main_export_ms,
-            },
-        );
+        self.pending_syncs.insert(request_id);
         self.status.syncing = true;
-        self.status.last_sync.main_export_ms = main_export_ms;
         self.worker.send(RuntimeWorkerInput::ApplyBundles {
             request_id,
             bundles,
-            refresh_queries,
+            client_messages,
         })?;
         Ok(())
     }
 
     fn hydrate_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+        self.ensure_ready()?;
         if queries.is_empty() {
             return Ok(());
         }
 
         let request_id = self.next_request_id()?;
-        self.pending_hydrates.insert(
-            request_id,
-            PendingHydrate {
-                started_at_ms: Date::now(),
-            },
-        );
+        self.pending_hydrates.insert(request_id);
         self.status.syncing = true;
         if queries.len() == 1 {
             let mut queries = queries;
@@ -476,21 +485,51 @@ impl Inner {
         Ok(request_id)
     }
 
-    fn subscription_queries(&self) -> Vec<BuiltQuery> {
-        self.subscriptions
-            .values()
-            .map(|entry| entry.query.clone())
-            .collect()
+    fn ensure_ready(&self) -> Result<(), String> {
+        if self.status.ready {
+            Ok(())
+        } else {
+            Err("runtime is opening".to_owned())
+        }
+    }
+
+    fn replay_connection_subscriptions(&mut self) -> Result<Vec<ClientMessage>, String> {
+        self.connection_manager.replay().map_err(error_message)
+    }
+
+    fn apply_protocol_messages(
+        &mut self,
+        server_messages: Vec<ServerMessage>,
+    ) -> Result<Vec<ClientMessage>, String> {
+        self.connection_manager
+            .receive(&mut self.main, server_messages)
+            .map_err(error_message)
+    }
+
+    fn send_protocol_messages(
+        &mut self,
+        client_messages: Vec<ClientMessage>,
+    ) -> Result<(), String> {
+        if client_messages.is_empty() {
+            return Ok(());
+        }
+        let request_id = self.next_request_id()?;
+        self.pending_protocols.insert(request_id);
+        self.status.syncing = true;
+        self.worker.send(RuntimeWorkerInput::Protocol {
+            request_id,
+            client_messages,
+        })?;
+        Ok(())
     }
 
     fn has_pending_work(&self) -> bool {
-        !self.pending_syncs.is_empty() || !self.pending_hydrates.is_empty()
+        !self.pending_syncs.is_empty()
+            || !self.pending_hydrates.is_empty()
+            || !self.pending_protocols.is_empty()
     }
 
-    fn refresh_subscriptions(
-        &mut self,
-    ) -> Result<(Vec<PendingSubscriptionNotification>, f64), String> {
-        let started_at = Date::now();
+    fn refresh_subscriptions(&mut self) -> Result<Vec<PendingSubscriptionNotification>, String> {
         let ids = self
             .subscriptions
             .keys()
@@ -515,7 +554,7 @@ impl Inner {
             }
         }
 
-        Ok((notifications, Date::now() - started_at))
+        Ok(notifications)
     }
 }
 

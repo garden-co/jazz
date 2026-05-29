@@ -4346,6 +4346,10 @@ impl Runtime {
         self.schema.policy_fingerprint()
     }
 
+    pub fn local_schema_fingerprint(&self) -> String {
+        self.schema.compatibility_fingerprint()
+    }
+
     fn query_context(&self) -> query::QueryContext<'_> {
         query::QueryContext {
             conn: &self.conn,

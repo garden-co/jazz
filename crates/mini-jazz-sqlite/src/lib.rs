@@ -1,8 +1,10 @@
 mod branch;
+pub mod connection;
 mod effective;
 mod error;
 mod policy;
 mod projection;
+pub mod protocol;
 mod query;
 mod query_api;
 mod query_predicate;
@@ -11,6 +13,7 @@ mod read_visibility;
 mod rows;
 mod runtime;
 mod schema;
+pub mod session;
 mod stats;
 mod storage;
 mod subscription;
