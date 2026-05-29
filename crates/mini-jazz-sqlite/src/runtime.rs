@@ -13368,6 +13368,47 @@ mod tests {
     }
 
     #[test]
+    fn denied_deep_text_update_records_rejection_without_updating_current() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+            table.write_if_created_by_user();
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("alice text"))]),
+            )
+            .unwrap();
+        bob.apply_history_delta(&alice.export_all_history_delta(&[]).unwrap())
+            .unwrap();
+
+        let tx_id = bob
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("bob text"))]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "alice text"
+        );
+        let rejected = bob.rejected_transactions().unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].tx_id, tx_id);
+        assert_eq!(rejected[0].code, "policy_denied");
+        assert!(bob.current_text_ops_watermark().unwrap().op_id >= 2);
+    }
+
+    #[test]
     fn batched_row_writes_use_batch_local_deep_text_roots() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
