@@ -1,3 +1,4 @@
+use crate::apply::BundleApplyPlan;
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
 use crate::query_api::{
@@ -588,34 +589,7 @@ impl Runtime {
     ) -> Result<ApplyBundleProfile> {
         let total_started = ProfileTimer::start();
         let validation_started = ProfileTimer::start();
-        if bundle.protocol_version != BUNDLE_PROTOCOL_VERSION {
-            return Err(crate::Error::new(format!(
-                "unsupported bundle protocol version {}",
-                bundle.protocol_version
-            )));
-        }
-        let local_schema_fingerprint = self.schema.compatibility_fingerprint();
-        if bundle.schema_fingerprint != "legacy"
-            && bundle.schema_fingerprint != local_schema_fingerprint
-        {
-            return Err(crate::Error::new("incompatible schema fingerprint"));
-        }
-        if check_policy_fingerprint {
-            let policy_tables = bundle_policy_tables(bundle);
-            for table_name in &policy_tables {
-                self.schema.table_def(table_name)?;
-            }
-            if !policy_tables.is_empty() {
-                let local_policy_fingerprint = self
-                    .schema
-                    .policy_fingerprint_for_tables(policy_tables.iter());
-                if bundle.policy_fingerprint != "legacy"
-                    && bundle.policy_fingerprint != local_policy_fingerprint
-                {
-                    return Err(crate::Error::new("incompatible policy fingerprint"));
-                }
-            }
-        }
+        let apply_plan = BundleApplyPlan::validate(&self.schema, bundle, check_policy_fingerprint)?;
         let validation_ms = validation_started.elapsed_ms();
         let schema = self.schema.clone();
         let repair_user = self.policy_user().to_owned();
@@ -776,15 +750,15 @@ impl Runtime {
             .iter()
             .any(|tx| tx.outcome == tx::OUTCOME_REJECTED)
         {
-            for table_name in bundle_touched_tables(bundle) {
-                schema.table_def(&table_name)?;
+            for table_name in apply_plan.touched_tables() {
+                schema.table_def(table_name)?;
                 db.execute(
                     &format!(
                         "DELETE FROM {}
                          WHERE visible_tx_num IN (
                            SELECT tx_num FROM jazz_tx WHERE outcome = ?
                          )",
-                        crate::schema::current_table(&table_name)
+                        crate::schema::current_table(table_name)
                     ),
                     params![tx::OUTCOME_REJECTED],
                 )?;
@@ -7805,31 +7779,6 @@ fn plan_query_read_refreshes(
     ));
     plans.extend(singles);
     Ok(plans)
-}
-
-fn bundle_policy_tables(bundle: &Bundle) -> BTreeSet<String> {
-    let mut tables = BTreeSet::new();
-    for record in &bundle.history {
-        tables.insert(record.table.clone());
-    }
-    for query_read in &bundle.query_reads {
-        tables.insert(query_read.table.clone());
-    }
-    tables
-}
-
-fn bundle_touched_tables(bundle: &Bundle) -> BTreeSet<String> {
-    let mut tables = BTreeSet::new();
-    for record in &bundle.history {
-        tables.insert(record.table.clone());
-    }
-    for record in &bundle.reads {
-        tables.insert(record.table.clone());
-    }
-    for query_read in &bundle.query_reads {
-        tables.insert(query_read.table.clone());
-    }
-    tables
 }
 
 fn scoped_policy_fingerprint(

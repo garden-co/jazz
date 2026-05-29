@@ -210,3 +210,12 @@ cross-cutting helpers first, then larger phases. Start with profiling timers
 because they are generic infrastructure used by both apply and export profiles
 and do not belong to runtime orchestration. This is intentionally modest but
 keeps moving code toward named boundaries before changing behavior.
+
+## 2026-05-28 23:46 PDT
+
+Next apply-boundary slice: bundle validation/classification. The runtime should
+not have ad hoc knowledge of which tables appear in policy reads versus history
+records inline inside `apply_bundle_inner`; that makes every sync/apply feature
+tempting to implement as another local scan. Introduce an `apply` module that
+can validate protocol/schema/policy compatibility and expose touched table sets
+as named facts for apply phases.
