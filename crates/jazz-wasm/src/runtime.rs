@@ -463,6 +463,7 @@ fn assemble_wasm_runtime(
         mutation_error_emit_scheduled,
         upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
+        follower_outbox_sender: RefCell::new(None),
     }
 }
 
@@ -1081,6 +1082,10 @@ pub struct WasmRuntime {
     pub(crate) upstream_server_id: Rc<std::cell::Cell<Option<ServerId>>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
     pub(crate) tier_label: &'static str,
+    /// Outbox sender installed by `installFollowerOutboxSender`. Held so the
+    /// forwarder callback can be swapped in/out after construction.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    follower_outbox_sender: RefCell<Option<RustOutboxSender>>,
 }
 
 impl Clone for WasmRuntime {
@@ -1090,6 +1095,7 @@ impl Clone for WasmRuntime {
             mutation_error_emit_scheduled: Rc::clone(&self.mutation_error_emit_scheduled),
             upstream_server_id: Rc::clone(&self.upstream_server_id),
             tier_label: self.tier_label,
+            follower_outbox_sender: RefCell::new(None),
         }
     }
 }
@@ -1230,6 +1236,7 @@ impl WasmRuntime {
             mutation_error_emit_scheduled,
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
+            follower_outbox_sender: RefCell::new(None),
         })
     }
 
@@ -1882,6 +1889,49 @@ impl WasmRuntime {
         if let Some(server_id) = self.upstream_server_id.get() {
             core.remove_server(server_id);
         }
+    }
+
+    /// Install a `RustOutboxSender` on this runtime that routes server-bound
+    /// outbox entries through a JS callback. Called once by follower tabs that
+    /// use `MessagePortRuntimeTransport` instead of a dedicated worker bridge.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = installFollowerOutboxSender)]
+    pub fn install_follower_outbox_sender(&self) {
+        let sender = RustOutboxSender::new(true);
+        sender.attach_target(JsValue::NULL, None, None, None);
+        self.core
+            .borrow_mut()
+            .set_sync_sender(Box::new(sender.clone()));
+        *self.follower_outbox_sender.borrow_mut() = Some(sender);
+    }
+
+    /// Swap the JS callback that receives server-bound outbox payloads.
+    /// Pass `None` to uninstall (e.g. on transport teardown).
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = setFollowerOutboxForwarder)]
+    pub fn set_follower_outbox_forwarder(&self, callback: Option<Function>) {
+        let Some(sender) = self.follower_outbox_sender.borrow().as_ref().cloned() else {
+            return;
+        };
+        sender.set_server_payload_forwarder(callback);
+    }
+
+    /// Re-run the `removeServer` / `addServer` dance to replay the server edge
+    /// and generate outbox catalogue entries through the follower outbox sender.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = replayFollowerServerEdge)]
+    pub fn replay_follower_server_edge(&self) {
+        self.remove_server();
+        let _ = self.add_server(None, None);
+    }
+
+    /// Apply an incoming binary sync payload from the leader as if it arrived
+    /// from the upstream server.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = applyIncomingFollowerPayload)]
+    pub fn apply_incoming_follower_payload(&self, payload: Uint8Array) -> Result<(), JsError> {
+        self.on_sync_message_received(payload.into(), None)
+            .map_err(|e| JsError::new(&format!("apply follower payload: {e:?}")))
     }
 
     /// Add a client connection (for server-side use in tests).

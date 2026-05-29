@@ -6,10 +6,10 @@ export interface MessagePortRuntimeTransportOptions {
 }
 
 interface RuntimeWithFollowerHooks extends Runtime {
-  installFollowerOutboxSender?(): void;
-  setFollowerOutboxForwarder?(cb: ((payload: Uint8Array) => void) | null): void;
-  applyIncomingFollowerPayload?(payload: Uint8Array): void;
-  replayFollowerServerEdge?(): void;
+  installFollowerOutboxSender(): void;
+  setFollowerOutboxForwarder(cb: ((payload: Uint8Array) => void) | null): void;
+  applyIncomingFollowerPayload(payload: Uint8Array): void;
+  replayFollowerServerEdge(): void;
 }
 
 /**
@@ -31,8 +31,8 @@ export class MessagePortRuntimeTransport {
   }
 
   start(): void {
-    this.runtime.installFollowerOutboxSender?.();
-    this.runtime.setFollowerOutboxForwarder?.((payload) => {
+    this.runtime.installFollowerOutboxSender();
+    this.runtime.setFollowerOutboxForwarder((payload) => {
       if (this.disposed) return;
       try {
         this.port.postMessage({
@@ -43,7 +43,7 @@ export class MessagePortRuntimeTransport {
         // port closed; SharedWorkerLeaderClient will reissue.
       }
     });
-    this.runtime.replayFollowerServerEdge?.();
+    this.runtime.replayFollowerServerEdge();
 
     this.port.onmessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; payload?: unknown };
@@ -52,7 +52,7 @@ export class MessagePortRuntimeTransport {
       if (!Array.isArray(payload)) return;
       for (const entry of payload) {
         if (entry instanceof Uint8Array) {
-          this.runtime.applyIncomingFollowerPayload?.(entry);
+          this.runtime.applyIncomingFollowerPayload(entry);
         }
       }
     };
@@ -62,7 +62,7 @@ export class MessagePortRuntimeTransport {
   stop(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.runtime.setFollowerOutboxForwarder?.(null);
+    this.runtime.setFollowerOutboxForwarder(null);
     try {
       this.port.onmessage = null;
       this.port.close();

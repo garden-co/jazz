@@ -108,6 +108,14 @@ export interface Runtime {
   updateAuth?(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure?(callback: (reason: string) => void): void;
+  /** Install a follower outbox sender that routes server-bound payloads via a JS callback. */
+  installFollowerOutboxSender?(): void;
+  /** Swap the JS callback that receives server-bound outbox payloads. Pass null to uninstall. */
+  setFollowerOutboxForwarder?(cb: ((payload: Uint8Array) => void) | null): void;
+  /** Replay the removeServer/addServer dance to generate outbox catalogue entries. */
+  replayFollowerServerEdge?(): void;
+  /** Apply an incoming binary sync payload from the leader as if from the upstream server. */
+  applyIncomingFollowerPayload?(payload: Uint8Array): void;
 }
 
 /**
