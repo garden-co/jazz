@@ -605,3 +605,9 @@ regress.
 - Moved bundle application's query-scope repair and history-record materialization methods from the central runtime file into `runtime::sync_apply`.
 - This makes `sync_apply` the owner of both the top-level apply APIs and the repair/materialization machinery they invoke, instead of splitting the apply path across an impl block in one file and helper methods in another.
 - Focused sync-fate and query-matrix tests pass after the move.
+
+## 2026-05-29 02:27 PDT - Query export orchestration moved to query-export
+
+- Moved the remaining query-scope export orchestration methods from `runtime.rs` into `runtime::query_export`: batched predicate refreshes, top-N refresh exports, built-query export, query-read scope export, batched query scopes, and ref-include history collection.
+- I briefly botched the mechanical lift by removing the methods before inserting them; restored the exact block from HEAD before continuing. This reinforced that large moves should stay uncommitted until the focused tests are green.
+- Focused query-matrix and sync-fate tests pass after the move.
