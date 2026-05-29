@@ -1446,3 +1446,11 @@ Decision: batched deep-text writes now load the current depth-since-snapshot onc
 Why: append/document batches are linear by construction, so querying the parent op and snapshot table on every edit duplicated work the batch already knows. This keeps the same op rows and snapshot cadence while making the sidecar behave more like a real runtime append/edit stream.
 
 Scope impact: standalone text-op APIs still compute depth from storage. Canonical append/document write time improved materially in the first sample; canvas is unaffected except for ordinary run noise.
+
+## Fri May 29 03:42:13 PDT 2026 - Select Query Delta Blocks From Bundle Rows Across Tables
+
+Decision: query and recursive-ref history deltas now choose missing sealed blocks from every table/row represented in the outgoing bundle, plus the queried table rows, instead of only consulting the primary query table.
+
+Why: real query bundles can include policy dependency rows, recursive rows, and ref-included rows. If those rows have cold history sealed into blocks, sidecar/block export should follow the bundle shape rather than assuming the queried table is the whole sync scope.
+
+Scope impact: this is a correctness-oriented sync integration cleanup. It can send additional relevant blocks for multi-table query scopes, while still filtering against receiver block manifests and branch-base visibility.

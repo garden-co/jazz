@@ -1719,6 +1719,39 @@ impl Runtime {
         Ok(blocks)
     }
 
+    fn missing_history_block_manifests_for_bundle_rows(
+        &self,
+        bundle: &Bundle,
+        mut row_ids_by_table: BTreeMap<String, BTreeSet<String>>,
+        remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<Vec<HistoryBlockManifest>> {
+        for record in &bundle.history {
+            row_ids_by_table
+                .entry(record.table.clone())
+                .or_default()
+                .insert(record.row_id.clone());
+        }
+        let remote_keys = remote_block_manifests
+            .iter()
+            .map(history_block_manifest_key)
+            .collect::<BTreeSet<_>>();
+        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
+        let mut missing = Vec::new();
+        for (table_name, row_ids) in row_ids_by_table {
+            self.schema.table_def(&table_name)?;
+            missing.extend(
+                self.history_block_manifests(&table_name)?
+                    .into_iter()
+                    .filter(|manifest| {
+                        row_ids.contains(&manifest.row_id)
+                            && history_block_manifest_visible_for_branch_base(manifest, base_epoch)
+                            && !remote_keys.contains(&history_block_manifest_key(manifest))
+                    }),
+            );
+        }
+        Ok(missing)
+    }
+
     pub fn import_history_blocks(&mut self, blocks: &[HistoryBlockExport]) -> Result<usize> {
         let db = self.conn.savepoint()?;
         let mut imported = 0;
@@ -2118,20 +2151,11 @@ impl Runtime {
             value: JsonValue::String(root_id.to_owned()),
         }];
         let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
-        let remote_keys = remote_block_manifests
-            .iter()
-            .map(history_block_manifest_key)
-            .collect::<BTreeSet<_>>();
-        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
-        let missing_block_manifests = self
-            .history_block_manifests(table_name)?
-            .into_iter()
-            .filter(|manifest| {
-                row_ids.contains(&manifest.row_id)
-                    && history_block_manifest_visible_for_branch_base(manifest, base_epoch)
-                    && !remote_keys.contains(&history_block_manifest_key(manifest))
-            })
-            .collect::<Vec<_>>();
+        let missing_block_manifests = self.missing_history_block_manifests_for_bundle_rows(
+            &bundle,
+            BTreeMap::from([(table_name.to_owned(), row_ids)]),
+            remote_block_manifests,
+        )?;
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
         let text_ops_delta =
             self.export_text_ops_delta_for_bundle_since(&bundle, &blocks, text_ops_watermark)?;
@@ -6462,21 +6486,11 @@ impl Runtime {
             value,
         }];
         let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
-        let remote_keys = options
-            .remote_block_manifests
-            .iter()
-            .map(history_block_manifest_key)
-            .collect::<BTreeSet<_>>();
-        let base_epoch = branch_base_epoch(&self.conn, self.branch_num)?;
-        let missing_block_manifests = self
-            .history_block_manifests(table_name)?
-            .into_iter()
-            .filter(|manifest| {
-                row_ids.contains(&manifest.row_id)
-                    && history_block_manifest_visible_for_branch_base(manifest, base_epoch)
-                    && !remote_keys.contains(&history_block_manifest_key(manifest))
-            })
-            .collect::<Vec<_>>();
+        let missing_block_manifests = self.missing_history_block_manifests_for_bundle_rows(
+            &bundle,
+            BTreeMap::from([(table_name.to_owned(), row_ids)]),
+            options.remote_block_manifests,
+        )?;
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
         let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
             &bundle,
