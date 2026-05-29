@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:59:43 PDT 2026
+
+Decision: validate snapshot chunk integrity inside the deep-text delta decoder.
+
+Why: a snapshot row is only a valid random-access anchor if every chunk hash it lists is available and each imported chunk's content matches its hash. Otherwise a receiver can accept sidecar bytes and row roots, then fail later during historical/current text materialization. The content-addressed chunk table should be treated as part of the sidecar wire integrity boundary.
+
+Scope impact: `apply_delta` now rejects malformed snapshot hash lists, missing chunks, and chunk hash/text mismatches before inserting sidecar rows. I also removed the old unused inline-op helpers from the abandoned row-inline experiment so the persisted text-op module only exposes the current delta/snapshot/chunk path.
+
 ## Fri May 29 01:57:29 PDT 2026
 
 Decision: validate text-op delta parent references before importing sidecar rows.

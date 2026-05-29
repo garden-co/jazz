@@ -179,68 +179,6 @@ pub fn root_len(conn: &Connection, root: TextRoot) -> Result<i64> {
         .ok_or_else(|| Error::new("unknown text op root"))
 }
 
-pub fn inline_op_bytes(conn: &Connection, root: TextRoot) -> Result<Vec<u8>> {
-    let Some(op_id) = root else {
-        return Ok(Vec::new());
-    };
-    let op = conn
-        .prepare_cached(
-            "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
-             FROM jazz_text_op
-             WHERE op_id = ?",
-        )?
-        .query_row(params![op_id], |row| {
-            Ok(TextOpRow {
-                op_id: row.get(0)?,
-                parent_op_id: row.get(1)?,
-                start_byte: row.get(2)?,
-                delete_bytes: row.get(3)?,
-                insert_text: row.get(4)?,
-                resulting_len: row.get(5)?,
-            })
-        })?;
-    let mut out = Vec::new();
-    write_varint(&mut out, op.parent_op_id.unwrap_or(0) as u64);
-    write_varint(&mut out, op.start_byte as u64);
-    write_varint(&mut out, op.delete_bytes as u64);
-    write_bytes(&mut out, op.insert_text.as_bytes());
-    write_varint(&mut out, op.resulting_len as u64);
-    Ok(out)
-}
-
-pub fn apply_inline_op(conn: &Connection, bytes: &[u8], snapshot_every: usize) -> Result<TextRoot> {
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let mut cursor = ByteCursor::new(bytes);
-    let parent_op_id = match cursor.read_varint()? as i64 {
-        0 => None,
-        parent => Some(parent),
-    };
-    let start_byte = cursor.read_varint()? as i64;
-    let delete_bytes = cursor.read_varint()? as i64;
-    let insert_text = String::from_utf8(cursor.read_bytes()?.to_vec())
-        .map_err(|err| Error::new(err.to_string()))?;
-    let resulting_len = cursor.read_varint()? as i64;
-    cursor.expect_end()?;
-    conn.prepare_cached(
-        "INSERT INTO jazz_text_op (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?, ?)",
-    )?
-    .execute(params![
-        parent_op_id,
-        start_byte,
-        delete_bytes,
-        insert_text,
-        resulting_len
-    ])?;
-    let op_id = conn.last_insert_rowid();
-    if snapshot_every > 0 && (op_id as usize).is_multiple_of(snapshot_every) {
-        snapshot(conn, Some(op_id))?;
-    }
-    Ok(Some(op_id))
-}
-
 pub fn database_bytes(conn: &Connection) -> Result<i64> {
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -451,7 +389,7 @@ pub fn apply_delta(
     let payload = lz4_flex::decompress_size_prepended(encoded)
         .map_err(|err| Error::new(format!("decode text op delta: {err}")))?;
     let (ops, snapshots, chunks) = decode_delta_payload(&payload)?;
-    validate_delta_references(conn, &ops, &snapshots)?;
+    validate_delta_references(conn, &ops, &snapshots, &chunks)?;
     for chunk in ops.chunks(500) {
         let placeholders = (0..chunk.len())
             .map(|_| "(?, ?, ?, ?, ?, ?)")
@@ -543,6 +481,7 @@ fn validate_delta_references(
     conn: &Connection,
     ops: &[TextOpRow],
     snapshots: &[SnapshotRow],
+    chunks: &[ChunkRow],
 ) -> Result<()> {
     let incoming_ops = ops.iter().map(|op| op.op_id).collect::<BTreeSet<_>>();
     let mut op_exists_stmt = conn.prepare_cached("SELECT 1 FROM jazz_text_op WHERE op_id = ?")?;
@@ -565,19 +504,48 @@ fn validate_delta_references(
         }
     }
 
+    let mut incoming_chunks = BTreeSet::new();
+    for chunk in chunks {
+        let expected_hash = Sha256::digest(chunk.text.as_bytes()).to_vec();
+        if chunk.hash != expected_hash {
+            return Err(Error::new("text chunk hash does not match chunk text"));
+        }
+        incoming_chunks.insert(chunk.hash.as_slice());
+    }
+    let mut chunk_exists_stmt =
+        conn.prepare_cached("SELECT 1 FROM jazz_text_chunk WHERE chunk_hash = ?")?;
     for snapshot in snapshots {
         if incoming_ops.contains(&snapshot.op_id) {
-            continue;
-        }
-        let op_exists = op_exists_stmt
+        } else if op_exists_stmt
             .query_row(params![snapshot.op_id], |_| Ok(()))
             .optional()?
-            .is_some();
-        if !op_exists {
+            .is_none()
+        {
             return Err(Error::new(format!(
                 "missing text op {} for snapshot {}",
                 snapshot.op_id, snapshot.snapshot_id
             )));
+        }
+        if !snapshot.chunk_hashes.len().is_multiple_of(32) {
+            return Err(Error::new(format!(
+                "snapshot {} has malformed chunk hash list",
+                snapshot.snapshot_id
+            )));
+        }
+        for hash in snapshot.chunk_hashes.chunks_exact(32) {
+            if incoming_chunks.contains(hash) {
+                continue;
+            }
+            let chunk_exists = chunk_exists_stmt
+                .query_row(params![hash], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !chunk_exists {
+                return Err(Error::new(format!(
+                    "missing text chunk for snapshot {}",
+                    snapshot.snapshot_id
+                )));
+            }
         }
     }
     Ok(())
@@ -1034,5 +1002,44 @@ mod tests {
             "hello Ada!"
         );
         assert_eq!(watermark.op_id, 4);
+    }
+
+    #[test]
+    fn binary_delta_rejects_snapshot_with_missing_chunk() {
+        let source = open_text_store();
+        let target = open_text_store();
+
+        let root = append(&source, None, "hello snapshot", 0).expect("append");
+        snapshot(&source, root).expect("snapshot");
+        let delta = export_delta(&source, DeltaWatermark::default()).expect("export");
+        let payload = lz4_flex::decompress_size_prepended(&delta.bytes).expect("decompress");
+        let (ops, snapshots, _) = decode_delta_payload(&payload).expect("decode");
+        let mut corrupted = Vec::new();
+        encode_delta_payload(&mut corrupted, &ops, &snapshots, &[]);
+        let corrupted = lz4_flex::compress_prepend_size(&corrupted);
+
+        let err = apply_delta(&target, &corrupted, &mut DeltaWatermark::default()).unwrap_err();
+
+        assert!(err.to_string().contains("missing text chunk"));
+    }
+
+    #[test]
+    fn binary_delta_rejects_chunk_hash_mismatch() {
+        let source = open_text_store();
+        let target = open_text_store();
+
+        let root = append(&source, None, "hello snapshot", 0).expect("append");
+        snapshot(&source, root).expect("snapshot");
+        let delta = export_delta(&source, DeltaWatermark::default()).expect("export");
+        let payload = lz4_flex::decompress_size_prepended(&delta.bytes).expect("decompress");
+        let (ops, snapshots, mut chunks) = decode_delta_payload(&payload).expect("decode");
+        chunks[0].text.push_str(" corrupted");
+        let mut corrupted = Vec::new();
+        encode_delta_payload(&mut corrupted, &ops, &snapshots, &chunks);
+        let corrupted = lz4_flex::compress_prepend_size(&corrupted);
+
+        let err = apply_delta(&target, &corrupted, &mut DeltaWatermark::default()).unwrap_err();
+
+        assert!(err.to_string().contains("chunk hash"));
     }
 }
