@@ -2145,6 +2145,23 @@ impl Runtime {
             self.schema.table_def(&block.manifest.table)?;
             validate_history_block_export_manifest(block)?;
         }
+        let text_watermark = crate::persisted_text_ops::current_watermark(&self.conn)?;
+        let max_history_block_id = self.conn.query_row(
+            "SELECT COALESCE(MAX(block_id), 0) FROM history_blocks",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let result = self.profile_apply_history_delta_after_preflight(delta);
+        if result.is_err() {
+            rollback_partial_history_delta_apply(&self.conn, text_watermark, max_history_block_id)?;
+        }
+        result
+    }
+
+    fn profile_apply_history_delta_after_preflight(
+        &mut self,
+        delta: &HistoryDelta,
+    ) -> Result<ApplyBundleProfile> {
         if !delta.text_ops_delta.is_empty() {
             let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
             crate::persisted_text_ops::apply_delta(
@@ -7417,6 +7434,42 @@ fn validate_deep_text_root_exists(conn: &Connection, root: i64) -> Result<()> {
     crate::persisted_text_ops::root_len(conn, Some(root))
         .map(|_| ())
         .map_err(|err| crate::Error::new(format!("missing deep_text root {root}: {err}")))
+}
+
+fn rollback_partial_history_delta_apply(
+    conn: &Connection,
+    text_watermark: crate::persisted_text_ops::DeltaWatermark,
+    max_history_block_id: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM history_block_text_root_range WHERE block_id > ?",
+        params![max_history_block_id],
+    )?;
+    conn.execute(
+        "DELETE FROM history_block_tx_index WHERE block_id > ?",
+        params![max_history_block_id],
+    )?;
+    conn.execute(
+        "DELETE FROM history_blocks WHERE block_id > ?",
+        params![max_history_block_id],
+    )?;
+    conn.execute(
+        "DELETE FROM jazz_text_snapshot WHERE snapshot_id > ?",
+        params![text_watermark.snapshot_id],
+    )?;
+    conn.execute(
+        "DELETE FROM jazz_text_op WHERE op_id > ?",
+        params![text_watermark.op_id],
+    )?;
+    conn.execute(
+        "DELETE FROM jazz_text_chunk
+         WHERE NOT EXISTS (
+           SELECT 1 FROM jazz_text_snapshot
+           WHERE instr(chunk_hashes, chunk_hash) > 0
+         )",
+        [],
+    )?;
+    Ok(())
 }
 
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
@@ -13653,6 +13706,35 @@ mod tests {
 
         assert!(err.to_string().contains("missing deep_text root"));
         assert!(bob.read_rows("docs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_history_delta_apply_rolls_back_deep_text_sidecar() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "orphan candidate")
+            .unwrap();
+        let mut delta = alice.export_all_history_delta(&[]).unwrap();
+        delta.bundle.txs.clear();
+
+        let err = bob.apply_history_delta(&delta).unwrap_err();
+
+        assert!(err.to_string().contains("references missing tx"));
+        assert_eq!(
+            bob.current_text_ops_watermark().unwrap(),
+            crate::persisted_text_ops::DeltaWatermark::default()
+        );
     }
 
     #[test]

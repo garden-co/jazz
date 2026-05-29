@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:53:52 PDT 2026
+
+Decision: failed `HistoryDelta` receive should roll back imported deep-text sidecar and block rows to the pre-apply watermarks.
+
+Why: the honest sync envelope is a bundle plus sealed blocks plus text-op sidecar. If the text sidecar applies and a later row-history validation fails, leaving orphan text ops behind is observable storage corruption even though current rows remain unchanged. I tried the ideal outer SQLite savepoint first, but the current inner import/apply paths open their own transactions, so a full one-transaction delta apply needs a larger extraction.
+
+Scope impact: `profile_apply_history_delta` now records the text-op watermark and max history block id after preflight, and failure cleanup deletes any text ops, snapshots, unreferenced chunks, block manifests, block tx indexes, and block text-root ranges inserted by the partial receive. This keeps runtime state coherent while preserving the existing transaction structure; a future refactor can replace this compensation with one explicit shared transaction.
+
 ## Fri May 29 01:47:10 PDT 2026
 
 Decision: generic public string writes to `deep_text` fields should store a minimal replacement op, not a whole-value replacement.
