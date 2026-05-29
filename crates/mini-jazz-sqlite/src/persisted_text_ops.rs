@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -451,43 +451,74 @@ pub fn apply_delta(
     let payload = lz4_flex::decompress_size_prepended(encoded)
         .map_err(|err| Error::new(format!("decode text op delta: {err}")))?;
     let (ops, snapshots, chunks) = decode_delta_payload(&payload)?;
-    let mut insert_op = conn.prepare_cached(
-        "INSERT OR REPLACE INTO jazz_text_op
-         (op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )?;
+    for chunk in ops.chunks(500) {
+        let placeholders = (0..chunk.len())
+            .map(|_| "(?, ?, ?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT OR REPLACE INTO jazz_text_op
+             (op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
+             VALUES {placeholders}"
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 6);
+        for op in chunk {
+            values.push(rusqlite::types::Value::Integer(op.op_id));
+            values.push(
+                op.parent_op_id
+                    .map(rusqlite::types::Value::Integer)
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            values.push(rusqlite::types::Value::Integer(op.start_byte));
+            values.push(rusqlite::types::Value::Integer(op.delete_bytes));
+            values.push(rusqlite::types::Value::Text(op.insert_text.clone()));
+            values.push(rusqlite::types::Value::Integer(op.resulting_len));
+        }
+        conn.prepare_cached(&sql)?
+            .execute(params_from_iter(values.iter()))?;
+    }
     for op in &ops {
-        insert_op.execute(params![
-            op.op_id,
-            op.parent_op_id,
-            op.start_byte,
-            op.delete_bytes,
-            op.insert_text,
-            op.resulting_len
-        ])?;
         watermark.op_id = watermark.op_id.max(op.op_id);
     }
-    drop(insert_op);
 
-    let mut insert_chunk = conn
-        .prepare_cached("INSERT OR IGNORE INTO jazz_text_chunk (chunk_hash, text) VALUES (?, ?)")?;
-    for chunk in &chunks {
-        insert_chunk.execute(params![&chunk.hash, &chunk.text])?;
+    for chunk_rows in chunks.chunks(500) {
+        let placeholders = (0..chunk_rows.len())
+            .map(|_| "(?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT OR IGNORE INTO jazz_text_chunk (chunk_hash, text) VALUES {placeholders}"
+        );
+        let mut values = Vec::with_capacity(chunk_rows.len() * 2);
+        for chunk in chunk_rows {
+            values.push(rusqlite::types::Value::Blob(chunk.hash.clone()));
+            values.push(rusqlite::types::Value::Text(chunk.text.clone()));
+        }
+        conn.prepare_cached(&sql)?
+            .execute(params_from_iter(values.iter()))?;
     }
-    drop(insert_chunk);
 
-    let mut insert_snapshot = conn.prepare_cached(
-        "INSERT OR REPLACE INTO jazz_text_snapshot
-         (snapshot_id, op_id, byte_len, chunk_hashes)
-         VALUES (?, ?, ?, ?)",
-    )?;
+    for chunk in snapshots.chunks(500) {
+        let placeholders = (0..chunk.len())
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT OR REPLACE INTO jazz_text_snapshot
+             (snapshot_id, op_id, byte_len, chunk_hashes)
+             VALUES {placeholders}"
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 4);
+        for snapshot in chunk {
+            values.push(rusqlite::types::Value::Integer(snapshot.snapshot_id));
+            values.push(rusqlite::types::Value::Integer(snapshot.op_id));
+            values.push(rusqlite::types::Value::Integer(snapshot.byte_len));
+            values.push(rusqlite::types::Value::Blob(snapshot.chunk_hashes.clone()));
+        }
+        conn.prepare_cached(&sql)?
+            .execute(params_from_iter(values.iter()))?;
+    }
     for snapshot in &snapshots {
-        insert_snapshot.execute(params![
-            snapshot.snapshot_id,
-            snapshot.op_id,
-            snapshot.byte_len,
-            &snapshot.chunk_hashes
-        ])?;
         watermark.snapshot_id = watermark.snapshot_id.max(snapshot.snapshot_id);
     }
     Ok(DeltaStats {

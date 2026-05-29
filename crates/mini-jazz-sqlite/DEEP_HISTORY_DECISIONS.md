@@ -1006,3 +1006,11 @@ Decision: store the latest deep-text roots referenced by each sealed history blo
 Why: scoped text-op export must include roots from missing blocks, but repeatedly decoding compressed block payloads just to rediscover those roots is unnecessary work. Compaction and block import now populate the index, and export falls back to decoding only if an older block lacks index rows.
 
 Scope impact: native export for text scenarios improves in the canonical sample, while the extra table costs one small SQLite page in these tiny databases. Manifest validation now returns the decoded block bundle so import does not decode payloads twice. Full `mini-jazz-sqlite` tests pass.
+
+## Thu May 28 23:48:55 PDT 2026 - Batch Text Delta Apply Inserts
+
+Decision: apply decoded deep-text sidecar deltas with multi-row `INSERT` chunks for ops, chunks, and snapshots.
+
+Why: sync/import receives sidecar data as one logical delta, but the apply path still inserted each text op row separately. Batching keeps the durable table layout unchanged while reducing statement count for large text deltas.
+
+Scope impact: the canonical sample shows small import/apply movement rather than a dramatic win, but this is a cleaner production-shaped receive path and keeps text sidecar apply aligned with the batched Jazz bundle apply. Full `mini-jazz-sqlite` tests pass.
