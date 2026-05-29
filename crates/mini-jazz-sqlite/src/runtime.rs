@@ -8,8 +8,8 @@ use crate::sync::{
 use crate::types::{
     ApplyBundleProfile, BranchInfo, HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange,
     HistoryCompactionPolicy, HistoryCompactionStats, HistoryDelta, HistoryDeltaExportOptions,
-    QueryExportProfile, RejectionInfo, RowView, StorageStats, TopFieldHistoryDeltaOptions,
-    TransactionInfo,
+    QueryExportProfile, RejectionInfo, RowView, StorageStats, TopCreatedHistoryDeltaOptions,
+    TopFieldHistoryDeltaOptions, TransactionInfo,
 };
 use crate::value::{bytes_to_hex, hex_to_bytes, IntoValueMap, Value as JsonValue, WireValue};
 use crate::{
@@ -182,13 +182,6 @@ impl QueryScopeOptions<'_> {
 }
 
 impl<'a> QueryScopeDeltaOptions<'a> {
-    fn remote(remote_block_manifests: &'a [HistoryBlockManifest]) -> Self {
-        Self::remote_since_text_watermark(
-            remote_block_manifests,
-            crate::persisted_text_ops::DeltaWatermark::default(),
-        )
-    }
-
     fn remote_since_text_watermark(
         remote_block_manifests: &'a [HistoryBlockManifest],
         text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
@@ -5353,24 +5346,12 @@ impl Runtime {
     where
         V: Into<JsonValue>,
     {
-        let value = value.into();
-        let rows = self.read_rows_where_eq_top_created_at_desc(
+        self.export_query_where_eq_top_created_at_desc_history_delta_with_options(
             table_name,
             field_name,
-            value.clone(),
-            limit,
-        )?;
-        self.export_query_scope_history_delta(
-            table_name,
-            field_name,
-            "eq_top_created_at_desc",
-            json!({
-                "eq": value,
-                "limit": limit,
-                "observed_ids": observed_row_ids(&rows),
-            }),
-            rows,
-            QueryScopeDeltaOptions::remote(remote_block_manifests),
+            value,
+            TopCreatedHistoryDeltaOptions::new(limit)
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
         )
     }
 
@@ -5386,12 +5367,32 @@ impl Runtime {
     where
         V: Into<JsonValue>,
     {
+        self.export_query_where_eq_top_created_at_desc_history_delta_with_options(
+            table_name,
+            field_name,
+            value,
+            TopCreatedHistoryDeltaOptions::new(limit)
+                .with_previous_observed_ids(previous_observed_ids)
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_query_where_eq_top_created_at_desc_history_delta_with_options<V>(
+        &self,
+        table_name: &str,
+        field_name: &str,
+        value: V,
+        options: TopCreatedHistoryDeltaOptions,
+    ) -> Result<HistoryDelta>
+    where
+        V: Into<JsonValue>,
+    {
         let value = value.into();
         let rows = self.read_rows_where_eq_top_created_at_desc(
             table_name,
             field_name,
             value.clone(),
-            limit,
+            options.limit,
         )?;
         self.export_query_scope_history_delta(
             table_name,
@@ -5399,15 +5400,15 @@ impl Runtime {
             "eq_top_created_at_desc",
             json!({
                 "eq": value,
-                "limit": limit,
+                "limit": options.limit,
                 "observed_ids": observed_row_ids(&rows),
             }),
             rows,
             QueryScopeDeltaOptions {
                 ref_include_fields: &[],
-                extra_row_ids: &previous_observed_ids,
-                remote_block_manifests,
-                text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+                extra_row_ids: &options.previous_observed_ids,
+                remote_block_manifests: &options.remote_block_manifests,
+                text_ops_watermark: options.text_ops_watermark,
             },
         )
     }
@@ -14376,6 +14377,69 @@ mod tests {
                 "folder",
                 "kept",
                 HistoryDeltaExportOptions::new().with_text_ops_watermark(text_watermark),
+            )
+            .unwrap();
+
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &first_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &second_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+
+        assert_eq!(stats.ops, 1);
+    }
+
+    #[test]
+    fn top_created_query_delta_can_increment_deep_text_sidecar_from_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("folder");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("folder".to_owned(), JsonValue::from("kept"))]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let first_delta = alice
+            .export_query_where_eq_top_created_at_desc_history_delta(
+                "docs",
+                "folder",
+                "kept",
+                1,
+                &[],
+            )
+            .unwrap();
+        let text_watermark = alice.current_text_ops_watermark().unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " again")
+            .unwrap();
+
+        let second_delta = alice
+            .export_query_where_eq_top_created_at_desc_history_delta_with_options(
+                "docs",
+                "folder",
+                "kept",
+                TopCreatedHistoryDeltaOptions::new(1)
+                    .with_previous_observed_ids(vec!["doc-1".to_owned()])
+                    .with_text_ops_watermark(text_watermark),
             )
             .unwrap();
 

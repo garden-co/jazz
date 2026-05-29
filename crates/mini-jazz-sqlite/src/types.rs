@@ -220,6 +220,43 @@ impl HistoryDeltaExportOptions {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct TopCreatedHistoryDeltaOptions {
+    pub limit: usize,
+    pub previous_observed_ids: Vec<String>,
+    pub remote_block_manifests: Vec<HistoryBlockManifest>,
+    pub text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+}
+
+impl TopCreatedHistoryDeltaOptions {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            previous_observed_ids: Vec::new(),
+            remote_block_manifests: Vec::new(),
+            text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+        }
+    }
+
+    pub fn with_previous_observed_ids(mut self, row_ids: Vec<String>) -> Self {
+        self.previous_observed_ids = row_ids;
+        self
+    }
+
+    pub fn with_remote_block_manifests(mut self, manifests: Vec<HistoryBlockManifest>) -> Self {
+        self.remote_block_manifests = manifests;
+        self
+    }
+
+    pub fn with_text_ops_watermark(
+        mut self,
+        watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Self {
+        self.text_ops_watermark = watermark;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct TopFieldHistoryDeltaOptions {
     pub order_field_name: String,
     pub limit: usize,

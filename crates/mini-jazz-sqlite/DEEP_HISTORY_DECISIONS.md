@@ -1310,3 +1310,11 @@ Decision: record the receiver-state sync checkpoint as `Block+Ops15` in the benc
 Why: the storage/wire format did not change, but the measured live text path now uses receiver-derived export options instead of benchmark-local watermark state. Keeping a column makes that semantic benchmark shift visible and gives us a stable point before the next runtime pass.
 
 Scope impact: canonical numbers remain in the Block+Ops14 band: append about 0.43 ms/update, Automerge about 0.14 ms/update, canvas about 0.06 ms/update. Native sync bytes are essentially unchanged.
+
+## Fri May 29 02:50:55 PDT 2026 - Normalize Top-Created Delta Options
+
+Decision: add `TopCreatedHistoryDeltaOptions` so top-created query HistoryDelta export can carry previous observed ids, remote block manifests, and text-op watermark through one API, matching top-field query export.
+
+Why: ordered query sync should have one coherent shape. Top-created refresh already needed previous observed ids for repair, but defaulting the text sidecar watermark made it less incremental than predicate/top-field exports.
+
+Scope impact: old top-created methods remain wrappers. A regression verifies a second top-created query delta exports exactly one new deep-text op when given the receiver watermark.
