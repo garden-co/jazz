@@ -825,3 +825,13 @@ regress.
 - Replaced the `sync_apply` wildcard runtime import with explicit dependencies and removed the import noise that had been living in `runtime.rs` only because `sync_apply` borrowed it ambiently.
 - This is deliberately not a giant split of the 1.6k-line apply path; the useful learning is that the real next extraction should be semantic, likely around awaiting dependency validation or query-scope repair, rather than a mechanical move.
 - Focused conflict metadata regression passes, and `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:46 PDT - Perf PR is still a moving draft
+
+- Rechecked PR #973 while the full test run was starting.
+- It has moved again to `0c7e4a48a00540aca1c76e4f23bf2a33dc8f2e49` and is still a draft, so this cleanup PR should continue to incorporate durable API/semantic lessons without merging that branch wholesale.
+
+## 2026-05-29 03:46 PDT - Full validation passes after boundary cleanup
+
+- Ran `cargo test -p mini-jazz-sqlite` after the conflict metadata fix, descriptor identity cleanup, todo fixture naming cleanup, and explicit `sync_apply` dependencies.
+- Result: 440 passed, 18 ignored placeholders, 0 failed.
