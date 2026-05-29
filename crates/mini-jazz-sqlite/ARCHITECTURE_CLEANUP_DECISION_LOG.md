@@ -587,3 +587,9 @@ regress.
 - Extracted the shared row write materialization path into `runtime::write_core`: effective value normalization, field validation, create/update history insertion, current projection insertion, local write-policy checks, row-id collision checks, exclusive-write conflict checks, and write-set recording.
 - This boundary is behaviorally important because simple writes, batched writes, explicit transactions, and apply-history all need the same low-level write semantics.
 - Focused storage/projection tests pass after the move.
+
+## 2026-05-29 02:22 PDT - Delete staging now uses the shared write-core path
+
+- Factored duplicate tombstone/current-projection delete materialization out of ordinary deletes and explicit transaction deletes into `runtime::write_core::stage_delete_row_in_tx`.
+- Preserved the intentional API difference: simple deletes do not currently record a previous-row read set, while explicit transaction deletes do because transaction validation depends on the deleted row version being stable.
+- Focused transaction and storage/projection tests pass after the move.

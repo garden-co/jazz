@@ -15,6 +15,20 @@ pub(super) struct InsertRowInTx<'a> {
     pub(super) base_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
+pub(super) struct StageDeleteInTx<'a> {
+    pub(super) db: &'a Connection,
+    pub(super) schema: &'a SchemaDef,
+    pub(super) table_name: &'a str,
+    pub(super) id: &'a str,
+    pub(super) visible_values: &'a BTreeMap<String, JsonValue>,
+    pub(super) tx_num: i64,
+    pub(super) branch_num: i64,
+    pub(super) now: i64,
+    pub(super) user: &'a str,
+    pub(super) bypass_policy: bool,
+    pub(super) record_row_read: bool,
+}
+
 struct EffectiveWriteValues<'a> {
     db: &'a Connection,
     schema: &'a SchemaDef,
@@ -204,6 +218,171 @@ pub(super) fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             &current_values,
         )?;
     }
+    Ok(allowed)
+}
+
+pub(super) fn stage_delete_row_in_tx(args: StageDeleteInTx<'_>) -> Result<bool> {
+    let table = args.schema.table_def(args.table_name)?;
+    let row_num = row_num(args.db, args.id)?;
+    if args.record_row_read {
+        read_set::record_tx_read(
+            args.db,
+            args.tx_num,
+            args.table_name,
+            row_num,
+            args.branch_num,
+            2,
+        )?;
+    }
+    policy_read_set::record_for_write(policy_read_set::WritePolicyReadSet {
+        conn: args.db,
+        schema: args.schema,
+        table,
+        policy: &table.write_policy,
+        values: args.visible_values,
+        branch_num: args.branch_num,
+        tx_num: args.tx_num,
+    })?;
+    let allowed = args.bypass_policy
+        || local_write_allowed(LocalWriteCheck {
+            db: args.db,
+            schema: args.schema,
+            table,
+            row_num,
+            branch_num: args.branch_num,
+            values: args.visible_values,
+            user: args.user,
+            op: 3,
+        })?;
+
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect::<Vec<_>>();
+    let mut insert_columns = vec![
+        "row_num".to_owned(),
+        "tx_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "op".to_owned(),
+    ];
+    insert_columns.extend(field_columns.iter().cloned());
+    insert_columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    let mut select_columns = vec![
+        "row_num".to_owned(),
+        "?".to_owned(),
+        "j_branch_num".to_owned(),
+        "3".to_owned(),
+    ];
+    select_columns.extend(field_columns.iter().cloned());
+    select_columns.extend([
+        "j_created_at".to_owned(),
+        "?".to_owned(),
+        "j_created_by".to_owned(),
+        "?".to_owned(),
+    ]);
+    let user_num = users::ensure_user(args.db, args.user)?;
+    let inserted = args.db.execute(
+        &format!(
+            "INSERT OR IGNORE INTO {} ({})
+             SELECT {}
+             FROM {}
+             WHERE row_num = ? AND j_branch_num = ?",
+            crate::schema::history_table(&table.name),
+            insert_columns.join(", "),
+            select_columns.join(", "),
+            crate::schema::current_table(&table.name),
+        ),
+        params![args.tx_num, args.now, user_num, row_num, args.branch_num],
+    )?;
+    if inserted == 0 {
+        let mut values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(args.tx_num),
+            rusqlite::types::Value::Integer(args.branch_num),
+            rusqlite::types::Value::Integer(3),
+        ];
+        for field in &table.fields {
+            let value = args
+                .visible_values
+                .get(&field.name)
+                .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+            values.push(crate::schema::field_sql_value(
+                field,
+                value,
+                |ref_table, row_id| ensure_row_id(args.db, ref_table, row_id),
+            )?);
+        }
+        values.extend([
+            rusqlite::types::Value::Integer(args.now),
+            rusqlite::types::Value::Integer(args.now),
+            rusqlite::types::Value::Integer(user_num),
+            rusqlite::types::Value::Integer(user_num),
+        ]);
+        insert_dynamic(
+            args.db,
+            &crate::schema::history_table(&table.name),
+            &insert_columns,
+            &values,
+        )?;
+    }
+    args.db.execute(
+        &format!(
+            "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+            crate::schema::current_table(&table.name)
+        ),
+        params![row_num, args.branch_num],
+    )?;
+    if args.branch_num != 1 {
+        let mut current_columns = vec![
+            "row_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "visible_tx_num".to_owned(),
+            "is_deleted".to_owned(),
+        ];
+        current_columns.extend(field_columns.iter().cloned());
+        current_columns.extend([
+            "j_created_at".to_owned(),
+            "j_updated_at".to_owned(),
+            "j_created_by".to_owned(),
+            "j_updated_by".to_owned(),
+        ]);
+        let mut current_values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(args.branch_num),
+            rusqlite::types::Value::Integer(args.tx_num),
+            rusqlite::types::Value::Integer(1),
+        ];
+        for field in &table.fields {
+            let value = args
+                .visible_values
+                .get(&field.name)
+                .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+            current_values.push(crate::schema::field_sql_value(
+                field,
+                value,
+                |ref_table, row_id| ensure_row_id(args.db, ref_table, row_id),
+            )?);
+        }
+        current_values.extend([
+            rusqlite::types::Value::Integer(args.now),
+            rusqlite::types::Value::Integer(args.now),
+            rusqlite::types::Value::Integer(user_num),
+            rusqlite::types::Value::Integer(user_num),
+        ]);
+        insert_dynamic(
+            args.db,
+            &crate::schema::current_table(&table.name),
+            &current_columns,
+            &current_values,
+        )?;
+    }
+    record_tx_write(args.db, args.tx_num, &table.name, row_num, 3)?;
     Ok(allowed)
 }
 
