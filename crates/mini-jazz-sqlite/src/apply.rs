@@ -1,6 +1,6 @@
 use crate::schema::SchemaDef;
 use crate::sync::{Bundle, BUNDLE_PROTOCOL_VERSION};
-use crate::{tx, Result};
+use crate::{rows, tx, users, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,6 +64,67 @@ impl BundleApplyPlan {
 pub(crate) struct AppliedTxs {
     pub(crate) tx_nums_by_id: BTreeMap<String, i64>,
     pub(crate) tx_info_by_num: BTreeMap<i64, ApplyTxInfo>,
+}
+
+#[derive(Default)]
+pub(crate) struct ApplyCaches {
+    row_nums_by_id: BTreeMap<(String, String), i64>,
+    row_nums_created_in_apply: BTreeSet<i64>,
+    user_nums_by_id: BTreeMap<String, i64>,
+}
+
+impl ApplyCaches {
+    pub(crate) fn ensure_row_id(
+        &mut self,
+        db: &Connection,
+        table_name: &str,
+        row_id: &str,
+    ) -> Result<i64> {
+        if let Some(row_num) = self
+            .row_nums_by_id
+            .get(&(table_name.to_owned(), row_id.to_owned()))
+        {
+            return Ok(*row_num);
+        }
+        let row_num = rows::ensure_row_id(db, table_name, row_id)?;
+        self.row_nums_by_id
+            .insert((table_name.to_owned(), row_id.to_owned()), row_num);
+        Ok(row_num)
+    }
+
+    pub(crate) fn ensure_row_id_with_status(
+        &mut self,
+        db: &Connection,
+        table_name: &str,
+        row_id: &str,
+    ) -> Result<i64> {
+        if let Some(row_num) = self
+            .row_nums_by_id
+            .get(&(table_name.to_owned(), row_id.to_owned()))
+        {
+            return Ok(*row_num);
+        }
+        let (row_num, created) = rows::ensure_row_id_with_status(db, row_id)?;
+        self.row_nums_by_id
+            .insert((table_name.to_owned(), row_id.to_owned()), row_num);
+        if created {
+            self.row_nums_created_in_apply.insert(row_num);
+        }
+        Ok(row_num)
+    }
+
+    pub(crate) fn row_created_in_apply(&self, row_num: i64) -> bool {
+        self.row_nums_created_in_apply.contains(&row_num)
+    }
+
+    pub(crate) fn ensure_user(&mut self, db: &Connection, user_id: &str) -> Result<i64> {
+        if let Some(user_num) = self.user_nums_by_id.get(user_id) {
+            return Ok(*user_num);
+        }
+        let user_num = users::ensure_user(db, user_id)?;
+        self.user_nums_by_id.insert(user_id.to_owned(), user_num);
+        Ok(user_num)
+    }
 }
 
 #[derive(Clone, Copy)]

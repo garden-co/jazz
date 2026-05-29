@@ -1,5 +1,6 @@
 use crate::apply::{
-    apply_tx_records, encode_optional_json, tx_apply_info, ApplyTxInfo, BundleApplyPlan,
+    apply_tx_records, encode_optional_json, tx_apply_info, ApplyCaches, ApplyTxInfo,
+    BundleApplyPlan,
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
@@ -629,9 +630,7 @@ impl Runtime {
         let txs_ms = txs_started.elapsed_ms();
 
         let reads_started = ProfileTimer::start();
-        let mut row_nums_by_id = BTreeMap::new();
-        let mut row_nums_created_in_apply = BTreeSet::new();
-        let mut user_nums_by_id = BTreeMap::new();
+        let mut apply_caches = ApplyCaches::default();
         let mut insert_read_stmt = db.prepare(
             "INSERT OR REPLACE INTO jazz_tx_read
              (tx_num, table_num, row_num, reason, observed_tx_num)
@@ -643,10 +642,8 @@ impl Runtime {
                 .get(&read_record.tx_id)
                 .copied()
                 .ok_or_else(|| crate::Error::new("bundle read references missing tx"))?;
-            let row_num = cached_ensure_row_id_with_status(
+            let row_num = apply_caches.ensure_row_id_with_status(
                 &db,
-                &mut row_nums_by_id,
-                &mut row_nums_created_in_apply,
                 &read_record.table,
                 &read_record.row_id,
             )?;
@@ -715,9 +712,7 @@ impl Runtime {
             tx_info_by_num: &applied_txs.tx_info_by_num,
             branch_nums_by_id: &branch_nums_by_id,
             table_nums_by_name: &table_nums_by_name,
-            row_nums_by_id: &mut row_nums_by_id,
-            row_nums_created_in_apply: &mut row_nums_created_in_apply,
-            user_nums_by_id: &mut user_nums_by_id,
+            apply_caches: &mut apply_caches,
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
@@ -1787,10 +1782,8 @@ impl Runtime {
         record: &HistoryRecord,
     ) -> Result<()> {
         let table = context.schema.table_def(&record.table)?;
-        let row_num = cached_ensure_row_id_with_status(
+        let row_num = context.apply_caches.ensure_row_id_with_status(
             context.db,
-            context.row_nums_by_id,
-            context.row_nums_created_in_apply,
             &record.table,
             &record.row_id,
         )?;
@@ -1852,7 +1845,9 @@ impl Runtime {
                 field,
                 value,
                 |ref_table, row_id| {
-                    cached_ensure_row_id(context.db, context.row_nums_by_id, ref_table, row_id)
+                    context
+                        .apply_caches
+                        .ensure_row_id(context.db, ref_table, row_id)
                 },
             )?);
         }
@@ -1862,10 +1857,12 @@ impl Runtime {
             "j_created_by".to_owned(),
             "j_updated_by".to_owned(),
         ]);
-        let created_by_num =
-            cached_ensure_user(context.db, context.user_nums_by_id, &record.created_by)?;
-        let updated_by_num =
-            cached_ensure_user(context.db, context.user_nums_by_id, &record.updated_by)?;
+        let created_by_num = context
+            .apply_caches
+            .ensure_user(context.db, &record.created_by)?;
+        let updated_by_num = context
+            .apply_caches
+            .ensure_user(context.db, &record.updated_by)?;
         values.extend([
             rusqlite::types::Value::Integer(record.created_at),
             rusqlite::types::Value::Integer(record.updated_at),
@@ -1916,7 +1913,7 @@ impl Runtime {
                 )? {
                     return Ok(());
                 }
-            } else if !context.row_nums_created_in_apply.contains(&row_num)
+            } else if !context.apply_caches.row_created_in_apply(row_num)
                 && !is_newest_version_for_current(
                     context.db,
                     &record.table,
@@ -5462,9 +5459,7 @@ struct ApplyHistoryContext<'a> {
     tx_info_by_num: &'a BTreeMap<i64, ApplyTxInfo>,
     branch_nums_by_id: &'a BTreeMap<String, i64>,
     table_nums_by_name: &'a BTreeMap<String, i64>,
-    row_nums_by_id: &'a mut BTreeMap<(String, String), i64>,
-    row_nums_created_in_apply: &'a mut BTreeSet<i64>,
-    user_nums_by_id: &'a mut BTreeMap<String, i64>,
+    apply_caches: &'a mut ApplyCaches,
 }
 
 fn next_global_epoch(conn: &Connection) -> Result<i64> {
@@ -7477,53 +7472,6 @@ fn cached_public_row_id(
     let row_id = public_row_id(conn, row_num)?;
     cache.insert(row_num, row_id.clone());
     Ok(row_id)
-}
-
-fn cached_ensure_row_id(
-    conn: &Connection,
-    cache: &mut BTreeMap<(String, String), i64>,
-    table: &str,
-    row_id: &str,
-) -> Result<i64> {
-    let key = (table.to_owned(), row_id.to_owned());
-    if let Some(row_num) = cache.get(&key) {
-        return Ok(*row_num);
-    }
-    let row_num = ensure_row_id(conn, table, row_id)?;
-    cache.insert(key, row_num);
-    Ok(row_num)
-}
-
-fn cached_ensure_row_id_with_status(
-    conn: &Connection,
-    cache: &mut BTreeMap<(String, String), i64>,
-    created_in_apply: &mut BTreeSet<i64>,
-    table: &str,
-    row_id: &str,
-) -> Result<i64> {
-    let key = (table.to_owned(), row_id.to_owned());
-    if let Some(row_num) = cache.get(&key) {
-        return Ok(*row_num);
-    }
-    let (row_num, created) = ensure_row_id_with_status(conn, row_id)?;
-    if created {
-        created_in_apply.insert(row_num);
-    }
-    cache.insert(key, row_num);
-    Ok(row_num)
-}
-
-fn cached_ensure_user(
-    conn: &Connection,
-    cache: &mut BTreeMap<String, i64>,
-    user_id: &str,
-) -> Result<i64> {
-    if let Some(user_num) = cache.get(user_id) {
-        return Ok(*user_num);
-    }
-    let user_num = users::ensure_user(conn, user_id)?;
-    cache.insert(user_id.to_owned(), user_num);
-    Ok(user_num)
 }
 
 fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {

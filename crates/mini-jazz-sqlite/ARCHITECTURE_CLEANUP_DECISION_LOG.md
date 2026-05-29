@@ -227,3 +227,11 @@ phase that produces exactly the identity map later phases need. Move tx import,
 receipt import, rejection detail import, and `ApplyTxInfo` lookup into the
 `apply` module so history/read application can depend on a named `AppliedTxs`
 result instead of a cluster of locals.
+
+## 2026-05-28 23:50 PDT
+
+Next apply-boundary cleanup: row/user identity caches. These caches are shared
+across read and history application to avoid repeated SQLite lookups and to
+track rows created by the current apply. They should be explicit apply state,
+not free-floating `BTreeMap`s in runtime. This also prepares a cleaner future
+`apply_read_records` and `apply_history_records` phase split.
