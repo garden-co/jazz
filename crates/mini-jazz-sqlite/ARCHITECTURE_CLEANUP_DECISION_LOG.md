@@ -819,3 +819,9 @@ regress.
 - Query descriptor dedupe now asks `observed_query::identity_value` for semantic descriptor identity instead of deleting top-level `observed_ids` from arbitrary JSON.
 - Only top-window descriptors currently ignore repair-state `observed_ids`; other descriptors keep full value identity.
 - Focused window-descriptor and query-read tests pass.
+
+## 2026-05-29 03:46 PDT - Made sync apply dependencies explicit
+
+- Replaced the `sync_apply` wildcard runtime import with explicit dependencies and removed the import noise that had been living in `runtime.rs` only because `sync_apply` borrowed it ambiently.
+- This is deliberately not a giant split of the 1.6k-line apply path; the useful learning is that the real next extraction should be semantic, likely around awaiting dependency validation or query-scope repair, rather than a mechanical move.
+- Focused conflict metadata regression passes, and `cargo check -p mini-jazz-sqlite` is green.

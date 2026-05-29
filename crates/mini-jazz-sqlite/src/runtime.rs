@@ -1,9 +1,4 @@
-use crate::apply::{
-    apply_branch_records, apply_query_read_records, apply_read_records, apply_tx_records,
-    tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
-};
 use crate::auth::RuntimeAuth;
-use crate::profile::ProfileTimer;
 use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::query_observation::{built_query_from_read, observed_ids_from_query_value};
 use crate::read_visibility::ReadVisibility;
@@ -13,11 +8,10 @@ use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
-use crate::time::now_ms;
-use crate::types::{ApplyBundleProfile, ReadTier};
-use crate::{branch, policy, projection, query, query_predicate, read_set, tx, users, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use serde_json::{json, Value as JsonValue};
+use crate::types::ReadTier;
+use crate::{branch, query, query_predicate, read_set, tx, users, Result};
+use rusqlite::{params, params_from_iter, Connection};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod branches;
@@ -40,7 +34,6 @@ use history_export::*;
 use sync_apply::*;
 #[allow(unused_imports)]
 pub use transaction_builder::TransactionBuilder;
-use write_core::{record_tx_write_num, row_id_used_by_other_table};
 
 pub struct Runtime {
     conn: Connection,

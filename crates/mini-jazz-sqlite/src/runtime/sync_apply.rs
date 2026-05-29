@@ -1,4 +1,26 @@
-use super::*;
+use super::{insert_dynamic, Runtime};
+use crate::apply::{
+    apply_branch_records, apply_query_read_records, apply_read_records, apply_tx_records,
+    tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
+};
+use crate::profile::ProfileTimer;
+use crate::query_api::BuiltQuery;
+use crate::query_observation::{built_query_from_read, observed_ids_from_query_value};
+use crate::rows::{ensure_row_id, row_num};
+use crate::runtime::history_export::{
+    built_query_repair_keep_query, built_query_repair_scope, delete_current_rows_outside_keep_set,
+    id_predicate_values, integer_value, sql_placeholders, sql_value_to_json, text_value,
+    BuiltQueryRepairScope,
+};
+use crate::runtime::write_core::{record_tx_write_num, row_id_used_by_other_table};
+use crate::schema::{FieldKind, PolicyDef, SchemaDef};
+use crate::sync::{Bundle, HistoryRecord, QueryReadRecord};
+use crate::time::now_ms;
+use crate::types::{ApplyBundleProfile, ReadTier};
+use crate::{branch, policy, projection, query, query_predicate, read_set, tx, users, Result};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use serde_json::{json, Value as JsonValue};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct AwaitingDependencyTx {
     tx_num: i64,
