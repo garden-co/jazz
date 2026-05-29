@@ -549,13 +549,13 @@ regress.
 ## 2026-05-29 02:04 PDT - Sync export API moved behind a sync-export module
 
 - Moved table-history export, exclusive-transaction forwarding export, recursive query-scope export, and batched recursive refresh export into `runtime::sync_export`.
-- This keeps bundle production separate from bundle application. The remaining apply path has policy/fate/awaiting-dependency concerns and should move separately if it stays coherent.
+- This makes the public bundle-production surface findable separately from bundle application, but the boundary is still imperfect: exclusive forwarding export still reuses `history_records_for_tx` from `sync_apply` until we extract shared history-record reconstruction.
 - Focused recursive-query export/sync tests pass, including branch snapshots, tombstones, recursive policy ancestors, and refresh repair.
 
 ## 2026-05-29 02:06 PDT - Sync apply API moved behind a sync-apply module
 
 - Moved bundle apply, profiled apply, untrusted apply, exclusive forwarding staging, and awaiting-dependency revalidation into `runtime::sync_apply`.
-- This is the first extraction that names the authority-facing apply path directly. It separates "produce a bundle" from "validate and materialize a bundle into local SQLite state", which should make future policy/fate fixes less likely to land in export code by accident.
+- This is the first extraction that names the authority-facing apply path directly. It separates most "produce a bundle" work from "validate and materialize a bundle into local SQLite state", with the known exception that sync export still reuses one history reconstruction helper.
 - Focused sync/fate tests pass, including fail-closed validation, protocol versions, stale pending/rejected fate, page-boundary repair, required ref repair, idempotence, and out-of-order global epochs.
 
 ## 2026-05-29 02:10 PDT - Small misplaced runtime methods moved to their owning modules
@@ -886,3 +886,9 @@ regress.
 
 - Ran `cargo test -p mini-jazz-sqlite-wasm` after making the WASM constructor names schema-explicit.
 - The wasm-gated browser tests do not run on the host target, but the rlib/test target compiles and doc-tests cleanly.
+
+## 2026-05-29 04:06 PDT - Fixed final review findings
+
+- Final read-only review caught that the plain JS todo demo still called `MiniJazzRuntime.openOpfs(...)` after the schema-explicit WASM rename.
+- Updated the demo to call `openTodoOpfs(...)`, which matches its fixture/demo role.
+- Also softened earlier decision-log wording that overstated sync export/apply separation; export still reuses one history reconstruction helper from `sync_apply`.

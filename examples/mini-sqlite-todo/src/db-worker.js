@@ -20,7 +20,7 @@ self.onmessage = async ({ data }) => {
   try {
     if (data.type === "init") {
       await init();
-      db = await MiniJazzRuntime.openOpfs(data.dbName, data.nodeId, data.user);
+      db = await MiniJazzRuntime.openTodoOpfs(data.dbName, data.nodeId, data.user);
       if (!db.readRows("projects").some((row) => row.id === PROJECT_ID)) {
         db.insertRow("projects", PROJECT_ID, { title: "Todo list" });
       }
