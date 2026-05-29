@@ -465,6 +465,26 @@ impl Runtime {
         crate::persisted_text_ops::materialize(&self.conn, root)
     }
 
+    fn export_text_ops_delta(&self) -> Result<Vec<u8>> {
+        if !self.schema_has_deep_text_fields() {
+            return Ok(Vec::new());
+        }
+        Ok(crate::persisted_text_ops::export_delta(
+            &self.conn,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )?
+        .bytes)
+    }
+
+    fn schema_has_deep_text_fields(&self) -> bool {
+        self.schema.tables().any(|table| {
+            table
+                .fields
+                .iter()
+                .any(|field| matches!(field.kind, FieldKind::DeepText))
+        })
+    }
+
     fn current_deep_text_root(
         &self,
         table_name: &str,
@@ -864,7 +884,11 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        Ok(HistoryDelta { bundle, blocks })
+        Ok(HistoryDelta {
+            bundle,
+            blocks,
+            text_ops_delta: self.export_text_ops_delta()?,
+        })
     }
 
     pub fn export_all_history_delta(
@@ -909,6 +933,7 @@ impl Runtime {
         Ok(HistoryDelta {
             bundle: make_bundle(&self.schema, branches, txs, reads, Vec::new(), history),
             blocks,
+            text_ops_delta: self.export_text_ops_delta()?,
         })
     }
 
@@ -1719,7 +1744,11 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        Ok(HistoryDelta { bundle, blocks })
+        Ok(HistoryDelta {
+            bundle,
+            blocks,
+            text_ops_delta: self.export_text_ops_delta()?,
+        })
     }
 
     fn export_many_recursive_refs(
@@ -1829,13 +1858,17 @@ impl Runtime {
         self.apply_bundle_inner(bundle, true).map(|_| ())
     }
 
-    pub fn apply_history_delta(
-        &mut self,
-        bundle: &Bundle,
-        blocks: &[HistoryBlockExport],
-    ) -> Result<()> {
-        self.import_history_blocks(blocks)?;
-        self.apply_bundle(bundle)
+    pub fn apply_history_delta(&mut self, delta: &HistoryDelta) -> Result<()> {
+        if !delta.text_ops_delta.is_empty() {
+            let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
+            crate::persisted_text_ops::apply_delta(
+                &self.conn,
+                &delta.text_ops_delta,
+                &mut watermark,
+            )?;
+        }
+        self.import_history_blocks(&delta.blocks)?;
+        self.apply_bundle(&delta.bundle)
     }
 
     pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
@@ -2434,6 +2467,7 @@ impl Runtime {
             _ => Ok(HistoryDelta {
                 bundle: self.export_query_read_refresh(read)?,
                 blocks: Vec::new(),
+                text_ops_delta: self.export_text_ops_delta()?,
             }),
         }
     }
@@ -5719,7 +5753,11 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        Ok(HistoryDelta { bundle, blocks })
+        Ok(HistoryDelta {
+            bundle,
+            blocks,
+            text_ops_delta: self.export_text_ops_delta()?,
+        })
     }
 
     fn export_batched_query_scopes(
@@ -12310,5 +12348,36 @@ mod tests {
         );
         let row = alice.read_rows("docs").unwrap().remove(0);
         assert!(row.values["body"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn history_delta_applies_deep_text_sidecar_with_row_roots() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " sync")
+            .unwrap();
+
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!delta.text_ops_delta.is_empty());
+        bob.apply_history_delta(&delta).unwrap();
+
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello sync"
+        );
     }
 }

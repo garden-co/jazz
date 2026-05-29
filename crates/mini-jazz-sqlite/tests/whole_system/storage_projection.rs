@@ -437,8 +437,7 @@ fn table_history_delta_syncs_open_rows_and_missing_blocks() {
     assert_eq!(delta.bundle.history.len(), 1);
     assert_eq!(delta.blocks.len(), 1);
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
 
     let rows = bob.read_rows("notes").unwrap();
     assert_eq!(rows.len(), 1);
@@ -501,8 +500,7 @@ fn query_history_delta_syncs_open_rows_and_matching_blocks() {
     assert_eq!(delta.blocks.len(), 1);
     assert_eq!(delta.blocks[0].manifest.row_id, "note-1");
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
 
     let rows = bob
         .read_rows_where_eq("notes", "pinned", json!(true))
@@ -568,8 +566,7 @@ fn contains_query_history_delta_syncs_matching_blocks() {
     assert_eq!(delta.bundle.history.len(), 1);
     assert_eq!(delta.blocks.len(), 1);
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     let rows = bob
         .read_rows_where_contains("notes", "body", "alpha")
         .unwrap();
@@ -630,8 +627,7 @@ fn top_created_query_history_delta_syncs_matching_blocks() {
         .unwrap();
     assert_eq!(delta.blocks.len(), 1);
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     let rows = bob
         .read_rows_where_eq_top_created_at_desc("notes", "pinned", json!(true), 2)
         .unwrap();
@@ -703,8 +699,7 @@ fn top_field_query_history_delta_repairs_previous_observed_rows() {
             &[],
         )
         .unwrap();
-    bob.apply_history_delta(&initial.bundle, &initial.blocks)
-        .unwrap();
+    bob.apply_history_delta(&initial).unwrap();
     assert_eq!(
         bob.read_rows_where_eq_top_field_desc("notes", "pinned", json!(true), "rank", 1)
             .unwrap()[0]
@@ -791,8 +786,7 @@ fn observed_query_refresh_history_delta_includes_sealed_blocks() {
             &[],
         )
         .unwrap();
-    bob.apply_history_delta(&initial.bundle, &initial.blocks)
-        .unwrap();
+    bob.apply_history_delta(&initial).unwrap();
     assert_eq!(bob.observed_query_reads().unwrap().len(), 1);
 
     for idx in 0..4 {
@@ -818,8 +812,7 @@ fn observed_query_refresh_history_delta_includes_sealed_blocks() {
     assert_eq!(deltas[0].blocks.len(), 1);
 
     for delta in deltas {
-        bob.apply_history_delta(&delta.bundle, &delta.blocks)
-            .unwrap();
+        bob.apply_history_delta(&delta).unwrap();
     }
 
     let rows = bob
@@ -922,8 +915,7 @@ fn recursive_observed_query_refresh_history_delta_includes_sealed_blocks() {
     let initial = alice
         .export_recursive_refs_history_delta("folders", "root", "parent", &[])
         .unwrap();
-    bob.apply_history_delta(&initial.bundle, &initial.blocks)
-        .unwrap();
+    bob.apply_history_delta(&initial).unwrap();
     assert_eq!(bob.observed_query_reads().unwrap()[0].op, "recursive_refs");
 
     for idx in 0..4 {
@@ -947,8 +939,7 @@ fn recursive_observed_query_refresh_history_delta_includes_sealed_blocks() {
         .unwrap();
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].blocks.len(), 1);
-    bob.apply_history_delta(&deltas[0].bundle, &deltas[0].blocks)
-        .unwrap();
+    bob.apply_history_delta(&deltas[0]).unwrap();
 
     let rows = bob
         .read_recursive_refs("folders", "root", "parent")
@@ -1015,8 +1006,7 @@ fn all_history_delta_syncs_open_rows_and_missing_blocks_across_tables() {
     assert_eq!(delta.bundle.history.len(), 2);
     assert_eq!(delta.blocks.len(), 2);
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
 
     let docs = bob.read_rows("docs").unwrap();
     assert_eq!(docs.len(), 1);

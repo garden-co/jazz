@@ -1126,8 +1126,7 @@ fn branch_query_history_delta_with_compaction_stays_pinned_to_base_epoch() {
         .any(|record| record.values["title"] == json!("Main after branch")));
     assert!(delta.blocks.is_empty());
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     bob.checkout_branch("draft").unwrap();
     let rows = bob
         .read_rows_where_eq("tasks", "done", json!(false))
@@ -1178,8 +1177,7 @@ fn branch_table_history_delta_with_compaction_omits_future_main_blocks() {
     let delta = alice.export_table_history_delta("tasks", &[]).unwrap();
     assert!(delta.blocks.is_empty());
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     bob.checkout_branch("draft").unwrap();
     let rows = bob.read_rows("tasks").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1228,8 +1226,7 @@ fn branch_all_history_delta_with_compaction_omits_future_main_blocks() {
     let delta = alice.export_all_history_delta(&[]).unwrap();
     assert!(delta.blocks.is_empty());
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     bob.checkout_branch("draft").unwrap();
     let rows = bob.read_rows("tasks").unwrap();
     assert_eq!(rows.len(), 1);

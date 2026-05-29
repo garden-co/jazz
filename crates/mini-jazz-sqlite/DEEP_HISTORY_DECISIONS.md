@@ -875,3 +875,11 @@ Decision: introduce an explicit `deep_text` table field kind as the first runtim
 Why: the previous Block+Ops benchmark stored text roots and inline op bytes in benchmark-specific columns (`body_root`, `body_op`) and managed a separate sidecar connection by hand. That proved the representation but not the runtime shape. The next iteration should let schema authors opt into a deep-history text column, with Runtime methods owning the op-log write and storing only the current op root in ordinary Jazz row history/current storage.
 
 Scope impact: deep text remains an opt-in prototype column codec, not a transparent replacement for every `text` field. Reads use an explicit materialization API so sync/history code can still move compact root ids as normal row values.
+
+## Thu May 28 22:37:27 PDT 2026 - Make HistoryDelta Carry Text Ops
+
+Decision: extend `HistoryDelta` with a text-op sidecar payload and change `Runtime::apply_history_delta` to consume the whole delta object.
+
+Why: applying `bundle` and `blocks` separately made it too easy to mismatch pieces of one logical transfer, and text sidecar sync previously lived entirely in benchmark code. A coherent delta object is closer to the real sync shape: apply sidecar bytes first, then sealed blocks, then the open-history bundle.
+
+Scope impact: current text-op export is still coarse: when a schema contains deep-text fields, deltas carry the full text-op delta from an empty watermark. That is honest but not final; the next step is adding sidecar watermarks so incremental sync can avoid resending already-known text ops.

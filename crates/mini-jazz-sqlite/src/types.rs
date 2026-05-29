@@ -191,6 +191,7 @@ pub struct HistoryBlockExport {
 pub struct HistoryDelta {
     pub bundle: Bundle,
     pub blocks: Vec<HistoryBlockExport>,
+    pub text_ops_delta: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]

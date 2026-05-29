@@ -1228,8 +1228,7 @@ fn recursive_branch_history_delta_with_compaction_omits_future_main_blocks() {
         record.row_id == "child" && record.values["name"] == json!("Main after branch")
     }));
 
-    bob.apply_history_delta(&delta.bundle, &delta.blocks)
-        .unwrap();
+    bob.apply_history_delta(&delta).unwrap();
     bob.checkout_branch("draft").unwrap();
     let rows = bob
         .read_recursive_refs("folders", "root", "parent")

@@ -1,8 +1,9 @@
 use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
 use mini_jazz_sqlite::{
     persisted_text_ops, reset_runtime_write_phase_stats, take_runtime_write_phase_stats,
-    ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy, QueryExportProfile, Result,
-    RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats, SchemaDef, Storage, Value,
+    ApplyBundleProfile, HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta,
+    QueryExportProfile, Result, RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats,
+    SchemaDef, Storage, Value,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -4855,7 +4856,11 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
         let delta_wire = encode_native_bundle(&delta.bundle)?;
-        let delta_bundle = decode_native_bundle(&delta_wire)?;
+        let decoded_delta = HistoryDelta {
+            bundle: decode_native_bundle(&delta_wire)?,
+            blocks: delta.blocks.clone(),
+            text_ops_delta: delta.text_ops_delta.clone(),
+        };
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
         phase_ms.native_export += block_native_export_ms.unwrap_or(0.0);
         block_native_blocks = Some(delta.blocks.len());
@@ -4869,7 +4874,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         persisted_text_ops::install(&block_peer_ops)?;
         let mut block_watermark = 0i64;
         let block_import_started = Instant::now();
-        block_peer.apply_history_delta(&delta_bundle, &delta.blocks)?;
+        block_peer.apply_history_delta(&decoded_delta)?;
         let block_history = block_peer.export_table_history("documents")?;
         apply_inline_text_ops_from_bundle(
             &block_history,
@@ -5390,7 +5395,7 @@ fn run_naive_deep_history_case(
             input.schema.clone(),
         )?;
         let block_import_started = Instant::now();
-        block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
+        block_peer.apply_history_delta(&delta)?;
         let block_rows = block_peer.read_rows(input.table)?;
         if block_rows.len() != 1 {
             return Err(format!(
