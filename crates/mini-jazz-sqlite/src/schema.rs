@@ -527,6 +527,12 @@ fn validate_schema_shape(schema: &SchemaDef) -> Result<()> {
                 }
             }
         }
+        if table.branch_policies.len() > 1 {
+            return Err(crate::Error::new(format!(
+                "table {} declares multiple branch policy tables; the prototype supports one branch policy table per row table",
+                table.name
+            )));
+        }
         for branch_table_name in table.branch_policies.keys() {
             schema.table_def(branch_table_name)?;
         }

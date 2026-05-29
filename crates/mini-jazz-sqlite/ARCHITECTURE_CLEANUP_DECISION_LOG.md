@@ -655,3 +655,10 @@ regress.
 - Added a regression test where a globally accepted pinned row is later locally updated to unpinned; local query hides it while global query still returns the global pinned version.
 - Implemented the conservative tiered built-query path by reconstructing tier-visible rows from history, then applying built-query predicates/order/window to the semantic rows. This favors correctness over hot-path speed for non-local tier reads.
 - Focused tiered policy/subscription tests pass.
+
+## 2026-05-29 02:45 PDT - Made the single branch-policy table assumption explicit
+
+- The branch policy API shape can hold multiple policy backing tables, but the current runtime evaluation path used the first map entry. That was an attractive broken-window trap.
+- Added schema validation that rejects more than one branch policy backing table per row table until we define composition/selection semantics.
+- Renamed the internal helper from `active_branch_policy` to `single_branch_policy` so the limitation is visible at call sites.
+- Focused schema validation test passes.

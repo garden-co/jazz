@@ -32,7 +32,7 @@ pub(crate) struct WriteCheck<'a> {
 }
 
 pub(crate) fn write_allowed(check: WriteCheck<'_>) -> Result<bool> {
-    if let Some((branch_table, branch_policy)) = active_branch_policy(check.table, check.branch_num)
+    if let Some((branch_table, branch_policy)) = single_branch_policy(check.table, check.branch_num)
     {
         let Some(write_policy) = branch_policy.write_policy.as_ref() else {
             return Ok(false);
@@ -360,7 +360,7 @@ pub(crate) fn branch_read_policy_sql_for_alias(
             branch_context: None,
         }
     };
-    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+    if let Some((branch_table, branch_policy)) = single_branch_policy(table, branch_num) {
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
@@ -410,7 +410,7 @@ pub(crate) fn branch_snapshot_read_policy_sql_for_alias(
     branch_num: i64,
     base_epoch: i64,
 ) -> Result<String> {
-    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+    if let Some((branch_table, branch_policy)) = single_branch_policy(table, branch_num) {
         let Some(read_policy) = branch_policy.read_policy.as_ref() else {
             return Ok("0 = 1".to_owned());
         };
@@ -542,7 +542,7 @@ fn lower_policy(
     }
 }
 
-fn active_branch_policy(
+fn single_branch_policy(
     table: &TableDef,
     branch_num: i64,
 ) -> Option<(&str, &crate::schema::BranchPolicyDef)> {

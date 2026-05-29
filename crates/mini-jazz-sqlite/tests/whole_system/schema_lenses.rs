@@ -712,6 +712,31 @@ fn schema_validation_rejects_ambiguous_fields_and_indexes() {
     assert!(err
         .to_string()
         .contains("index records.bad references unknown field missing"));
+
+    let multiple_branch_policy_tables = SchemaDef::new()
+        .table("drafts", |table| {
+            table.text("owner");
+        })
+        .table("reviews", |table| {
+            table.text("owner");
+        })
+        .table("records", |table| {
+            table.text("owner");
+            table.read_for_branch_if_field_matches("drafts", "owner", "owner");
+            table.read_for_branch_if_field_matches("reviews", "owner", "owner");
+        });
+    let err = match Runtime::open_with_schema(
+        Storage::Memory,
+        "node",
+        "alice",
+        multiple_branch_policy_tables,
+    ) {
+        Ok(_) => panic!("multiple branch policy tables opened successfully"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("table records declares multiple branch policy tables"));
 }
 
 #[test]
