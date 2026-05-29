@@ -1382,3 +1382,11 @@ Decision: keep receive-side tx/history/tuple batch chunks at 500 rows instead of
 Why: a measured canonical run with 1000-row chunks did not improve the live apply path. Append was effectively neutral, Automerge was neutral-to-worse, and canvas got slower in tx/history/tuple buckets. Bigger SQL statements are not a free win here.
 
 Scope impact: the uncommitted chunk-size experiment was reverted.
+
+## Fri May 29 03:10:02 PDT 2026 - Rejected Incremental History Join Rewrite
+
+Decision: keep the correlated current-visibility `EXISTS` in incremental table-history export instead of rewriting it as a current-table join.
+
+Why: the join looked more relationally direct, but the measured canonical run got worse for append and Automerge live export/apply and was flat for canvas. SQLite was already handling the EXISTS shape well enough for this workload.
+
+Scope impact: the uncommitted SQL rewrite was reverted.
