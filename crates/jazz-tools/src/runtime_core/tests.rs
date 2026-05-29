@@ -2094,6 +2094,7 @@ fn noop_waker() -> std::task::Waker {
 }
 
 mod basic;
+mod batched_tick_parked_drain;
 mod fk_remove_error;
 mod install_transport_tests;
 mod query_subscription;
