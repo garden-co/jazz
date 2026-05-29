@@ -182,11 +182,21 @@ impl QueryScopeOptions<'_> {
 
 impl<'a> QueryScopeDeltaOptions<'a> {
     fn remote(remote_block_manifests: &'a [HistoryBlockManifest]) -> Self {
+        Self::remote_since_text_watermark(
+            remote_block_manifests,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )
+    }
+
+    fn remote_since_text_watermark(
+        remote_block_manifests: &'a [HistoryBlockManifest],
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Self {
         Self {
             ref_include_fields: &[],
             extra_row_ids: &[],
             remote_block_manifests,
-            text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+            text_ops_watermark,
         }
     }
 }
@@ -1917,6 +1927,23 @@ impl Runtime {
         parent_field: &str,
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<HistoryDelta> {
+        self.export_recursive_refs_history_delta_since_text_watermark(
+            table_name,
+            root_id,
+            parent_field,
+            remote_block_manifests,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )
+    }
+
+    fn export_recursive_refs_history_delta_since_text_watermark(
+        &self,
+        table_name: &str,
+        root_id: &str,
+        parent_field: &str,
+        remote_block_manifests: &[HistoryBlockManifest],
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<HistoryDelta> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -2015,11 +2042,8 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let blocks = self.export_history_blocks_matching(&missing_block_manifests)?;
-        let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
-            &bundle,
-            &blocks,
-            crate::persisted_text_ops::DeltaWatermark::default(),
-        )?;
+        let text_ops_delta =
+            self.export_text_ops_delta_for_bundle_since(&bundle, &blocks, text_ops_watermark)?;
         Ok(HistoryDelta {
             bundle,
             blocks,
@@ -2641,8 +2665,23 @@ impl Runtime {
         &self,
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<Vec<HistoryDelta>> {
+        self.export_observed_query_refresh_deltas_since_text_watermark(
+            remote_block_manifests,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )
+    }
+
+    pub fn export_observed_query_refresh_deltas_since_text_watermark(
+        &self,
+        remote_block_manifests: &[HistoryBlockManifest],
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<Vec<HistoryDelta>> {
         let reads = self.observed_query_reads()?;
-        self.export_query_read_refresh_deltas(&reads, remote_block_manifests)
+        self.export_query_read_refresh_deltas_since_text_watermark(
+            &reads,
+            remote_block_manifests,
+            text_ops_watermark,
+        )
     }
 
     pub fn export_query_read_refresh_deltas(
@@ -2650,13 +2689,30 @@ impl Runtime {
         reads: &[QueryReadRecord],
         remote_block_manifests: &[HistoryBlockManifest],
     ) -> Result<Vec<HistoryDelta>> {
+        self.export_query_read_refresh_deltas_since_text_watermark(
+            reads,
+            remote_block_manifests,
+            crate::persisted_text_ops::DeltaWatermark::default(),
+        )
+    }
+
+    pub fn export_query_read_refresh_deltas_since_text_watermark(
+        &self,
+        reads: &[QueryReadRecord],
+        remote_block_manifests: &[HistoryBlockManifest],
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    ) -> Result<Vec<HistoryDelta>> {
         let mut known_block_keys = remote_block_manifests
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
         let mut deltas = Vec::new();
         for read in reads {
-            let mut delta = self.export_query_read_refresh_delta(read, remote_block_manifests)?;
+            let mut delta = self.export_query_read_refresh_delta(
+                read,
+                remote_block_manifests,
+                text_ops_watermark,
+            )?;
             delta.blocks.retain(|block| {
                 let key = history_block_manifest_key(&block.manifest);
                 if known_block_keys.contains(&key) {
@@ -2693,54 +2749,84 @@ impl Runtime {
         &self,
         read: &QueryReadRecord,
         remote_block_manifests: &[HistoryBlockManifest],
+        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
     ) -> Result<HistoryDelta> {
         if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new("query refresh branch is not checked out"));
         }
         match read.op.as_str() {
-            "eq" => self.export_query_where_eq_history_delta(
-                &read.table,
-                &read.field,
-                read.value.clone(),
-                remote_block_manifests,
-            ),
-            "ne" => self.export_query_where_ne_history_delta(
-                &read.table,
-                &read.field,
-                read.value.clone(),
-                remote_block_manifests,
-            ),
+            "eq" => {
+                let rows = self.read_rows_where_eq(&read.table, &read.field, read.value.clone())?;
+                self.export_query_scope_history_delta(
+                    &read.table,
+                    &read.field,
+                    "eq",
+                    read.value.clone(),
+                    rows,
+                    QueryScopeDeltaOptions::remote_since_text_watermark(
+                        remote_block_manifests,
+                        text_ops_watermark,
+                    ),
+                )
+            }
+            "ne" => {
+                let rows = self.read_rows_where_ne(&read.table, &read.field, read.value.clone())?;
+                self.export_query_scope_history_delta(
+                    &read.table,
+                    &read.field,
+                    "ne",
+                    read.value.clone(),
+                    rows,
+                    QueryScopeDeltaOptions::remote_since_text_watermark(
+                        remote_block_manifests,
+                        text_ops_watermark,
+                    ),
+                )
+            }
             "contains" => {
                 let Some(needle) = read.value.as_str() else {
                     return Err(crate::Error::new("contains expects a string value"));
                 };
-                self.export_query_where_contains_history_delta(
+                let rows = self.read_rows_where_contains(&read.table, &read.field, needle)?;
+                self.export_query_scope_history_delta(
                     &read.table,
                     &read.field,
-                    needle,
-                    remote_block_manifests,
+                    "contains",
+                    JsonValue::String(needle.to_owned()),
+                    rows,
+                    QueryScopeDeltaOptions::remote_since_text_watermark(
+                        remote_block_manifests,
+                        text_ops_watermark,
+                    ),
                 )
             }
             "in" => {
                 let Some(values) = read.value.as_array() else {
                     return Err(crate::Error::new("in predicate expects an array value"));
                 };
-                self.export_query_where_in_history_delta(
+                let rows = self.read_rows_where_in(&read.table, &read.field, values.clone())?;
+                self.export_query_scope_history_delta(
                     &read.table,
                     &read.field,
-                    values.clone(),
-                    remote_block_manifests,
+                    "in",
+                    JsonValue::Array(values.clone()),
+                    rows,
+                    QueryScopeDeltaOptions::remote_since_text_watermark(
+                        remote_block_manifests,
+                        text_ops_watermark,
+                    ),
                 )
             }
             "recursive_refs" => {
                 let Some(root_id) = read.value.as_str() else {
                     return Err(crate::Error::new("recursive refs expects root id string"));
                 };
-                self.export_recursive_refs_history_delta(
+                self.export_recursive_refs_history_delta_since_text_watermark(
                     &read.table,
                     root_id,
                     &read.field,
                     remote_block_manifests,
+                    text_ops_watermark,
                 )
             }
             "eq_top_created_at_desc" => {
@@ -2753,13 +2839,28 @@ impl Runtime {
                     .get("limit")
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| crate::Error::new("top created query expects numeric limit"))?;
-                self.export_query_where_eq_top_created_at_desc_history_delta_with_previous_observed(
+                let rows = self.read_rows_where_eq_top_created_at_desc(
                     &read.table,
                     &read.field,
                     value.clone(),
                     limit as usize,
-                    observed_ids_from_query_value(&read.value)?,
-                    remote_block_manifests,
+                )?;
+                self.export_query_scope_history_delta(
+                    &read.table,
+                    &read.field,
+                    "eq_top_created_at_desc",
+                    json!({
+                        "eq": value,
+                        "limit": limit,
+                        "observed_ids": observed_row_ids(&rows),
+                    }),
+                    rows,
+                    QueryScopeDeltaOptions {
+                        ref_include_fields: &[],
+                        extra_row_ids: &observed_ids_from_query_value(&read.value)?,
+                        remote_block_manifests,
+                        text_ops_watermark,
+                    },
                 )
             }
             "eq_top_field_desc" => {
@@ -2799,17 +2900,14 @@ impl Runtime {
                         ref_include_fields: &[],
                         extra_row_ids: &observed_ids_from_query_value(&read.value)?,
                         remote_block_manifests,
-                        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+                        text_ops_watermark,
                     },
                 )
             }
             _ => {
                 let bundle = self.export_query_read_refresh(read)?;
-                let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
-                    &bundle,
-                    &[],
-                    crate::persisted_text_ops::DeltaWatermark::default(),
-                )?;
+                let text_ops_delta =
+                    self.export_text_ops_delta_for_bundle_since(&bundle, &[], text_ops_watermark)?;
                 Ok(HistoryDelta {
                     bundle,
                     blocks: Vec::new(),
@@ -14182,6 +14280,72 @@ mod tests {
         assert_eq!(stats.ops, 1);
 
         bob.apply_history_delta(&second_delta).unwrap();
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello again"
+        );
+    }
+
+    #[test]
+    fn query_refresh_deltas_can_increment_deep_text_sidecar_from_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("folder");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("folder".to_owned(), JsonValue::from("kept"))]),
+            )
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        let first_delta = alice
+            .export_query_where_eq_history_delta("docs", "folder", "kept", &[])
+            .unwrap();
+        let observed_reads = first_delta.bundle.query_reads.clone();
+        bob.apply_history_delta(&first_delta).unwrap();
+        let text_watermark = bob.current_text_ops_watermark().unwrap();
+
+        alice
+            .append_deep_text("docs", "doc-1", "body", " again")
+            .unwrap();
+        let mut refresh_deltas = alice
+            .export_query_read_refresh_deltas_since_text_watermark(
+                &observed_reads,
+                &[],
+                text_watermark,
+            )
+            .unwrap();
+        assert_eq!(refresh_deltas.len(), 1);
+        let refresh_delta = refresh_deltas.pop().unwrap();
+
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &first_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &refresh_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        assert_eq!(stats.ops, 1);
+
+        bob.apply_history_delta(&refresh_delta).unwrap();
         assert_eq!(
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello again"

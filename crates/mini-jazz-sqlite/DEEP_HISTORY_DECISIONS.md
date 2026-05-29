@@ -1278,3 +1278,11 @@ Decision: top-field history delta options now carry a deep-text sidecar watermar
 Why: top-field refresh is a real observed-query sync path. If the receiver already has old text ops, repeated refreshes should only carry the new sidecar ops required by the changed row versions. This keeps the public API closer to a cursor-shaped sync model without introducing a larger cursor abstraction yet.
 
 Scope impact: a runtime regression covers a second top-field HistoryDelta exporting exactly one new text op after the first refresh watermark.
+
+## Fri May 29 02:40:22 PDT 2026 - Query Refresh Deltas Carry Text-Op Watermarks
+
+Decision: observed-query refresh delta export now accepts a deep-text sidecar watermark and threads it through predicate, recursive-ref, top-created, top-field, and fallback refresh paths.
+
+Why: real sync refreshes are cursor-shaped. Block manifests already avoided resending sealed blocks, but text sidecar export was still pinned to zero in refresh APIs, which made repeated observed-query sync less honest than the benchmark-native path.
+
+Scope impact: direct query exports still default to a zero watermark for compatibility, while refresh callers can now pass the receiver watermark. A runtime regression verifies a refreshed predicate query exports exactly one new text op after the first sync.
