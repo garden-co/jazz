@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -14,6 +14,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "svelte-check": "^4.0.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vitest": "catalog:default"
