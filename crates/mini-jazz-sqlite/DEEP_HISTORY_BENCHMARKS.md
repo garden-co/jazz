@@ -162,6 +162,12 @@ directly instead of formatting JSON text first.
 - `tx info`: average `transaction_info(tx-id)` over sampled early, middle, and
   latest transaction ids
 
+Future benchmark dimension to add once the per-update numbers are comfortably
+low: full-system sync at realtime max-speed ingest. That run should measure the
+whole loop when ingestion never waits for per-update export: write into 10 ms
+SQLite commit slices, export one native delta per realtime sync slice, receive
+and apply it, then poll listener-visible semantic rows.
+
 For append and document edits, final-payload ratios compare storage to the text
 content produced by the run. For canvas positions, final-payload ratios are
 intentionally `N/A`; compare to the gzipped position trace instead. Storage rows
