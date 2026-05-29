@@ -5922,7 +5922,11 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 fn env_optional_usize(name: &str) -> Option<usize> {
-    env::var(name).ok().and_then(|value| value.parse().ok())
+    env::var(name).ok().map(|value| {
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid usize env var {name}={value:?}"))
+    })
 }
 
 fn deep_history_sample_every(specific_name: &str, default: usize) -> usize {
@@ -5947,10 +5951,10 @@ fn deep_history_max_rows_per_block() -> Option<usize> {
 fn env_bool(name: &str, default: bool) -> bool {
     env::var(name)
         .ok()
-        .and_then(|value| match value.as_str() {
-            "1" | "true" | "TRUE" | "yes" => Some(true),
-            "0" | "false" | "FALSE" | "no" => Some(false),
-            _ => None,
+        .map(|value| match value.as_str() {
+            "1" | "true" | "TRUE" | "yes" => true,
+            "0" | "false" | "FALSE" | "no" => false,
+            _ => panic!("invalid bool env var {name}={value:?}"),
         })
         .unwrap_or(default)
 }

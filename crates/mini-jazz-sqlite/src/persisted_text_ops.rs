@@ -80,6 +80,16 @@ pub fn replace_range(
     if start_byte > total_len || start_byte + delete_bytes > total_len {
         return Err(Error::new("text op replace range out of bounds"));
     }
+    if start_byte > 0 || delete_bytes > 0 {
+        let current = materialize(conn, root)?;
+        if !current.is_char_boundary(start_byte)
+            || !current.is_char_boundary(start_byte + delete_bytes)
+        {
+            return Err(Error::new(
+                "text op replace range must use UTF-8 boundaries",
+            ));
+        }
+    }
     conn.prepare_cached(
         "INSERT INTO jazz_text_op (start_byte, delete_bytes, insert_text, resulting_len)
          VALUES (?, ?, ?, ?)",

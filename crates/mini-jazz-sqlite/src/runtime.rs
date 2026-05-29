@@ -31,6 +31,7 @@ macro_rules! json {
 const HISTORY_BLOCK_FORMAT_VERSION: i64 = 10;
 const HISTORY_BLOCK_CODEC: &str = "columnar-bincode-lz4";
 const HISTORY_BLOCK_CACHE_CAPACITY: usize = 64;
+const APPLIED_TX_CACHE_CAPACITY: usize = 16_384;
 const HISTORY_BLOCK_KIND_ACCEPTED: i64 = 1;
 const HISTORY_BLOCK_KIND_REJECTED: i64 = 2;
 
@@ -2062,9 +2063,15 @@ impl Runtime {
         let commit_started = Instant::now();
         db.commit()?;
         let commit_ms = duration_ms(commit_started.elapsed());
-        self.applied_tx_cache
-            .borrow_mut()
-            .extend(pending_applied_tx_cache);
+        let mut applied_tx_cache = self.applied_tx_cache.borrow_mut();
+        applied_tx_cache.extend(pending_applied_tx_cache);
+        while applied_tx_cache.len() > APPLIED_TX_CACHE_CAPACITY {
+            let Some(first_key) = applied_tx_cache.keys().next().cloned() else {
+                break;
+            };
+            applied_tx_cache.remove(&first_key);
+        }
+        drop(applied_tx_cache);
 
         let revalidate_started = Instant::now();
         self.revalidate_awaiting_dependencies()?;

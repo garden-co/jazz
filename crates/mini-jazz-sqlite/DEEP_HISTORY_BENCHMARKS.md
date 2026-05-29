@@ -34,6 +34,7 @@ Scenario-specific sample intervals override the shared
 Current canonical inputs use scenario-specific sample intervals:
 
 ```bash
+MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER=1 \
 MINI_JAZZ_PERF_ONLY_DEEP_HISTORY=all \
 MINI_JAZZ_DEEP_HISTORY_APPEND_TOKENS=2225 \
 MINI_JAZZ_DEEP_HISTORY_APPEND_SAMPLE_EVERY=445 \
@@ -100,10 +101,11 @@ path: generic row writes use the same 10ms SQLite transaction batching policy as
 text op roots, and batched writes reuse user/table metadata, row numbers,
 creation metadata, and current visible-tx observations.
 `Block+Ops4` keeps the same storage/sync shape and treats the experimental
-single-writer incremental live path as the measured realtime path: live export
-uses a node/local-epoch watermark, receive caches exact already-applied txs,
-received read/write tuple columns are written together, and batched local tx
-rows are inserted with tuple JSONB already populated.
+single-writer incremental live path as the measured realtime path. This column
+requires `MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER=1`: live export uses a
+node/local-epoch watermark, receive caches exact already-applied txs, received
+read/write tuple columns are written together, and batched local tx rows are
+inserted with tuple JSONB already populated.
 `Block+Ops5` keeps the same format and further reduces receive-side SQLite
 statement count by batching tx upserts, open-history inserts, and tx tuple
 updates inside `apply_bundle`.
@@ -201,13 +203,10 @@ count; point reads and `transaction_info` stay as absolute per-call latencies.
 - Historical local point reads currently decode and scan a whole selected block.
   The first measured Block numbers are intentionally rough but show this path is
   a real optimization target.
-- The current Block payload uses v9 columnar JSON compressed with lz4. It is
-  not the final binary/delta-varint block format, but it already avoids repeated
-  per-record JSON object keys and stores user values as per-column arrays inside
-  sealed history blocks. v9 dictionary-codes repeated string metadata and
-  repeated user values, run/delta-codes integer metadata, run-codes nullable
-  integer/JSON/vector metadata, and keeps the v4 packing for text values shaped
-  as JSON `{x, y}` objects into numeric `x[]` / `y[]` streams.
+- The current Block payload uses format v10: columnar bundle records encoded
+  with bincode and compressed with lz4. It is not the final delta-varint block
+  format, but it already avoids repeated per-record JSON object keys by storing
+  transaction/read/history fields as column vectors before binary encoding.
 
 ## Reclaim Probe
 
@@ -243,6 +242,8 @@ replacement for history blocks.
 Quick non-canonical append Block sweep after adding
 `MINI_JAZZ_DEEP_HISTORY_MAX_ROWS_PER_BLOCK`. Inputs were the canonical append
 Block workload (`2225` updates, sample every `445`) with v9 columnar lz4 blocks.
+These numbers predate the current v10 columnar-bincode-lz4 block format and are
+kept only as historical tuning context.
 
 | max rows/block | blocks | historical read avg | block-native import | block payload bytes | database bytes |
 | -------------: | -----: | ------------------: | ------------------: | ------------------: | -------------: |
