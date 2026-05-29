@@ -148,6 +148,8 @@ feature exists.
 - Edge validation of untrusted branch writes reproduces the same pinned-base
   policy decision from synced branch/base history.
 - Branch query-scope repair is scoped by branch id.
+- Direct branch queries evaluate the same view as checking out the branch and
+  querying, while preserving the caller's previous checkout.
 - Stale branch-source metadata replay cannot override newer source-list state.
 - A branch delete of a pinned-base row exports a branch tombstone sufficient to
   repair peer recursive reads.

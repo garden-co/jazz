@@ -94,6 +94,8 @@ Coverage labels:
 #### `branches.rs`
 
 - `branch_local_write_is_invisible_on_main`: D.5
+- `direct_branch_query_matches_checkout_without_changing_current_branch`: D.5,
+  D.6
 - `branch_scoped_export_excludes_unrelated_branch_rows`: D.5, D.7
 - `branch_scoped_export_excludes_unrelated_deleted_rows`: D.5, D.7
 - `branch_reads_main_base_with_sparse_overlay`: D.5, D.4

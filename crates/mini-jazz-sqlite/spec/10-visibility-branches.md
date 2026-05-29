@@ -140,6 +140,12 @@ Branch creation uses a dedicated API that creates the backing row and engine
 branch metadata. `db.branch(branchId)` returns a branch-scoped handle and should
 fail early if the backing row is not visible under policy.
 
+Branch queries may also be expressed as an explicit branch parameter on a normal
+query. A direct branch query must evaluate with the same semantics as checking
+out that branch and running the query, but it must not mutate the caller's
+current checkout. This matters for tools, previews, branch pickers, and tests:
+branch context is query input, not hidden process-global state.
+
 Branch access has two policy layers:
 
 - can the session see/use/change the branch backing row?
@@ -195,6 +201,7 @@ Baseline branch features:
 - branch-local writes
 - branch reads over overlay plus pinned main base
 - branch reads over transitive acyclic source graphs
+- direct branch queries that preserve the caller's current checkout
 - branch sync including branch-local rows and base-only rows
 - branch policy/write validation against branch overlay plus pinned base
 - branch query-scope repair scoped by branch id
