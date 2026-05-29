@@ -129,11 +129,7 @@ impl QueryContext<'_> {
         let order_sql = self.lower_query_order(table, &query.order_by)?;
         let defer_window_until_effective_policy =
             self.defer_query_window_until_effective_branch_policy(table, query, base_epoch);
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["j_query_row_id".to_owned(), "j_query_tx_id".to_owned()];
         select_columns.extend(field_columns.iter().cloned());
         select_columns.push("j_query_created_by".to_owned());
@@ -159,7 +155,7 @@ impl QueryContext<'_> {
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 3;
+        let row_width = row_view_width(table, 2, 3);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -475,11 +471,7 @@ impl QueryContext<'_> {
         let (condition_sql, mut params) =
             self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
         let order_sql = self.lower_source_query_order(table, &query.order_by, "current", "ids")?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(
             field_columns
@@ -513,7 +505,7 @@ impl QueryContext<'_> {
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 3;
+        let row_width = row_view_width(table, 2, 3);
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
@@ -1009,11 +1001,7 @@ impl QueryContext<'_> {
             .iter()
             .find(|field| field.name == field_name)
             .ok_or_else(|| crate::Error::new(format!("unknown field {table_name}.{field_name}")))?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "value_index".to_owned(),
             "row_id".to_owned(),
@@ -1081,7 +1069,7 @@ impl QueryContext<'_> {
         params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
         params.push(rusqlite::types::Value::Integer(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let mut grouped = vec![Vec::new(); values.len()];
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             let value_index = row.get::<_, i64>(0)? as usize;
@@ -1153,11 +1141,7 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(
             field_columns
@@ -1196,7 +1180,7 @@ impl QueryContext<'_> {
             tier_sql = self.read_tier_sql("tx"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let rows = stmt.query_map(params![predicate_value, limit as i64], |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -1259,11 +1243,7 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "value_index".to_owned(),
             "row_id".to_owned(),
@@ -1332,7 +1312,7 @@ impl QueryContext<'_> {
         params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
         params.push(rusqlite::types::Value::Integer(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let mut grouped = vec![Vec::new(); values.len()];
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             let value_index = row.get::<_, i64>(0)? as usize;
@@ -1384,11 +1364,7 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let current_field_columns = field_columns
             .iter()
             .map(|column| format!("current.{column} AS {column}"))
@@ -1500,7 +1476,7 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Integer(limit as i64),
         ];
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -1543,11 +1519,7 @@ impl QueryContext<'_> {
                     "unknown order field {table_name}.{order_field_name}"
                 ))
             })?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let cte_field_columns = field_columns
             .iter()
             .map(|column| format!("current.{column} AS {column}"))
@@ -1631,7 +1603,7 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Integer(limit as i64),
         ];
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -1706,11 +1678,7 @@ impl QueryContext<'_> {
     pub(crate) fn read_row_candidates(&self, table_name: &str, id: &str) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
         let row_num = row_num(self.conn, id)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -1756,7 +1724,7 @@ impl QueryContext<'_> {
                 rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED),
             ]);
             let mut stmt = self.conn.prepare(&sql)?;
-            let row_width = 3 + table.fields.len() + 1;
+            let row_width = row_view_width(table, 3, 1);
             let mapped = stmt.query_map(params_from_iter(params.iter()), |row| {
                 (0..row_width)
                     .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -1822,11 +1790,7 @@ impl QueryContext<'_> {
         )? {
             return self.read_recursive_refs_from_visible_rows(table_name, root_id, parent_field);
         }
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(
             field_columns
@@ -1873,7 +1837,7 @@ impl QueryContext<'_> {
             child_policy_sql = self.visibility().current_policy_sql(table, "child")?,
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let rows = stmt.query_map(
             params![
                 root_num,
@@ -2016,11 +1980,7 @@ impl QueryContext<'_> {
         max_global_epoch: Option<i64>,
     ) -> Result<Vec<(i64, RowView)>> {
         let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "h.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -2085,7 +2045,7 @@ impl QueryContext<'_> {
             params.push(rusqlite::types::Value::Integer(max_global_epoch));
         }
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 3;
+        let row_width = row_view_width(table, 3, 3);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -2242,11 +2202,7 @@ impl QueryContext<'_> {
     ) -> Result<Option<RowView>> {
         let table = self.schema.table_def(table_name)?;
         let row_num = row_num(self.conn, id)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(
             field_columns
@@ -2269,7 +2225,7 @@ impl QueryContext<'_> {
             select_columns.join(", "),
             crate::schema::current_table(table_name),
         );
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows =
             stmt.query_map(params![row_num, branch_num, tx::OUTCOME_REJECTED], |row| {
@@ -2285,11 +2241,7 @@ impl QueryContext<'_> {
 
     fn read_rows_from_current(&self, table_name: &str, overlay_main: bool) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -2364,7 +2316,7 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Integer(self.branch_num),
         ]);
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -2388,11 +2340,7 @@ impl QueryContext<'_> {
         overlay_main: bool,
     ) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -2496,7 +2444,7 @@ impl QueryContext<'_> {
             params.push(predicate_value);
         }
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -2599,11 +2547,7 @@ impl QueryContext<'_> {
             return Ok(Vec::new());
         }
         let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -2681,7 +2625,7 @@ impl QueryContext<'_> {
         ]);
         params.extend(values);
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -2722,11 +2666,7 @@ impl QueryContext<'_> {
         overlay_main: bool,
     ) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(table_name)?;
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec![
             "current.j_branch_num".to_owned(),
             "ids.row_id".to_owned(),
@@ -2804,7 +2744,7 @@ impl QueryContext<'_> {
             rusqlite::types::Value::Text(needle.to_owned()),
         ]);
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 3 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 3, 1);
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
@@ -2861,11 +2801,7 @@ impl QueryContext<'_> {
             self.visibility()
                 .snapshot_policy_sql(table, "h", base_epoch)?
         };
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
+        let field_columns = quoted_field_columns(table);
         let mut select_columns = vec!["ids.row_id".to_owned(), "tx.tx_id".to_owned()];
         select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
         select_columns.push(format!(
@@ -2908,7 +2844,7 @@ impl QueryContext<'_> {
             policy_sql = policy_sql,
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 1;
+        let row_width = row_view_width(table, 2, 1);
         let rows = stmt.query_map(
             params![
                 tx::OUTCOME_REJECTED,
@@ -2954,6 +2890,22 @@ fn query_candidate_select_columns(
         format!("{row_alias}.row_num AS j_query_row_num"),
     ]);
     select_columns
+}
+
+fn quoted_field_columns(table: &crate::schema::TableDef) -> Vec<String> {
+    table
+        .fields
+        .iter()
+        .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+        .collect()
+}
+
+fn row_view_width(
+    table: &crate::schema::TableDef,
+    prefix_columns: usize,
+    system_columns: usize,
+) -> usize {
+    prefix_columns + table.fields.len() + system_columns
 }
 
 fn branch_depth_case_sql(conn: &Connection, branch_num: i64, row_alias: &str) -> Result<String> {

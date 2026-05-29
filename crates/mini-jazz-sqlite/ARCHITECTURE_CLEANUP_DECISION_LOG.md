@@ -970,3 +970,9 @@ regress.
 - Replaced the long `apply_query_scope_repair` conditional body with a small dispatcher over query-read kind.
 - Extracted private helpers for absent/recursive validation, top-created repair, top-field repair, IN expansion, id repair, `$createdBy` repair, and ordinary field predicate repair.
 - Decision: keep the helpers in `sync_apply` for now. The simplification goal is local readability, not a new cross-module repair abstraction.
+
+## 2026-05-29 13:24 PDT - Centralized query SQL row-shape helpers
+
+- Replaced repeated quoted field-column construction and row-width arithmetic in `query.rs` with small private helpers.
+- Kept the SQL assembly local to each read path instead of introducing a query-builder abstraction.
+- Validation: `cargo check -p mini-jazz-sqlite`; `cargo test -p mini-jazz-sqlite query_matrix -- --nocapture` passed 10 focused query/export tests.
