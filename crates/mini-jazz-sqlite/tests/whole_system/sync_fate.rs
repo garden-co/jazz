@@ -983,6 +983,26 @@ fn older_untagged_bundles_decode_as_protocol_version_one() {
 }
 
 #[test]
+fn native_bundles_roundtrip_protocol_metadata() {
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Native bundle metadata", false, "project-1")
+        .unwrap();
+
+    let exported = alice.export_query_scope_open_todos().unwrap();
+    let encoded = mini_jazz_sqlite::sync::encode_bundle(&exported).unwrap();
+    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+
+    assert_eq!(decoded.protocol_version, 1);
+    assert_eq!(decoded.schema_fingerprint, exported.schema_fingerprint);
+    assert_eq!(decoded.policy_fingerprint, exported.policy_fingerprint);
+    assert_eq!(decoded.history, exported.history);
+    assert_eq!(decoded.query_reads, exported.query_reads);
+}
+
+#[test]
 fn incompatible_schema_fingerprint_fails_closed_without_partial_apply() {
     let writer_schema = SchemaDef::new().table("notes", |table| {
         table.text("body");

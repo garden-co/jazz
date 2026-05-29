@@ -478,3 +478,10 @@ regress.
 - #973 had useful coverage that hyphenated node ids must not break transaction lookup, but the test was coupled to sealed history compaction.
 - Added a non-sealed whole-system test using a UUID-shaped node id and normal transaction lookup/read-set APIs.
 - This guards the generic invariant directly: transaction identity is opaque text and must never be recovered by splitting `tx-{node}-{epoch}` on hyphens.
+
+## 2026-05-29 01:28 PDT - Added native bundle codec boundary without adopting #973 columnar codec
+
+- #973's columnar binary bundle codec is too broad for this architecture PR, but the missing abstraction is real: callers should not have to know whether the native sync representation is JSON today or a compact binary format later.
+- Added `sync::encode_bundle` / `sync::decode_bundle` as the native codec boundary, currently implemented as JSON bytes.
+- Updated one existing serialization test to use that boundary and added smoke tests for protocol metadata and equality query-read roundtrips.
+- Also derived record equality for sync records, which makes codec roundtrip tests less awkward and gives future protocol changes sharper assertions.
