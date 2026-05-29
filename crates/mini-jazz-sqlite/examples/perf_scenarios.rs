@@ -4649,7 +4649,6 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let (initial_delta, _) =
         encode_decode_native_delta(writer.export_table_history_delta("documents", &[])?)?;
     let mut live_sync_writer_epoch = max_local_epoch_for_node(&initial_delta.bundle, "writer-node");
-    let mut live_text_ops_watermark = writer.current_text_ops_watermark()?;
     receiver.apply_history_delta(&initial_delta)?;
     let mut subscription = receiver.subscribe_rows("documents")?;
 
@@ -4714,18 +4713,17 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
             let receive_started = Instant::now();
             let export_started = Instant::now();
             let delta = if env_bool("MINI_JAZZ_DEEP_HISTORY_INCREMENTAL_LIVE_FILTER", false) {
-                writer.export_table_history_since_node_epoch_delta_since_text_watermark(
+                writer.export_table_history_since_node_epoch_delta_with_options(
                     "documents",
                     "writer-node",
                     live_sync_writer_epoch,
-                    live_text_ops_watermark,
+                    receiver.history_delta_export_options_for_table("documents")?,
                 )?
             } else {
                 writer.export_table_history_delta("documents", &[])?
             };
             live_sync_writer_epoch =
                 live_sync_writer_epoch.max(max_local_epoch_for_node(&delta.bundle, "writer-node"));
-            live_text_ops_watermark = writer.current_text_ops_watermark()?;
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let encode_decode_started = Instant::now();
             let (delta, _) = encode_decode_native_delta(delta)?;

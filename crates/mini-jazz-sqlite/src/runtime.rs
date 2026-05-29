@@ -642,6 +642,15 @@ impl Runtime {
         crate::persisted_text_ops::current_watermark(&self.conn)
     }
 
+    pub fn history_delta_export_options_for_table(
+        &self,
+        table_name: &str,
+    ) -> Result<HistoryDeltaExportOptions> {
+        Ok(HistoryDeltaExportOptions::new()
+            .with_remote_block_manifests(self.history_block_manifests(table_name)?)
+            .with_text_ops_watermark(self.current_text_ops_watermark()?))
+    }
+
     fn export_text_ops_delta_for_bundle_since(
         &self,
         bundle: &Bundle,
@@ -1106,10 +1115,25 @@ impl Runtime {
         after_local_epoch: i64,
         text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
     ) -> Result<HistoryDelta> {
+        self.export_table_history_since_node_epoch_delta_with_options(
+            table_name,
+            node_id,
+            after_local_epoch,
+            HistoryDeltaExportOptions::new().with_text_ops_watermark(text_ops_watermark),
+        )
+    }
+
+    pub fn export_table_history_since_node_epoch_delta_with_options(
+        &self,
+        table_name: &str,
+        node_id: &str,
+        after_local_epoch: i64,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<HistoryDelta> {
         let bundle =
             self.export_table_history_since_node_epoch(table_name, node_id, after_local_epoch)?;
         let text_ops_delta =
-            self.export_text_ops_delta_for_bundle_since(&bundle, &[], text_ops_watermark)?;
+            self.export_text_ops_delta_for_bundle_since(&bundle, &[], options.text_ops_watermark)?;
         Ok(HistoryDelta {
             bundle,
             blocks: Vec::new(),
@@ -1121,6 +1145,18 @@ impl Runtime {
         &self,
         table_name: &str,
         remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        self.export_table_history_delta_with_options(
+            table_name,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_table_history_delta_with_options(
+        &self,
+        table_name: &str,
+        options: HistoryDeltaExportOptions,
     ) -> Result<HistoryDelta> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -1138,7 +1174,8 @@ impl Runtime {
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let bundle = make_bundle(&self.schema, branches, txs, reads, Vec::new(), history);
-        let remote_keys = remote_block_manifests
+        let remote_keys = options
+            .remote_block_manifests
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
@@ -1155,7 +1192,7 @@ impl Runtime {
         let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
             &bundle,
             &blocks,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            options.text_ops_watermark,
         )?;
         Ok(HistoryDelta {
             bundle,
@@ -1167,6 +1204,16 @@ impl Runtime {
     pub fn export_all_history_delta(
         &self,
         remote_block_manifests: &[HistoryBlockManifest],
+    ) -> Result<HistoryDelta> {
+        self.export_all_history_delta_with_options(
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec()),
+        )
+    }
+
+    pub fn export_all_history_delta_with_options(
+        &self,
+        options: HistoryDeltaExportOptions,
     ) -> Result<HistoryDelta> {
         let user = self.policy_user();
         let bypass_policy = self.bypasses_policy();
@@ -1182,7 +1229,8 @@ impl Runtime {
                 bypass_policy,
                 self.branch_num,
             )?);
-            let remote_keys = remote_block_manifests
+            let remote_keys = options
+                .remote_block_manifests
                 .iter()
                 .map(history_block_manifest_key)
                 .collect::<BTreeSet<_>>();
@@ -1207,7 +1255,7 @@ impl Runtime {
         let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
             &bundle,
             &blocks,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            options.text_ops_watermark,
         )?;
         Ok(HistoryDelta {
             bundle,
@@ -14206,7 +14254,7 @@ mod tests {
             .unwrap();
         let first_delta = alice.export_all_history_delta(&[]).unwrap();
         bob.apply_history_delta(&first_delta).unwrap();
-        let text_watermark = alice.current_text_ops_watermark().unwrap();
+        let bob_state = bob.history_delta_export_options_for_table("docs").unwrap();
         let row_epoch = first_delta
             .bundle
             .txs
@@ -14220,11 +14268,11 @@ mod tests {
             .append_deep_text("docs", "doc-1", "body", " again")
             .unwrap();
         let second_delta = alice
-            .export_table_history_since_node_epoch_delta_since_text_watermark(
+            .export_table_history_since_node_epoch_delta_with_options(
                 "docs",
                 "alice-node",
                 row_epoch,
-                text_watermark,
+                bob_state,
             )
             .unwrap();
         assert!(!second_delta.text_ops_delta.is_empty());

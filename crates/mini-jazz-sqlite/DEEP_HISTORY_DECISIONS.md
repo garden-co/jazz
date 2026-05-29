@@ -1294,3 +1294,11 @@ Decision: ordinary predicate query HistoryDelta APIs now have `HistoryDeltaExpor
 Why: the runtime was growing one-off sync knobs. A caller should be able to pass receiver state as one options object instead of remembering which query shape has a special watermark method. This is a small step toward a real sync cursor without committing to the final cursor shape yet.
 
 Scope impact: equality, inequality, contains, and in-query delta exports can now increment deep-text sidecar bytes directly from the receiver watermark. A regression covers the equality path exporting exactly one new text op after an initial query sync.
+
+## Fri May 29 02:45:08 PDT 2026 - Capture Receiver Delta Export State
+
+Decision: add `Runtime::history_delta_export_options_for_table`, returning the receiver state a sender needs to avoid resending sealed blocks and deep-text sidecar ops for a table. Table-history delta exports now also accept the shared `HistoryDeltaExportOptions` object.
+
+Why: real sync call sites should not manually stitch together block manifests and text-op watermarks or accidentally use the sender watermark as a proxy for receiver state. The benchmark live path now asks the receiver for its current export options before each incremental table delta.
+
+Scope impact: existing table/all-history delta methods remain wrappers. The text benchmark still preserves one Jazz row per update, but its live incremental sync is now shaped like sender-export-against-receiver-state rather than benchmark-private sidecar bookkeeping.
