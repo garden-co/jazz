@@ -802,7 +802,7 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after grouping storage-admin APIs and centralizing observed-query decoding.
 - Result: 439 passed, 18 ignored placeholders, 0 failed.
 
-## 2026-05-29 03:41 PDT - Made todo fixture construction explicit
+## 2026-05-29 03:40 PDT - Made todo fixture construction explicit
 
 - Renamed raw `Harness::memory` / `Harness::durable` helpers to `todo_memory` / `todo_durable` so tests must opt into the todo fixture by name.
 - Kept generic topology recipes named `memory` because they accept an explicit schema and model reusable topologies rather than a default app universe.
