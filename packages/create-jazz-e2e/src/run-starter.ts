@@ -11,9 +11,10 @@ const APP_NAME = "test-app";
 
 /**
  * Workspace packages every starter's dependency closure can transitively pull
- * in. We pack each as a tarball and pin them via `pnpm.overrides` in the
- * scaffolded project, so `pnpm install` resolves against the local workspace
- * even when the alpha versions aren't on npm yet (e.g. during a release PR).
+ * in. We pack each as a tarball and pin them via `overrides` in the
+ * scaffolded project's `pnpm-workspace.yaml`, so `pnpm install` resolves
+ * against the local workspace even when the alpha versions aren't on npm
+ * yet (e.g. during a release PR).
  */
 const PACKAGES_TO_PACK = ["jazz-tools", "jazz-napi", "jazz-wasm"] as const;
 
@@ -203,16 +204,36 @@ async function packWorkspaceTarballs(
   return tarballs;
 }
 
-function patchManifestWithOverrides(manifestPath: string, tarballs: Record<string, string>): void {
-  const raw = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as {
-    pnpm?: { overrides?: Record<string, string> };
-  } & Record<string, unknown>;
-  const overrides: Record<string, string> = { ...raw.pnpm?.overrides };
-  for (const [pkg, tgz] of Object.entries(tarballs)) {
-    overrides[pkg] = `file:${tgz}`;
-  }
-  raw.pnpm = { ...raw.pnpm, overrides };
-  fs.writeFileSync(manifestPath, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+/**
+ * pnpm 10 stopped reading the `pnpm` field in package.json — it emits
+ * `[WARN] The "pnpm" field in package.json is no longer read by pnpm` and
+ * ignores anything underneath, including `overrides`. The canonical home is
+ * `pnpm-workspace.yaml` (yes, even in a non-workspace single-project setup).
+ *
+ * We also pre-approve build scripts for known native/postinstall-using deps;
+ * pnpm 10 exits non-zero from `pnpm install` if it sees a build script for a
+ * package that isn't on the allowlist (`ERR_PNPM_IGNORED_BUILDS`). Listing
+ * the common ones here keeps the harness's install reliable across starters.
+ */
+const ONLY_BUILT_DEPENDENCIES = [
+  "@swc/core",
+  "better-sqlite3",
+  "blake3",
+  "bufferutil",
+  "esbuild",
+  "lefthook",
+  "protobufjs",
+  "sharp",
+  "utf-8-validate",
+];
+
+function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, string>): void {
+  const overrideLines = Object.entries(tarballs)
+    .map(([pkg, tgz]) => `  "${pkg}": "file:${tgz}"`)
+    .join("\n");
+  const allowLines = ONLY_BUILT_DEPENDENCIES.map((p) => `  - "${p}"`).join("\n");
+  const yaml = `overrides:\n${overrideLines}\n\nonlyBuiltDependencies:\n${allowLines}\n`;
+  fs.writeFileSync(path.join(appDir, "pnpm-workspace.yaml"), yaml, "utf-8");
 }
 
 function writeEnvFile(
@@ -277,8 +298,8 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       };
       // create-jazz auto-installs if it can detect a package manager via
       // `npm_config_user_agent`. We unset it so the CLI exits after scaffolding;
-      // we run pnpm install ourselves below, after patching overrides into the
-      // manifest. Otherwise the install runs first and resolves against npm.
+      // we run pnpm install ourselves below, after writing the workspace
+      // overrides. Otherwise the install runs first and resolves against npm.
       delete env.npm_config_user_agent;
 
       await runChild(
@@ -288,18 +309,19 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       );
     });
 
-    patchManifestWithOverrides(path.join(appDir, "package.json"), tarballs);
+    writeScaffoldedPnpmConfig(appDir, tarballs);
 
     await recordPhase("install", () =>
-      runChild(
-        "pnpm",
-        ["install", "--ignore-workspace", "--no-frozen-lockfile", "--prefer-offline"],
-        {
-          cwd: appDir,
-          verbose,
-          description: `pnpm install ${opts.starter}`,
-        },
-      ),
+      // No `--ignore-workspace` here: that would make pnpm skip the
+      // pnpm-workspace.yaml we just wrote (which is where pnpm 10 reads
+      // `overrides` and `onlyBuiltDependencies` from). The scaffolded folder
+      // lives in $TMPDIR, so there's no risk of pnpm walking up into the
+      // jazz monorepo's workspace by accident.
+      runChild("pnpm", ["install", "--no-frozen-lockfile", "--prefer-offline"], {
+        cwd: appDir,
+        verbose,
+        description: `pnpm install ${opts.starter}`,
+      }),
     );
 
     patchInstalledJazzNapi(appDir, opts.repoRoot);
