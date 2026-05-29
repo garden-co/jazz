@@ -599,3 +599,9 @@ regress.
 - Lifted the ambient history/export helper family out of `runtime.rs` into `runtime::history_export`: transaction export, read-set export, branch provenance export, policy dependency export, query-scope repair candidates, visible/history version export, bundle construction, and SQL helper utilities used by export paths.
 - This is still not the final abstraction: many helpers remain broad `pub(super)` because neighboring query/sync modules call them directly. The important improvement is that future work now has a named export boundary instead of adding more tail-end functions to the central runtime file.
 - Focused query-matrix, recursive-query, and sync tests pass after the move.
+
+## 2026-05-29 02:25 PDT - Apply-side repair methods moved to sync-apply
+
+- Moved bundle application's query-scope repair and history-record materialization methods from the central runtime file into `runtime::sync_apply`.
+- This makes `sync_apply` the owner of both the top-level apply APIs and the repair/materialization machinery they invoke, instead of splitting the apply path across an impl block in one file and helper methods in another.
+- Focused sync-fate and query-matrix tests pass after the move.
