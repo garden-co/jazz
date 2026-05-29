@@ -513,10 +513,9 @@ Implementation lessons from the prototype:
   locally, but leaking them into default query order creates cross-replica
   divergence when bundles are applied in different orders.
 - Query descriptor lifetime is a protocol concern. The prototype showed that
-  simply making descriptor tables temporary breaks reconnect repair when stale
-  cached facts survive restart. The durable product contract should be active
-  descriptor replay plus settled-query repair, not persisted query interest as
-  user data.
+  stale cached facts survive restart while active query interest does not. The
+  durable product contract is active descriptor replay plus settled-query repair,
+  not persisted query interest as user data.
 - Create/update intent should be explicit at the API boundary. Treating
   `insert` as an accidental update hid important product semantics; the current
   shape is create-only `insert`, explicit `update`, and explicit `upsert`.
@@ -541,10 +540,10 @@ Known implementation tensions:
   source-depth precedence, source-list replay ordering, and conflict behavior,
   but product branch backing-row permissions and merge APIs remain incomplete.
 - Active query descriptors now drive reconnect refresh and subscription
-  recovery in the prototype. They should be replayed by downstream clients
-  rather than persisted as durable query state. A storage-only switch to
-  connection-local descriptors is not enough, because retained cache facts and
-  active query truth need an explicit settlement/resubscribe boundary.
+  recovery in the prototype. They are replayed by downstream clients rather than
+  persisted as durable query state. Remaining work is to make the
+  settlement/resubscribe boundary explicit enough for compact reconnect
+  summaries and UI-level settled-state reporting.
 - Mergeable upsert is now product-shaped for create, update, sync, and
   restore-after-delete. Exclusive upsert over an existing row is still a real
   semantic gap: it needs either expected-version/read-set requirements or a

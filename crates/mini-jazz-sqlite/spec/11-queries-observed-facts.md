@@ -137,12 +137,12 @@ the row ids that were previously published for that descriptor. Refresh uses
 those ids as repair candidates so rows that left the page can be removed, while
 the current support query supplies replacement boundary rows. This is semantic
 repair metadata, not an embedded durable result snapshot.
-Prototype note: removing durable query descriptors by changing storage alone is
-not correct. If retained local facts remain after restart but the active query
-descriptor/result scope is forgotten, a later resubscribe with an empty current
-result cannot distinguish stale cached facts from the authoritative current
-result. The replacement needs an explicit resubscribe/query-settlement protocol
-that separates retained cache state from active query truth.
+Prototype note: the current implementation now clears stored query descriptors
+on runtime open and models reconnect by replaying query descriptors from the
+downstream client or tab. This is the correct product direction. The remaining
+work is an explicit resubscribe/query-settlement protocol that separates
+retained cache state from active query truth, especially for compact reconnect
+summaries and UI settlement barriers.
 
 When an upstream peer refreshes active query descriptors for one downstream
 peer, it should plan compatible descriptors together before assembling bundles.

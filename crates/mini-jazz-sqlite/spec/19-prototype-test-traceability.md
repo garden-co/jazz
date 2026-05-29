@@ -482,9 +482,9 @@ them concrete:
   until the dependency arrives
 - fate-before-history delivery survives durable restart and materializes when
   history later arrives
-- removing durable observed-query descriptors requires an explicit
-  resubscribe/query-settlement protocol, because retained local facts and
-  current query results are not the same thing
+- observed-query descriptors are connection-local and replayed after restart;
+  explicit query-settlement protocol is still needed because retained local
+  facts and current query results are not the same thing
 - windowed built-query refresh uses previously observed row ids as repair
   candidates and current support rows as page-boundary replacements
 - duplicated/reordered table bundles converge across a simple multi-tier
@@ -541,9 +541,8 @@ The largest gaps between Appendix D and the current prototype tests are:
 - exclusive upsert semantics over existing rows in multi-tier topologies
 - forwarded exclusive transaction retry/offline transport and proactive
   dependency request/subscription mechanics for mergeable `awaiting_deps`
-- compact reconnect summaries and active query-descriptor replay protocol,
-  including how to stop persisting observed descriptors without leaving stale
-  local facts in current query results
+- compact reconnect summaries, active query-descriptor replay protocol, and
+  settled-state reporting over retained cache facts
 - union semantics for merging overlapping query bundles with different scoped
   metadata fingerprints
 - catalogue observed facts

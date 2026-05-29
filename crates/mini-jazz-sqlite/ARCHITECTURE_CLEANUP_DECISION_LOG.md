@@ -702,3 +702,9 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after the observed-query semantic flip and restart test migrations.
 - Result: 436 passed, 18 ignored placeholders, 0 failed.
 - This gives the PR a new green baseline after a product-shaped behavior change, not just module movement.
+
+## 2026-05-29 03:02 PDT - Updated spec language after query replay implementation
+
+- Replaced outdated spec caveats that treated connection-local query descriptors as future/unsafe storage-only work.
+- The spec now says the prototype clears descriptors on runtime open and relies on downstream replay, while keeping explicit query settlement and compact reconnect summaries as remaining protocol work.
+- This keeps the spec aligned with the green implementation rather than leaving a contradiction for reviewers.

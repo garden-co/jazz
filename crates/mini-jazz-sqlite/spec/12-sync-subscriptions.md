@@ -241,25 +241,23 @@ Downstream runtimes replay active query descriptors to upstream peers after
 disconnects and upstream restarts. This replay should trickle upward through
 workers, edges, and global services. Queries are not durable disk state; app
 restart normally recreates them by resubscribing from application code.
-Until the resubscribe/query-settlement protocol is explicit, durable
-intermediaries may keep implementation-local descriptor state as a correctness
-scaffold. That state must not become product data: active interest is derived
-from downstream replay, and retained rows outside active query results are cache
-state.
+The prototype follows this direction by clearing observed query descriptors when
+a runtime opens and by testing reconnect repair with explicit descriptor replay.
+Active interest is derived from downstream replay, and retained rows outside
+active query results are cache state.
 
 Descriptor replay must distinguish retained local facts from the authoritative
 current result of a reissued query. A durable cache may retain rows learned from
 old scopes, but after reconnect or resubscribe the newly settled query result is
 defined by the current descriptor replay and repair bundle, not by every cached
-row that happens to still exist locally. This is why removing persisted
-descriptor state is a protocol change, not a storage-layout-only cleanup.
+row that happens to still exist locally.
 
 Open issues:
 
 - affected-row discovery should become narrower than broad projection repair,
   but broad repair is acceptable as a correctness baseline
-- in-memory receiver-side storage for active query descriptors and scope
-  contraction
+- explicit receiver-side storage/registry for active query descriptors and
+  scope contraction during a live session
 - whether incoming predicate facts should directly mutate current projection or
   only schedule rerun/repair work
 - staged apply/validate/publish pipeline for untrusted authority intake
