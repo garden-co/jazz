@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:02:56 PDT 2026
+
+Decision: keep sealed-block deep-text root ranges range-shaped through sidecar export.
+
+Why: history block indexing stores consecutive deep-text roots as ranges so compacted append/document histories do not create one side-index row per edit. Export was immediately expanding those ranges back to individual roots before asking the text-op sidecar for bytes. That was correct, but it wasted memory and repeated root-walk setup for exactly the histories blocks are meant to make compact.
+
+Scope impact: `persisted_text_ops` now exports deltas from explicit roots plus root ranges. For a range it includes every op in the range and the ancestor path needed to materialize the first root, preserving semantic independence without expanding the block index in `Runtime`. Existing tests cover range indexes and a new text-op test verifies a range export can materialize the latest root.
+
 ## Fri May 29 01:59:43 PDT 2026
 
 Decision: validate snapshot chunk integrity inside the deep-text delta decoder.

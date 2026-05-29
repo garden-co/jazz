@@ -649,9 +649,11 @@ impl Runtime {
             return Ok(Vec::new());
         }
         let mut roots = deep_text_roots_for_bundle(&self.schema, bundle)?;
+        let mut root_ranges = Vec::new();
         for block in blocks {
-            let indexed_roots = history_block_text_roots(&self.conn, block.manifest.block_id)?;
-            if indexed_roots.is_empty() {
+            let indexed_ranges =
+                history_block_text_root_ranges(&self.conn, block.manifest.block_id)?;
+            if indexed_ranges.is_empty() {
                 let block_bundle = decode_history_block_payload(
                     &block.manifest.codec,
                     block.manifest.format_version,
@@ -659,10 +661,18 @@ impl Runtime {
                 )?;
                 roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
             } else {
-                roots.extend(indexed_roots);
+                root_ranges.extend(indexed_ranges);
             }
         }
-        Ok(crate::persisted_text_ops::export_delta_for_roots(&self.conn, roots, watermark)?.bytes)
+        Ok(
+            crate::persisted_text_ops::export_delta_for_roots_and_ranges(
+                &self.conn,
+                roots,
+                root_ranges,
+                watermark,
+            )?
+            .bytes,
+        )
     }
 
     fn schema_has_deep_text_fields(&self) -> bool {
@@ -10131,10 +10141,21 @@ fn consecutive_root_ranges(mut roots: Vec<i64>) -> Vec<(i64, i64)> {
     ranges
 }
 
+#[cfg(test)]
 fn history_block_text_roots(
     conn: &Connection,
     block_id: i64,
 ) -> Result<Vec<crate::persisted_text_ops::TextRoot>> {
+    let mut roots = Vec::new();
+    for (min_root, max_root) in history_block_text_root_ranges(conn, block_id)? {
+        for root_op_id in min_root..=max_root {
+            roots.push(Some(root_op_id));
+        }
+    }
+    Ok(roots)
+}
+
+fn history_block_text_root_ranges(conn: &Connection, block_id: i64) -> Result<Vec<(i64, i64)>> {
     let mut stmt = conn.prepare_cached(
         "SELECT min_root_op_id, max_root_op_id
          FROM history_block_text_root_range
@@ -10144,14 +10165,8 @@ fn history_block_text_roots(
     let rows = stmt.query_map(params![block_id], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
     })?;
-    let mut roots = Vec::new();
-    for row in rows {
-        let (min_root, max_root) = row?;
-        for root_op_id in min_root..=max_root {
-            roots.push(Some(root_op_id));
-        }
-    }
-    Ok(roots)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn history_block_tx_ranges(

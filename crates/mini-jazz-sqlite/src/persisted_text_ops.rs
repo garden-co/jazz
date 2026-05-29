@@ -265,6 +265,15 @@ pub fn export_delta_for_roots(
     roots: impl IntoIterator<Item = TextRoot>,
     watermark: DeltaWatermark,
 ) -> Result<EncodedDelta> {
+    export_delta_for_roots_and_ranges(conn, roots, std::iter::empty(), watermark)
+}
+
+pub fn export_delta_for_roots_and_ranges(
+    conn: &Connection,
+    roots: impl IntoIterator<Item = TextRoot>,
+    root_ranges: impl IntoIterator<Item = (i64, i64)>,
+    watermark: DeltaWatermark,
+) -> Result<EncodedDelta> {
     let mut op_ids = BTreeSet::new();
     let mut snapshot_op_ids = BTreeSet::new();
     let mut ancestor_stmt =
@@ -293,6 +302,59 @@ pub fn export_delta_for_roots(
                 .query_row(params![op_id], |row| row.get::<_, Option<i64>>(0))
                 .optional()?
                 .ok_or_else(|| Error::new("unknown text op root"))?;
+        }
+    }
+    let mut range_op_stmt = conn.prepare_cached(
+        "SELECT op_id
+         FROM jazz_text_op
+         WHERE op_id BETWEEN ? AND ?
+         ORDER BY op_id",
+    )?;
+    for (min_root, max_root) in root_ranges {
+        if min_root > max_root {
+            return Err(Error::new("invalid text op root range"));
+        }
+        if min_root > watermark.op_id {
+            let mut current = Some(min_root);
+            while let Some(op_id) = current {
+                if op_id <= watermark.op_id {
+                    break;
+                }
+                let newly_inserted = op_ids.insert(op_id);
+                if let Some(snapshot_id) = snapshot_stmt
+                    .query_row(params![op_id], |row| row.get::<_, i64>(0))
+                    .optional()?
+                {
+                    if snapshot_id > watermark.snapshot_id {
+                        snapshot_op_ids.insert(op_id);
+                    }
+                    break;
+                }
+                if !newly_inserted {
+                    break;
+                }
+                current = ancestor_stmt
+                    .query_row(params![op_id], |row| row.get::<_, Option<i64>>(0))
+                    .optional()?
+                    .ok_or_else(|| Error::new("unknown text op root"))?;
+            }
+        }
+        let first_needed = min_root.max(watermark.op_id + 1);
+        if first_needed <= max_root {
+            let rows = range_op_stmt
+                .query_map(params![first_needed, max_root], |row| row.get::<_, i64>(0))?;
+            for row in rows {
+                let op_id = row?;
+                op_ids.insert(op_id);
+                if let Some(snapshot_id) = snapshot_stmt
+                    .query_row(params![op_id], |row| row.get::<_, i64>(0))
+                    .optional()?
+                {
+                    if snapshot_id > watermark.snapshot_id {
+                        snapshot_op_ids.insert(op_id);
+                    }
+                }
+            }
         }
     }
     encode_delta_for_op_ids(conn, &op_ids, &snapshot_op_ids)
@@ -1002,6 +1064,31 @@ mod tests {
             "hello Ada!"
         );
         assert_eq!(watermark.op_id, 4);
+    }
+
+    #[test]
+    fn binary_delta_can_export_root_ranges() {
+        let source = open_text_store();
+        let target = open_text_store();
+
+        let mut root = None;
+        root = append(&source, root, "a", 0).expect("append 1");
+        root = append(&source, root, "b", 0).expect("append 2");
+        root = append(&source, root, "c", 0).expect("append 3");
+        root = append(&source, root, "d", 0).expect("append 4");
+
+        let delta = export_delta_for_roots_and_ranges(
+            &source,
+            std::iter::empty(),
+            [(2, 4)],
+            DeltaWatermark::default(),
+        )
+        .expect("export range");
+        let stats =
+            apply_delta(&target, &delta.bytes, &mut DeltaWatermark::default()).expect("apply");
+
+        assert_eq!(stats.ops, 4);
+        assert_eq!(materialize(&target, root).expect("materialize"), "abcd");
     }
 
     #[test]
