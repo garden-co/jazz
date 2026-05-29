@@ -84,21 +84,20 @@ self-describing bundle frames while allowing the transport to compress across a
 larger redundancy window.
 
 Receiver state is part of sync cursor design. A receiver should be able to
-summarize the sealed history blocks it already has plus the promoted-text
-sidecar watermark it has applied. The sender exports against that state so it
-does not resend known blocks or known text operations. The prototype represents
-this as export options containing block manifests and a text-op watermark; a
-production protocol may encode the same facts as an explicit sync cursor.
+summarize the row versions and sealed history blocks it already has. Promoted
+text sidecar state is then implicit: the receiver is considered to have the
+sidecar data reachable from those known row versions and blocks. A sender
+exports row versions and blocks against that receiver state, computes the text
+roots newly introduced by the delta, subtracts the roots already implied by the
+receiver's known versions/blocks, and includes the operation/snapshot/chunk
+closure needed to materialize the newly introduced roots.
 
-The promoted-text sidecar watermark is currently global to a store: it records
-the latest text operation and snapshot known by the receiver. This is simple
-and works when text operations are assigned in one monotonic sidecar sequence,
-but it can over-send in sparse multi-document or multi-column sync: a receiver
-may know recent operations for one document while missing older operations for
-another, and one global watermark cannot express that shape. A future cursor may
-split the watermark by table/row/column or by sidecar shard. The semantic
-requirement is that receivers never observe row roots without the sidecar data
-needed to materialize them.
+Promoted-text sidecar sync is therefore dependency data of row-version sync,
+not an independent semantic cursor. Receivers must never observe row roots
+without the sidecar data needed to materialize them, but correctness should not
+depend on a global text-operation watermark. Physical import can still use
+content-addressed chunks and idempotent inserts to dedupe redundant sidecar
+bytes if a delta happens to resend data already present locally.
 
 Table-scope and query-scope exports have different obligations. Table-scope
 exports include table tombstones needed to converge table replicas. Query-scope

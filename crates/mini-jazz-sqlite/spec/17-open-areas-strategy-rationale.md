@@ -449,7 +449,7 @@ Implemented slices so far:
 - sealed history blocks for compacted accepted and rejected history
 - block-native history deltas with receiver block manifests
 - promoted text prototype via an explicit `deep_text` field kind, text-op
-  sidecar, sidecar watermarks, and `HistoryDelta` integration
+  sidecar, current sidecar watermarks, and `HistoryDelta` integration
 
 Tests should be product-shaped integration tests using projects, todos, Alice,
 Bob, and a core authority.
@@ -538,9 +538,10 @@ Known implementation tensions:
 - The prototype exposes promoted text through an explicit `deep_text` schema
   kind. The intended product direction is implicit promotion behind ordinary
   text once edit pressure justifies the sidecar lowering.
-- The prototype currently uses a global text sidecar watermark. This may
-  over-send in sparse multi-document or multi-column sync and should evolve
-  into a richer cursor if measurements show it matters.
+- The prototype currently uses a global text sidecar watermark. The intended
+  protocol direction is to derive sidecar possession from known row versions
+  and sealed blocks instead, making text sidecar bytes dependency closure for
+  newly introduced roots rather than an independent cursor.
 - Projection repair is intentionally broad in several incoming-sync paths.
 - Recursive policy/query lowering works for narrow acyclic cases, but helper
   SQL is duplicated and needs consolidation.
@@ -634,7 +635,8 @@ Future work may revisit:
   conflicts, or historical queries too slow or complex
 - payload compression for special large metadata/blob cases
 - userland history-block compression
-- automatic text promotion thresholds and sidecar sharding/cursor design
+- automatic text promotion thresholds and sidecar closure export derived from
+  row-version/block receiver state
 - opaque policy proofs
 - compact encrypted indexes
 - query-scope repair via durable observed-fact indexes rather than broad
