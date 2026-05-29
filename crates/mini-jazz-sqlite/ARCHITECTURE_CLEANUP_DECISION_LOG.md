@@ -946,3 +946,9 @@ regress.
 - Re-applied the same standard to `sync::encode_bundle` / `sync::decode_bundle`. They were public helpers around `serde_json::{to_vec, from_slice}` and existed only to reserve a future native binary codec boundary.
 - Removed the helpers and kept the actual serialization regressions using direct JSON serialization, because JSON is the current concrete representation in this prototype.
 - Decision: the future binary/columnar codec can introduce a real codec API when there is an implementation or caller that needs it.
+
+## 2026-05-29 12:01 PDT - Full validation after simplification pass
+
+- Ran `cargo test -p mini-jazz-sqlite` after removing the speculative batched write API/module, native bundle codec wrapper, and dead apply-plan state.
+- Result: 436 passed, 18 ignored placeholders, 0 failed.
+- The passing test count intentionally dropped by four because the deleted batched-write tests only covered the deleted API.
