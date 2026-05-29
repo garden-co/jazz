@@ -1,7 +1,7 @@
 mod branch;
 mod effective;
 mod error;
-pub mod persisted_text_ops;
+mod persisted_text_ops;
 mod policy;
 mod projection;
 mod query;
@@ -20,6 +20,7 @@ mod users;
 pub mod value;
 
 pub use error::{Error, Result};
+pub use persisted_text_ops::DeltaWatermark;
 pub use runtime::{
     reset_runtime_write_phase_stats, take_runtime_write_phase_stats, DeepTextEdit, Runtime,
     RuntimeWritePhaseStats,

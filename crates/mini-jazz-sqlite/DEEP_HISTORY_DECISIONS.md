@@ -1478,3 +1478,11 @@ Decision: `HistoryDelta` apply repairs current projection from the block exports
 Why: the correctness boundary is the imported delta. Re-reading unrelated local blocks would make import cost grow with database age instead of delta size, which is exactly the deep-history shape we are trying to avoid.
 
 Scope impact: explicit `rebuild_current_projection()` still scans all sealed blocks. Delta apply stays scoped to newly imported accepted blocks and then lets the open bundle apply newer candidates.
+
+## Fri May 29 04:01:25 PDT 2026 - Hide Raw Persisted Text Ops Behind Runtime API
+
+Decision: make the persisted text-op module crate-private, re-export only `DeltaWatermark`, and remove unused raw sidecar byte helpers.
+
+Why: deep-history text should present as schema/runtime behavior, not as a public parallel storage/sync API. Keeping the sidecar internals private makes the prototype closer to an integrated runtime design while preserving focused internal tests for the binary delta format.
+
+Scope impact: public callers should use `SchemaDef` deep-text columns, runtime text edit methods, and `HistoryDelta` export/apply options. The crate can still exercise lower-level sidecar internals in tests and runtime integration code.

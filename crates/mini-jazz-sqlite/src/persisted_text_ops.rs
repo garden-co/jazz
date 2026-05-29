@@ -25,7 +25,6 @@ pub struct DeltaStats {
 
 pub struct EncodedDelta {
     pub bytes: Vec<u8>,
-    pub stats: DeltaStats,
 }
 
 pub fn install(conn: &Connection) -> Result<()> {
@@ -350,95 +349,6 @@ pub fn root_len(conn: &Connection, root: TextRoot) -> Result<i64> {
         .ok_or_else(|| Error::new("unknown text op root"))
 }
 
-pub fn database_bytes(conn: &Connection) -> Result<i64> {
-    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    Ok(page_count * page_size)
-}
-
-pub fn bundle_bytes(conn: &Connection) -> Result<usize> {
-    Ok(export_delta(conn, DeltaWatermark::default())?
-        .stats
-        .compressed_bytes)
-}
-
-pub fn export_delta(conn: &Connection, watermark: DeltaWatermark) -> Result<EncodedDelta> {
-    let mut ops = Vec::new();
-    let mut op_stmt = conn.prepare_cached(
-        "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
-         FROM jazz_text_op
-         WHERE op_id > ?
-         ORDER BY op_id",
-    )?;
-    let op_rows = op_stmt.query_map(params![watermark.op_id], |row| {
-        Ok(TextOpRow {
-            op_id: row.get(0)?,
-            parent_op_id: row.get(1)?,
-            start_byte: row.get(2)?,
-            delete_bytes: row.get(3)?,
-            insert_text: row.get(4)?,
-            resulting_len: row.get(5)?,
-        })
-    })?;
-    for row in op_rows {
-        ops.push(row?);
-    }
-
-    let mut snapshots = Vec::new();
-    let mut chunk_hashes = BTreeSet::new();
-    let mut snapshot_stmt = conn.prepare_cached(
-        "SELECT snapshot_id, op_id, byte_len, chunk_hashes
-         FROM jazz_text_snapshot
-         WHERE snapshot_id > ?
-         ORDER BY snapshot_id",
-    )?;
-    let snapshot_rows = snapshot_stmt.query_map(params![watermark.snapshot_id], |row| {
-        Ok(SnapshotRow {
-            snapshot_id: row.get(0)?,
-            op_id: row.get(1)?,
-            byte_len: row.get(2)?,
-            chunk_hashes: row.get(3)?,
-        })
-    })?;
-    for row in snapshot_rows {
-        let snapshot = row?;
-        for hash in snapshot.chunk_hashes.chunks_exact(32) {
-            chunk_hashes.insert(hash.to_vec());
-        }
-        snapshots.push(snapshot);
-    }
-
-    let mut chunks = Vec::new();
-    let mut chunk_stmt =
-        conn.prepare_cached("SELECT text FROM jazz_text_chunk WHERE chunk_hash = ?")?;
-    for hash in chunk_hashes {
-        let text: String = chunk_stmt.query_row(params![hash.as_slice()], |row| row.get(0))?;
-        chunks.push(ChunkRow { hash, text });
-    }
-
-    let mut uncompressed = Vec::new();
-    encode_delta_payload(&mut uncompressed, &ops, &snapshots, &chunks);
-    let compressed = lz4_flex::compress_prepend_size(&uncompressed);
-    Ok(EncodedDelta {
-        bytes: compressed.clone(),
-        stats: DeltaStats {
-            ops: ops.len(),
-            snapshots: snapshots.len(),
-            chunks: chunks.len(),
-            uncompressed_bytes: uncompressed.len(),
-            compressed_bytes: compressed.len(),
-        },
-    })
-}
-
-pub fn export_delta_for_roots(
-    conn: &Connection,
-    roots: impl IntoIterator<Item = TextRoot>,
-    watermark: DeltaWatermark,
-) -> Result<EncodedDelta> {
-    export_delta_for_roots_and_ranges(conn, roots, std::iter::empty(), watermark)
-}
-
 pub fn export_delta_for_roots_and_ranges(
     conn: &Connection,
     roots: impl IntoIterator<Item = TextRoot>,
@@ -588,16 +498,7 @@ fn encode_delta_for_op_ids(
     let mut uncompressed = Vec::new();
     encode_delta_payload(&mut uncompressed, &ops, &snapshots, &chunks);
     let compressed = lz4_flex::compress_prepend_size(&uncompressed);
-    Ok(EncodedDelta {
-        bytes: compressed.clone(),
-        stats: DeltaStats {
-            ops: ops.len(),
-            snapshots: snapshots.len(),
-            chunks: chunks.len(),
-            uncompressed_bytes: uncompressed.len(),
-            compressed_bytes: compressed.len(),
-        },
-    })
+    Ok(EncodedDelta { bytes: compressed })
 }
 
 pub fn current_watermark(conn: &Connection) -> Result<DeltaWatermark> {
@@ -1350,7 +1251,9 @@ mod tests {
         snapshot(&source, root).expect("snapshot current");
 
         let mut watermark = DeltaWatermark::default();
-        let first_delta = export_delta(&source, watermark).expect("export first delta");
+        let first_delta =
+            export_delta_for_roots_and_ranges(&source, [root], [(1, root.unwrap())], watermark)
+                .expect("export first delta");
         let first_stats =
             apply_delta(&target, &first_delta.bytes, &mut watermark).expect("apply first delta");
         assert_eq!(first_stats.ops, 3);
@@ -1361,7 +1264,8 @@ mod tests {
         assert_eq!(watermark.op_id, 3);
 
         root = append(&source, root, "!", 2).expect("append final");
-        let second_delta = export_delta(&source, watermark).expect("export second delta");
+        let second_delta = export_delta_for_roots_and_ranges(&source, [root], [], watermark)
+            .expect("export second delta");
         let second_stats =
             apply_delta(&target, &second_delta.bytes, &mut watermark).expect("apply second delta");
         assert_eq!(second_stats.ops, 1);
@@ -1404,7 +1308,9 @@ mod tests {
 
         let root = append(&source, None, "hello snapshot", 0).expect("append");
         snapshot(&source, root).expect("snapshot");
-        let delta = export_delta(&source, DeltaWatermark::default()).expect("export");
+        let delta =
+            export_delta_for_roots_and_ranges(&source, [root], [], DeltaWatermark::default())
+                .expect("export");
         let payload = lz4_flex::decompress_size_prepended(&delta.bytes).expect("decompress");
         let (ops, snapshots, _) = decode_delta_payload(&payload).expect("decode");
         let mut corrupted = Vec::new();
@@ -1423,7 +1329,9 @@ mod tests {
 
         let root = append(&source, None, "hello snapshot", 0).expect("append");
         snapshot(&source, root).expect("snapshot");
-        let delta = export_delta(&source, DeltaWatermark::default()).expect("export");
+        let delta =
+            export_delta_for_roots_and_ranges(&source, [root], [], DeltaWatermark::default())
+                .expect("export");
         let payload = lz4_flex::decompress_size_prepended(&delta.bytes).expect("decompress");
         let (ops, snapshots, mut chunks) = decode_delta_payload(&payload).expect("decode");
         chunks[0].text.push_str(" corrupted");
