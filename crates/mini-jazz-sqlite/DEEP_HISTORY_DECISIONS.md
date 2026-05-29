@@ -1118,3 +1118,11 @@ Decision: `apply_history_delta` now validates bundle headers and history block m
 Why: the receive path previously applied `text_ops_delta` first, then discovered bundle/schema incompatibility inside `apply_bundle`. That could leave orphan text ops behind for a delta whose row history was rejected. This is not full transactional apply yet, but it closes the most obvious sidecar-before-validation leak.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. A regression verifies that a schema-incompatible delta returns an error without advancing the receiver's text-op watermark.
+
+## Fri May 29 01:01:26 PDT 2026 - Accept Deep-Text Strings In Ordinary Row Writes
+
+Decision: ordinary `insert_row` and `update_row` calls can now pass string values for `deep_text` fields. The runtime converts those strings to text-op roots inside the same SQLite transaction as the Jazz row version.
+
+Why: `deep_text` should be an opt-in storage behavior, not an API that requires callers to manufacture internal sidecar roots. The specialized append/replace APIs are still useful for efficient incremental edits, but the generic row API must remain text-shaped.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. A regression inserts and updates a deep-text field through ordinary row writes, exports the resulting history delta, imports it on another runtime, and reads back the materialized string.

@@ -6957,6 +6957,8 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         (row_num, row_id_created)
     };
     add_write_phase(|stats| &mut stats.row_lookup_ms, row_lookup_started);
+    let normalized_values = normalize_deep_text_write_values(&mut args, table, row_id_created)?;
+    let write_values = normalized_values.as_ref().unwrap_or(args.values);
     let effective_started = Instant::now();
     let effective_cache_key = (args.table_name.to_owned(), row_num);
     let cached_effective_values = args
@@ -6970,7 +6972,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         id: args.id,
         row_num,
         branch_num: args.branch_num,
-        patch_values: args.values,
+        patch_values: write_values,
         op: args.op,
         cached_values: cached_effective_values,
     })?;
@@ -7191,6 +7193,51 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         tx_num,
         tx_id,
     })
+}
+
+fn normalize_deep_text_write_values(
+    args: &mut InsertRowInTx<'_>,
+    table: &crate::schema::TableDef,
+    row_id_created: bool,
+) -> Result<Option<BTreeMap<String, JsonValue>>> {
+    let mut normalized = None;
+    for field in &table.fields {
+        if !matches!(field.kind, FieldKind::DeepText) {
+            continue;
+        }
+        let Some(value) = args.values.get(&field.name) else {
+            continue;
+        };
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let root = if args.op == 1 && row_id_created {
+            None
+        } else {
+            current_deep_text_root_in_tx(
+                args.db,
+                args.schema,
+                args.branch_num,
+                args.table_name,
+                args.id,
+                &field.name,
+            )?
+        };
+        let current_len = crate::persisted_text_ops::root_len(args.db, root)? as usize;
+        let root = crate::persisted_text_ops::replace_range_known_len(
+            args.db,
+            root,
+            current_len,
+            0,
+            current_len,
+            text,
+            256,
+        )?;
+        normalized
+            .get_or_insert_with(|| args.values.clone())
+            .insert(field.name.clone(), deep_text_root_value(root));
+    }
+    Ok(normalized)
 }
 
 fn cached_current_visible_tx_num(
@@ -12982,6 +13029,45 @@ mod tests {
         );
         let row = alice.read_rows("docs").unwrap().remove(0);
         assert_eq!(row.values["body"], JsonValue::from("hello Ada"));
+    }
+
+    #[test]
+    fn ordinary_row_writes_accept_deep_text_strings() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("hello"))]),
+            )
+            .unwrap();
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([("body".to_owned(), JsonValue::from("goodbye"))]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            alice.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("goodbye")
+        );
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!delta.text_ops_delta.is_empty());
+        bob.apply_history_delta(&delta).unwrap();
+        assert_eq!(
+            bob.read_rows("docs").unwrap()[0].values["body"],
+            JsonValue::from("goodbye")
+        );
     }
 
     #[test]
