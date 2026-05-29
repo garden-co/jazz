@@ -79,10 +79,7 @@ pub(super) fn export_txs_for_query_scope(
     export_txs_by_ids(conn, needed_tx_ids)
 }
 
-pub(super) fn export_txs_by_ids(
-    conn: &Connection,
-    tx_ids: BTreeSet<&str>,
-) -> Result<Vec<TxRecord>> {
+fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<TxRecord>> {
     if tx_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -284,7 +281,7 @@ pub(super) fn export_reads_for_history(
     export_reads_for_history_with_temp_scope(conn, history)
 }
 
-pub(super) fn export_reads_for_history_simple(
+fn export_reads_for_history_simple(
     conn: &Connection,
     history: &[HistoryRecord],
     tx_ids: &[String],
@@ -337,7 +334,7 @@ pub(super) fn export_reads_for_history_simple(
     Ok(records)
 }
 
-pub(super) fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<usize> {
+fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<usize> {
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*)
@@ -554,7 +551,7 @@ pub(super) fn export_table_history(
     Ok(records)
 }
 
-pub(super) fn export_main_base_snapshot_history(
+fn export_main_base_snapshot_history(
     visibility: &ReadVisibility<'_>,
     table_name: &str,
     base_epoch: i64,
@@ -960,7 +957,7 @@ pub(super) fn export_branch_policy_dependency_history(
     Ok(records)
 }
 
-pub(super) fn branch_backing_row_nums(conn: &Connection, branch_nums: &[i64]) -> Result<Vec<i64>> {
+fn branch_backing_row_nums(conn: &Connection, branch_nums: &[i64]) -> Result<Vec<i64>> {
     let branch_nums = sorted_unique_row_nums(branch_nums);
     let mut row_nums = BTreeSet::new();
     for chunk in branch_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
@@ -980,7 +977,7 @@ pub(super) fn branch_backing_row_nums(conn: &Connection, branch_nums: &[i64]) ->
     Ok(row_nums.into_iter().collect())
 }
 
-pub(super) fn scoped_policy_parent_row_nums(
+fn scoped_policy_parent_row_nums(
     conn: &Connection,
     table_name: &str,
     ref_column: &str,
@@ -1019,7 +1016,7 @@ pub(super) fn scoped_policy_parent_row_nums(
     Ok(parent_row_nums.into_iter().collect())
 }
 
-pub(super) fn export_deleted_table_history(
+fn export_deleted_table_history(
     conn: &Connection,
     schema: &SchemaDef,
     table_name: &str,
@@ -1614,7 +1611,7 @@ pub(super) fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryR
     Ok(BuiltQueryRepairScope::Generic)
 }
 
-pub(super) fn legacy_predicate_repair_supports(condition: &QueryCondition) -> bool {
+fn legacy_predicate_repair_supports(condition: &QueryCondition) -> bool {
     match condition.column.as_str() {
         "id" => matches!(
             condition.op,
@@ -1626,7 +1623,7 @@ pub(super) fn legacy_predicate_repair_supports(condition: &QueryCondition) -> bo
     }
 }
 
-pub(super) fn query_condition_value_contains_null(value: &JsonValue) -> bool {
+fn query_condition_value_contains_null(value: &JsonValue) -> bool {
     value.is_null()
         || value
             .as_array()
@@ -2217,7 +2214,7 @@ pub(super) fn sql_value_to_json_cached(
     }
 }
 
-pub(super) fn cached_public_row_id(
+fn cached_public_row_id(
     conn: &Connection,
     cache: &mut BTreeMap<i64, String>,
     row_num: i64,
@@ -2244,7 +2241,7 @@ pub(super) fn integer_value(value: &rusqlite::types::Value, name: &str) -> Resul
     }
 }
 
-pub(super) fn scoped_policy_fingerprint(
+fn scoped_policy_fingerprint(
     schema: &SchemaDef,
     history: &[HistoryRecord],
     query_reads: &[QueryReadRecord],

@@ -952,3 +952,9 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after removing the speculative batched write API/module, native bundle codec wrapper, and dead apply-plan state.
 - Result: 436 passed, 18 ignored placeholders, 0 failed.
 - The passing test count intentionally dropped by four because the deleted batched-write tests only covered the deleted API.
+
+## 2026-05-29 12:50 PDT - Pruned query/export helper surface
+
+- Removed the unused public `export_query_where_eq_top_created_at_desc_with_ref_include` convenience API.
+- Narrowed single-module helper visibility in `history_export` and `query_export` from `pub(super)` to private where sibling modules had no callers.
+- Decision: for the remaining large export modules, prefer shrinking visible helper surface before doing more structural splits. A private helper inside a large file is less misleading than a sibling-visible helper bag that invites accidental reuse.
