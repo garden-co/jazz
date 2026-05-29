@@ -339,6 +339,9 @@ fn add_apply_profile(total: &mut ApplyBundleProfile, sample: ApplyBundleProfile)
     total.rejected_cleanup_ms += sample.rejected_cleanup_ms;
     total.query_reads_ms += sample.query_reads_ms;
     total.history_ms += sample.history_ms;
+    total.history_insert_ms += sample.history_insert_ms;
+    total.tuple_update_ms += sample.tuple_update_ms;
+    total.current_repair_ms += sample.current_repair_ms;
     total.query_scope_repair_ms += sample.query_scope_repair_ms;
     total.commit_ms += sample.commit_ms;
     total.revalidate_awaiting_ms += sample.revalidate_awaiting_ms;
@@ -5640,6 +5643,9 @@ fn profile_apply_bundles(
         rejected_cleanup_ms: 0.0,
         query_reads_ms: 0.0,
         history_ms: 0.0,
+        history_insert_ms: 0.0,
+        tuple_update_ms: 0.0,
+        current_repair_ms: 0.0,
         query_scope_repair_ms: 0.0,
         commit_ms: 0.0,
         revalidate_awaiting_ms: 0.0,
@@ -5660,6 +5666,9 @@ fn profile_apply_bundles(
         aggregate.rejected_cleanup_ms += profile.rejected_cleanup_ms;
         aggregate.query_reads_ms += profile.query_reads_ms;
         aggregate.history_ms += profile.history_ms;
+        aggregate.history_insert_ms += profile.history_insert_ms;
+        aggregate.tuple_update_ms += profile.tuple_update_ms;
+        aggregate.current_repair_ms += profile.current_repair_ms;
         aggregate.query_scope_repair_ms += profile.query_scope_repair_ms;
         aggregate.commit_ms += profile.commit_ms;
         aggregate.revalidate_awaiting_ms += profile.revalidate_awaiting_ms;
@@ -5846,6 +5855,24 @@ fn median_apply_profile(profiles: Vec<ApplyBundleProfile>) -> ApplyBundleProfile
                 .collect(),
         ),
         history_ms: median_f64(profiles.iter().map(|profile| profile.history_ms).collect()),
+        history_insert_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.history_insert_ms)
+                .collect(),
+        ),
+        tuple_update_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.tuple_update_ms)
+                .collect(),
+        ),
+        current_repair_ms: median_f64(
+            profiles
+                .iter()
+                .map(|profile| profile.current_repair_ms)
+                .collect(),
+        ),
         query_scope_repair_ms: median_f64(
             profiles
                 .iter()

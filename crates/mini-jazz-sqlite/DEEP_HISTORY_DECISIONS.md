@@ -1030,3 +1030,11 @@ Decision: do not keep the first batched local `jazz_tx` creation experiment.
 Why: pre-creating tx rows in a batch did reduce `tx_create_ms`, but because compact read/write tuple JSONB then had to be batch-updated separately, the combined `tx_create + tx_tuple` cost was neutral to worse for append/document and only modestly better for canvas. The added control-flow complexity was not justified by the mixed result.
 
 Scope impact: the uncommitted tx-batch experiment was reverted. The cleaner local history insert batching remains.
+
+## Fri May 29 00:09:18 PDT 2026 - Add Apply History Subtimers, Reject Tuple JSONB Fast Path
+
+Decision: keep receive/apply sub-timers for history insert, tx tuple update, and current repair; do not keep the attempted `jsonb_array(...)` tuple update fast path.
+
+Why: `history_ms` was too broad to choose the next apply optimization honestly. The new profile fields show tuple updates and history inserts separately. A trial fast path that constructed one-read/one-write tuple JSONB directly in SQLite was slower than the existing batched `jsonb(?)` update, so it was reverted.
+
+Scope impact: no storage semantics changed. The benchmark JSON now exposes more detailed apply timing, and the full `mini-jazz-sqlite` suite passes.

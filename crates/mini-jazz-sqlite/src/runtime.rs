@@ -2398,7 +2398,9 @@ impl Runtime {
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
         }
+        let history_insert_started = Instant::now();
         insert_apply_history_batches(&db, &schema, &mut history_context.history_values_by_table)?;
+        let history_insert_ms = duration_ms(history_insert_started.elapsed());
         let mut tuple_tx_nums = history_context
             .writes_by_tx
             .keys()
@@ -2418,7 +2420,10 @@ impl Runtime {
                 reads: reads_by_tx.get(&tx_num).cloned(),
             });
         }
+        let tuple_update_started = Instant::now();
         tx::set_received_read_write_tuple_batch(&db, &tx_tuples)?;
+        let tuple_update_ms = duration_ms(tuple_update_started.elapsed());
+        let current_repair_started = Instant::now();
         for (table_name, row_num, branch_num) in &history_context.touched_current_rows {
             let key = (table_name.clone(), *row_num, *branch_num);
             if let Some(candidate) = history_context.current_candidates.get(&key) {
@@ -2443,6 +2448,7 @@ impl Runtime {
                 )?;
             }
         }
+        let current_repair_ms = duration_ms(current_repair_started.elapsed());
         let history_ms = duration_ms(history_started.elapsed());
 
         let query_scope_repair_started = Instant::now();
@@ -2478,6 +2484,9 @@ impl Runtime {
             rejected_cleanup_ms,
             query_reads_ms,
             history_ms,
+            history_insert_ms,
+            tuple_update_ms,
+            current_repair_ms,
             query_scope_repair_ms,
             commit_ms,
             revalidate_awaiting_ms,
