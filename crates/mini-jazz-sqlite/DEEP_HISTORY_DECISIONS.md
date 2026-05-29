@@ -1086,3 +1086,11 @@ Decision: when a batched local single-row write reads exactly the immediately pr
 Why: this is the compression rule we already designed for transaction metadata, but local write batches were not taking advantage of it. The guard is strict: it only fires when the observed tx is the last tx created in the same SQLite write batch, so interleaved row writes do not accidentally depend on the wrong previous epoch.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. Canonical sampling shows storage improving across scenarios: append live DB/final about 24.24x to 23.62x, Automerge live DB/source gzip about 0.358x to 0.349x, and canvas live DB/position gzip about 5.48x to 5.27x. Timing is mostly neutral/noisy, with canvas slightly better in the first full run.
+
+## Fri May 29 00:42:28 PDT 2026 - Preserve Implicit Reads In Native Export
+
+Decision: native bundle export now omits read records that are derived solely from `reads_json = NULL`; receivers reconstruct those as implicit previous-local reads by leaving `reads_json` null on import.
+
+Why: after local storage learned the implicit-read representation, export was immediately expanding it back through `jazz_tx_read`. That wasted wire bytes and made receive apply rebuild explicit read JSON that was intentionally absent on the sender.
+
+Scope impact: full `mini-jazz-sqlite` tests pass, including a focused round trip that omits implicit reads from a bundle and still reconstructs `transaction_previous_read_rows`. Canonical native sync bytes dropped from about 38.4k to 31.8k for append, 51.0k to 37.5k for Automerge, and 198.5k to 186.9k for canvas. Sampled receive/update also improved because apply sees far fewer explicit read rows.

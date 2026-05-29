@@ -10841,38 +10841,6 @@ fn export_reads_for_single_node_incremental(
             records.push(row?);
         }
     }
-    {
-        let mut stmt = conn.prepare_cached(
-            "SELECT tx.local_epoch, tables.table_name, ids.row_id, previous.local_epoch
-             FROM jazz_tx tx
-             JOIN jazz_tx previous
-               ON previous.node_num = tx.node_num
-              AND previous.local_epoch = tx.local_epoch - 1,
-                  json_each(tx.writes_json) write
-             JOIN jazz_table tables
-               ON tables.table_num = CAST(json_extract(write.value, '$[0]') AS INTEGER)
-             JOIN jazz_row_id ids
-               ON ids.row_num = CAST(json_extract(write.value, '$[1]') AS INTEGER)
-             WHERE tx.node_num = ?
-               AND tx.local_epoch > ?
-               AND tx.reads_json IS NULL
-             ORDER BY tx.tx_num, tables.table_name, ids.row_id",
-        )?;
-        let rows = stmt.query_map(params![node_num, after_local_epoch], |row| {
-            let local_epoch = row.get::<_, i64>(0)?;
-            let previous_epoch = row.get::<_, i64>(3)?;
-            Ok(ReadRecord {
-                tx_id: format!("tx-{node_id}-{local_epoch}"),
-                table: row.get(1)?,
-                row_id: row.get(2)?,
-                reason: 2,
-                observed_tx_id: Some(format!("tx-{node_id}-{previous_epoch}")),
-            })
-        })?;
-        for row in rows {
-            records.push(row?);
-        }
-    }
     records.retain(|record| {
         history_keys.contains(&(
             record.tx_id.clone(),
@@ -10902,11 +10870,13 @@ fn export_reads_for_history_simple(
     let mut stmt = conn.prepare(&format!(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_tx_read reads
+         JOIN jazz_tx tx_raw ON tx_raw.tx_num = reads.tx_num
          JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx_public observed ON observed.tx_num = reads.observed_tx_num
          JOIN jazz_row_id ids ON ids.row_num = reads.row_num
          WHERE tx.tx_id IN ({placeholders})
+           AND tx_raw.reads_json IS NOT NULL
          ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
         placeholders = (0..tx_ids.len())
             .map(|_| "?")
@@ -10942,8 +10912,10 @@ fn count_read_rows_for_tx_ids(conn: &Connection, tx_ids: &[String]) -> Result<us
         &format!(
             "SELECT COUNT(*)
              FROM jazz_tx_read reads
+             JOIN jazz_tx tx_raw ON tx_raw.tx_num = reads.tx_num
              JOIN jazz_tx_public tx ON tx.tx_num = reads.tx_num
-             WHERE tx.tx_id IN ({placeholders})",
+             WHERE tx.tx_id IN ({placeholders})
+               AND tx_raw.reads_json IS NOT NULL",
             placeholders = (0..tx_ids.len())
                 .map(|_| "?")
                 .collect::<Vec<_>>()
@@ -10991,6 +10963,7 @@ fn export_reads_for_history_with_temp_scope(
         "SELECT tx.tx_id, tables.table_name, ids.row_id, reads.reason, observed.tx_id
          FROM jazz_export_tx_scope tx_scope
          JOIN jazz_tx_public tx ON tx.tx_id = tx_scope.tx_id
+         JOIN jazz_tx tx_raw ON tx_raw.tx_num = tx.tx_num
          JOIN jazz_tx_read reads ON reads.tx_num = tx.tx_num
          JOIN jazz_table tables ON tables.table_num = reads.table_num
          LEFT JOIN jazz_tx_public observed ON observed.tx_num = reads.observed_tx_num
@@ -10999,8 +10972,11 @@ fn export_reads_for_history_with_temp_scope(
            ON history_scope.tx_id = tx.tx_id
           AND history_scope.table_name = tables.table_name
           AND history_scope.row_id = ids.row_id
-         WHERE reads.reason != ?
-            OR history_scope.tx_id IS NOT NULL
+         WHERE tx_raw.reads_json IS NOT NULL
+           AND (
+             reads.reason != ?
+             OR history_scope.tx_id IS NOT NULL
+           )
          ORDER BY tx.tx_num, tables.table_name, ids.row_id, reads.reason",
     )?;
     let records = stmt.query_map(params![read_set::REASON_ABSENT], |row| {
@@ -13237,5 +13213,16 @@ mod tests {
             .filter(|record| record.row_id == "doc-1")
             .count();
         assert_eq!(versions, 4);
+        assert!(bundle.reads.len() < versions);
+
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", alice.schema.clone())
+                .unwrap();
+        bob.apply_bundle(&bundle).unwrap();
+        assert_eq!(
+            bob.transaction_previous_read_rows("tx-alice-node-4")
+                .unwrap(),
+            vec![("docs".to_owned(), "doc-1".to_owned())]
+        );
     }
 }
