@@ -12,7 +12,7 @@ Decision: sync every referenced deep-text root, not only the latest root per row
 
 Why: latest-root-only sidecar export made current reads efficient but was not honest for historical point reads. A delta containing history rows for roots 3, 4, and 5 must also carry enough text-op state to materialize those historical roots, even if the latest root has a later snapshot. Inline root validation exposed this by rejecting early roots during the append benchmark.
 
-Scope impact: `deep_text_roots_for_bundle` now returns all distinct non-empty roots in exported history instead of coalescing to the maximum root per row/field. `HistoryDelta` receive validates roots while applying open history rows and while indexing imported history blocks. `Block+Ops13` records the measured cost: append sync bytes remain about 32 KB, Automerge rises from about 37 KB to about 44 KB, and native import is about 0.02 ms/update for text scenarios.
+Scope impact: `deep_text_roots_for_bundle` now returns all distinct non-empty roots in exported history instead of coalescing to the maximum root per row/field. `HistoryDelta` receive validates roots while applying open history rows and while indexing imported history blocks. Sealed blocks store consecutive root ids as ranges to avoid one side-index row per edit. `Block+Ops13` records the measured cost: append sync bytes remain about 32 KB, Automerge rises from about 37 KB to about 44 KB, and native import is about 0.02 ms/update for text scenarios while storage returns to the previous Block+Ops12 ratio.
 
 ## Fri May 29 01:16:24 PDT 2026
 

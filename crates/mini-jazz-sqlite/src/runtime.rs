@@ -10011,14 +10011,36 @@ fn insert_history_block_text_roots(
         return Ok(());
     }
     let mut stmt = conn.prepare_cached(
-        "INSERT OR IGNORE INTO history_block_text_root (block_id, root_op_id)
-         VALUES (?, ?)",
+        "INSERT OR IGNORE INTO history_block_text_root_range
+         (block_id, min_root_op_id, max_root_op_id)
+         VALUES (?, ?, ?)",
     )?;
-    for root_op_id in roots.into_iter().flatten() {
-        validate_deep_text_root_exists(conn, root_op_id)?;
-        stmt.execute(params![block_id, root_op_id])?;
+    let root_ids = roots.into_iter().flatten().collect::<Vec<_>>();
+    for root_op_id in &root_ids {
+        validate_deep_text_root_exists(conn, *root_op_id)?;
+    }
+    for (min_root, max_root) in consecutive_root_ranges(root_ids) {
+        stmt.execute(params![block_id, min_root, max_root])?;
     }
     Ok(())
+}
+
+fn consecutive_root_ranges(mut roots: Vec<i64>) -> Vec<(i64, i64)> {
+    roots.sort();
+    roots.dedup();
+    let mut ranges = Vec::new();
+    for root in roots {
+        let Some((_, max_root)) = ranges.last_mut() else {
+            ranges.push((root, root));
+            continue;
+        };
+        if root == *max_root + 1 {
+            *max_root = root;
+        } else {
+            ranges.push((root, root));
+        }
+    }
+    ranges
 }
 
 fn history_block_text_roots(
@@ -10026,13 +10048,22 @@ fn history_block_text_roots(
     block_id: i64,
 ) -> Result<Vec<crate::persisted_text_ops::TextRoot>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT root_op_id
-         FROM history_block_text_root
+        "SELECT min_root_op_id, max_root_op_id
+         FROM history_block_text_root_range
          WHERE block_id = ?
-         ORDER BY root_op_id",
+         ORDER BY min_root_op_id, max_root_op_id",
     )?;
-    let rows = stmt.query_map(params![block_id], |row| row.get::<_, i64>(0))?;
-    rows.map(|row| row.map(Some).map_err(Into::into)).collect()
+    let rows = stmt.query_map(params![block_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut roots = Vec::new();
+    for row in rows {
+        let (min_root, max_root) = row?;
+        for root_op_id in min_root..=max_root {
+            roots.push(Some(root_op_id));
+        }
+    }
+    Ok(roots)
 }
 
 fn history_block_tx_ranges(
