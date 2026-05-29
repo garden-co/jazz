@@ -835,3 +835,9 @@ regress.
 
 - Ran `cargo test -p mini-jazz-sqlite` after the conflict metadata fix, descriptor identity cleanup, todo fixture naming cleanup, and explicit `sync_apply` dependencies.
 - Result: 440 passed, 18 ignored placeholders, 0 failed.
+
+## 2026-05-29 03:49 PDT - Removed remaining runtime wildcard imports
+
+- Replaced the final runtime-module wildcard import in `history_export` with explicit dependencies.
+- `runtime.rs` now imports only what it directly needs plus shared helper dependencies; it no longer acts as an ambient import bucket for large child modules.
+- `cargo check -p mini-jazz-sqlite` is green.
