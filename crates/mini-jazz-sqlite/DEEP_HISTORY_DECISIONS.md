@@ -1398,3 +1398,11 @@ Decision: range-based deep-text edits now insert ops and write snapshots from th
 Why: random-run document edits already require a materialized string for range validation and patch application. Rebuilding snapshot content from the persisted op chain while that string is available is redundant work.
 
 Scope impact: a canonical sample moved Automerge deep-text edit time from about 42 ms to about 37 ms for the run. Overall document timing is roughly flat because live export/apply now dominate, but the storage-side behavior is cleaner.
+
+## Fri May 29 03:14:22 PDT 2026 - Share Created At Within Ingest Batches
+
+Decision: batched writes now assign one `created_at` timestamp to every transaction in the ingest slice.
+
+Why: the runtime batching model is explicitly a short latency slice. One timestamp per slice is production-shaped, preserves one Jazz transaction/history row per update, and avoids redundant clock calls while importing or receiving a burst.
+
+Scope impact: transaction ordering is still node/local-epoch based. `created_at` becomes slice-granular for batched writes, which is already the practical resolution a 10ms ingest batch exposes.

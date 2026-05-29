@@ -528,12 +528,12 @@ impl Runtime {
         let mut tx_ids = Vec::with_capacity(edits.len());
         let last_edit_index = edits.len().saturating_sub(1);
         let mut last_created_tx_num = None;
+        let batch_created_at = now_ms();
         for (index, edit) in edits.iter().enumerate() {
             let deep_text_edit_started = Instant::now();
             root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
             add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
             let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
-            let now = now_ms();
             let outcome = insert_row_in_tx(InsertRowInTx {
                 db: &db,
                 schema: &self.schema,
@@ -550,7 +550,7 @@ impl Runtime {
                     global_epoch: None,
                 }),
                 branch_num: self.branch_num,
-                now,
+                now: batch_created_at,
                 user: &user,
                 user_num,
                 bypass_policy,
@@ -785,8 +785,8 @@ impl Runtime {
         add_write_phase(|stats| &mut stats.next_epoch_ms, next_epoch_started);
         let mut tx_ids = Vec::with_capacity(writes.len());
         let mut last_created_tx_num = None;
+        let batch_created_at = now_ms();
         for (index, (id, values)) in writes.into_iter().enumerate() {
-            let now = now_ms();
             let op = match mode {
                 BatchedWriteMode::Insert => 1,
                 BatchedWriteMode::Update => 2,
@@ -820,7 +820,7 @@ impl Runtime {
                     global_epoch: None,
                 }),
                 branch_num: self.branch_num,
-                now,
+                now: batch_created_at,
                 user: &user,
                 user_num,
                 bypass_policy,
