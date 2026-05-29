@@ -648,6 +648,10 @@ struct RustOutboxSenderInner {
     /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
     /// for routing client-bound payloads to the right follower-tab peer.
     peer_routing_lookup: RefCell<Option<Function>>,
+    /// Worker-side: `(peerId: string) => MessagePort | null`. When non-null and
+    /// the peer has an attached follower port, the outbox emits a leader-sync JS
+    /// object to that port and skips the worker-to-main PeerSync envelope.
+    follower_port_lookup: RefCell<Option<Function>>,
     /// Worker-side: `() => void` invoked after each batch flush that
     /// contained at least one main-bound client entry. The TS shim uses
     /// it to schedule the rejected-batch replay walk.
@@ -693,6 +697,7 @@ impl RustOutboxSender {
                 target: RefCell::new(JsValue::NULL),
                 main_client_id: RefCell::new(None),
                 peer_routing_lookup: RefCell::new(None),
+                follower_port_lookup: RefCell::new(None),
                 on_main_sync_flushed: RefCell::new(None),
                 server_payload_forwarder: RefCell::new(None),
                 bootstrap_catalogue_forwarding: RefCell::new(false),
@@ -737,6 +742,10 @@ impl RustOutboxSender {
         *self.inner.main_client_id.borrow_mut() = main_client_id;
         *self.inner.peer_routing_lookup.borrow_mut() = peer_routing_lookup;
         *self.inner.on_main_sync_flushed.borrow_mut() = on_main_sync_flushed;
+    }
+
+    pub(crate) fn set_follower_port_lookup(&self, lookup: Option<Function>) {
+        *self.inner.follower_port_lookup.borrow_mut() = lookup;
     }
 
     pub(crate) fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
@@ -855,6 +864,41 @@ impl SyncSender for RustOutboxSender {
                 .push(PeerRouting { is_main: true });
             self.schedule_flush();
             return;
+        }
+
+        // Fast path: if the peer has an attached follower MessagePort, post
+        // directly to that port and skip the PeerSync worker-to-main envelope.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(lookup) = inner.follower_port_lookup.borrow().as_ref() {
+                if let Ok(port_value) =
+                    lookup.call1(&JsValue::NULL, &JsValue::from_str(&destination_id))
+                {
+                    if !port_value.is_null() && !port_value.is_undefined() {
+                        if let Ok(port) = port_value.dyn_into::<web_sys::MessagePort>() {
+                            let bytes_payload = match &encoded {
+                                SyncEntry::BareBytes(b)
+                                | SyncEntry::SequencedBytes { payload: b, .. } => b.clone(),
+                                SyncEntry::BareString(_) | SyncEntry::SequencedString { .. } => {
+                                    return
+                                }
+                            };
+                            let arr = Uint8Array::from(&bytes_payload[..]);
+                            let payload_arr = js_sys::Array::new();
+                            payload_arr.push(&arr);
+                            let obj = Object::new();
+                            let _ = Reflect::set(
+                                &obj,
+                                &"type".into(),
+                                &JsValue::from_str("leader-sync"),
+                            );
+                            let _ = Reflect::set(&obj, &"payload".into(), &payload_arr.into());
+                            let _ = port.post_message(&obj.into());
+                            return;
+                        }
+                    }
+                }
+            }
         }
 
         // Peer client: look up (peerId, term) and post peer-sync immediately.

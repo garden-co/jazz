@@ -311,6 +311,7 @@ async fn run_init(init: InitPayload, on_init_ok: Option<Function>) -> Result<(),
         Some(peer_lookup),
         None,
     );
+    sender.set_follower_port_lookup(Some(make_follower_port_lookup()));
     runtime_rc
         .core
         .borrow_mut()
@@ -599,6 +600,24 @@ fn make_peer_routing_lookup() -> Function {
             let _ = Reflect::set(&obj, &"peerId".into(), &JsValue::from_str(peer_id));
             let _ = Reflect::set(&obj, &"term".into(), &JsValue::from_f64(term as f64));
             obj.into()
+        })
+    })
+    .into_js_value()
+    .unchecked_into()
+}
+
+fn make_follower_port_lookup() -> Function {
+    Closure::<dyn Fn(JsValue) -> JsValue>::new(|peer_id: JsValue| {
+        let Some(peer_id) = peer_id.as_string() else {
+            return JsValue::NULL;
+        };
+        let follower_tab_id = match peer_id.strip_prefix("tab:") {
+            Some(rest) => rest.to_string(),
+            None => return JsValue::NULL,
+        };
+        FOLLOWER_PORTS.with(|cell| match cell.borrow().get(&follower_tab_id) {
+            Some(entry) => JsValue::from(entry.port.clone()),
+            None => JsValue::NULL,
         })
     })
     .into_js_value()
