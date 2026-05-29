@@ -66,7 +66,7 @@ fn connection_subscribe_delivers_initial_query_and_settled() {
 }
 
 #[test]
-fn connection_edge_subscription_receives_rows_without_false_settlement() {
+fn connection_rejects_unsupported_edge_subscription_tier() {
     let harness = Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();
     let mut worker = harness.memory("alice-worker", "alice").unwrap();
@@ -105,7 +105,12 @@ fn connection_edge_subscription_receives_rows_without_false_settlement() {
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
     downstream.pump(&mut tab, &mut downstream_conn).unwrap();
 
-    assert_eq!(row_ids(tab.query(query).unwrap()), vec!["todo-1"]);
+    let error = downstream.last_error().expect("subscription is rejected");
+    assert_eq!(error.code, "unsupported_settlement_tier");
+    assert_eq!(error.subscription_id.as_ref(), Some(&subscription_id));
+    assert_eq!(error.retry_hint, RetryHint::Retryable);
+    assert!(!downstream.has_active_subscription(&subscription_id));
+    assert!(row_ids(tab.query(query).unwrap()).is_empty());
     assert!(!downstream.is_settled(&subscription_id, SettlementTier::Local));
     assert!(!downstream.is_settled(&subscription_id, SettlementTier::Edge));
     assert!(!downstream.is_settled(&subscription_id, SettlementTier::Global));
@@ -1810,6 +1815,11 @@ fn connection_manager_replay_excludes_locally_dropped_subscription() {
     };
     assert_eq!(subscriptions.len(), 1);
     assert_eq!(subscriptions[0].subscription_id, *kept_subscription.id());
+
+    upstream.receive(&mut worker, replay_messages).unwrap();
+
+    assert!(!upstream.has_active_subscription(dropped_subscription.id()));
+    assert!(upstream.has_active_subscription(kept_subscription.id()));
 }
 
 #[test]

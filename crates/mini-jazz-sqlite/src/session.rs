@@ -391,6 +391,17 @@ impl UpstreamSession {
                         );
                         continue;
                     }
+                    if requested_tier != SettlementTier::Local {
+                        self.send_protocol_error(
+                            conn,
+                            "unsupported_settlement_tier",
+                            "only local settlement is supported",
+                            Some(subscription_id),
+                            None,
+                            RetryHint::Retryable,
+                        );
+                        continue;
+                    }
                     if let Err(error) = self.send_subscription_data(
                         runtime,
                         conn,
@@ -425,6 +436,17 @@ impl UpstreamSession {
                         replay_subscription_ids.contains(subscription_id)
                     });
                     for subscription in subscriptions {
+                        if subscription.requested_tier != SettlementTier::Local {
+                            self.send_protocol_error(
+                                conn,
+                                "unsupported_settlement_tier",
+                                "only local settlement is supported",
+                                Some(subscription.subscription_id),
+                                None,
+                                RetryHint::Retryable,
+                            );
+                            continue;
+                        }
                         if let Err(error) = self.send_subscription_data(
                             runtime,
                             conn,
@@ -481,6 +503,10 @@ impl UpstreamSession {
         subscription_id: &SubscriptionId,
     ) -> Option<ReplayCursor> {
         self.last_acknowledged.get(subscription_id).copied()
+    }
+
+    pub fn has_active_subscription(&self, subscription_id: &SubscriptionId) -> bool {
+        self.active_subscriptions.contains_key(subscription_id)
     }
 
     pub fn last_error(&self) -> Option<&ProtocolError> {

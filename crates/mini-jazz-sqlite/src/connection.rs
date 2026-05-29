@@ -310,6 +310,10 @@ impl UpstreamConnectionManager {
         self.session.is_closed()
     }
 
+    pub fn has_active_subscription(&self, subscription_id: &SubscriptionId) -> bool {
+        self.session.has_active_subscription(subscription_id)
+    }
+
     pub fn last_error(&self) -> Option<&ProtocolError> {
         self.session.last_error()
     }
