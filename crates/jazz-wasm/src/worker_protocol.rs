@@ -460,6 +460,24 @@ pub fn decode_worker_to_main_js(bytes: &Uint8Array) -> Result<JsValue, JsError> 
             set("type", &JsValue::from_str("init-ok"))?;
             set("clientId", &JsValue::from_str(&client_id))?;
         }
+        WorkerToMainWire::FollowerPortAttached {
+            follower_tab_id,
+            generation,
+        } => {
+            set("type", &JsValue::from_str("follower-port-attached"))?;
+            set("followerTabId", &JsValue::from_str(&follower_tab_id))?;
+            set("generation", &JsValue::from_f64(generation as f64))?;
+        }
+        WorkerToMainWire::FollowerPortAttachFailed {
+            follower_tab_id,
+            generation,
+            reason,
+        } => {
+            set("type", &JsValue::from_str("follower-port-attach-failed"))?;
+            set("followerTabId", &JsValue::from_str(&follower_tab_id))?;
+            set("generation", &JsValue::from_f64(generation as f64))?;
+            set("reason", &JsValue::from_str(&reason))?;
+        }
         other => {
             return Err(JsError::new(&format!(
                 "decodeWorkerToMainJs: unsupported variant {other:?}"

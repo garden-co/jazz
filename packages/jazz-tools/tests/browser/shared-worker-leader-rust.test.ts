@@ -23,21 +23,6 @@
  *      worker does NOT post an `Error` back (the runtime route is async; sync
  *      application is covered by later tasks — here we only verify the attach
  *      accepted the port and the route did not blow up synchronously).
- *
- * ## Why we hand-decode the postcard ack instead of `decodeWorkerToMainJs`
- *
- * `jazz-wasm` exports `decodeWorkerToMainJs`, but its match arm only covers a
- * subset of variants (`Error`, `ShutdownFailed`, `DebugSchemaStateOk`,
- * `DebugSeedLiveSchemaOk`, `InitOk`) and throws `unsupported variant` for
- * everything else — including `FollowerPortAttached` /
- * `FollowerPortAttachFailed` (verified in `worker_protocol.rs` and in the built
- * `crates/jazz-wasm/pkg/jazz_wasm_bg.wasm`: it contains `attach-follower-port`
- * and `followerTabId` but not `follower-port-attached`). So we decode the
- * postcard envelope for this one variant shape directly. postcard (1.1.x)
- * encodes an enum as `varint(discriminant)` followed by the variant fields;
- * here the fields are a length-prefixed UTF-8 `String` (`follower_tab_id`) and
- * a `varint(u32)` (`generation`). We validate by matching the unique
- * `followerTabId` we sent, which unambiguously identifies the variant.
  */
 
 import { describe, expect, it, afterEach } from "vitest";
@@ -55,70 +40,17 @@ const schema = {
 };
 const app = s.defineApp(schema);
 
-interface VarintResult {
-  value: number;
-  next: number;
-}
-
-/** Read a postcard/LEB128 unsigned varint starting at `offset`. */
-function readVarint(bytes: Uint8Array, offset: number): VarintResult | null {
-  let result = 0;
-  let shift = 0;
-  let pos = offset;
-  while (pos < bytes.length) {
-    const byte = bytes[pos];
-    result |= (byte & 0x7f) << shift;
-    pos += 1;
-    if ((byte & 0x80) === 0) {
-      // `>>> 0` coerces back to an unsigned 32-bit value.
-      return { value: result >>> 0, next: pos };
-    }
-    shift += 7;
-    if (shift > 35) return null; // malformed (u32 varint is <= 5 bytes)
-  }
-  return null;
-}
-
 interface DecodedFollowerPortAttached {
+  type: "follower-port-attached";
   followerTabId: string;
   generation: number;
 }
 
-/**
- * Decode a postcard `WorkerToMainWire::FollowerPortAttached` envelope.
- *
- * Returns `null` if `bytes` is not a clean encoding of exactly that variant
- * (wrong field shapes, or trailing bytes), so iterating every worker→main
- * message and keeping only the clean match is safe — the unique
- * `followerTabId` string we send makes a false positive impossible.
- */
-function tryDecodeFollowerPortAttached(bytes: Uint8Array): DecodedFollowerPortAttached | null {
-  // discriminant varint
-  const tag = readVarint(bytes, 0);
-  if (!tag) return null;
-  // follower_tab_id: length-prefixed UTF-8 string
-  const len = readVarint(bytes, tag.next);
-  if (!len) return null;
-  const strEnd = len.next + len.value;
-  if (strEnd > bytes.length) return null;
-  let followerTabId: string;
-  try {
-    followerTabId = new TextDecoder("utf-8", { fatal: true }).decode(
-      bytes.subarray(len.next, strEnd),
-    );
-  } catch {
-    return null;
-  }
-  // generation: varint(u32)
-  const gen = readVarint(bytes, strEnd);
-  if (!gen) return null;
-  // A clean FollowerPortAttached has no trailing bytes after `generation`.
-  if (gen.next !== bytes.length) return null;
-  return { followerTabId, generation: gen.value };
-}
-
-/** Decode a worker→main message into `{type,...}` if `decodeWorkerToMainJs` supports it. */
-function tryDecodeKnownJs(bytes: Uint8Array): { type?: string; message?: string } | null {
+/** Attempt to decode a worker→main message via `decodeWorkerToMainJs`. Returns
+ * the decoded object if it succeeds, or null if the variant is not supported or
+ * the bytes are not a valid postcard envelope. */
+function tryDecode(bytes: Uint8Array): { type?: string; message?: string } | null {
+  if (!(bytes instanceof Uint8Array)) return null;
   try {
     return decodeWorkerToMainJs(bytes) as { type?: string; message?: string };
   } catch {
@@ -159,14 +91,12 @@ describe("worker-host attach-follower-port (dedicated Worker)", () => {
     const listener = (event: MessageEvent) => {
       const data = event.data;
       if (!(data instanceof Uint8Array)) return;
-      const attached = tryDecodeFollowerPortAttached(data);
-      if (attached) {
-        attachedAcks.push(attached);
-        return;
-      }
-      const known = tryDecodeKnownJs(data);
-      if (known?.type === "error") {
-        errorMessages.push(known.message ?? "(no message)");
+      const decoded = tryDecode(data);
+      if (!decoded) return;
+      if (decoded.type === "follower-port-attached") {
+        attachedAcks.push(decoded as DecodedFollowerPortAttached);
+      } else if (decoded.type === "error") {
+        errorMessages.push(decoded.message ?? "(no message)");
       }
     };
     worker.addEventListener("message", listener);
@@ -194,7 +124,7 @@ describe("worker-host attach-follower-port (dedicated Worker)", () => {
       const ack = attachedAcks.find(
         (a) => a.followerTabId === followerTabId && a.generation === generation,
       );
-      expect(ack).toEqual({ followerTabId, generation });
+      expect(ack).toEqual({ type: "follower-port-attached", followerTabId, generation });
       // The attach path must not have produced an Error envelope.
       expect(errorMessages).toEqual([]);
 
