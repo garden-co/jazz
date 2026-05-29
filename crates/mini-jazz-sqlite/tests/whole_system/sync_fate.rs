@@ -68,13 +68,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         .create_todo("todo-1", "Initially open", false, "project-1")
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness.durable("worker.sqlite", "worker", "alice").unwrap();
-        support::apply(
-            upstream.export_query_scope_open_todos().unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream.export_query_scope_open_todos().unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(worker.open_todos().unwrap().len(), 1);
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
@@ -95,11 +94,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         .durable("worker.sqlite", "worker-reopened", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
+    assert!(reopened.observed_query_reads().unwrap().is_empty());
 
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert!(reopened.open_todos().unwrap().is_empty());
-    assert_eq!(reopened.observed_query_reads().unwrap().len(), 1);
+    assert_eq!(reopened.observed_query_reads().unwrap(), query_reads);
 }
 
 #[test]
@@ -132,22 +132,21 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema("ordered-worker.sqlite", "worker", "alice", schema.clone())
             .unwrap();
-        support::apply(
-            upstream
-                .export_query(support::top_created_query(
-                    "notes",
-                    "pinned",
-                    json!(true),
-                    2,
-                ))
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .query(support::top_created_query(
@@ -179,7 +178,7 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
     let mut reopened = harness
         .durable_with_schema("ordered-worker.sqlite", "worker-reopened", "alice", schema)
         .unwrap();
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert_eq!(
         reopened
@@ -231,6 +230,7 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema(
@@ -240,19 +240,17 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
                 schema.clone(),
             )
             .unwrap();
-        support::apply(
-            upstream
-                .export_query_where_eq_top_field_desc(
-                    "documents",
-                    "owner_id",
-                    json!("alice"),
-                    "updated_at",
-                    2,
-                )
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                2,
+            )
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .read_rows_where_eq_top_field_desc(
@@ -290,7 +288,7 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
             schema,
         )
         .unwrap();
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert_eq!(
         reopened
@@ -393,6 +391,7 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema(
@@ -402,19 +401,17 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
                 schema.clone(),
             )
             .unwrap();
-        support::apply(
-            upstream
-                .export_query_where_eq_top_field_desc(
-                    "documents",
-                    "owner_id",
-                    json!("alice"),
-                    "updated_at",
-                    2,
-                )
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                2,
+            )
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .read_rows_where_eq_top_field_desc(
@@ -442,9 +439,7 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
             schema,
         )
         .unwrap();
-    let refresh_bundles = upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap();
+    let refresh_bundles = upstream.export_query_read_refreshes(&query_reads).unwrap();
     let exported_doc_ids = refresh_bundles[0]
         .history
         .iter()
@@ -915,7 +910,8 @@ fn durable_peer_remembers_query_scope_after_restart() {
     }
 
     let reopened = support::open_todo_app(Storage::File(peer_path), "peer-node", "alice").unwrap();
-    assert_eq!(reopened.observed_query_reads().unwrap(), bundle.query_reads);
+    assert!(reopened.observed_query_reads().unwrap().is_empty());
+    assert_eq!(reopened.open_todos().unwrap().len(), 1);
 }
 
 #[test]

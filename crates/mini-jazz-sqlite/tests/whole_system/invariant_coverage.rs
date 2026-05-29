@@ -2518,7 +2518,6 @@ fn durable_node_recovers_when_fate_arrives_before_history() {
 }
 
 #[test]
-#[ignore = "requires explicit resubscribe/query-settlement protocol before persisted descriptors can be removed"]
 fn durable_observed_query_reads_are_connection_local_not_persisted() {
     let schema = support::tasks_schema();
     let harness = support::Harness::new();

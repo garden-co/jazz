@@ -1,5 +1,6 @@
 use mini_jazz_sqlite::{
-    BuiltQuery, ReadTier, RejectionInfo, RowDiff, Runtime, SchemaDef, Storage, SubscriptionRowDelta,
+    sync::QueryReadRecord, BuiltQuery, ReadTier, RejectionInfo, RowDiff, Runtime, SchemaDef,
+    Storage, SubscriptionRowDelta,
 };
 use serde_json::json;
 use std::collections::BTreeMap;

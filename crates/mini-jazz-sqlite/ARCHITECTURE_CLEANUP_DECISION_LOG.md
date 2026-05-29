@@ -688,3 +688,11 @@ regress.
 - Replaced the transaction-builder wildcard runtime import with explicit dependencies on transaction snapshots, write-core staging helpers, runtime state, and projection repair.
 - This makes the explicit transaction layer read more like its own API boundary instead of an extension of the old monolithic runtime namespace.
 - Focused transaction tests pass.
+
+## 2026-05-29 03:04 PDT - Made observed query descriptors connection-local
+
+- Implemented the newer sync design direction: runtime open clears `jazz_query_read`, so query interest does not persist on disk across durable node restarts.
+- Existing cached rows/history remain durable; downstream clients or tabs must replay query descriptors after reconnect/restart, and applying those refresh bundles records the descriptors for the live connection again.
+- Converted restart tests from "worker remembers query descriptors" to "client replays query descriptors" while preserving the same refresh/repair assertions.
+- Unignored the invariant that durable observed query reads are connection-local.
+- Focused `after_restart`, `query_read`, and restarted subscription tests pass.

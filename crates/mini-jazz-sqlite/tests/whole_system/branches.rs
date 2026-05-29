@@ -216,6 +216,7 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
         .unwrap();
     upstream.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -236,6 +237,7 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
             .unwrap();
         absent_bundle.history.clear();
         absent_bundle.query_reads[0].op = "absent".to_owned();
+        query_reads = absent_bundle.query_reads.clone();
         worker.apply_bundle(&absent_bundle).unwrap();
         let non_absent_reads = worker
             .observed_query_reads()
@@ -262,15 +264,14 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
     upstream.remove_branch_source("merge", "left").unwrap();
     let mut reopened =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = reopened.observed_query_reads().unwrap();
-    assert!(observed.iter().any(|read| {
+    assert!(query_reads.iter().any(|read| {
         read.branch_id == "merge"
             && read.table == "tasks"
             && read.field == "id"
             && read.op == "absent"
             && read.value == json!("task-missing")
     }));
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
     reopened.checkout_branch("merge").unwrap();
@@ -399,6 +400,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
     upstream.create_branch("draft", Some(1)).unwrap();
     upstream.checkout_branch("draft").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -407,13 +409,11 @@ fn durable_branch_query_read_refreshes_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("draft").unwrap();
         assert_eq!(
             worker
@@ -443,11 +443,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
     )
     .unwrap();
     reopened.checkout_branch("draft").unwrap();
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -2523,6 +2519,7 @@ fn durable_branch_source_removal_survives_reopen() {
         .unwrap();
     alice.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -2531,13 +2528,11 @@ fn durable_branch_source_removal_survives_reopen() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &alice
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = alice
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("merge").unwrap();
         assert_eq!(
             worker
@@ -2552,10 +2547,7 @@ fn durable_branch_source_removal_survives_reopen() {
     let mut reopened =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
     reopened.checkout_branch("merge").unwrap();
-    for refresh in alice
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in alice.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -2935,6 +2927,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
         .unwrap();
     upstream.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -2943,13 +2936,11 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("merge").unwrap();
         assert!(worker
             .query(support::eq_query("tasks", "done", json!(false)))
@@ -2977,8 +2968,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
         schema.clone(),
     )
     .unwrap();
-    let observed = reopened.observed_query_reads().unwrap();
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
     reopened.checkout_branch("merge").unwrap();

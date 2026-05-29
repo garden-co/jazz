@@ -874,7 +874,7 @@ fn observed_id_not_equal_subscription_removes_deleted_remote_row() {
 }
 
 #[test]
-fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
+fn restarted_subscription_uses_replayed_query_read_and_emits_refresh_diff() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
     let schema = SchemaDef::new().table("tasks", |table| {
@@ -894,6 +894,7 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
             ]),
         )
         .unwrap();
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -902,13 +903,11 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
 
@@ -922,11 +921,11 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
 
     let mut worker =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = worker.observed_query_reads().unwrap();
-    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
+    assert!(worker.observed_query_reads().unwrap().is_empty());
+    let mut subscription = worker.subscribe_observed_query(&query_reads[0]).unwrap();
     assert_eq!(subscription.initial_rows().len(), 1);
 
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         worker.apply_bundle(&refresh).unwrap();
     }
     let diffs = worker.poll_subscription(&mut subscription).unwrap();
@@ -963,6 +962,7 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -971,18 +971,16 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query(support::top_created_query(
-                        "notes",
-                        "pinned",
-                        json!(true),
-                        2,
-                    ))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -999,9 +997,9 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
 
     let mut worker =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = worker.observed_query_reads().unwrap();
-    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    assert!(worker.observed_query_reads().unwrap().is_empty());
+    let mut subscription = worker.subscribe_observed_query(&query_reads[0]).unwrap();
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         worker.apply_bundle(&refresh).unwrap();
     }
 

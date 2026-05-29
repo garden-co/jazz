@@ -551,6 +551,7 @@ fn durable_recursive_query_read_refreshes_after_restart() {
             ]),
         )
         .unwrap();
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -559,13 +560,11 @@ fn durable_recursive_query_read_refreshes_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_recursive_refs("folders", "root", "parent")
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_recursive_refs("folders", "root", "parent")
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
 
@@ -582,12 +581,8 @@ fn durable_recursive_query_read_refreshes_after_restart() {
 
     let mut reopened =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    assert_eq!(desired_queries[0].op, "recursive_refs");
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
+    assert_eq!(query_reads[0].op, "recursive_refs");
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 

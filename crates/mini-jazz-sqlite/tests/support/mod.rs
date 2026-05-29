@@ -1,4 +1,4 @@
-use mini_jazz_sqlite::sync::Bundle;
+use mini_jazz_sqlite::sync::{Bundle, QueryReadRecord};
 use mini_jazz_sqlite::{BuiltQuery, Result, Runtime, SchemaDef, Storage};
 use serde_json::json;
 use serde_json::Value as JsonValue;
@@ -237,7 +237,16 @@ pub fn forward_exclusive(
 }
 
 pub fn refresh_observed_queries(source: &Runtime, target: &mut Runtime) -> Result<()> {
-    for refresh in source.export_query_read_refreshes(&target.observed_query_reads()?)? {
+    let reads = target.observed_query_reads()?;
+    refresh_query_reads(source, target, &reads)
+}
+
+pub fn refresh_query_reads(
+    source: &Runtime,
+    target: &mut Runtime,
+    reads: &[QueryReadRecord],
+) -> Result<()> {
+    for refresh in source.export_query_read_refreshes(reads)? {
         target.apply_bundle(&refresh)?;
     }
     Ok(())
