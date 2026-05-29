@@ -1318,3 +1318,11 @@ Decision: add `TopCreatedHistoryDeltaOptions` so top-created query HistoryDelta 
 Why: ordered query sync should have one coherent shape. Top-created refresh already needed previous observed ids for repair, but defaulting the text sidecar watermark made it less incremental than predicate/top-field exports.
 
 Scope impact: old top-created methods remain wrappers. A regression verifies a second top-created query delta exports exactly one new deep-text op when given the receiver watermark.
+
+## Fri May 29 02:52:23 PDT 2026 - Make Query Refresh Options-First
+
+Decision: observed-query refresh delta APIs now have options-first variants using `HistoryDeltaExportOptions`; older remote-block/watermark signatures are wrappers.
+
+Why: refresh sync is the closest thing this prototype has to real subscription continuation. It should use the same receiver-state object as direct table/query exports instead of growing parallel argument lists.
+
+Scope impact: no format change. The refresh watermark regression now exercises the options-first API directly.

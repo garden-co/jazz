@@ -2718,12 +2718,19 @@ impl Runtime {
         remote_block_manifests: &[HistoryBlockManifest],
         text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
     ) -> Result<Vec<HistoryDelta>> {
-        let reads = self.observed_query_reads()?;
-        self.export_query_read_refresh_deltas_since_text_watermark(
-            &reads,
-            remote_block_manifests,
-            text_ops_watermark,
+        self.export_observed_query_refresh_deltas_with_options(
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec())
+                .with_text_ops_watermark(text_ops_watermark),
         )
+    }
+
+    pub fn export_observed_query_refresh_deltas_with_options(
+        &self,
+        options: HistoryDeltaExportOptions,
+    ) -> Result<Vec<HistoryDelta>> {
+        let reads = self.observed_query_reads()?;
+        self.export_query_read_refresh_deltas_with_options(&reads, options)
     }
 
     pub fn export_query_read_refresh_deltas(
@@ -2744,7 +2751,21 @@ impl Runtime {
         remote_block_manifests: &[HistoryBlockManifest],
         text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
     ) -> Result<Vec<HistoryDelta>> {
-        let mut known_block_keys = remote_block_manifests
+        self.export_query_read_refresh_deltas_with_options(
+            reads,
+            HistoryDeltaExportOptions::new()
+                .with_remote_block_manifests(remote_block_manifests.to_vec())
+                .with_text_ops_watermark(text_ops_watermark),
+        )
+    }
+
+    pub fn export_query_read_refresh_deltas_with_options(
+        &self,
+        reads: &[QueryReadRecord],
+        options: HistoryDeltaExportOptions,
+    ) -> Result<Vec<HistoryDelta>> {
+        let mut known_block_keys = options
+            .remote_block_manifests
             .iter()
             .map(history_block_manifest_key)
             .collect::<BTreeSet<_>>();
@@ -2752,8 +2773,8 @@ impl Runtime {
         for read in reads {
             let mut delta = self.export_query_read_refresh_delta(
                 read,
-                remote_block_manifests,
-                text_ops_watermark,
+                &options.remote_block_manifests,
+                options.text_ops_watermark,
             )?;
             delta.blocks.retain(|block| {
                 let key = history_block_manifest_key(&block.manifest);
@@ -14572,10 +14593,9 @@ mod tests {
             .append_deep_text("docs", "doc-1", "body", " again")
             .unwrap();
         let mut refresh_deltas = alice
-            .export_query_read_refresh_deltas_since_text_watermark(
+            .export_query_read_refresh_deltas_with_options(
                 &observed_reads,
-                &[],
-                text_watermark,
+                HistoryDeltaExportOptions::new().with_text_ops_watermark(text_watermark),
             )
             .unwrap();
         assert_eq!(refresh_deltas.len(), 1);
