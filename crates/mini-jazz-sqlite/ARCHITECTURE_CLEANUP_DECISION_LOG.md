@@ -174,3 +174,7 @@ Next #947 slice: tiered one-shot reads are in place, but subscription semantics 
 ## 2026-05-28 23:27 PDT
 
 #947 second slice is green: tier now lives on subscription state for table and built-query subscriptions. First delivery and later deltas use the same `ReadTier` path as one-shot reads. Predicate convenience subscriptions still route through their existing APIs and should eventually be rebuilt on `BuiltQuery` or tier-aware predicates.
+
+## 2026-05-28 23:29 PDT
+
+Subscription architecture cleanup: collapsed the duplicated rerun logic used by `subscription_delta` and legacy `poll_subscription` into one `Runtime::subscription_rows` helper. This should make future subscription/tier/query changes hit one boundary instead of two nearly identical matches.

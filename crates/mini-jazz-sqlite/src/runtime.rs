@@ -4103,7 +4103,15 @@ impl Runtime {
         &self,
         subscription: &mut RowsSubscription,
     ) -> Result<Vec<crate::types::RowDiff>> {
-        let next_rows = match &subscription.query {
+        let next_rows = self.subscription_rows(subscription)?;
+        Ok(subscription.replace_with_diff(next_rows))
+    }
+
+    pub(crate) fn subscription_rows(
+        &self,
+        subscription: &RowsSubscription,
+    ) -> Result<Vec<RowView>> {
+        Ok(match &subscription.query {
             RowsSubscriptionQuery::Table { table, tier } => self.read_rows_at_tier(table, *tier)?,
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
                 self.query(predicate_query(
@@ -4183,8 +4191,7 @@ impl Runtime {
             RowsSubscriptionQuery::Built { query, tier } => {
                 self.query_at_tier(query.clone(), *tier)?
             }
-        };
-        Ok(subscription.replace_with_diff(next_rows))
+        })
     }
 
     pub fn poll_rejections(
