@@ -4,12 +4,11 @@ use crate::apply::{
     tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
 };
 use crate::profile::ProfileTimer;
-use crate::query_api::BuiltQuery;
+use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::query_observation::{built_query_from_read, observed_ids_from_query_value};
 use crate::rows::{ensure_row_id, row_num};
 use crate::runtime::history_export::{
-    built_query_repair_keep_query, built_query_repair_scope, delete_current_rows_outside_keep_set,
-    history_records_for_tx, id_predicate_values, sql_placeholders, BuiltQueryRepairScope,
+    history_records_for_tx, id_predicate_values, sql_placeholders,
 };
 use crate::runtime::write_core::{record_tx_write_num, row_id_used_by_other_table};
 use crate::schema::{FieldKind, PolicyDef, SchemaDef};
@@ -1607,4 +1606,101 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+enum BuiltQueryRepairScope<'a> {
+    Predicate(&'a QueryCondition),
+    Generic,
+}
+
+fn built_query_repair_scope(query: &BuiltQuery) -> Result<BuiltQueryRepairScope<'_>> {
+    if query.conditions.len() == 1 && query.offset.unwrap_or(0) == 0 {
+        let condition = &query.conditions[0];
+        match (query.order_by.as_slice(), query.limit) {
+            ([], None) if legacy_predicate_repair_supports(condition) => {
+                return Ok(BuiltQueryRepairScope::Predicate(condition));
+            }
+            _ => {}
+        }
+    }
+    Ok(BuiltQueryRepairScope::Generic)
+}
+
+fn legacy_predicate_repair_supports(condition: &QueryCondition) -> bool {
+    match condition.column.as_str() {
+        "id" => matches!(
+            condition.op,
+            QueryConditionOp::Eq | QueryConditionOp::Ne | QueryConditionOp::In
+        ),
+        "$createdBy" => matches!(condition.op, QueryConditionOp::Eq | QueryConditionOp::Ne),
+        "$createdAt" | "$updatedAt" => false,
+        _ => !query_condition_value_contains_null(&condition.value),
+    }
+}
+
+fn query_condition_value_contains_null(value: &JsonValue) -> bool {
+    value.is_null()
+        || value
+            .as_array()
+            .is_some_and(|values| values.iter().any(JsonValue::is_null))
+}
+
+fn built_query_repair_keep_query(query: &BuiltQuery) -> Result<BuiltQuery> {
+    let offset = query.offset.unwrap_or(0);
+    if offset == 0 {
+        return Ok(query.clone());
+    }
+
+    let mut keep_query = query.clone();
+    keep_query.offset = None;
+    keep_query.limit = query
+        .limit
+        .map(|limit| {
+            offset
+                .checked_add(limit)
+                .ok_or_else(|| crate::Error::new("query limit plus offset is too large"))
+        })
+        .transpose()?;
+    Ok(keep_query)
+}
+
+fn delete_current_rows_outside_keep_set(
+    db: &Connection,
+    table_name: &str,
+    branch_num: i64,
+    scope_row_nums: &[i64],
+    keep_row_nums: &[i64],
+) -> Result<()> {
+    if scope_row_nums.is_empty() {
+        return Ok(());
+    }
+
+    let keep_row_nums = keep_row_nums.iter().copied().collect::<BTreeSet<_>>();
+    let delete_row_nums = scope_row_nums
+        .iter()
+        .copied()
+        .filter(|row_num| !keep_row_nums.contains(row_num))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for delete_chunk in delete_row_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
+        let sql = format!(
+            "DELETE FROM {}
+             WHERE j_branch_num = ?
+               AND is_deleted = 0
+               AND row_num IN ({})",
+            crate::schema::current_table(table_name),
+            sql_placeholders(delete_chunk.len()),
+        );
+        let mut params = Vec::with_capacity(1 + delete_chunk.len());
+        params.push(rusqlite::types::Value::Integer(branch_num));
+        params.extend(
+            delete_chunk
+                .iter()
+                .copied()
+                .map(rusqlite::types::Value::Integer),
+        );
+        db.execute(&sql, params_from_iter(params.iter()))?;
+    }
+    Ok(())
 }

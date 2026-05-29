@@ -976,3 +976,9 @@ regress.
 - Replaced repeated quoted field-column construction and row-width arithmetic in `query.rs` with small private helpers.
 - Kept the SQL assembly local to each read path instead of introducing a query-builder abstraction.
 - Validation: `cargo check -p mini-jazz-sqlite`; `cargo test -p mini-jazz-sqlite query_matrix -- --nocapture` passed 10 focused query/export tests.
+
+## 2026-05-29 13:26 PDT - Moved apply-only repair helpers out of history export
+
+- Moved built-query repair-scope classification, offset keep-query construction, and current-row contraction from `history_export.rs` into `sync_apply.rs`.
+- Kept shared history/export helpers in `history_export`, but removed helpers that only made sense while applying query-scope refreshes.
+- Validation: `cargo check -p mini-jazz-sqlite`; `cargo test -p mini-jazz-sqlite sync_fate -- --nocapture` passed 65 focused sync tests.
