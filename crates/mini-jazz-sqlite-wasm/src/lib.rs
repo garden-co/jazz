@@ -50,7 +50,16 @@ impl From<JsValue> for NotificationError {
 impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
-        Runtime::open_with_schema(Storage::Memory, node_id, user, todo_app_schema())
+        Self::open_memory_with_schema(node_id, user, to_js_value(todo_app_schema())?)
+    }
+
+    #[wasm_bindgen(js_name = openMemoryWithSchema)]
+    pub fn open_memory_with_schema(
+        node_id: &str,
+        user: &str,
+        schema: JsValue,
+    ) -> Result<MiniJazzRuntime, JsValue> {
+        Runtime::open_with_schema(Storage::Memory, node_id, user, parse_schema(schema)?)
             .map(MiniJazzRuntime::new)
             .map_err(to_js_error)
     }
@@ -61,6 +70,17 @@ impl MiniJazzRuntime {
         db_name: &str,
         node_id: &str,
         user: &str,
+    ) -> Result<MiniJazzRuntime, JsValue> {
+        Self::open_opfs_with_schema(db_name, node_id, user, to_js_value(todo_app_schema())?).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openOpfsWithSchema)]
+    pub async fn open_opfs_with_schema(
+        db_name: &str,
+        node_id: &str,
+        user: &str,
+        schema: JsValue,
     ) -> Result<MiniJazzRuntime, JsValue> {
         let pool_name = opfs_pool_name(db_name);
         let pool_directory = format!(".{pool_name}");
@@ -76,7 +96,7 @@ impl MiniJazzRuntime {
             Storage::File(db_name.into()),
             node_id,
             user,
-            todo_app_schema(),
+            parse_schema(schema)?,
         )
         .map(MiniJazzRuntime::new)
         .map_err(to_js_error)
@@ -310,6 +330,11 @@ impl MiniJazzRuntime {
 fn parse_values(value: JsValue) -> Result<BTreeMap<String, JsonValue>, JsValue> {
     serde_wasm_bindgen::from_value(value)
         .map_err(|error| JsValue::from_str(&format!("invalid row values: {error}")))
+}
+
+fn parse_schema(value: JsValue) -> Result<SchemaDef, JsValue> {
+    serde_wasm_bindgen::from_value(value)
+        .map_err(|error| JsValue::from_str(&format!("invalid schema: {error}")))
 }
 
 fn parse_built_query(value: JsValue) -> Result<BuiltQuery, JsValue> {

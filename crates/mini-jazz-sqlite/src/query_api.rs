@@ -71,7 +71,7 @@ impl BuiltQuery {
         })
     }
 
-    pub(crate) fn to_json_value(&self) -> JsonValue {
+    pub fn to_json_value(&self) -> JsonValue {
         let mut object = JsonMap::new();
         object.insert("table".to_owned(), JsonValue::String(self.table.clone()));
         object.insert(

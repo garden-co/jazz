@@ -200,6 +200,7 @@ fn built_query_page_refresh_removes_stale_rows_and_adds_new_boundary_rows() {
         query_ids(&peer, query.clone()),
         vec!["task-alpha", "task-beta"]
     );
+    assert_eq!(peer.observed_query_reads().unwrap().len(), 1);
     let mut subscription = peer.subscribe_query(query.clone()).unwrap();
 
     upstream
@@ -215,6 +216,12 @@ fn built_query_page_refresh_removes_stale_rows_and_adds_new_boundary_rows() {
     {
         peer.apply_bundle(&refresh).unwrap();
     }
+    let observed = peer.observed_query_reads().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].value["observed_ids"],
+        json!(["task-beta", "task-charlie"])
+    );
 
     let update = peer.subscription_delta(&mut subscription).unwrap();
     assert_eq!(

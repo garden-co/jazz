@@ -841,3 +841,10 @@ regress.
 - Replaced the final runtime-module wildcard import in `history_export` with explicit dependencies.
 - `runtime.rs` now imports only what it directly needs plus shared helper dependencies; it no longer acts as an ambient import bucket for large child modules.
 - `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:55 PDT - Fixed review-found generic descriptor and WASM schema smells
+
+- Subagent review caught that generic built-query descriptor identity still included `observed_ids`, so generic page queries could accumulate stale descriptor variants even though dedicated top-window descriptors had been fixed.
+- Made `ObservedQuery::Built` identity use the canonical `BuiltQuery` value and added explicit coverage to the built-query page refresh test that the descriptor count remains one while `observed_ids` updates.
+- Subagent review also caught that `MiniJazzRuntime::openMemory` / `openOpfs` looked generic while always installing the todo schema. Added schema-taking WASM constructors and kept the old constructors as todo-demo convenience wrappers for now.
+- Focused built-query descriptor test passes, and `cargo check -p mini-jazz-sqlite-wasm -p mini-sqlite-todo-yew` is green.

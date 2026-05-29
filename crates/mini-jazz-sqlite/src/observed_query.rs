@@ -141,6 +141,7 @@ pub(crate) fn identity_value(read: &QueryReadRecord) -> Result<JsonValue> {
             "order_field": order_field,
             "limit": limit,
         })),
+        ObservedQuery::Built { query, .. } => Ok(query.to_json_value()),
         _ => Ok(read.value.clone()),
     }
 }
