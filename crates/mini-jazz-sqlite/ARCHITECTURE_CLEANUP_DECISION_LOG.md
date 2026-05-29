@@ -848,3 +848,8 @@ regress.
 - Made `ObservedQuery::Built` identity use the canonical `BuiltQuery` value and added explicit coverage to the built-query page refresh test that the descriptor count remains one while `observed_ids` updates.
 - Subagent review also caught that `MiniJazzRuntime::openMemory` / `openOpfs` looked generic while always installing the todo schema. Added schema-taking WASM constructors and kept the old constructors as todo-demo convenience wrappers for now.
 - Focused built-query descriptor test passes, and `cargo check -p mini-jazz-sqlite-wasm -p mini-sqlite-todo-yew` is green.
+
+## 2026-05-29 03:56 PDT - Perf PR moved again
+
+- Rechecked PR #973 after the descriptor/WASM fixes.
+- It has moved to `2188e1ed73e01f88e692e7b979f531966470ff79` and remains draft, so it is still better treated as a moving source of lessons rather than something to merge into this cleanup lane.
