@@ -188,6 +188,79 @@ pub(super) fn parse_rejection_detail_for_sqlite(
     }
 }
 
+pub(super) fn history_records_for_tx(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_num: i64,
+    tx_id: &str,
+) -> Result<Vec<HistoryRecord>> {
+    let mut records = Vec::new();
+    for table in schema.tables() {
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "ids.row_id".to_owned(),
+            "branch.branch_id".to_owned(),
+            "h.op".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.extend([
+            "h.j_created_at".to_owned(),
+            "h.j_updated_at".to_owned(),
+            format!(
+                "{} AS j_created_by",
+                users::user_id_expr("h", "j_created_by")
+            ),
+            format!(
+                "{} AS j_updated_by",
+                users::user_id_expr("h", "j_updated_by")
+            ),
+        ]);
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
+             WHERE h.tx_num = ?
+             ORDER BY h.row_num",
+            select_columns.join(", "),
+            crate::schema::history_table(&table.name)
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 4;
+        let mut rows = stmt.query(params![tx_num])?;
+        while let Some(row) = rows.next()? {
+            let raw = (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut values = BTreeMap::new();
+            for (idx, field) in table.fields.iter().enumerate() {
+                values.insert(
+                    field.name.clone(),
+                    sql_value_to_json(conn, field, &raw[idx + 3])?,
+                );
+            }
+            let sys = 3 + table.fields.len();
+            records.push(HistoryRecord {
+                table: table.name.clone(),
+                row_id: text_value(&raw[0], "row_id")?,
+                branch_id: text_value(&raw[1], "branch_id")?,
+                tx_id: tx_id.to_owned(),
+                op: integer_value(&raw[2], "op")?,
+                values,
+                created_at: integer_value(&raw[sys], "j_created_at")?,
+                updated_at: integer_value(&raw[sys + 1], "j_updated_at")?,
+                created_by: text_value(&raw[sys + 2], "j_created_by")?,
+                updated_by: text_value(&raw[sys + 3], "j_updated_by")?,
+            });
+        }
+    }
+    Ok(records)
+}
+
 pub(super) fn export_reads_for_history(
     conn: &Connection,
     history: &[HistoryRecord],

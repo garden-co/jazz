@@ -4,9 +4,8 @@ use super::history_export::{
     export_policy_dependency_history, export_reads_for_history,
     export_recursive_scope_repair_history, export_snapshot_policy_dependency_history,
     export_table_history, export_txs, export_txs_for_query_scope, export_visible_table_history,
-    include_branch_record, make_bundle, PolicyDependencyExport,
+    history_records_for_tx, include_branch_record, make_bundle, PolicyDependencyExport,
 };
-use super::sync_apply::history_records_for_tx;
 use super::Runtime;
 use crate::rows::row_num;
 use crate::sync::{Bundle, QueryReadRecord};

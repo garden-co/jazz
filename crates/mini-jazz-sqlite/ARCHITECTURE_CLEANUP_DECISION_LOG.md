@@ -898,3 +898,9 @@ regress.
 - Ran `pnpm --filter mini-sqlite-todo build` to catch the JS demo constructor rename.
 - The `prebuild` wasm-pack step succeeded and regenerated the WASM package with the renamed binding.
 - The Vite build then failed because this worktree does not have `node_modules` installed (`vite: command not found`), so the browser app bundle itself remains unvalidated in this worktree.
+
+## 2026-05-29 04:10 PDT - Moved shared history reconstruction out of sync apply
+
+- Moved `history_records_for_tx` from `sync_apply` to `history_export`, since both exclusive forwarding export and awaiting-dependency revalidation need it.
+- This removes the remaining concrete dependency from sync export into sync apply and makes the export/apply boundary less leaky.
+- `cargo check -p mini-jazz-sqlite` is green.
