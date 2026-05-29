@@ -1302,3 +1302,11 @@ Decision: add `Runtime::history_delta_export_options_for_table`, returning the r
 Why: real sync call sites should not manually stitch together block manifests and text-op watermarks or accidentally use the sender watermark as a proxy for receiver state. The benchmark live path now asks the receiver for its current export options before each incremental table delta.
 
 Scope impact: existing table/all-history delta methods remain wrappers. The text benchmark still preserves one Jazz row per update, but its live incremental sync is now shaped like sender-export-against-receiver-state rather than benchmark-private sidecar bookkeeping.
+
+## Fri May 29 02:49:31 PDT 2026 - Record Receiver-State Benchmark Pulse
+
+Decision: record the receiver-state sync checkpoint as `Block+Ops15` in the benchmark overview.
+
+Why: the storage/wire format did not change, but the measured live text path now uses receiver-derived export options instead of benchmark-local watermark state. Keeping a column makes that semantic benchmark shift visible and gives us a stable point before the next runtime pass.
+
+Scope impact: canonical numbers remain in the Block+Ops14 band: append about 0.43 ms/update, Automerge about 0.14 ms/update, canvas about 0.06 ms/update. Native sync bytes are essentially unchanged.
