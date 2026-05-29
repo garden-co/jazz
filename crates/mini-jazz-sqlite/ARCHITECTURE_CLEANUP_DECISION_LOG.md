@@ -593,3 +593,9 @@ regress.
 - Factored duplicate tombstone/current-projection delete materialization out of ordinary deletes and explicit transaction deletes into `runtime::write_core::stage_delete_row_in_tx`.
 - Preserved the intentional API difference: simple deletes do not currently record a previous-row read set, while explicit transaction deletes do because transaction validation depends on the deleted row version being stable.
 - Focused transaction and storage/projection tests pass after the move.
+
+## 2026-05-29 02:24 PDT - History export helpers moved into an explicit module
+
+- Lifted the ambient history/export helper family out of `runtime.rs` into `runtime::history_export`: transaction export, read-set export, branch provenance export, policy dependency export, query-scope repair candidates, visible/history version export, bundle construction, and SQL helper utilities used by export paths.
+- This is still not the final abstraction: many helpers remain broad `pub(super)` because neighboring query/sync modules call them directly. The important improvement is that future work now has a named export boundary instead of adding more tail-end functions to the central runtime file.
+- Focused query-matrix, recursive-query, and sync tests pass after the move.
