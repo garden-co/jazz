@@ -3157,14 +3157,6 @@ impl Runtime {
             .copied()
             .map(Ok)
             .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
-        let history_exists = history_record_exists(context.db, &record.table, row_num, tx_num)?;
-        if history_exists
-            && current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
-                .is_none_or(|current_tx_num| current_tx_num == tx_num)
-        {
-            return Ok(());
-        }
-
         let mut columns = vec![
             "row_num".to_owned(),
             "tx_num".to_owned(),
@@ -3210,26 +3202,22 @@ impl Runtime {
             rusqlite::types::Value::Integer(created_by_num),
             rusqlite::types::Value::Integer(updated_by_num),
         ]);
-        if !history_exists {
-            insert_dynamic(
-                context.db,
-                &crate::schema::history_table(&record.table),
-                &columns,
-                &values,
-            )?;
-        }
+        insert_dynamic(
+            context.db,
+            &crate::schema::history_table(&record.table),
+            &columns,
+            &values,
+        )?;
         let table_num = context
             .table_nums_by_name
             .get(&record.table)
             .copied()
             .ok_or_else(|| crate::Error::new("history record references missing table"))?;
-        if !history_exists {
-            context
-                .writes_by_tx
-                .entry(tx_num)
-                .or_default()
-                .push(tx::PackedWrite(table_num, row_num, record.op));
-        }
+        context
+            .writes_by_tx
+            .entry(tx_num)
+            .or_default()
+            .push(tx::PackedWrite(table_num, row_num, record.op));
         context
             .touched_current_rows
             .insert((record.table.clone(), row_num, branch_num));
@@ -8106,24 +8094,6 @@ fn integer_sql_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> 
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
-}
-
-fn history_record_exists(
-    conn: &Connection,
-    table_name: &str,
-    row_num: i64,
-    tx_num: i64,
-) -> Result<bool> {
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT 1
-         FROM {}
-         WHERE row_num = ?
-           AND tx_num = ?
-         LIMIT 1",
-        crate::schema::history_table(table_name)
-    ))?;
-    let mut rows = stmt.query(params![row_num, tx_num])?;
-    Ok(rows.next()?.is_some())
 }
 
 fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
