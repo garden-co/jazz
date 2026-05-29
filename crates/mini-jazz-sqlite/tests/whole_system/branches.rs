@@ -4,7 +4,8 @@ use super::*;
 fn direct_branch_query_matches_checkout_without_changing_current_branch() {
     let schema = support::tasks_schema();
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let base_tx = alice
         .insert_row(
@@ -107,7 +108,8 @@ fn branch_local_write_is_invisible_on_main() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -462,7 +464,8 @@ fn branch_scoped_export_excludes_unrelated_branch_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -509,7 +512,8 @@ fn branch_scoped_built_query_export_excludes_unrelated_branch_repair_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -564,7 +568,8 @@ fn branch_scoped_built_query_export_excludes_unrelated_versions_of_same_row() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice
         .insert_row(
@@ -1216,7 +1221,8 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1241,15 +1247,15 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
     alice.checkout_branch("draft").unwrap();
     assert_eq!(alice.read_rows("todos").unwrap().len(), 1);
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice.read_rows("todos").unwrap().is_empty());
 }
@@ -1267,7 +1273,8 @@ fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1291,15 +1298,15 @@ fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
     alice.create_branch("draft", Some(2)).unwrap();
     alice.checkout_branch("draft").unwrap();
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice.read_rows("todos").unwrap().is_empty());
 
@@ -1323,7 +1330,8 @@ fn branch_equality_query_uses_effective_branch_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1347,15 +1355,15 @@ fn branch_equality_query_uses_effective_branch_policy() {
     alice.create_branch("draft", Some(2)).unwrap();
     alice.checkout_branch("draft").unwrap();
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice
         .query(support::eq_query("todos", "title", json!("Find me")))
@@ -1376,7 +1384,8 @@ fn branch_ordered_query_applies_effective_policy_before_pagination() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let visible_project_tx = alice
         .insert_row(
@@ -1428,15 +1437,15 @@ fn branch_ordered_query_applies_effective_policy_before_pagination() {
 
     alice.create_branch("draft", Some(4)).unwrap();
     alice.checkout_branch("draft").unwrap();
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-hidden",
-            BTreeMap::from([("title".to_owned(), json!("Bob branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-hidden",
+                BTreeMap::from([("title".to_owned(), json!("Bob branch project"))]),
+            )
+            .unwrap();
+    });
 
     let rows = alice
         .query(
@@ -1532,7 +1541,8 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();
@@ -3095,7 +3105,8 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();
@@ -3118,29 +3129,28 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
         )
         .unwrap();
 
-    alice.session_user_for_test("bob");
-    alice.create_branch("right", None).unwrap();
-    alice.checkout_branch("right").unwrap();
-    alice
-        .insert_row(
-            "projects",
-            "project-right",
-            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
-        )
-        .unwrap();
-    alice
-        .insert_row(
-            "tasks",
-            "task-1",
-            BTreeMap::from([
-                ("title".to_owned(), json!("Hidden candidate")),
-                ("done".to_owned(), json!(false)),
-                ("project".to_owned(), json!("project-right")),
-            ]),
-        )
-        .unwrap();
-
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice.create_branch("right", None).unwrap();
+        alice.checkout_branch("right").unwrap();
+        alice
+            .insert_row(
+                "projects",
+                "project-right",
+                BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+            )
+            .unwrap();
+        alice
+            .insert_row(
+                "tasks",
+                "task-1",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Hidden candidate")),
+                    ("done".to_owned(), json!(false)),
+                    ("project".to_owned(), json!("project-right")),
+                ]),
+            )
+            .unwrap();
+    });
     alice
         .create_branch_from_branches("merge", &["left", "right"])
         .unwrap();

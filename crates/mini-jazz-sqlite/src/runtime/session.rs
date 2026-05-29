@@ -106,14 +106,6 @@ impl Runtime {
         self.with_temporary_auth(RuntimeAuth::trusted_attributing_to_user(user), f)
     }
 
-    pub fn session_user_for_test(&mut self, user: &str) {
-        self.auth = if self.auth.is_trusted() {
-            RuntimeAuth::trusted_as_user(user)
-        } else {
-            RuntimeAuth::client(user)
-        }
-    }
-
     fn with_temporary_auth<T>(
         &mut self,
         auth: RuntimeAuth,

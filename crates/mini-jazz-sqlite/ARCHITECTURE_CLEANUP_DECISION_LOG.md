@@ -642,3 +642,9 @@ regress.
 - PR #973 head is now `f54c83c1d9ada44cf1bae407cac801462217b25f`, updated 02:33 PDT.
 - It is still a draft spike centered on sealed history blocks, text op sidecars, block codecs/caches, and deep-history benchmark docs.
 - Decision: continue avoiding wholesale merge into this architecture cleanup branch. The generic slices that fit this PR have already been ported; the remaining work should stay in the perf lane until its abstractions stabilize.
+
+## 2026-05-29 02:40 PDT - Removed test-only user switching from runtime API
+
+- Replaced branch tests that mutated a runtime's user with the real trusted-peer `run_as_user` API.
+- Removed `Runtime::session_user_for_test`, so future tests must model user switching through the same API trusted peers use in production-shaped topologies.
+- Focused branch tests pass after the replacement.
