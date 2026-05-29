@@ -4721,6 +4721,27 @@ fn record_policy_read_set_for_write(
     branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
+    let mut policy = policy;
+    if branch_num != 1 {
+        if let Some((branch_table_name, branch_policy)) = table.branch_policies.iter().next() {
+            if let Some(branch_write_policy) = branch_policy.write_policy.as_ref() {
+                let branch_id = branch_id_for_num(conn, branch_num)?;
+                let branch_row_num = ensure_row_id(conn, branch_table_name, &branch_id)?;
+                read_set::record_tx_read(conn, tx_num, branch_table_name, branch_row_num, 1, 1)?;
+                let branch_table = schema.table_def(branch_table_name)?;
+                record_policy_read_dependencies_for_row(
+                    conn,
+                    schema,
+                    branch_table,
+                    &branch_table.read_policy,
+                    branch_row_num,
+                    1,
+                    tx_num,
+                )?;
+                policy = branch_write_policy;
+            }
+        }
+    }
     let PolicyDef::RefReadable { field } = policy else {
         return Ok(());
     };

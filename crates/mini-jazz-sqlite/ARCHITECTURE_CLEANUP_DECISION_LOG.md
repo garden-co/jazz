@@ -335,3 +335,19 @@ pattern: append rejected history, hide current, and expose rejection info rather
 than throwing synchronously. Remaining gap: branch backing rows used by write
 policy should be recorded as policy read-set facts for exclusive validation and
 sync diagnostics.
+
+## 2026-05-29 00:21 PDT
+
+Turned that branch-write read-set gap into a failing whole-system assertion:
+the accepted branch-view write should record the backing branch row as a policy
+read. This keeps the branch policy model aligned with ordinary
+`write_if_ref_readable`, where permission-influencing rows are not just checked
+but also exported and revalidated.
+
+## 2026-05-29 00:22 PDT
+
+Green slice: branch-view writes now record the app backing branch row as a
+policy read-set fact before evaluating the write. This is intentionally generic
+inside the existing branch-policy slot rather than hardcoded to the test schema:
+any active branch write policy records the branch backing row on main, plus
+recursive policy dependencies of that backing row.

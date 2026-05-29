@@ -136,6 +136,7 @@ feature exists.
   branch-view policy decisions on a receiver.
 - Branch-view write policies validate proposed values against the same backing
   row context as branch-view read policies.
+- Branch-view write policies record backing rows as policy read-set facts.
 - A branch-local transaction may be globally accepted while invisible to main.
 - Main visibility does not automatically include branch-local history.
 - Branch reads use source precedence, not incidental storage order.

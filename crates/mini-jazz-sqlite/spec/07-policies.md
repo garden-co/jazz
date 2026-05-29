@@ -46,7 +46,9 @@ allowed because the proposed row field matches a backing-row field. If the
 backing row is hidden or the branch-view write rule is missing for a table with
 branch policy, the write is denied. Denial is represented as rejected history
 and projection repair, consistent with ordinary local-first policy failure
-semantics.
+semantics. Backing rows used by branch-view write policies are recorded as
+policy read-set facts, just like parent rows used by ordinary reference
+policies.
 
 ## Server Permission Validation Flow
 
@@ -138,7 +140,6 @@ Open issues:
 - exact SQL-lowerable policy IR
 - explicit inherit-main branch policy semantics
 - branch-view query-scope repair coverage
-- branch-view write policy read-set recording
 - how to bound recursive policy evaluation
 - edge policy-readiness strategy
 - redaction rules for policy denial/rejection explanations

@@ -557,6 +557,10 @@ fn for_branch_write_uses_branch_policy_and_backing_row_visibility() {
             .collect::<Vec<_>>(),
         vec!["todo-allowed"]
     );
+    assert_eq!(
+        alice.transaction_policy_read_rows(&accepted).unwrap(),
+        vec![("branches".to_owned(), "draft-a".to_owned())]
+    );
 }
 
 #[test]
