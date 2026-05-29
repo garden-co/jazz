@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:33:37 PDT 2026
+
+Decision: let SQLite build the local single-row read/write tuple JSONB directly.
+
+Why: local write profiles still spend most write time creating `jazz_tx` rows. We had been formatting tiny tuple JSON strings in Rust, passing them into SQLite, and asking SQLite JSONB to parse them. SQLite can build the same nested arrays from bound integers with `jsonb_array(...)`, which is a cleaner storage-boundary shape and avoids one text formatting/parsing hop.
+
+Scope impact: the hot `create_tx_at_local_epoch_with_single_row_read_write` path now inserts `writes_json` and `reads_json` with SQL JSONB constructors. The canonical sample moved append/canvas `tx_create_ms` down slightly and left Automerge roughly flat; the overview keeps this folded into `Block+Ops13` because it is a small general write-path cleanup rather than a new storage experiment.
+
 ## Fri May 29 01:24:42 PDT 2026
 
 Decision: sync every referenced deep-text root, not only the latest root per row.
