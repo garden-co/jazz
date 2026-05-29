@@ -5102,22 +5102,21 @@ fn apply_inline_text_ops_from_bundle(
                 .parse::<i64>()
                 .ok()?;
             let op = record.values.get("body_op")?;
-            let op_hex = if let Some(bytes) = op.as_bytes() {
-                bytes_to_hex(bytes)
+            let op_bytes = if let Some(bytes) = op.as_bytes() {
+                bytes.to_vec()
             } else {
-                op.as_str()?.to_owned()
+                hex_to_bytes(op.as_str()?).ok()?
             };
-            Some((root, op_hex))
+            Some((root, op_bytes))
         })
         .collect::<Vec<_>>();
     ops.sort_by_key(|(root, _)| *root);
     let tx = target.transaction()?;
-    for (root, op_hex) in ops {
+    for (root, op_bytes) in ops {
         if root <= *watermark {
             continue;
         }
-        let bytes = hex_to_bytes(&op_hex)?;
-        persisted_text_ops::apply_inline_op(&tx, &bytes, snapshot_every)?;
+        persisted_text_ops::apply_inline_op(&tx, &op_bytes, snapshot_every)?;
         *watermark = root;
     }
     tx.commit()?;
