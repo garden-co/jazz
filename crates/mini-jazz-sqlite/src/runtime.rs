@@ -7322,15 +7322,19 @@ fn normalize_deep_text_write_values(
         };
         let current_text = crate::persisted_text_ops::materialize(args.db, root)?;
         let (start_byte, delete_bytes, insert) = text_replacement_diff(&current_text, text);
-        let root = crate::persisted_text_ops::replace_range_known_len(
-            args.db,
-            root,
-            current_text.len(),
-            start_byte,
-            delete_bytes,
-            insert,
-            256,
-        )?;
+        let root = if delete_bytes == 0 && insert.is_empty() {
+            root
+        } else {
+            crate::persisted_text_ops::replace_range_known_len(
+                args.db,
+                root,
+                current_text.len(),
+                start_byte,
+                delete_bytes,
+                insert,
+                256,
+            )?
+        };
         normalized
             .get_or_insert_with(|| args.values.clone())
             .insert(field.name.clone(), deep_text_root_value(root));
@@ -13450,6 +13454,52 @@ mod tests {
         assert_eq!(
             alice.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello brave world"
+        );
+    }
+
+    #[test]
+    fn ordinary_deep_text_string_update_skips_noop_text_op() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.text("title");
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([
+                    ("title".to_owned(), JsonValue::from("First")),
+                    ("body".to_owned(), JsonValue::from("hello")),
+                ]),
+            )
+            .unwrap();
+        let op_count_before: i64 = alice
+            .conn
+            .query_row("SELECT COUNT(*) FROM jazz_text_op", [], |row| row.get(0))
+            .unwrap();
+
+        alice
+            .update_row(
+                "docs",
+                "doc-1",
+                BTreeMap::from([
+                    ("title".to_owned(), JsonValue::from("Second")),
+                    ("body".to_owned(), JsonValue::from("hello")),
+                ]),
+            )
+            .unwrap();
+
+        let op_count_after: i64 = alice
+            .conn
+            .query_row("SELECT COUNT(*) FROM jazz_text_op", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(op_count_after, op_count_before);
+        assert_eq!(
+            alice.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "hello"
         );
     }
 

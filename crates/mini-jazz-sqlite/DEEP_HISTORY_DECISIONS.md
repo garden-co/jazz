@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:18:49 PDT 2026
+
+Decision: ordinary public `deep_text` assignments that do not change text should reuse the existing root.
+
+Why: `deep_text` is an opt-in storage strategy behind a normal text-shaped API. If an app updates another column while resending the same text value, creating a no-op text op would inflate sidecar history and make repeating unchanged columns expensive again. The row update may still create a Jazz row version for the other field change, but the text column should structurally share its prior root.
+
+Scope impact: generic row-write normalization now detects empty replacement diffs and leaves the existing text root untouched. A regression updates a title while resending the same deep-text body and verifies `jazz_text_op` does not grow.
+
 ## Fri May 29 02:07:46 PDT 2026
 
 Decision: make `HistoryDelta` receive a real outer SQLite savepoint and let nested block/bundle import use savepoints too.
