@@ -163,38 +163,6 @@ mod install_transport_tests {
     }
 
     #[test]
-    fn peer_secret_transport_drops_live_catalogue_publishes_upstream() {
-        let mut core = create_test_runtime();
-
-        let mut manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
-            &mut core,
-            "ws://example.test/ws".to_string(),
-            AuthConfig {
-                peer_secret: Some("cluster-peer-secret".to_string()),
-                ..Default::default()
-            },
-            NopTick,
-        );
-        let server_id = core.transport.as_ref().unwrap().server_id;
-        let current_hash = core.schema_manager().catalogue_state_hash();
-        core.handle_transport_inbound_for_test(
-            server_id,
-            crate::transport_manager::TransportInbound::Connected {
-                catalogue_state_hash: Some(current_hash),
-                next_sync_seq: None,
-            },
-        );
-
-        core.publish_schema(schema_evolution_v2());
-        core.batched_tick();
-
-        assert!(
-            manager.try_recv_outbox_for_test().is_none(),
-            "peer-secret transports must not publish live catalogue updates upstream"
-        );
-    }
-
-    #[test]
     fn admin_secret_transport_drops_live_catalogue_publishes_upstream() {
         let mut core = create_test_runtime();
 

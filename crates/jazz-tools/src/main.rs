@@ -146,10 +146,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_UPSTREAM_URL")]
         upstream_url: Option<String>,
 
-        /// Shared server-to-server secret for peer sync.
-        #[arg(long, env = "JAZZ_PEER_SECRET")]
-        peer_secret: Option<String>,
-
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
             long,
@@ -205,7 +201,6 @@ async fn main() {
             backend_secret,
             admin_secret,
             upstream_url,
-            peer_secret,
             shutdown_timeout_secs,
             bound_port_file,
         } => {
@@ -231,7 +226,6 @@ async fn main() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
-                peer_secret,
                 ..Default::default()
             };
             if let Err(e) = commands::server::run(
@@ -258,7 +252,6 @@ async fn main() {
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
         upstream_url,
-        peer_secret,
         admin_secret,
         ..
     } = command
@@ -266,9 +259,6 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
         return Ok(());
     };
 
-    if upstream_url.is_some() && peer_secret.is_none() {
-        return Err("--peer-secret / JAZZ_PEER_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
-    }
     if upstream_url.is_some() && admin_secret.is_none() {
         return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -445,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn server_command_parses_upstream_url_and_peer_secret() {
+    fn server_command_parses_upstream_url_and_admin_secret() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
@@ -453,26 +443,26 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             "--upstream-url",
             "https://core.example.com",
-            "--peer-secret",
-            "cluster-secret",
+            "--admin-secret",
+            "admin-secret",
         ])
         .expect("server command should parse");
 
         match cli.command {
             Commands::Server {
                 upstream_url,
-                peer_secret,
+                admin_secret,
                 ..
             } => {
                 assert_eq!(upstream_url.as_deref(), Some("https://core.example.com"));
-                assert_eq!(peer_secret.as_deref(), Some("cluster-secret"));
+                assert_eq!(admin_secret.as_deref(), Some("admin-secret"));
             }
             _ => panic!("expected server command"),
         }
     }
 
     #[test]
-    fn server_cli_validation_requires_peer_secret_in_edge_mode() {
+    fn server_cli_validation_allows_admin_secret_only_in_edge_mode() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
@@ -480,14 +470,13 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             "--upstream-url",
             "https://core.example.com",
+            "--admin-secret",
+            "admin-secret",
         ])
         .expect("server command should parse");
 
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("edge mode without peer secret should fail validation");
-
-        assert!(error.contains("--peer-secret"));
-        assert!(error.contains("--upstream-url"));
+        validate_server_cli_options(&cli.command)
+            .expect("edge mode should only require admin secret");
     }
 
     #[test]
@@ -499,8 +488,6 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             "--upstream-url",
             "https://core.example.com",
-            "--peer-secret",
-            "cluster-secret",
         ])
         .expect("server command should parse");
 
