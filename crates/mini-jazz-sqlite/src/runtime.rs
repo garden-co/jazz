@@ -2129,7 +2129,7 @@ impl Runtime {
     }
 
     pub fn apply_bundle(&mut self, bundle: &Bundle) -> Result<()> {
-        self.apply_bundle_inner(bundle, true).map(|_| ())
+        self.apply_bundle_inner(bundle, true, false).map(|_| ())
     }
 
     pub fn apply_history_delta(&mut self, delta: &HistoryDelta) -> Result<()> {
@@ -2153,32 +2153,12 @@ impl Runtime {
                 &mut watermark,
             )?;
         }
-        self.validate_deep_text_roots_for_history_delta(delta)?;
         self.import_history_blocks(&delta.blocks)?;
-        self.apply_bundle_inner(&delta.bundle, true)
-    }
-
-    fn validate_deep_text_roots_for_history_delta(&self, delta: &HistoryDelta) -> Result<()> {
-        if !self.schema_has_deep_text_fields() {
-            return Ok(());
-        }
-        let mut roots = deep_text_roots_for_bundle(&self.schema, &delta.bundle)?;
-        for block in &delta.blocks {
-            let block_bundle = validate_history_block_export_manifest(block)?;
-            roots.extend(deep_text_roots_for_bundle(&self.schema, &block_bundle)?);
-        }
-        roots.sort();
-        roots.dedup();
-        for root in roots.into_iter().flatten() {
-            crate::persisted_text_ops::root_len(&self.conn, Some(root)).map_err(|err| {
-                crate::Error::new(format!("missing deep_text root {root}: {err}"))
-            })?;
-        }
-        Ok(())
+        self.apply_bundle_inner(&delta.bundle, true, true)
     }
 
     pub fn profile_apply_bundle(&mut self, bundle: &Bundle) -> Result<ApplyBundleProfile> {
-        self.apply_bundle_inner(bundle, true)
+        self.apply_bundle_inner(bundle, true, false)
     }
 
     fn validate_bundle_header_for_apply(
@@ -2221,6 +2201,7 @@ impl Runtime {
         &mut self,
         bundle: &Bundle,
         check_policy_fingerprint: bool,
+        validate_deep_text_roots: bool,
     ) -> Result<ApplyBundleProfile> {
         let total_started = Instant::now();
         let validation_started = Instant::now();
@@ -2436,6 +2417,7 @@ impl Runtime {
             writes_by_tx: BTreeMap::new(),
             already_applied_tx_ids: &already_applied_tx_ids,
             history_values_by_table: BTreeMap::new(),
+            validate_deep_text_roots,
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
@@ -2955,7 +2937,7 @@ impl Runtime {
                 )));
             }
         }
-        self.apply_bundle_inner(bundle, false)?;
+        self.apply_bundle_inner(bundle, false, false)?;
         projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
@@ -2977,7 +2959,7 @@ impl Runtime {
                     .map(|user| (tx.tx_id.as_str(), user))
             })
             .collect::<BTreeMap<_, _>>();
-        self.apply_bundle_inner(bundle, false)?;
+        self.apply_bundle_inner(bundle, false, false)?;
         let mut rejected = BTreeSet::new();
         let mut exclusive_to_accept = BTreeSet::new();
         for tx_id in stale_exclusive_tx_ids {
@@ -3682,6 +3664,9 @@ impl Runtime {
                 .get(&field.name)
                 .or_else(|| record.values.get(&field.storage_name))
                 .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
+            if context.validate_deep_text_roots {
+                validate_history_deep_text_root(context.db, field, value)?;
+            }
             values.push(crate::schema::field_sql_value(
                 field,
                 value,
@@ -7375,6 +7360,30 @@ fn validate_public_deep_text_write_values(
     Ok(())
 }
 
+fn validate_history_deep_text_root(
+    conn: &Connection,
+    field: &FieldDef,
+    value: &JsonValue,
+) -> Result<()> {
+    if !matches!(field.kind, FieldKind::DeepText) {
+        return Ok(());
+    }
+    let Some(root) = value
+        .as_u64()
+        .map(|root| root as i64)
+        .filter(|root| *root != 0)
+    else {
+        return Ok(());
+    };
+    validate_deep_text_root_exists(conn, root)
+}
+
+fn validate_deep_text_root_exists(conn: &Connection, root: i64) -> Result<()> {
+    crate::persisted_text_ops::root_len(conn, Some(root))
+        .map(|_| ())
+        .map_err(|err| crate::Error::new(format!("missing deep_text root {root}: {err}")))
+}
+
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
 }
@@ -7383,7 +7392,7 @@ fn deep_text_roots_for_bundle(
     schema: &SchemaDef,
     bundle: &Bundle,
 ) -> Result<Vec<crate::persisted_text_ops::TextRoot>> {
-    let mut roots = BTreeMap::new();
+    let mut roots = BTreeSet::new();
     for record in &bundle.history {
         let table = schema.table_def(&record.table)?;
         for field in &table.fields {
@@ -7394,19 +7403,11 @@ fn deep_text_roots_for_bundle(
                 continue;
             };
             if root > 0 {
-                roots
-                    .entry((
-                        record.table.clone(),
-                        record.row_id.clone(),
-                        record.branch_id.clone(),
-                        field.name.clone(),
-                    ))
-                    .and_modify(|existing: &mut i64| *existing = (*existing).max(root as i64))
-                    .or_insert(root as i64);
+                roots.insert(root as i64);
             }
         }
     }
-    Ok(roots.into_values().map(Some).collect())
+    Ok(roots.into_iter().map(Some).collect())
 }
 
 fn apply_deep_text_edit(
@@ -8695,6 +8696,7 @@ struct ApplyHistoryContext<'a> {
     writes_by_tx: BTreeMap<i64, Vec<tx::PackedWrite>>,
     already_applied_tx_ids: &'a BTreeSet<String>,
     history_values_by_table: BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+    validate_deep_text_roots: bool,
 }
 
 #[derive(Clone)]
@@ -10013,6 +10015,7 @@ fn insert_history_block_text_roots(
          VALUES (?, ?)",
     )?;
     for root_op_id in roots.into_iter().flatten() {
+        validate_deep_text_root_exists(conn, root_op_id)?;
         stmt.execute(params![block_id, root_op_id])?;
     }
     Ok(())
@@ -13458,6 +13461,40 @@ mod tests {
 
         assert!(err.to_string().contains("missing deep_text root"));
         assert!(bob.read_rows("docs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_delta_carries_deep_text_roots_for_historical_reads() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        for _ in 0..300 {
+            alice
+                .append_deep_text("docs", "doc-1", "body", "x")
+                .unwrap();
+        }
+        let delta = alice.export_all_history_delta(&[]).unwrap();
+        bob.apply_history_delta(&delta).unwrap();
+
+        assert_eq!(
+            bob.read_deep_text_at_node_epoch("docs", "doc-1", "body", "alice-node", 4)
+                .unwrap()
+                .unwrap(),
+            "xxx"
+        );
+        assert_eq!(
+            bob.read_deep_text("docs", "doc-1", "body").unwrap().len(),
+            300
+        );
     }
 
     #[test]

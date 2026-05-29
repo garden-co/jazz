@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:24:42 PDT 2026
+
+Decision: sync every referenced deep-text root, not only the latest root per row.
+
+Why: latest-root-only sidecar export made current reads efficient but was not honest for historical point reads. A delta containing history rows for roots 3, 4, and 5 must also carry enough text-op state to materialize those historical roots, even if the latest root has a later snapshot. Inline root validation exposed this by rejecting early roots during the append benchmark.
+
+Scope impact: `deep_text_roots_for_bundle` now returns all distinct non-empty roots in exported history instead of coalescing to the maximum root per row/field. `HistoryDelta` receive validates roots while applying open history rows and while indexing imported history blocks. `Block+Ops13` records the measured cost: append sync bytes remain about 32 KB, Automerge rises from about 37 KB to about 44 KB, and native import is about 0.02 ms/update for text scenarios.
+
 ## Fri May 29 01:16:24 PDT 2026
 
 Decision: reject internal deep-text roots at the public row-write API boundary.
