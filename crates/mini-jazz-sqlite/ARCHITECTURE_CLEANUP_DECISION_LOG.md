@@ -734,3 +734,9 @@ regress.
 - Replaced the transaction-status wildcard runtime import with explicit dependencies.
 - This clarifies the transaction status/fate surface after the larger runtime split and keeps public status helpers from depending on ambient runtime internals.
 - Focused transaction and rejection test suites pass.
+
+## 2026-05-29 03:14 PDT - Tightened query-scope export imports
+
+- Replaced the query-scope export wildcard runtime import with explicit dependencies.
+- This makes the boundary between semantic query reads, policy repair history, and sync bundle construction easier to review.
+- Focused query-scope tests pass.
