@@ -533,3 +533,9 @@ regress.
 - Moved generic insert/update/upsert/conflict-resolution/delete/restore runtime APIs into `runtime::writes`.
 - Left the lower-level history materialization helpers in `runtime.rs` for now because they are shared with transaction builders, batched writes, and bundle apply. The module boundary still helps by making the caller-facing row mutation semantics findable.
 - Focused storage/projection tests pass, including delete/restore, batched writes, and hyphen-safe transaction identity.
+
+## 2026-05-29 01:59 PDT - Runtime session/auth API moved behind a session module
+
+- Moved runtime constructors, trusted/user session switching, attribution switching, and internal auth accessors into `runtime::session`.
+- The compiler forced an explicit boundary: `policy_user`, `attribution_user`, and `bypasses_policy` are now `pub(super)` runtime-internal helpers instead of invisible methods accidentally shared by everything in one giant file.
+- Focused auth/policy tests pass, including trusted admin writes, untrusted policy validation, and same-user/multiple-node authorship.
