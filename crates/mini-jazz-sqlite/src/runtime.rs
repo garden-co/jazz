@@ -506,6 +506,7 @@ impl Runtime {
         let mut creation_metadata_cache = BTreeMap::new();
         let mut row_num_cache = BTreeMap::new();
         let mut visible_tx_cache = BTreeMap::new();
+        let mut effective_values_cache = BTreeMap::new();
         let mut materialized_text = if edits
             .iter()
             .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
@@ -515,7 +516,8 @@ impl Runtime {
             None
         };
         let mut tx_ids = Vec::with_capacity(edits.len());
-        for edit in edits {
+        let last_edit_index = edits.len().saturating_sub(1);
+        for (index, edit) in edits.iter().enumerate() {
             root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
             let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
             let now = now_ms();
@@ -546,6 +548,8 @@ impl Runtime {
                 creation_metadata_cache: Some(&mut creation_metadata_cache),
                 row_num_cache: Some(&mut row_num_cache),
                 visible_tx_cache: Some(&mut visible_tx_cache),
+                effective_values_cache: Some(&mut effective_values_cache),
+                write_current_projection: index == last_edit_index,
             })?;
             next_local_epoch += 1;
             if !outcome.allowed {
@@ -722,18 +726,27 @@ impl Runtime {
         let mut creation_metadata_cache = BTreeMap::new();
         let mut row_num_cache = BTreeMap::new();
         let mut visible_tx_cache = BTreeMap::new();
+        let mut effective_values_cache = BTreeMap::new();
+        let last_write_index_by_id = writes
+            .iter()
+            .enumerate()
+            .map(|(index, (id, _))| (id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
         let next_epoch_started = Instant::now();
         let mut next_local_epoch = tx::next_local_epoch(&db, self.node_num)?;
         add_write_phase(|stats| &mut stats.next_epoch_ms, next_epoch_started);
         let mut tx_ids = Vec::with_capacity(writes.len());
-        for (id, values) in writes {
+        for (index, (id, values)) in writes.into_iter().enumerate() {
             let now = now_ms();
             let op = match mode {
                 BatchedWriteMode::Insert => 1,
                 BatchedWriteMode::Update => 2,
                 BatchedWriteMode::Upsert => {
                     let upsert_probe_started = Instant::now();
-                    if row_has_current_branch_value(&db, table_name, &id, self.branch_num)? {
+                    if row_num_cache.get(&id).is_some_and(|row_num| {
+                        effective_values_cache.contains_key(&(table_name.to_owned(), *row_num))
+                    }) || row_has_current_branch_value(&db, table_name, &id, self.branch_num)?
+                    {
                         add_write_phase(|stats| &mut stats.upsert_probe_ms, upsert_probe_started);
                         2
                     } else {
@@ -769,6 +782,8 @@ impl Runtime {
                 creation_metadata_cache: Some(&mut creation_metadata_cache),
                 row_num_cache: Some(&mut row_num_cache),
                 visible_tx_cache: Some(&mut visible_tx_cache),
+                effective_values_cache: Some(&mut effective_values_cache),
+                write_current_projection: last_write_index_by_id.get(&id) == Some(&index),
             })?;
             next_local_epoch += 1;
             if !outcome.allowed {
@@ -860,6 +875,8 @@ impl Runtime {
             creation_metadata_cache: None,
             row_num_cache: None,
             visible_tx_cache: None,
+            effective_values_cache: None,
+            write_current_projection: true,
         })?;
         if !outcome.allowed {
             let reject_started = Instant::now();
@@ -6660,7 +6677,11 @@ struct InsertRowInTx<'a> {
     creation_metadata_cache: Option<&'a mut BTreeMap<i64, (i64, i64)>>,
     row_num_cache: Option<&'a mut BTreeMap<String, i64>>,
     visible_tx_cache: Option<&'a mut BTreeMap<i64, Option<i64>>>,
+    effective_values_cache: Option<&'a mut EffectiveValuesCache>,
+    write_current_projection: bool,
 }
+
+type EffectiveValuesCache = BTreeMap<(String, i64), BTreeMap<String, JsonValue>>;
 
 struct DeferredTxInsert<'a> {
     node_num: i64,
@@ -6795,6 +6816,7 @@ struct EffectiveWriteValues<'a> {
     branch_num: i64,
     patch_values: &'a BTreeMap<String, JsonValue>,
     op: i64,
+    cached_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
 fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
@@ -6816,6 +6838,11 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
         .all(|field| args.patch_values.contains_key(&field.name))
     {
         return Ok(args.patch_values.clone());
+    }
+    if let Some(cached_values) = args.cached_values {
+        let mut current = cached_values.clone();
+        current.extend(args.patch_values.clone());
+        return Ok(current);
     }
     let mut current = effective::row_values(
         args.db,
@@ -6850,6 +6877,11 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
     };
     add_write_phase(|stats| &mut stats.row_lookup_ms, row_lookup_started);
     let effective_started = Instant::now();
+    let effective_cache_key = (args.table_name.to_owned(), row_num);
+    let cached_effective_values = args
+        .effective_values_cache
+        .as_deref()
+        .and_then(|cache| cache.get(&effective_cache_key));
     let effective_values = effective_write_values(EffectiveWriteValues {
         db: args.db,
         schema: args.schema,
@@ -6859,6 +6891,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         branch_num: args.branch_num,
         patch_values: args.values,
         op: args.op,
+        cached_values: cached_effective_values,
     })?;
     add_write_phase(|stats| &mut stats.effective_values_ms, effective_started);
     let tx_tuple_started = Instant::now();
@@ -7011,6 +7044,9 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         metadata.unwrap_or((args.now, args.user_num))
     };
     let updated_by_num = args.user_num;
+    if let Some(cache) = args.creation_metadata_cache.as_deref_mut() {
+        cache.entry(row_num).or_insert((created_at, created_by_num));
+    }
     add_write_phase(
         |stats| &mut stats.creation_metadata_ms,
         creation_metadata_started,
@@ -7035,7 +7071,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         );
     }
 
-    if allowed {
+    if allowed && args.write_current_projection {
         let mut current_values = vec![
             rusqlite::types::Value::Integer(row_num),
             rusqlite::types::Value::Integer(args.branch_num),
@@ -7050,6 +7086,14 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         add_write_phase(|stats| &mut stats.current_upsert_ms, current_upsert_started);
         if let Some(cache) = args.visible_tx_cache.as_deref_mut() {
             cache.insert(row_num, Some(tx_num));
+        }
+    }
+    if allowed {
+        if let Some(cache) = args.visible_tx_cache.as_deref_mut() {
+            cache.insert(row_num, Some(tx_num));
+        }
+        if let Some(cache) = args.effective_values_cache.as_deref_mut() {
+            cache.insert(effective_cache_key, effective_values);
         }
     }
     Ok(InsertRowOutcome {
@@ -8071,6 +8115,8 @@ impl<'a> TransactionBuilder<'a> {
                         creation_metadata_cache: None,
                         row_num_cache: None,
                         visible_tx_cache: None,
+                        effective_values_cache: None,
+                        write_current_projection: true,
                     })?;
                     allowed &= outcome.allowed;
                 }

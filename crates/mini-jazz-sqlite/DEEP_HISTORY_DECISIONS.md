@@ -990,3 +990,11 @@ Decision: change history delta export to include text-op sidecar data only for d
 Why: the runtime-shaped deep-text path should sync the sidecar as part of the same logical history delta, but dumping every text op in the local store is not an honest query-sync behavior. The exporter now extracts the latest root per table/row/branch/field, walks its parent closure to the remote watermark or nearest snapshot, and includes only required snapshots/chunks. A regression test verifies that a query delta for one doc does not export another doc's unrelated text op.
 
 Scope impact: this keeps full-store bootstrap behavior correct while making query/table-scoped deltas semantically closer to real sync. The first implementation over-walked overlapping chains; stopping on already-included ops and latest-root filtering brought canonical sample export times back down. Full `mini-jazz-sqlite` tests pass.
+
+## Thu May 28 23:40:10 PDT 2026 - Defer Intermediate Current Projection Upserts In Write Batches
+
+Decision: when a batched local write touches the same row repeatedly inside one SQLite transaction, keep every Jazz tx/history row but only upsert the current projection for the last write to that row.
+
+Why: current projection is a cache of the visible row after commit. Rewriting it for every intermediate update inside the same SQLite transaction adds write amplification without adding observable runtime semantics. To preserve subsequent writes in the same batch, the write path now maintains batch-local effective-values, visible-tx, row-num, and creation-metadata caches.
+
+Scope impact: this is a general batched-write optimization, not a deep-text special case. The full `mini-jazz-sqlite` suite passes; it caught and fixed an upsert edge case where a row created earlier in the same batch must be treated as an update later in that batch. Canonical samples show current-upsert timing dropping near zero, with the largest visible win on canvas writes and neutral/noisy text results.
