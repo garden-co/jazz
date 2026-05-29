@@ -53,6 +53,25 @@ Projection rebuild:
 6. preserve concurrent candidates when merge strategy cannot reduce them
 7. apply delete semantics
 
+Long-lived stores may compact accepted history into sealed history blocks once
+the open rows are no longer needed for hot current projection. Sealed history is
+still authoritative history: exports, historical point reads, pinned branch base
+reads, policy dependency reconstruction, and repair must behave the same as
+they did before compaction. Compaction must not reopen rejected transactions or
+turn locally visible pending state into durable accepted history.
+
+Branch bases are anchors across compaction. If a branch is pinned to a base
+epoch or version frontier, branch reads and branch-scoped exports must continue
+to resolve that base after main-branch history has been sealed. A sealed-history
+implementation therefore needs point-read and row-scope decode paths, not only a
+bulk archival format.
+
+Sync should treat open history, sealed history blocks, and any sidecar state
+needed to decode them as one coherent history delta. A receiver must not apply
+one part far enough to expose a row while missing another part required to
+reconstruct or validate that row. This argues for a `HistoryDelta`-shaped
+boundary even if the first implementation still encodes ordinary bundles only.
+
 Accepted global transactions are ordered by `(global_epoch, tie_breaker)`,
 because several transactions may share a global epoch. Local pending
 transactions are ordered by `(node, local_epoch)` only within one node.
@@ -74,3 +93,6 @@ Open issues:
 - exact conflict metadata shape
 - exact hard-delete/truncate authorization, sync, and historical-query semantics
 - hot branch projection heuristics
+- sealed history block format, eligibility rules, and decode/query planning
+- coherent history delta wire/apply shape for open rows, sealed blocks, and
+  sidecars

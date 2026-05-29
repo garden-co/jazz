@@ -198,3 +198,7 @@ Tried routing legacy predicate export APIs directly through `BuiltQuery`. Revert
 ## 2026-05-28 23:39 PDT
 
 Test support cleanup integrated locally after the worker left `mod todo_app` without the file in this workspace. `tests/support/mod.rs` is now generic topology/schema helpers plus a re-export, while todo-app helpers live in `tests/support/todo_app.rs`. Also adjusted built-query observed descriptor metadata to preserve the previous public JSON shape and add `observed_ids` inline, instead of nesting under `query`; this preserves existing query-read contracts while supporting refresh repair.
+
+## 2026-05-28 23:42 PDT
+
+Folded #973 lessons into spec as contracts, not implementation: sealed history blocks must preserve export/point-read/branch-base semantics, branch bases are compaction anchors, and sync should eventually apply open history + sealed blocks + sidecars as one coherent history delta. Avoid porting #973 code until apply/storage boundaries are cleaner.

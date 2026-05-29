@@ -23,6 +23,14 @@ screens. Historical snapshots, arbitrary time travel, and pinned branch base
 views may initially use slower query-time visibility unless measurements justify
 promoting a derived projection or specialized historical index.
 
+Sealed history blocks are a later storage optimization, not a separate semantic
+history lane. When introduced, their lowering should sit beside the open history
+tables with explicit block metadata, format version, covered transaction/epoch
+ranges, covered rows, and integrity hashes. Query and export planning must be
+able to combine open rows and sealed blocks for the same logical row scope.
+Applying a sync payload that contains open history, sealed blocks, and sidecars
+should go through one coherent delta application boundary.
+
 ### 26.1 Transaction Tables
 
 Sketch:
