@@ -14,7 +14,7 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::types::{ApplyBundleProfile, ReadTier, RowView};
+use crate::types::{ApplyBundleProfile, ReadTier};
 use crate::{branch, policy, projection, query, query_predicate, read_set, tx, users, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};

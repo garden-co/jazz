@@ -776,3 +776,9 @@ regress.
 - Renamed the public `session_user()` accessor to `current_policy_user()` so auth forwarding reads as policy evaluation context, not as an inherent identity of trusted peers.
 - Renamed the trusted constructor from the session-shaped wording to `open_trusted_as_user`, matching `run_as_user` and making the remaining construction-time shortcut easier to spot for future migration.
 - Focused policy tests pass, and `cargo check -p mini-jazz-sqlite` is green.
+
+## 2026-05-29 03:21 PDT - Tightened read-surface imports
+
+- Replaced the read-surface wildcard runtime import with explicit query, visibility, row-id, schema, transaction, and type dependencies.
+- This clarifies that reads are a thin surface over `QueryContext`/`ReadVisibility`, with conflict metadata as the one extra runtime-specific read helper.
+- Focused branch and generic-schema tests pass, and `cargo check -p mini-jazz-sqlite` is green.
