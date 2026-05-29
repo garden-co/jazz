@@ -483,24 +483,32 @@ fn stable_key<T: Serialize>(value: &T) -> Result<String> {
 }
 
 pub fn encode_bundle(bundle: &Bundle) -> Result<Vec<u8>> {
-    let columnar = ColumnarBundle::from_bundle(bundle);
-    let payload = postcard::to_allocvec(&columnar)
-        .map_err(|err| crate::Error::new(format!("encode bundle: {err}")))?;
+    let payload = encode_bundle_payload(bundle)?;
     let compressed = lz4_flex::compress_prepend_size(&payload);
     let mut bytes = Vec::from(COLUMNAR_BUNDLE_MAGIC.as_slice());
     bytes.extend(compressed);
     Ok(bytes)
 }
 
+pub(crate) fn encode_bundle_payload(bundle: &Bundle) -> Result<Vec<u8>> {
+    let columnar = ColumnarBundle::from_bundle(bundle);
+    postcard::to_allocvec(&columnar)
+        .map_err(|err| crate::Error::new(format!("encode bundle: {err}")))
+}
+
 pub fn decode_bundle(bytes: &[u8]) -> Result<Bundle> {
     if let Some(payload) = bytes.strip_prefix(COLUMNAR_BUNDLE_MAGIC) {
         let decompressed = lz4_flex::decompress_size_prepended(payload)
             .map_err(|err| crate::Error::new(format!("decompress bundle: {err}")))?;
-        let columnar = postcard::from_bytes::<ColumnarBundle>(&decompressed)
-            .map_err(|err| crate::Error::new(format!("decode bundle: {err}")))?;
-        return columnar.into_bundle();
+        return decode_bundle_payload(&decompressed);
     }
     Err(crate::Error::new("unsupported bundle encoding"))
+}
+
+pub(crate) fn decode_bundle_payload(payload: &[u8]) -> Result<Bundle> {
+    let columnar = postcard::from_bytes::<ColumnarBundle>(payload)
+        .map_err(|err| crate::Error::new(format!("decode bundle: {err}")))?;
+    columnar.into_bundle()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
