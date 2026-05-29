@@ -316,3 +316,12 @@ branch reads, so a row inherited from a pinned main base is visible only if it
 matches the backing branch row. Remaining branch-policy gaps: writes,
 inherit-main shorthand, query-scope export/repair tests, and multi-branch-table
 policy selection if we allow more than one branch backing table per target.
+
+## 2026-05-29 00:13 PDT
+
+Added query-scoped export for branch-policy backing rows. The red test proved
+the important sync bug: without exporting the app backing row, the receiver gets
+the branch metadata and todo history but hides the todo because its branch
+policy dependency is missing. Export now treats branch backing rows as policy
+dependencies and sends their main-branch visible history alongside the result
+scope.

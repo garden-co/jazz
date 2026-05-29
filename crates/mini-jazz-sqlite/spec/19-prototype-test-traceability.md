@@ -166,6 +166,7 @@ Coverage labels:
   D.9
 - `for_branch_read_uses_branch_policy_and_backing_row_visibility`: D.5, D.9
 - `for_branch_read_policy_applies_to_pinned_base_rows`: D.4, D.5, D.9
+- `branch_query_scope_exports_branch_policy_backing_row`: D.5, D.7, D.9
 - `trusted_edge_validates_branch_recursive_write_policy_against_pinned_base`:
   D.5, D.9, D.11
 - `trusted_edge_rejects_untrusted_delete_policy_violation`: D.9, D.11

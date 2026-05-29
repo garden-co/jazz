@@ -6202,8 +6202,10 @@ fn export_policy_dependency_history(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
+    let branch_policy_records =
+        export_branch_policy_dependency_history(visibility, table, args.branch_nums)?;
     let PolicyDef::RefReadable { field } = args.policy else {
-        return Ok(Vec::new());
+        return Ok(branch_policy_records);
     };
     let field = table
         .fields
@@ -6257,6 +6259,7 @@ fn export_policy_dependency_history(
     } else {
         export_visible_table_history(visibility, parent_table, args.branch_nums, Some(&row_nums))?
     };
+    records.extend(branch_policy_records);
     records.extend(export_policy_dependency_history(
         visibility,
         PolicyDependencyExport {
@@ -6267,6 +6270,59 @@ fn export_policy_dependency_history(
         },
     )?);
     Ok(records)
+}
+
+fn export_branch_policy_dependency_history(
+    visibility: &ReadVisibility<'_>,
+    table: &crate::schema::TableDef,
+    branch_nums: &[i64],
+) -> Result<Vec<HistoryRecord>> {
+    if table.branch_policies.is_empty() || branch_nums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = visibility.conn;
+    let mut records = Vec::new();
+    let main_visibility = ReadVisibility {
+        conn: visibility.conn,
+        schema: visibility.schema,
+        branch_num: 1,
+        user: visibility.user,
+        bypass_policy: visibility.bypass_policy,
+    };
+    for branch_table_name in table.branch_policies.keys() {
+        let row_nums = branch_backing_row_nums(conn, branch_nums)?;
+        if row_nums.is_empty() {
+            continue;
+        }
+        records.extend(export_visible_table_history(
+            &main_visibility,
+            branch_table_name,
+            &[1],
+            Some(&row_nums),
+        )?);
+    }
+    dedupe_history_records(&mut records);
+    Ok(records)
+}
+
+fn branch_backing_row_nums(conn: &Connection, branch_nums: &[i64]) -> Result<Vec<i64>> {
+    let branch_nums = sorted_unique_row_nums(branch_nums);
+    let mut row_nums = BTreeSet::new();
+    for chunk in branch_nums.chunks(crate::SQL_VARIABLE_CHUNK_SIZE) {
+        let placeholders = sql_placeholders(chunk.len());
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ids.row_num
+             FROM jazz_branch branch
+             JOIN jazz_row_id ids ON ids.row_id = branch.branch_id
+             WHERE branch.branch_num IN ({placeholders})
+             ORDER BY ids.row_num"
+        ))?;
+        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| row.get::<_, i64>(0))?;
+        for row_num in rows {
+            row_nums.insert(row_num?);
+        }
+    }
+    Ok(row_nums.into_iter().collect())
 }
 
 fn scoped_policy_parent_row_nums(

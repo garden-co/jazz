@@ -131,7 +131,7 @@ Open issues:
 - exact SQL-lowerable policy IR
 - branch-view write policies
 - explicit inherit-main branch policy semantics
-- branch-view policy export and repair coverage
+- branch-view query-scope repair coverage
 - how to bound recursive policy evaluation
 - edge policy-readiness strategy
 - redaction rules for policy denial/rejection explanations

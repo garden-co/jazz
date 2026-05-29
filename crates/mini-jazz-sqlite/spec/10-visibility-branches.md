@@ -221,7 +221,7 @@ Deferred branch features:
 - product-grade branch merge APIs over multi-source graphs
 - branch-view write policies
 - inherit-main branch policies
-- branch-view policy export and repair coverage
+- branch-view query-scope repair coverage
 
 Branch merge should preferably become a metadata transaction changing branch
 sources rather than copying rows. Multi-base conflicts should remain visible

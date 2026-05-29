@@ -402,6 +402,80 @@ fn for_branch_read_policy_applies_to_pinned_base_rows() {
 }
 
 #[test]
+fn branch_query_scope_exports_branch_policy_backing_row() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "upstream", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    support::run_attributing_to_user(&mut upstream, "alice", |upstream| {
+        upstream
+            .insert_row(
+                "projects",
+                "project-a",
+                BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+            )
+            .unwrap();
+        upstream
+            .insert_row(
+                "branches",
+                "draft-a",
+                BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+            )
+            .unwrap();
+    });
+    upstream.create_branch("draft-a", None).unwrap();
+    upstream.checkout_branch("draft-a").unwrap();
+    support::run_attributing_to_user(&mut upstream, "alice", |upstream| {
+        upstream
+            .insert_row(
+                "todos",
+                "todo-draft",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Visible through branch policy")),
+                    ("project".to_owned(), json!("project-a")),
+                ]),
+            )
+            .unwrap();
+    });
+
+    let bundle = support::run_as_user(&mut upstream, "alice", |upstream| {
+        upstream.export_query(BuiltQuery::from_json_value(json!({ "table": "todos" })).unwrap())
+    })
+    .unwrap();
+    peer.apply_bundle(&bundle).unwrap();
+    peer.checkout_branch("draft-a").unwrap();
+
+    assert_eq!(
+        peer.read_rows("branches")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["draft-a"]
+    );
+    assert_eq!(
+        peer.read_rows("todos")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-draft"]
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

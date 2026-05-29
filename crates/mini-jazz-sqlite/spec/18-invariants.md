@@ -132,6 +132,8 @@ feature exists.
   visibility.
 - Branch-view field policies compare against the backing row for the branch
   being queried, not an arbitrary row with similar contents.
+- Query-scoped export includes branch backing rows needed to reproduce
+  branch-view policy decisions on a receiver.
 - A branch-local transaction may be globally accepted while invisible to main.
 - Main visibility does not automatically include branch-local history.
 - Branch reads use source precedence, not incidental storage order.
