@@ -1022,3 +1022,11 @@ Decision: local SQLite write batches now defer app-history row inserts and flush
 Why: every logical Jazz update still needs its own history row, but a 10ms SQLite transaction does not need one `INSERT` statement per row. The write path can finish validation, tx creation, read/write tuple recording, and current projection repair, then persist the accumulated history rows before commit.
 
 Scope impact: this preserves one Jazz tx/history row per update while cutting local `history_insert_ms` substantially in the canonical sample. Full `mini-jazz-sqlite` tests pass.
+
+## Fri May 29 00:00:27 PDT 2026 - Rejected Batched Local Tx Creation For Now
+
+Decision: do not keep the first batched local `jazz_tx` creation experiment.
+
+Why: pre-creating tx rows in a batch did reduce `tx_create_ms`, but because compact read/write tuple JSONB then had to be batch-updated separately, the combined `tx_create + tx_tuple` cost was neutral to worse for append/document and only modestly better for canvas. The added control-flow complexity was not justified by the mixed result.
+
+Scope impact: the uncommitted tx-batch experiment was reverted. The cleaner local history insert batching remains.
