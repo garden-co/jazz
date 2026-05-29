@@ -1,3 +1,4 @@
+use crate::auth::RuntimeAuth;
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
@@ -132,24 +133,6 @@ impl QueryScopeOptions<'_> {
     }
 }
 
-pub const ADMIN_SYSTEM_USER: &str = "@system/admin";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RuntimeAuth {
-    Client(User),
-    TrustedPeer { session: TrustedSession },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct User(pub String);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TrustedSession {
-    Admin,
-    AsUser(User),
-    AttributingToUser(User),
-}
-
 impl Runtime {
     pub fn open(storage: Storage, node_id: &str, user: &str) -> Result<Self> {
         Self::open_with_schema(storage, node_id, user, SchemaDef::attempt3_fixture())
@@ -161,12 +144,7 @@ impl Runtime {
         user: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
-        Self::open_with_schema_and_auth(
-            storage,
-            node_id,
-            RuntimeAuth::Client(User(user.to_owned())),
-            schema_def,
-        )
+        Self::open_with_schema_and_auth(storage, node_id, RuntimeAuth::client(user), schema_def)
     }
 
     pub fn open_trusted_with_schema(
@@ -174,14 +152,7 @@ impl Runtime {
         node_id: &str,
         schema_def: SchemaDef,
     ) -> Result<Self> {
-        Self::open_with_schema_and_auth(
-            storage,
-            node_id,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::Admin,
-            },
-            schema_def,
-        )
+        Self::open_with_schema_and_auth(storage, node_id, RuntimeAuth::trusted_admin(), schema_def)
     }
 
     pub fn open_trusted_with_session_user(
@@ -193,9 +164,7 @@ impl Runtime {
         Self::open_with_schema_and_auth(
             storage,
             node_id,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::AsUser(User(user.to_owned())),
-            },
+            RuntimeAuth::trusted_as_user(user),
             schema_def,
         )
     }
@@ -209,9 +178,7 @@ impl Runtime {
         Self::open_with_schema_and_auth(
             storage,
             node_id,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::AttributingToUser(User(user.to_owned())),
-            },
+            RuntimeAuth::trusted_attributing_to_user(user),
             schema_def,
         )
     }
@@ -236,7 +203,7 @@ impl Runtime {
     }
 
     pub fn is_trusted(&self) -> bool {
-        matches!(self.auth, RuntimeAuth::TrustedPeer { .. })
+        self.auth.is_trusted()
     }
 
     pub fn session_user(&self) -> &str {
@@ -244,40 +211,15 @@ impl Runtime {
     }
 
     fn policy_user(&self) -> &str {
-        match &self.auth {
-            RuntimeAuth::Client(User(user)) => user,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::AsUser(User(user)),
-            } => user,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::AttributingToUser(User(user)),
-            } => user,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::Admin,
-            } => ADMIN_SYSTEM_USER,
-        }
+        self.auth.policy_user()
     }
 
     fn attribution_user(&self) -> &str {
-        match &self.auth {
-            RuntimeAuth::Client(User(user)) => user,
-            RuntimeAuth::TrustedPeer {
-                session:
-                    TrustedSession::AsUser(User(user)) | TrustedSession::AttributingToUser(User(user)),
-            } => user,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::Admin,
-            } => ADMIN_SYSTEM_USER,
-        }
+        self.auth.attribution_user()
     }
 
     fn bypasses_policy(&self) -> bool {
-        matches!(
-            &self.auth,
-            RuntimeAuth::TrustedPeer {
-                session: TrustedSession::Admin | TrustedSession::AttributingToUser(_)
-            }
-        )
+        self.auth.bypasses_policy()
     }
 
     pub fn run_as_user<T>(&mut self, user: &str, f: impl FnOnce(&mut Runtime) -> T) -> T {
@@ -286,9 +228,7 @@ impl Runtime {
             "run_as_user is only valid for trusted peers"
         );
         let previous = self.auth.clone();
-        self.auth = RuntimeAuth::TrustedPeer {
-            session: TrustedSession::AsUser(User(user.to_owned())),
-        };
+        self.auth = RuntimeAuth::trusted_as_user(user);
         let result = f(self);
         self.auth = previous;
         result
@@ -304,9 +244,7 @@ impl Runtime {
             "run_attributing_to_user is only valid for trusted peers"
         );
         let previous = self.auth.clone();
-        self.auth = RuntimeAuth::TrustedPeer {
-            session: TrustedSession::AttributingToUser(User(user.to_owned())),
-        };
+        self.auth = RuntimeAuth::trusted_attributing_to_user(user);
         let result = f(self);
         self.auth = previous;
         result
@@ -2473,11 +2411,10 @@ impl Runtime {
     }
 
     pub fn session_user_for_test(&mut self, user: &str) {
-        match &mut self.auth {
-            RuntimeAuth::Client(User(current)) => *current = user.to_owned(),
-            RuntimeAuth::TrustedPeer { session } => {
-                *session = TrustedSession::AsUser(User(user.to_owned()));
-            }
+        self.auth = if self.auth.is_trusted() {
+            RuntimeAuth::trusted_as_user(user)
+        } else {
+            RuntimeAuth::client(user)
         }
     }
 

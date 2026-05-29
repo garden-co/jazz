@@ -1,3 +1,4 @@
+mod auth;
 mod branch;
 mod effective;
 mod error;
