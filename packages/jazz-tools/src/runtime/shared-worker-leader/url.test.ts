@@ -22,7 +22,11 @@ describe("resolveSharedWorkerLeaderUrl", () => {
 
   it("falls back to a module-relative URL when neither override is set", () => {
     const url = resolveSharedWorkerLeaderUrl(moduleUrl, locationHref, undefined);
-    expect(url).toMatch(/\/shared-worker-leader\/shared-worker-leader\.js$/);
+    // Must resolve as a sibling subdirectory of db.js — i.e. keep the
+    // `runtime/` segment. A "../"-based resolution would drop it and 404.
+    expect(url).toBe(
+      "https://example.test/_next/static/jazz/runtime/shared-worker-leader/shared-worker-leader.js",
+    );
   });
 
   it("preserves an absolute sharedWorkerLeaderUrl regardless of locationHref", () => {

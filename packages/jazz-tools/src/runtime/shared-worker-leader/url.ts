@@ -39,7 +39,11 @@ export function resolveSharedWorkerLeaderUrl(
     return new URL("shared-worker-leader/shared-worker-leader.js", baseUrl).href;
   }
   if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
-    return new URL("../shared-worker-leader/shared-worker-leader.js", runtimeModuleUrl).href;
+    // `runtimeModuleUrl` is db.js (at dist/runtime/db.js). The worker entry is
+    // emitted as a sibling subdirectory at dist/runtime/shared-worker-leader/,
+    // so resolve it bare against db.js's directory — NOT "../" (which would
+    // wrongly drop the runtime/ segment).
+    return new URL("shared-worker-leader/shared-worker-leader.js", runtimeModuleUrl).href;
   }
   return new URL("shared-worker-leader/shared-worker-leader.js", new URL("/", locationHref).href)
     .href;
