@@ -10,7 +10,7 @@ use crate::query_observation::{
     support_window_query,
 };
 use crate::read_visibility::ReadVisibility;
-use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
+use crate::rows::{ensure_row_id, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::sync::{
     BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
@@ -18,10 +18,7 @@ use crate::sync::{
 };
 use crate::time::now_ms;
 use crate::types::{ApplyBundleProfile, QueryExportProfile, ReadTier, RowView};
-use crate::{
-    branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set, tx,
-    users, Result,
-};
+use crate::{branch, policy, projection, query, query_predicate, read_set, tx, users, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};

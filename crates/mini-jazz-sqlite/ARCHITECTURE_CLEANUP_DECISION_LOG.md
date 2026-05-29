@@ -758,3 +758,9 @@ regress.
 - Renamed `clear_current_projection_for_test` to `clear_current_projection`, because clearing a derived projection is a real storage-admin maintenance operation used by invariants, not a fixture-only backdoor.
 - This removes one more test-shaped name from the runtime public surface while preserving the rebuild/recovery tests.
 - Full `cargo test -p mini-jazz-sqlite` passes: 439 passed, 18 ignored placeholders, 0 failed.
+
+## 2026-05-29 03:18 PDT - Tightened write-core imports
+
+- Replaced the write-core wildcard runtime import with explicit dependencies.
+- This separates write staging from the rest of runtime wiring: it now names its schema, row-id, policy, read-set, transaction, and user catalogue dependencies directly.
+- Focused transaction/generic/storage tests pass, and `cargo check -p mini-jazz-sqlite` is warning-free.
