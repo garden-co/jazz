@@ -324,6 +324,7 @@ impl Runtime {
             user: &user,
             bypass_policy,
             op,
+            base_values: None,
         })?;
         let row_num = row_num(&db, id)?;
         if !allowed {
@@ -4173,6 +4174,7 @@ struct InsertRowInTx<'a> {
     user: &'a str,
     bypass_policy: bool,
     op: i64,
+    base_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
 struct EffectiveWriteValues<'a> {
@@ -4184,6 +4186,7 @@ struct EffectiveWriteValues<'a> {
     branch_num: i64,
     patch_values: &'a BTreeMap<String, JsonValue>,
     op: i64,
+    base_values: Option<&'a BTreeMap<String, JsonValue>>,
 }
 
 fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
@@ -4199,14 +4202,18 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
         }
         return Ok(values);
     }
-    let mut current = effective::row_values(
-        args.db,
-        args.schema,
-        args.table_name,
-        args.row_num,
-        args.branch_num,
-    )?
-    .ok_or_else(|| crate::Error::new(format!("row {} is not visible", args.id)))?;
+    let mut current = if let Some(base_values) = args.base_values {
+        base_values.clone()
+    } else {
+        effective::row_values(
+            args.db,
+            args.schema,
+            args.table_name,
+            args.row_num,
+            args.branch_num,
+        )?
+        .ok_or_else(|| crate::Error::new(format!("row {} is not visible", args.id)))?
+    };
     current.extend(args.patch_values.clone());
     Ok(current)
 }
@@ -4238,6 +4245,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         branch_num: args.branch_num,
         patch_values: args.values,
         op: args.op,
+        base_values: args.base_values,
     })?;
     if args.op == 1 {
         if row_id_created {
@@ -5305,6 +5313,13 @@ impl<'a> TransactionBuilder<'a> {
                     values,
                     op,
                 } => {
+                    let base_values = self
+                        .start_rows_by_table
+                        .as_ref()
+                        .map_err(|error| crate::Error::new(error.clone()))?
+                        .get(&table)
+                        .and_then(|rows| rows.iter().find(|row| row.id == id))
+                        .map(|row| &row.values);
                     allowed &= insert_row_in_tx(InsertRowInTx {
                         db: &db,
                         schema: &self.runtime.schema,
@@ -5317,6 +5332,7 @@ impl<'a> TransactionBuilder<'a> {
                         user: &user,
                         bypass_policy,
                         op,
+                        base_values,
                     })?;
                 }
                 Mutation::DeleteRow { table, id } => {

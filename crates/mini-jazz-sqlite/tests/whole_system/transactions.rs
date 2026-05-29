@@ -145,6 +145,51 @@ fn transactions_do_not_see_each_others_staged_writes() {
 }
 
 #[test]
+fn transaction_patch_updates_are_applied_to_start_snapshot() {
+    let schema = support::notes_schema();
+    let harness = support::Harness::new();
+    let path = harness.path("tx-start-write.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("before")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice.transaction().update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("body".to_owned(), json!("from tx"))]),
+    );
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.update_row(
+        "notes",
+        "note-1",
+        BTreeMap::from([("pinned".to_owned(), json!(true))]),
+    )
+    .unwrap();
+
+    tx.commit().unwrap();
+
+    let rows = bob.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values["body"], json!("from tx"));
+    assert_eq!(rows[0].values["pinned"], json!(false));
+}
+
+#[test]
 fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

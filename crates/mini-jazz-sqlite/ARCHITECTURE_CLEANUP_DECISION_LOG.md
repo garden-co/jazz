@@ -98,3 +98,10 @@ per-operator subscription query variants even though the generic `BuiltQuery`
 path exists. This encourages future PRs to add subscription-specific hardcoded
 logic. Move ordinary predicate/page subscription constructors onto
 `BuiltQuery`; keep special observed/recursive compatibility only where needed.
+
+## 2026-05-28 22:55 PDT
+
+Continue #945 integration: transaction reads now snapshot correctly, but commit
+materialization still risks merging patch updates against latest current state.
+Next slice: use the transaction start snapshot as the effective base for staged
+row updates, so omitted fields come from the start row, not from a later commit.
