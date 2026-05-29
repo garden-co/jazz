@@ -509,3 +509,9 @@ regress.
 - Moved accept/reject, rejection listing, transaction info, physical tx lookup, and transaction read/write-set inspection into `runtime::transaction_status`.
 - The explicit transaction constructor stays in `runtime::transaction_builder`; this split mirrors the semantic distinction between creating transactions and later assigning/inspecting fate.
 - Focused transaction and fate-introspection tests pass after the move.
+
+## 2026-05-29 01:39 PDT - Storage/projection administration moved behind a small module
+
+- Moved storage stats/version, local policy fingerprint, physical row lookup, and projection rebuild helpers into `runtime::storage_admin`.
+- The `clear_current_projection_for_test` name is still a smell, but at least it is now isolated with other storage/projection maintenance APIs instead of buried in the read/query block.
+- Focused storage projection tests pass after the move.

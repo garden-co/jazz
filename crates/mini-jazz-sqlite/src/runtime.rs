@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod branches;
 mod query_scope_export;
+mod storage_admin;
 mod subscriptions;
 mod transaction_builder;
 mod transaction_status;
@@ -2124,18 +2125,6 @@ impl Runtime {
         self.write_row(table_name, id, values, 1)
     }
 
-    pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
-        projection::clear(&self.conn, &self.schema)
-    }
-
-    pub fn rebuild_current_projection(&mut self) -> Result<()> {
-        projection::rebuild(&self.conn, &self.schema, self.node_num)
-    }
-
-    pub fn physical_row_num_for(&self, row_id: &str) -> Result<i64> {
-        row_num(&self.conn, row_id)
-    }
-
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         self.query_context().read_rows(table_name)
     }
@@ -3340,18 +3329,6 @@ impl Runtime {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
-    }
-
-    pub fn storage_stats(&self) -> Result<StorageStats> {
-        stats::collect(&self.conn, &self.schema)
-    }
-
-    pub fn storage_format_version(&self) -> Result<i64> {
-        storage::storage_version(&self.conn)
-    }
-
-    pub fn local_policy_fingerprint(&self) -> String {
-        self.schema.policy_fingerprint()
     }
 
     fn query_context(&self) -> query::QueryContext<'_> {
