@@ -1,6 +1,6 @@
 use crate::value::{bytes_to_hex, WireValue};
 use crate::{Error, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Statement};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const KIND_DATA: i64 = 1;
@@ -168,6 +168,63 @@ pub(crate) fn create_tx_at_local_epoch_with_single_row_read_write(
         .execute(params![tx_num, TIER_GLOBAL, global_epoch])?;
     }
     Ok((tx_num, tx_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_local_tx_with_single_row_read_write(
+    stmt: &mut Statement<'_>,
+    conn: &Connection,
+    node_num: i64,
+    node_id: &str,
+    local_epoch: i64,
+    now: i64,
+    conflict_mode: i64,
+    outcome: i64,
+    global_epoch: Option<i64>,
+    table_num: i64,
+    row_num: i64,
+    op: i64,
+    read_reason: i64,
+    observed_tx_num: Option<i64>,
+    implicit_previous_read: bool,
+) -> Result<(i64, String)> {
+    stmt.execute(params![
+        node_num,
+        local_epoch,
+        global_epoch,
+        KIND_DATA,
+        conflict_mode,
+        outcome,
+        now,
+        table_num,
+        row_num,
+        op,
+        implicit_previous_read,
+        table_num,
+        row_num,
+        read_reason,
+        observed_tx_num,
+    ])?;
+    let tx_num = conn.last_insert_rowid();
+    if let Some(global_epoch) = global_epoch {
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO jazz_tx_receipt
+             (tx_num, tier, observed_at, receipt)
+             VALUES (?, ?, ?, '{}')",
+        )?
+        .execute(params![tx_num, TIER_GLOBAL, global_epoch])?;
+    }
+    Ok((tx_num, format!("tx-{node_id}-{local_epoch}")))
+}
+
+pub(crate) fn local_single_row_read_write_insert_sql() -> &'static str {
+    "INSERT INTO jazz_tx
+      (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata, writes_json, reads_json)
+     VALUES (
+       ?, ?, ?, ?, ?, ?, ?, NULL,
+       jsonb_array(jsonb_array(?, ?, ?)),
+       CASE WHEN ? THEN NULL ELSE jsonb_array(jsonb_array(?, ?, ?, ?)) END
+     )"
 }
 
 pub(crate) fn append_write(

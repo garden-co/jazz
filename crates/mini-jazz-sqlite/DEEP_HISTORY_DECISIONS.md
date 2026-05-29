@@ -1406,3 +1406,11 @@ Decision: batched writes now assign one `created_at` timestamp to every transact
 Why: the runtime batching model is explicitly a short latency slice. One timestamp per slice is production-shaped, preserves one Jazz transaction/history row per update, and avoids redundant clock calls while importing or receiving a burst.
 
 Scope impact: transaction ordering is still node/local-epoch based. `created_at` becomes slice-granular for batched writes, which is already the practical resolution a 10ms ingest batch exposes.
+
+## Fri May 29 03:19:19 PDT 2026 - Reuse Local Transaction Insert Statement Per Batch
+
+Decision: local batched writes now prepare the single-row transaction insert once per ingest batch and pass that statement into the row-write path.
+
+Why: the transaction row shape is identical for the hot mergeable single-row write case. Reusing the statement keeps one Jazz transaction per update but avoids repeatedly walking the statement cache during append/document/canvas ingest.
+
+Scope impact: only the deferred local batch path uses this helper. Non-batched writes and receive/apply keep their existing paths.

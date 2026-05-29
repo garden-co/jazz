@@ -16,7 +16,7 @@ use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
     storage, tx, users, Result, Storage,
 };
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Statement};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -529,62 +529,69 @@ impl Runtime {
         let last_edit_index = edits.len().saturating_sub(1);
         let mut last_created_tx_num = None;
         let batch_created_at = now_ms();
-        for (index, edit) in edits.iter().enumerate() {
-            let deep_text_edit_started = Instant::now();
-            root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
-            add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
-            let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
-            let outcome = insert_row_in_tx(InsertRowInTx {
-                db: &db,
-                schema: &self.schema,
-                table_name,
-                id,
-                values: &values,
-                tx_num: None,
-                deferred_tx: Some(DeferredTxInsert {
-                    node_num: self.node_num,
-                    node_id: &self.node_id,
-                    local_epoch: next_local_epoch,
-                    conflict_mode: tx::MODE_MERGEABLE,
-                    outcome: tx::OUTCOME_PENDING,
-                    global_epoch: None,
-                }),
-                branch_num: self.branch_num,
-                now: batch_created_at,
-                user: &user,
-                user_num,
-                bypass_policy,
-                op: 2,
-                write_sql: &write_sql,
-                table_num,
-                compact_tx_tuples: self.branch_num == 1,
-                creation_metadata_cache: Some(&mut creation_metadata_cache),
-                row_num_cache: Some(&mut row_num_cache),
-                visible_tx_cache: Some(&mut visible_tx_cache),
-                effective_values_cache: Some(&mut effective_values_cache),
-                write_current_projection: index == last_edit_index,
-                history_rows_batch: Some(
-                    history_rows_by_table
-                        .entry(table_name.to_owned())
-                        .or_insert_with(Vec::new),
-                ),
-                implicit_previous_read_tx_num: last_created_tx_num,
-            })?;
-            last_created_tx_num = Some(outcome.tx_num);
-            next_local_epoch += 1;
-            if !outcome.allowed {
-                let reject_started = Instant::now();
-                tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
-                db.execute(
+        {
+            let mut local_tx_insert_stmt =
+                db.prepare(tx::local_single_row_read_write_insert_sql())?;
+            for (index, edit) in edits.iter().enumerate() {
+                let deep_text_edit_started = Instant::now();
+                root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
+                add_write_phase(|stats| &mut stats.deep_text_edit_ms, deep_text_edit_started);
+                let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
+                let outcome = insert_row_in_tx_with_local_tx_stmt(
+                    InsertRowInTx {
+                        db: &db,
+                        schema: &self.schema,
+                        table_name,
+                        id,
+                        values: &values,
+                        tx_num: None,
+                        deferred_tx: Some(DeferredTxInsert {
+                            node_num: self.node_num,
+                            node_id: &self.node_id,
+                            local_epoch: next_local_epoch,
+                            conflict_mode: tx::MODE_MERGEABLE,
+                            outcome: tx::OUTCOME_PENDING,
+                            global_epoch: None,
+                        }),
+                        branch_num: self.branch_num,
+                        now: batch_created_at,
+                        user: &user,
+                        user_num,
+                        bypass_policy,
+                        op: 2,
+                        write_sql: &write_sql,
+                        table_num,
+                        compact_tx_tuples: self.branch_num == 1,
+                        creation_metadata_cache: Some(&mut creation_metadata_cache),
+                        row_num_cache: Some(&mut row_num_cache),
+                        visible_tx_cache: Some(&mut visible_tx_cache),
+                        effective_values_cache: Some(&mut effective_values_cache),
+                        write_current_projection: index == last_edit_index,
+                        history_rows_batch: Some(
+                            history_rows_by_table
+                                .entry(table_name.to_owned())
+                                .or_insert_with(Vec::new),
+                        ),
+                        implicit_previous_read_tx_num: last_created_tx_num,
+                    },
+                    Some(&mut local_tx_insert_stmt),
+                )?;
+                last_created_tx_num = Some(outcome.tx_num);
+                next_local_epoch += 1;
+                if !outcome.allowed {
+                    let reject_started = Instant::now();
+                    tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
+                    db.execute(
                     &format!(
                         "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
                         crate::schema::current_table(&table.name)
                     ),
                     params![outcome.row_num, self.branch_num, outcome.tx_num],
                 )?;
-                add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
+                    add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
+                }
+                tx_ids.push(outcome.tx_id);
             }
-            tx_ids.push(outcome.tx_id);
         }
         let history_insert_started = Instant::now();
         insert_apply_history_batches(&db, &self.schema, &mut history_rows_by_table)?;
@@ -786,75 +793,92 @@ impl Runtime {
         let mut tx_ids = Vec::with_capacity(writes.len());
         let mut last_created_tx_num = None;
         let batch_created_at = now_ms();
-        for (index, (id, values)) in writes.into_iter().enumerate() {
-            let op = match mode {
-                BatchedWriteMode::Insert => 1,
-                BatchedWriteMode::Update => 2,
-                BatchedWriteMode::Upsert => {
-                    let upsert_probe_started = Instant::now();
-                    if row_num_cache.get(&id).is_some_and(|row_num| {
-                        effective_values_cache.contains_key(&(table_name.to_owned(), *row_num))
-                    }) || row_has_current_branch_value(&db, table_name, &id, self.branch_num)?
-                    {
-                        add_write_phase(|stats| &mut stats.upsert_probe_ms, upsert_probe_started);
-                        2
-                    } else {
-                        add_write_phase(|stats| &mut stats.upsert_probe_ms, upsert_probe_started);
-                        1
+        {
+            let mut local_tx_insert_stmt =
+                db.prepare(tx::local_single_row_read_write_insert_sql())?;
+            for (index, (id, values)) in writes.into_iter().enumerate() {
+                let op = match mode {
+                    BatchedWriteMode::Insert => 1,
+                    BatchedWriteMode::Update => 2,
+                    BatchedWriteMode::Upsert => {
+                        let upsert_probe_started = Instant::now();
+                        if row_num_cache.get(&id).is_some_and(|row_num| {
+                            effective_values_cache.contains_key(&(table_name.to_owned(), *row_num))
+                        }) || row_has_current_branch_value(
+                            &db,
+                            table_name,
+                            &id,
+                            self.branch_num,
+                        )? {
+                            add_write_phase(
+                                |stats| &mut stats.upsert_probe_ms,
+                                upsert_probe_started,
+                            );
+                            2
+                        } else {
+                            add_write_phase(
+                                |stats| &mut stats.upsert_probe_ms,
+                                upsert_probe_started,
+                            );
+                            1
+                        }
                     }
-                }
-            };
-            let outcome = insert_row_in_tx(InsertRowInTx {
-                db: &db,
-                schema: &self.schema,
-                table_name,
-                id: &id,
-                values: &values,
-                tx_num: None,
-                deferred_tx: Some(DeferredTxInsert {
-                    node_num: self.node_num,
-                    node_id: &self.node_id,
-                    local_epoch: next_local_epoch,
-                    conflict_mode: tx::MODE_MERGEABLE,
-                    outcome: tx::OUTCOME_PENDING,
-                    global_epoch: None,
-                }),
-                branch_num: self.branch_num,
-                now: batch_created_at,
-                user: &user,
-                user_num,
-                bypass_policy,
-                op,
-                write_sql: &write_sql,
-                table_num,
-                compact_tx_tuples: self.branch_num == 1,
-                creation_metadata_cache: Some(&mut creation_metadata_cache),
-                row_num_cache: Some(&mut row_num_cache),
-                visible_tx_cache: Some(&mut visible_tx_cache),
-                effective_values_cache: Some(&mut effective_values_cache),
-                write_current_projection: last_write_index_by_id.get(&id) == Some(&index),
-                history_rows_batch: Some(
-                    history_rows_by_table
-                        .entry(table_name.to_owned())
-                        .or_insert_with(Vec::new),
-                ),
-                implicit_previous_read_tx_num: last_created_tx_num,
-            })?;
-            last_created_tx_num = Some(outcome.tx_num);
-            next_local_epoch += 1;
-            if !outcome.allowed {
-                let reject_started = Instant::now();
-                tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
-                db.execute(
+                };
+                let outcome = insert_row_in_tx_with_local_tx_stmt(
+                    InsertRowInTx {
+                        db: &db,
+                        schema: &self.schema,
+                        table_name,
+                        id: &id,
+                        values: &values,
+                        tx_num: None,
+                        deferred_tx: Some(DeferredTxInsert {
+                            node_num: self.node_num,
+                            node_id: &self.node_id,
+                            local_epoch: next_local_epoch,
+                            conflict_mode: tx::MODE_MERGEABLE,
+                            outcome: tx::OUTCOME_PENDING,
+                            global_epoch: None,
+                        }),
+                        branch_num: self.branch_num,
+                        now: batch_created_at,
+                        user: &user,
+                        user_num,
+                        bypass_policy,
+                        op,
+                        write_sql: &write_sql,
+                        table_num,
+                        compact_tx_tuples: self.branch_num == 1,
+                        creation_metadata_cache: Some(&mut creation_metadata_cache),
+                        row_num_cache: Some(&mut row_num_cache),
+                        visible_tx_cache: Some(&mut visible_tx_cache),
+                        effective_values_cache: Some(&mut effective_values_cache),
+                        write_current_projection: last_write_index_by_id.get(&id) == Some(&index),
+                        history_rows_batch: Some(
+                            history_rows_by_table
+                                .entry(table_name.to_owned())
+                                .or_insert_with(Vec::new),
+                        ),
+                        implicit_previous_read_tx_num: last_created_tx_num,
+                    },
+                    Some(&mut local_tx_insert_stmt),
+                )?;
+                last_created_tx_num = Some(outcome.tx_num);
+                next_local_epoch += 1;
+                if !outcome.allowed {
+                    let reject_started = Instant::now();
+                    tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
+                    db.execute(
                     &format!(
                         "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
                         crate::schema::current_table(&table.name)
                     ),
                     params![outcome.row_num, self.branch_num, outcome.tx_num],
                 )?;
-                add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
+                    add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
+                }
+                tx_ids.push(outcome.tx_id);
             }
-            tx_ids.push(outcome.tx_id);
         }
         let history_insert_started = Instant::now();
         insert_apply_history_batches(&db, &self.schema, &mut history_rows_by_table)?;
@@ -7295,7 +7319,14 @@ fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<Str
     Ok(current)
 }
 
-fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
+fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
+    insert_row_in_tx_with_local_tx_stmt(args, None)
+}
+
+fn insert_row_in_tx_with_local_tx_stmt(
+    mut args: InsertRowInTx<'_>,
+    local_tx_insert_stmt: Option<&mut Statement<'_>>,
+) -> Result<InsertRowOutcome> {
     let table = args.schema.table_def(args.table_name)?;
     let validate_started = Instant::now();
     validate_write_fields(table, args.values)?;
@@ -7361,22 +7392,42 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         if let Some(deferred_tx) = args.deferred_tx {
             add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
             let tx_create_started = Instant::now();
-            let created = tx::create_tx_at_local_epoch_with_single_row_read_write(
-                args.db,
-                deferred_tx.node_num,
-                deferred_tx.node_id,
-                deferred_tx.local_epoch,
-                args.now,
-                deferred_tx.conflict_mode,
-                deferred_tx.outcome,
-                deferred_tx.global_epoch,
-                args.table_num,
-                row_num,
-                args.op,
-                read_reason,
-                observed_tx_num,
-                implicit_previous_read,
-            )?;
+            let created = if let Some(stmt) = local_tx_insert_stmt {
+                tx::insert_local_tx_with_single_row_read_write(
+                    stmt,
+                    args.db,
+                    deferred_tx.node_num,
+                    deferred_tx.node_id,
+                    deferred_tx.local_epoch,
+                    args.now,
+                    deferred_tx.conflict_mode,
+                    deferred_tx.outcome,
+                    deferred_tx.global_epoch,
+                    args.table_num,
+                    row_num,
+                    args.op,
+                    read_reason,
+                    observed_tx_num,
+                    implicit_previous_read,
+                )?
+            } else {
+                tx::create_tx_at_local_epoch_with_single_row_read_write(
+                    args.db,
+                    deferred_tx.node_num,
+                    deferred_tx.node_id,
+                    deferred_tx.local_epoch,
+                    args.now,
+                    deferred_tx.conflict_mode,
+                    deferred_tx.outcome,
+                    deferred_tx.global_epoch,
+                    args.table_num,
+                    row_num,
+                    args.op,
+                    read_reason,
+                    observed_tx_num,
+                    implicit_previous_read,
+                )?
+            };
             add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
             tx_num = created.0;
             tx_id = created.1;
