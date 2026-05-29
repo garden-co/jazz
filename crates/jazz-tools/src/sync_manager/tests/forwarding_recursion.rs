@@ -84,22 +84,8 @@ fn forwarding_a_deep_parent_chain_does_not_overflow_the_stack() {
     );
 }
 
-/// Scaling guard (a ratio, not a wall-clock budget): forwarding a second batch
-/// of updates against a larger already-sent set must not take materially longer
-/// than the first. Cloning the sent set per forward made it ~3x slower.
-#[test]
-fn forwarding_hot_row_updates_do_not_scale_with_synced_history() {
-    use std::time::{Duration, Instant};
-    const PER_PHASE: usize = 100_000;
-
-    let io = MemoryStorage::new();
-    let mut sm = SyncManager::new();
-    let server_id = ServerId::new();
-    sm.add_server_with_storage(server_id, false, &io);
-    let row_id = ObjectId::new();
-
-    // Build the tips up front so the timed phases measure only forwarding.
-    let tips: Vec<_> = (0..2 * PER_PHASE)
+fn hot_row_tips(row_id: ObjectId, count: usize) -> Vec<StoredRowBatch> {
+    (0..count)
         .map(|k| {
             visible_row(
                 row_id,
@@ -109,31 +95,91 @@ fn forwarding_hot_row_updates_do_not_scale_with_synced_history() {
                 format!("v{k}").as_bytes(),
             )
         })
-        .collect();
+        .collect()
+}
 
-    let forward_range = |sm: &mut SyncManager, range: std::ops::Range<usize>| -> Duration {
-        let start = Instant::now();
-        for tip in &tips[range] {
-            sm.forward_row_batch_to_servers_with_storage(
-                &io,
-                "users",
-                row_id,
-                forwarding_metadata(),
-                tip.clone(),
-            );
-        }
-        start.elapsed()
-    };
+#[test]
+fn forwarding_hot_row_updates_to_a_server_does_not_clone_the_sent_batch_set() {
+    use crate::sync_manager::types::sent_batch_clone_probe;
+    const FORWARDS: usize = 256;
 
-    // First phase grows the sent-batch set 0 -> PER_PHASE; second PER_PHASE -> 2*PER_PHASE.
-    let first = forward_range(&mut sm, 0..PER_PHASE);
-    let second = forward_range(&mut sm, PER_PHASE..2 * PER_PHASE);
+    let io = MemoryStorage::new();
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+    let row_id = ObjectId::new();
 
-    let ratio = second.as_secs_f64() / first.as_secs_f64();
-    assert!(
-        ratio < 2.0,
-        "hot-row forwards scaled with synced-history size: the second {PER_PHASE} forwards took \
-         {ratio:.2}x the first (first={first:?}, second={second:?}). The per-object sent-batch set \
-         is being cloned on every forward."
+    sent_batch_clone_probe::reset();
+    for tip in hot_row_tips(row_id, FORWARDS) {
+        sm.forward_row_batch_to_servers_with_storage(
+            &io,
+            "users",
+            row_id,
+            forwarding_metadata(),
+            tip,
+        );
+    }
+
+    let synced = sm
+        .servers
+        .get(&server_id)
+        .and_then(|server| {
+            server
+                .sent_batch_ids
+                .get(&(row_id, BranchName::new("main")))
+        })
+        .map_or(0, |sent| sent.len());
+    assert_eq!(
+        synced, FORWARDS,
+        "each distinct tip should have grown the sent-batch set"
+    );
+    assert_eq!(
+        sent_batch_clone_probe::count(),
+        0,
+        "server forwarding must test sent-batch membership by borrow, never by cloning the per-row set"
+    );
+}
+
+#[test]
+fn forwarding_hot_row_updates_to_a_client_does_not_clone_the_sent_batch_set() {
+    use crate::sync_manager::types::sent_batch_clone_probe;
+    const FORWARDS: usize = 256;
+
+    let io = MemoryStorage::new();
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    add_client(&mut sm, &io, client_id);
+    let row_id = ObjectId::new();
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+
+    sent_batch_clone_probe::reset();
+    for tip in hot_row_tips(row_id, FORWARDS) {
+        sm.queue_row_to_client(client_id, row_id, forwarding_metadata(), tip, false);
+    }
+
+    let synced = sm
+        .clients
+        .get(&client_id)
+        .and_then(|client| {
+            client
+                .sent_batch_ids
+                .get(&(row_id, BranchName::new("main")))
+        })
+        .map_or(0, |sent| sent.len());
+    assert_eq!(
+        synced, FORWARDS,
+        "each distinct tip should have grown the sent-batch set"
+    );
+    assert_eq!(
+        sent_batch_clone_probe::count(),
+        0,
+        "client forwarding must test sent-batch membership by borrow, never by cloning the per-row set"
     );
 }
