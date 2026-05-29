@@ -81,6 +81,13 @@ import {
   type TabSyncMessage,
 } from "./tab-sync-protocol.js";
 import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
+import {
+  createSharedWorkerLeaderClient,
+  type SharedWorkerLeaderClient,
+} from "./shared-worker-leader/client.js";
+import { MessagePortRuntimeTransport } from "./shared-worker-leader/message-port-runtime-transport.js";
+import { resolveSharedWorkerLeaderUrl } from "./shared-worker-leader/url.js";
+import { JAZZ_PACKAGE_VERSION } from "./shared-worker-leader/package-version.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
@@ -757,6 +764,9 @@ export class Db {
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
   private workerDbName: string | null = null;
+  private useSharedWorkerLeader = false;
+  private sharedWorkerLeaderClient: SharedWorkerLeaderClient | null = null;
+  private messagePortTransport: MessagePortRuntimeTransport | null = null;
   private leaderElection: TabLeaderElection | null = null;
   private leaderElectionUnsubscribe: (() => void) | null = null;
   private tabRole: LeaderRole = "follower";
@@ -947,6 +957,24 @@ export class Db {
     db.primaryDbName = resolveDefaultPersistentDbName(config);
     db.workerDbName = db.primaryDbName;
 
+    // Safari path: if a SharedWorker can host the runtime (sync OPFS in
+    // SharedWorker scope), skip the dedicated-Worker election entirely. The
+    // probe is cheap and does NOT bootstrap the runtime — the actual CONNECT
+    // (with schema) is deferred to getClient(). On any other browser the probe
+    // returns null and we fall through to the legacy election + worker path.
+    const leaderClient = await Db.tryProbeSharedWorkerLeader(
+      config,
+      db.primaryDbName,
+      crypto.randomUUID(),
+      Date.now(),
+    );
+    if (leaderClient) {
+      db.useSharedWorkerLeader = true;
+      db.sharedWorkerLeaderClient = leaderClient;
+      db.attachLifecycleHooks();
+      return db;
+    }
+
     try {
       const election = new TabLeaderElection({
         appId: config.appId,
@@ -1014,11 +1042,16 @@ export class Db {
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
 
+      // In SharedWorker-leader mode the follower main runtime is non-durable
+      // and forwards server-bound traffic over the leader-minted MessagePort —
+      // same `hasWorker` semantics as the dedicated-Worker path (no direct
+      // server connection, binary encoding).
+      const usingLeader = this.useSharedWorkerLeader;
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
-        hasWorker: this.worker !== null,
-        useBinaryEncoding: this.worker !== null,
+        hasWorker: this.worker !== null || usingLeader,
+        useBinaryEncoding: this.worker !== null || usingLeader,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
@@ -1028,10 +1061,17 @@ export class Db {
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
+      } else if (usingLeader && !this.messagePortTransport) {
+        // Lazy CONNECT: the schema is known now, so connect to the leader and
+        // install the MessagePort transport. The first PEER_PORT wires it up.
+        // Other awaiters block via ensureBridgeReady().
+        const leaderReady = this.attachLeaderTransport(key, client);
+        this.bridgeReady = leaderReady;
+        leaderReady.catch(() => undefined);
       }
-      // Direct (non-worker) clients with a serverUrl must open their own
-      // Rust transport — the worker bridge is not doing it for them.
-      if (!this.worker && this.config.serverUrl) {
+      // Direct (non-worker, non-leader) clients with a serverUrl must open
+      // their own Rust transport — neither bridge is doing it for them.
+      if (!this.worker && !usingLeader && this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
@@ -1041,6 +1081,75 @@ export class Db {
     }
 
     return this.clients.get(key)!;
+  }
+
+  /**
+   * Safari path: construct a SharedWorker leader client and probe whether this
+   * browser can host the runtime in a SharedWorker (sync OPFS in SharedWorker
+   * scope). Returns the client on success (caller owns it), or null when the
+   * browser can't host (Chrome/Firefox today) / no SharedWorker / timeout — in
+   * which case the caller falls through to the dedicated-Worker election path.
+   * Does NOT bootstrap the runtime; the CONNECT (with schema) is deferred.
+   */
+  private static async tryProbeSharedWorkerLeader(
+    config: DbConfig,
+    primaryDbName: string,
+    tabId: string,
+    bornAt: number,
+  ): Promise<SharedWorkerLeaderClient | null> {
+    if (typeof SharedWorker === "undefined") return null;
+
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+    const leaderUrl = resolveSharedWorkerLeaderUrl(
+      import.meta.url,
+      locationHref,
+      config.runtimeSources,
+    );
+    const client = createSharedWorkerLeaderClient({
+      appId: config.appId,
+      dbName: primaryDbName,
+      env: config.env,
+      userBranch: config.userBranch,
+      serverUrl: config.serverUrl,
+      jwtToken: config.jwtToken,
+      adminSecret: config.adminSecret,
+      jazzPackageVersion: JAZZ_PACKAGE_VERSION,
+      leaderUrl,
+      tabId,
+      bornAt,
+    });
+
+    let supported = false;
+    try {
+      supported = await client.checkCapability();
+    } catch {
+      supported = false;
+    }
+    if (!supported) {
+      client.close();
+      return null;
+    }
+    return client;
+  }
+
+  /**
+   * Lazy CONNECT for SharedWorker-leader mode. Connects the leader client with
+   * the now-known schema and installs the MessagePort transport on the client's
+   * runtime. A connect failure is a hard error by design (no fallback): it
+   * rejects this promise, which is stored on `this.bridgeReady`, so
+   * `ensureBridgeReady()` and the first awaited query surface the typed error.
+   */
+  private async attachLeaderTransport(schemaJson: string, client: JazzClient): Promise<void> {
+    if (!this.sharedWorkerLeaderClient) {
+      throw new Error("attachLeaderTransport called without an active SharedWorker leader client");
+    }
+    const snapshot = await this.sharedWorkerLeaderClient.connect({ schemaJson });
+    const transport = new MessagePortRuntimeTransport({
+      port: snapshot.port,
+      runtime: client.getRuntime(),
+    });
+    transport.start();
+    this.messagePortTransport = transport;
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -2109,6 +2218,19 @@ export class Db {
     this.leaderPeerIds.clear();
     this.closeSyncChannel();
     this.detachLifecycleHooks();
+
+    // SharedWorker-leader mode: detach this follower (stop the MessagePort
+    // transport, close the leader control connection). The leader SharedWorker
+    // keeps running for other tabs — it owns OPFS + the lock. Clear bridgeReady
+    // (which may be a rejected leader-connect promise) so the ensureBridgeReady()
+    // below doesn't re-throw during cleanup.
+    if (this.useSharedWorkerLeader) {
+      this.messagePortTransport?.stop();
+      this.messagePortTransport = null;
+      this.sharedWorkerLeaderClient?.close();
+      this.sharedWorkerLeaderClient = null;
+      this.bridgeReady = null;
+    }
 
     if (this.leaderElectionUnsubscribe) {
       this.leaderElectionUnsubscribe();
