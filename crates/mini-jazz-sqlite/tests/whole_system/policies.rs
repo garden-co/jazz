@@ -1994,6 +1994,159 @@ fn patch_update_uses_preserved_ref_for_write_policy_validation() {
 }
 
 #[test]
+fn update_policy_uses_old_row_and_checks_new_row_separately() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.insert_if_ref_readable("project");
+            table.update_using_created_by_user();
+            table.update_check_ref_readable("project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice project"))]),
+        )
+        .unwrap();
+    bob.insert_row(
+        "projects",
+        "project-bob",
+        BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+    )
+    .unwrap();
+    alice
+        .insert_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice task")),
+                ("project".to_owned(), json!("project-alice")),
+            ]),
+        )
+        .unwrap();
+
+    for bundle in [
+        alice.export_table_history("projects").unwrap(),
+        alice.export_table_history("todos").unwrap(),
+        bob.export_table_history("projects").unwrap(),
+    ] {
+        edge.apply_bundle(&bundle).unwrap();
+        bob.apply_bundle(&bundle).unwrap();
+        alice.apply_bundle(&bundle).unwrap();
+    }
+
+    let bob_tx = bob
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("project".to_owned(), json!("project-bob"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        bob.transaction_info(&bob_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+
+    let alice_tx = alice
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("project".to_owned(), json!("project-bob"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice.transaction_info(&alice_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+
+    let alice_tx = alice
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice task renamed"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice.transaction_info(&alice_tx).unwrap().rejection_code,
+        None
+    );
+}
+
+#[test]
+fn update_with_check_plus_exists_allows_preventing_updates_to_specific_columns() {
+    let schema = SchemaDef::new().table("todos", |table| {
+        table.text("title");
+        table.bool("done");
+        table.update_protected_fields_if_created_by_user(["title"]);
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob =
+        Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema.clone()).unwrap();
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    alice
+        .insert_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Alice task")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice.export_table_history("todos").unwrap();
+    edge.apply_bundle(&bundle).unwrap();
+    bob.apply_bundle(&bundle).unwrap();
+
+    let bob_tx = bob
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .unwrap();
+    assert_eq!(bob.transaction_info(&bob_tx).unwrap().rejection_code, None);
+
+    let bob_tx = bob
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("title".to_owned(), json!("Bob rename"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        bob.transaction_info(&bob_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+
+    let alice_tx = alice
+        .update_row(
+            "todos",
+            "todo-alice",
+            BTreeMap::from([("title".to_owned(), json!("Alice rename"))]),
+        )
+        .unwrap();
+    assert_eq!(
+        alice.transaction_info(&alice_tx).unwrap().rejection_code,
+        None
+    );
+}
+
+#[test]
 fn ref_retarget_update_validates_new_parent_policy() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

@@ -99,6 +99,8 @@ impl SchemaDef {
                 table.index("by_title", ["title"]);
                 table.index("open_visible", ["done", "project", "$createdAt"]);
                 table.read_if_inherits("project");
+                table.write_if_ref_readable("project");
+                table.update_protected_fields_if_created_by_user(["title", "project"]);
                 table.delete_if_created_by_user();
             })
             .table("labels", |table| {
@@ -161,14 +163,19 @@ impl SchemaDef {
                 continue;
             };
             parts.push(format!(
-                "{}:write:{}",
+                "{}:insert:{}",
                 table.name,
-                table.write_policy.fingerprint_for_table(table)
+                table.insert_policy.fingerprint_for_table(table)
+            ));
+            parts.push(format!(
+                "{}:update:{}",
+                table.name,
+                table.update_policy.fingerprint_for_table(table)
             ));
             parts.push(format!(
                 "{}:delete:{}",
                 table.name,
-                table.delete_policy().fingerprint_for_table(table)
+                table.delete_policy.fingerprint_for_table(table)
             ));
         }
         parts.join("|")
@@ -187,13 +194,17 @@ pub(crate) struct TableDef {
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) indexes: Vec<IndexDef>,
     pub(crate) read_policy: PolicyDef,
-    pub(crate) write_policy: PolicyDef,
-    delete_policy: Option<PolicyDef>,
+    pub(crate) insert_policy: OperationPolicy,
+    pub(crate) update_policy: OperationPolicy,
+    pub(crate) delete_policy: OperationPolicy,
 }
 
 impl TableDef {
-    pub(crate) fn delete_policy(&self) -> &PolicyDef {
-        self.delete_policy.as_ref().unwrap_or(&self.write_policy)
+    pub(crate) fn effective_delete_using(&self) -> Option<&PolicyDef> {
+        self.delete_policy
+            .using
+            .as_ref()
+            .or(self.update_policy.using.as_ref())
     }
 }
 
@@ -246,12 +257,58 @@ pub(crate) enum PolicyValue {
     SessionRef(Vec<String>),
 }
 
+pub(crate) const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Operation {
     Select,
     Insert,
     Update,
     Delete,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OperationPolicy {
+    pub(crate) using: Option<PolicyDef>,
+    pub(crate) with_check: Option<PolicyDef>,
+}
+
+impl OperationPolicy {
+    fn using(policy: PolicyDef) -> Self {
+        Self {
+            using: Some(policy),
+            with_check: None,
+        }
+    }
+
+    fn with_check(policy: PolicyDef) -> Self {
+        Self {
+            using: None,
+            with_check: Some(policy),
+        }
+    }
+
+    fn using_and_check(using: PolicyDef, with_check: PolicyDef) -> Self {
+        Self {
+            using: Some(using),
+            with_check: Some(with_check),
+        }
+    }
+
+    fn fingerprint_for_table(&self, table: &TableDef) -> String {
+        format!(
+            "using:{}|check:{}",
+            self.using
+                .as_ref()
+                .map(|policy| policy.fingerprint_for_table(table))
+                .unwrap_or_else(|| "none".to_owned()),
+            self.with_check
+                .as_ref()
+                .map(|policy| policy.fingerprint_for_table(table))
+                .unwrap_or_else(|| "none".to_owned())
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -506,8 +563,9 @@ impl TableBuilder {
                 fields: Vec::new(),
                 indexes: Vec::new(),
                 read_policy: PolicyDef::True,
-                write_policy: PolicyDef::True,
-                delete_policy: None,
+                insert_policy: OperationPolicy::with_check(PolicyDef::True),
+                update_policy: OperationPolicy::using_and_check(PolicyDef::True, PolicyDef::True),
+                delete_policy: OperationPolicy::default(),
             },
         }
     }
@@ -651,15 +709,59 @@ impl TableBuilder {
     }
 
     pub fn write_if_created_by_user(&mut self) {
-        self.table.write_policy = created_by_user_policy();
+        self.insert_if_created_by_user();
+        self.update_if_created_by_user();
     }
 
     pub fn write_if_ref_readable(&mut self, field: &str) {
-        self.table.write_policy = inherits_policy(field);
+        self.insert_if_ref_readable(field);
+        self.update_if_ref_readable(field);
+    }
+
+    pub fn insert_if_created_by_user(&mut self) {
+        self.table.insert_policy = OperationPolicy::with_check(created_by_user_policy());
+    }
+
+    pub fn insert_if_ref_readable(&mut self, field: &str) {
+        self.table.insert_policy = OperationPolicy::with_check(inherits_policy(field));
+    }
+
+    pub fn update_if_created_by_user(&mut self) {
+        self.table.update_policy =
+            OperationPolicy::using_and_check(created_by_user_policy(), created_by_user_policy());
+    }
+
+    pub fn update_using_created_by_user(&mut self) {
+        self.table.update_policy.using = Some(created_by_user_policy());
+    }
+
+    pub fn update_check_created_by_user(&mut self) {
+        self.table.update_policy.with_check = Some(created_by_user_policy());
+    }
+
+    pub fn update_if_ref_readable(&mut self, field: &str) {
+        self.table.update_policy =
+            OperationPolicy::using_and_check(inherits_policy(field), inherits_policy(field));
+    }
+
+    pub fn update_using_ref_readable(&mut self, field: &str) {
+        self.table.update_policy.using = Some(inherits_policy(field));
+    }
+
+    pub fn update_check_ref_readable(&mut self, field: &str) {
+        self.table.update_policy.with_check = Some(inherits_policy(field));
+    }
+
+    pub fn update_protected_fields_if_created_by_user<const N: usize>(
+        &mut self,
+        fields: [&str; N],
+    ) {
+        let guard = protected_fields_unchanged_or_created_by_user_policy(&self.table.name, fields);
+        self.and_update_check(guard);
     }
 
     pub fn delete_if_created_by_user(&mut self) {
-        self.table.delete_policy = Some(created_by_user_policy());
+        self.table.delete_policy = OperationPolicy::using(created_by_user_policy());
     }
 
     pub fn read_if_ref_readable(&mut self, field: &str) {
@@ -668,6 +770,14 @@ impl TableBuilder {
 
     fn finish(self) -> TableDef {
         self.table
+    }
+
+    fn and_update_check(&mut self, guard: PolicyDef) {
+        self.table.update_policy.with_check =
+            Some(match self.table.update_policy.with_check.take() {
+                None | Some(PolicyDef::True) => guard,
+                Some(existing) => PolicyDef::And(vec![existing, guard]),
+            });
     }
 }
 
@@ -710,6 +820,33 @@ fn inherits_referencing_policy(source_table: &str, field: &str) -> PolicyDef {
         via_column: field.to_owned(),
         max_depth: None,
     }
+}
+
+fn protected_fields_unchanged_or_created_by_user_policy<const N: usize>(
+    table_name: &str,
+    fields: [&str; N],
+) -> PolicyDef {
+    let mut unchanged = vec![PolicyDef::Cmp {
+        column: "$id".to_owned(),
+        op: CmpOp::Eq,
+        value: outer_row_value("$id"),
+    }];
+    unchanged.extend(fields.into_iter().map(|field| PolicyDef::Cmp {
+        column: field.to_owned(),
+        op: CmpOp::Eq,
+        value: outer_row_value(field),
+    }));
+    PolicyDef::Or(vec![
+        created_by_user_policy(),
+        PolicyDef::Exists {
+            table: table_name.to_owned(),
+            condition: Box::new(PolicyDef::And(unchanged)),
+        },
+    ])
+}
+
+fn outer_row_value(column: &str) -> PolicyValue {
+    PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.to_owned(), column.to_owned()])
 }
 
 pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
@@ -882,8 +1019,16 @@ fn validate_schema_shape(schema: &SchemaDef) -> Result<()> {
 fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
     for table in schema.tables() {
         validate_policy_cycle(schema, table, &table.read_policy, &mut BTreeSet::new())?;
-        validate_policy_cycle(schema, table, &table.write_policy, &mut BTreeSet::new())?;
-        if let Some(delete_policy) = &table.delete_policy {
+        if let Some(policy) = &table.insert_policy.with_check {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(policy) = &table.update_policy.using {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(policy) = &table.update_policy.with_check {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(delete_policy) = &table.delete_policy.using {
             validate_policy_cycle(schema, table, delete_policy, &mut BTreeSet::new())?;
         }
     }

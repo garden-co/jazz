@@ -152,6 +152,11 @@ self.onmessage = async ({ data }) => {
       if (visibleTodo(data.id)) {
         db.updateRow("todos", data.id, { done: data.done });
       }
+    } else if (data.type === "rename") {
+      const title = String(data.title ?? "").trim();
+      if (title && visibleTodo(data.id)) {
+        db.updateRow("todos", data.id, { title });
+      }
     } else if (data.type === "delete") {
       const todo = visibleTodo(data.id);
       if (todo?.created_by === activeUserId) {
@@ -405,6 +410,7 @@ function postState(generateMs) {
     projectTitle: projectTitles.get(row.values.project) ?? row.values.project,
     createdBy: row.created_by,
     createdByName: userName(row.created_by),
+    canRename: row.created_by === activeUserId,
     canDelete: row.created_by === activeUserId,
     labels: todoLabels.get(row.id) ?? [],
     txId: row.tx_id,

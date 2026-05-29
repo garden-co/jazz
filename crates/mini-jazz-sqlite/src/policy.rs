@@ -1,4 +1,8 @@
-use crate::schema::{CmpOp, FieldKind, Operation, PolicyDef, PolicyValue, SchemaDef, TableDef};
+use crate::schema::{
+    CmpOp, FieldKind, Operation, PolicyDef, PolicyValue, SchemaDef, TableDef,
+    OUTER_ROW_SESSION_PREFIX,
+};
+use crate::sync::history_op;
 use crate::{branch, tx, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
@@ -37,8 +41,8 @@ fn write_allowed_for_policy(check: &WriteCheck<'_>, policy: &PolicyDef) -> Resul
         | PolicyDef::In { .. }
         | PolicyDef::InList { .. }
         | PolicyDef::SessionInList { .. }
-        | PolicyDef::Exists { .. }
         | PolicyDef::ExistsRel { .. } => current_row_matches_policy(check, policy),
+        PolicyDef::Exists { table, condition } => exists_write_allowed(check, table, condition),
         PolicyDef::Inherits {
             operation,
             via_column,
@@ -163,6 +167,9 @@ fn resolve_policy_value_for_ref(
 ) -> Result<JsonValue> {
     match value {
         PolicyValue::Literal(value) => Ok(value.clone()),
+        PolicyValue::SessionRef(path) if outer_row_ref_column(path).is_some() => {
+            resolve_outer_policy_value_for_json(check, path)
+        }
         PolicyValue::SessionRef(path) if is_session_user_id(path) && ref_table == "users" => {
             Ok(JsonValue::String(check.user.to_owned()))
         }
@@ -176,6 +183,9 @@ fn resolve_policy_value_for_ref(
 fn resolve_policy_value_for_json(check: &WriteCheck<'_>, value: &PolicyValue) -> Result<JsonValue> {
     match value {
         PolicyValue::Literal(value) => Ok(value.clone()),
+        PolicyValue::SessionRef(path) if outer_row_ref_column(path).is_some() => {
+            resolve_outer_policy_value_for_json(check, path)
+        }
         PolicyValue::SessionRef(path) if is_session_user_id(path) => {
             Ok(JsonValue::String(check.user.to_owned()))
         }
@@ -184,6 +194,36 @@ fn resolve_policy_value_for_json(check: &WriteCheck<'_>, value: &PolicyValue) ->
             path.join(".")
         ))),
     }
+}
+
+fn resolve_outer_policy_value_for_json(
+    check: &WriteCheck<'_>,
+    path: &[String],
+) -> Result<JsonValue> {
+    let column = outer_row_ref_column(path).expect("outer row ref checked by caller");
+    if column == "$id" {
+        return Ok(JsonValue::String(crate::rows::public_row_id(
+            check.db,
+            check.row_num,
+        )?));
+    }
+    if column == "$createdBy" {
+        return Ok(current_or_pending_created_by(check)?
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null));
+    }
+    let field = check
+        .table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .ok_or_else(|| crate::Error::new(format!("unknown outer row policy column {column}")))?;
+    Ok(check
+        .values
+        .get(column)
+        .or_else(|| check.values.get(&field.storage_name))
+        .cloned()
+        .unwrap_or(JsonValue::Null))
 }
 
 fn compare_json_values(left: &JsonValue, op: &CmpOp, right: &JsonValue) -> bool {
@@ -263,6 +303,7 @@ fn ref_row_read_allowed(
         check.user,
         Some(check.branch_num),
         0,
+        None,
     )?;
     let count: i64 = check.db.query_row(
         &format!(
@@ -293,6 +334,7 @@ fn current_row_matches_policy(check: &WriteCheck<'_>, policy: &PolicyDef) -> Res
         check.user,
         Some(check.branch_num),
         0,
+        None,
     )?;
     let count: i64 = check.db.query_row(
         &format!(
@@ -314,6 +356,51 @@ fn current_row_matches_policy(check: &WriteCheck<'_>, policy: &PolicyDef) -> Res
     Ok(count > 0)
 }
 
+fn exists_write_allowed(
+    check: &WriteCheck<'_>,
+    table_name: &str,
+    condition: &PolicyDef,
+) -> Result<bool> {
+    let exists_table = check.schema.table_def(table_name)?;
+    let exists_alias = "policy_exists_write";
+    let exists_tx_alias = "policy_exists_write_tx";
+    let condition_sql = lower_policy(
+        check.schema,
+        exists_table,
+        exists_alias,
+        condition,
+        check.user,
+        Some(check.branch_num),
+        1,
+        Some(PolicyOuterRow::Values {
+            db: check.db,
+            table: check.table,
+            row_num: check.row_num,
+            branch_num: check.branch_num,
+            values: check.values,
+            created_by: check.created_by,
+        }),
+    )?;
+    let count: i64 = check.db.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM {} {exists_alias}
+             JOIN jazz_tx {exists_tx_alias}
+               ON {exists_tx_alias}.tx_num = {exists_alias}.visible_tx_num
+             WHERE {exists_alias}.is_deleted = 0
+               AND {}
+               AND {exists_tx_alias}.outcome != {}
+               AND {condition_sql}",
+            crate::schema::current_table(table_name),
+            effective_branch_sql(exists_alias, table_name, check.branch_num),
+            tx::OUTCOME_REJECTED,
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 fn snapshot_write_ref_allowed(
     conn: &Connection,
     schema: &SchemaDef,
@@ -323,6 +410,7 @@ fn snapshot_write_ref_allowed(
     base_epoch: i64,
 ) -> Result<bool> {
     let policy_sql = snapshot_read_policy_sql_for_alias(schema, ref_table, "h", user, base_epoch)?;
+    let delete_op = history_op::DELETE;
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*)
@@ -330,7 +418,7 @@ fn snapshot_write_ref_allowed(
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND tx.outcome != {}
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
@@ -377,8 +465,32 @@ fn effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) -> Strin
     )
 }
 
+#[derive(Clone, Copy)]
+enum PolicyOuterRow<'a> {
+    Alias {
+        table: &'a TableDef,
+        alias: &'a str,
+    },
+    Values {
+        db: &'a Connection,
+        table: &'a TableDef,
+        row_num: i64,
+        branch_num: i64,
+        values: &'a BTreeMap<String, JsonValue>,
+        created_by: Option<&'a str>,
+    },
+}
+
 pub(crate) fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn outer_row_ref_column(path: &[String]) -> Option<&str> {
+    if path.len() == 2 && path[0] == OUTER_ROW_SESSION_PREFIX {
+        Some(path[1].as_str())
+    } else {
+        None
+    }
 }
 
 fn user_row_num_subquery(user: &str) -> String {
@@ -395,9 +507,10 @@ fn current_cmp_sql(
     op: &CmpOp,
     value: &PolicyValue,
     user: &str,
+    outer_row: Option<PolicyOuterRow<'_>>,
 ) -> Result<String> {
     let left = policy_column_sql(table, alias, column)?;
-    let right = policy_value_sql(table, column, value, user)?;
+    let right = policy_value_sql(table, column, value, user, outer_row)?;
     Ok(format!("{left} {} {right}", cmp_op_sql(op)))
 }
 
@@ -428,6 +541,7 @@ fn policy_value_sql(
     column: &str,
     value: &PolicyValue,
     user: &str,
+    outer_row: Option<PolicyOuterRow<'_>>,
 ) -> Result<String> {
     match value {
         PolicyValue::Literal(value) => {
@@ -445,6 +559,16 @@ fn policy_value_sql(
                 )),
                 _ => Ok(json_literal_sql(value)),
             }
+        }
+        PolicyValue::SessionRef(path) if outer_row_ref_column(path).is_some() => {
+            let outer_column = outer_row_ref_column(path).expect("outer row ref checked by guard");
+            let Some(outer_row) = outer_row else {
+                return Err(crate::Error::new(format!(
+                    "outer row ref {} used without outer row context",
+                    path.join(".")
+                )));
+            };
+            outer_policy_value_sql(table, column, outer_row, outer_column)
         }
         PolicyValue::SessionRef(path) if is_session_user_id(path) => {
             let Some(field) = table
@@ -466,6 +590,102 @@ fn policy_value_sql(
             path.join(".")
         ))),
     }
+}
+
+fn outer_policy_value_sql(
+    table: &TableDef,
+    column: &str,
+    outer_row: PolicyOuterRow<'_>,
+    outer_column: &str,
+) -> Result<String> {
+    match outer_row {
+        PolicyOuterRow::Alias { table, alias } => policy_column_sql(table, alias, outer_column),
+        PolicyOuterRow::Values {
+            db,
+            table: outer_table,
+            row_num,
+            branch_num,
+            values,
+            created_by,
+        } => {
+            let value = outer_policy_value_from_values(
+                db,
+                outer_table,
+                row_num,
+                branch_num,
+                values,
+                created_by,
+                outer_column,
+            )?;
+            let Some(field) = table
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == column)
+            else {
+                return Ok(json_literal_sql(&value));
+            };
+            match (&field.kind, value) {
+                (FieldKind::Ref { .. }, JsonValue::String(row_id)) => Ok(format!(
+                    "(SELECT row_num FROM jazz_row_id WHERE row_id = {})",
+                    sql_literal(&row_id)
+                )),
+                (_, value) => Ok(json_literal_sql(&value)),
+            }
+        }
+    }
+}
+
+fn outer_policy_value_from_values(
+    db: &Connection,
+    table: &TableDef,
+    row_num: i64,
+    branch_num: i64,
+    values: &BTreeMap<String, JsonValue>,
+    created_by: Option<&str>,
+    column: &str,
+) -> Result<JsonValue> {
+    if column == "$id" {
+        return Ok(JsonValue::String(crate::rows::public_row_id(db, row_num)?));
+    }
+    if column == "$createdBy" {
+        let created_by = match created_by {
+            Some(created_by) => Some(created_by.to_owned()),
+            None => current_created_by_for_row(db, table, row_num, branch_num)?,
+        };
+        return Ok(created_by.map(JsonValue::String).unwrap_or(JsonValue::Null));
+    }
+    let field = table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .ok_or_else(|| crate::Error::new(format!("unknown outer row policy column {column}")))?;
+    Ok(values
+        .get(column)
+        .or_else(|| values.get(&field.storage_name))
+        .cloned()
+        .unwrap_or(JsonValue::Null))
+}
+
+fn current_created_by_for_row(
+    db: &Connection,
+    table: &TableDef,
+    row_num: i64,
+    branch_num: i64,
+) -> Result<Option<String>> {
+    db.query_row(
+        &format!(
+            "SELECT user.user_id
+             FROM {} current
+             JOIN jazz_user user ON user.user_num = current.j_created_by
+             WHERE current.row_num = ?
+               AND current.j_branch_num = ?",
+            crate::schema::current_table(&table.name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn is_session_user_id(path: &[String]) -> bool {
@@ -499,8 +719,11 @@ fn json_literal_sql(value: &JsonValue) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn current_exists_policy_sql(
     schema: &SchemaDef,
+    outer_table: &TableDef,
+    outer_alias: &str,
     table_name: &str,
     condition: &PolicyDef,
     user: &str,
@@ -518,6 +741,10 @@ fn current_exists_policy_sql(
         user,
         branch_num,
         depth + 1,
+        Some(PolicyOuterRow::Alias {
+            table: outer_table,
+            alias: outer_alias,
+        }),
     )?;
     let branch_filter = branch_num
         .map(|branch_num| {
@@ -696,6 +923,7 @@ fn current_inherits_policy_sql(
         user,
         branch_num,
         depth + 1,
+        None,
     )?;
     let branch_filter = branch_num
         .map(|branch_num| {
@@ -796,6 +1024,7 @@ fn current_inherits_referencing_policy_sql(
         user,
         branch_num,
         depth + 1,
+        None,
     )?;
     let branch_filter = branch_num
         .map(|branch_num| {
@@ -838,6 +1067,7 @@ pub(crate) fn branch_read_policy_sql_for_alias(
         user,
         Some(branch_num),
         0,
+        None,
     )
 }
 
@@ -859,6 +1089,7 @@ pub(crate) fn snapshot_read_policy_sql_for_alias(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_policy(
     schema: &SchemaDef,
     table: &TableDef,
@@ -867,6 +1098,7 @@ fn lower_policy(
     user: &str,
     branch_num: Option<i64>,
     depth: usize,
+    outer_row: Option<PolicyOuterRow<'_>>,
 ) -> Result<String> {
     if depth > MAX_POLICY_RECURSION_DEPTH {
         return Err(crate::Error::new("policy recursion depth exceeded"));
@@ -875,7 +1107,7 @@ fn lower_policy(
         PolicyDef::True => Ok("1 = 1".to_owned()),
         PolicyDef::False => Ok("0 = 1".to_owned()),
         PolicyDef::Cmp { column, op, value } => {
-            current_cmp_sql(table, alias, column, op, value, user)
+            current_cmp_sql(table, alias, column, op, value, user, outer_row)
         }
         PolicyDef::SessionCmp { .. }
         | PolicyDef::IsNull { .. }
@@ -893,7 +1125,16 @@ fn lower_policy(
         PolicyDef::Exists {
             table: exists_table,
             condition,
-        } => current_exists_policy_sql(schema, exists_table, condition, user, branch_num, depth),
+        } => current_exists_policy_sql(
+            schema,
+            table,
+            alias,
+            exists_table,
+            condition,
+            user,
+            branch_num,
+            depth,
+        ),
         PolicyDef::Inherits {
             operation,
             via_column,
@@ -926,7 +1167,18 @@ fn lower_policy(
             }
             let parts = children
                 .iter()
-                .map(|child| lower_policy(schema, table, alias, child, user, branch_num, depth + 1))
+                .map(|child| {
+                    lower_policy(
+                        schema,
+                        table,
+                        alias,
+                        child,
+                        user,
+                        branch_num,
+                        depth + 1,
+                        outer_row,
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
             Ok(format!("({})", parts.join(" AND ")))
         }
@@ -936,13 +1188,33 @@ fn lower_policy(
             }
             let parts = children
                 .iter()
-                .map(|child| lower_policy(schema, table, alias, child, user, branch_num, depth + 1))
+                .map(|child| {
+                    lower_policy(
+                        schema,
+                        table,
+                        alias,
+                        child,
+                        user,
+                        branch_num,
+                        depth + 1,
+                        outer_row,
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
             Ok(format!("({})", parts.join(" OR ")))
         }
         PolicyDef::Not(child) => Ok(format!(
             "NOT ({})",
-            lower_policy(schema, table, alias, child, user, branch_num, depth + 1)?
+            lower_policy(
+                schema,
+                table,
+                alias,
+                child,
+                user,
+                branch_num,
+                depth + 1,
+                outer_row,
+            )?
         )),
     }
 }
@@ -965,7 +1237,7 @@ fn lower_snapshot_policy(
         PolicyDef::True => Ok("1 = 1".to_owned()),
         PolicyDef::False => Ok("0 = 1".to_owned()),
         PolicyDef::Cmp { column, op, value } => {
-            current_cmp_sql(table, alias, column, op, value, user)
+            current_cmp_sql(table, alias, column, op, value, user, None)
         }
         PolicyDef::SessionCmp { .. }
         | PolicyDef::IsNull { .. }
@@ -983,7 +1255,16 @@ fn lower_snapshot_policy(
         PolicyDef::Exists {
             table: exists_table,
             condition,
-        } => current_exists_policy_sql(schema, exists_table, condition, user, None, depth),
+        } => current_exists_policy_sql(
+            schema,
+            table,
+            alias,
+            exists_table,
+            condition,
+            user,
+            None,
+            depth,
+        ),
         PolicyDef::Inherits {
             operation,
             via_column: field,
@@ -1018,6 +1299,7 @@ fn lower_snapshot_policy(
                 base_epoch,
                 depth + 1,
             )?;
+            let delete_op = history_op::DELETE;
             Ok(format!(
                 "EXISTS (
                    SELECT 1
@@ -1026,7 +1308,7 @@ fn lower_snapshot_policy(
                      ON {parent_tx_alias}.tx_num = {parent_alias}.tx_num
                    WHERE {parent_alias}.row_num = {alias}.{}
                      AND {parent_alias}.j_branch_num = 1
-                     AND {parent_alias}.op != 3
+                     AND {parent_alias}.op != {delete_op}
                      AND {parent_tx_alias}.outcome != {}
                      AND {parent_tx_alias}.global_epoch IS NOT NULL
                      AND {parent_tx_alias}.global_epoch <= {base_epoch}

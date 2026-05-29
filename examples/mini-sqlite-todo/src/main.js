@@ -25,13 +25,14 @@ const state = {
   currentRows: 0,
 };
 let searchTimer = 0;
+let editingTodoId = null;
 
 app.innerHTML = `
   <section class="todo-app">
     <header class="app-header">
       <div>
         <p class="eyebrow">mini-jazz-sqlite WASM</p>
-        <h1>Group-scoped todos</h1>
+        <h1>Todos</h1>
       </div>
       <p id="status" class="status" role="status"></p>
     </header>
@@ -69,7 +70,7 @@ app.innerHTML = `
       </label>
     </div>
     <div id="label-filters" class="label-filters" aria-label="Label filters"></div>
-    <button id="generate" class="generate" type="button">Generate 100k scoped todos</button>
+    <button id="generate" class="generate" type="button">Generate 100k todos</button>
     <p id="error-message" class="error-message" role="alert" hidden></p>
     <ul id="todo-list" class="todo-list"></ul>
     <p id="empty-state" class="empty-state">No visible open todos.</p>
@@ -161,6 +162,33 @@ list.addEventListener("click", (event) => {
   worker.postMessage({ type: "delete", id: target.dataset.id });
 });
 
+list.addEventListener("dblclick", (event) => {
+  const target = event.target.closest?.("[data-role='title']");
+  if (!target || !state.ready || state.generating) return;
+  const todo = state.todos.find((candidate) => candidate.id === target.dataset.id);
+  if (!todo?.canRename) return;
+  editingTodoId = todo.id;
+  render();
+});
+
+list.addEventListener("keydown", (event) => {
+  const target = event.target;
+  if (target.dataset.role !== "title-editor") return;
+  if (event.key === "Escape") {
+    editingTodoId = null;
+    render();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const title = target.value.trim();
+  editingTodoId = null;
+  if (title) {
+    worker.postMessage({ type: "rename", id: target.dataset.id, title });
+  }
+  render();
+});
+
 worker.onmessage = ({ data }) => {
   if (data.type === "state") {
     state.ready = true;
@@ -237,7 +265,15 @@ function render() {
   error.textContent = state.error;
 
   labelFilters.innerHTML = state.labels.map(labelFilterHtml).join("");
+  if (editingTodoId && !state.todos.some((todo) => todo.id === editingTodoId && todo.canRename)) {
+    editingTodoId = null;
+  }
   list.innerHTML = state.todos.map(todoHtml).join("");
+  const editor = list.querySelector("[data-role='title-editor']");
+  if (editor) {
+    editor.focus();
+    editor.select();
+  }
   app.querySelector("#empty-state").hidden = state.todos.length > 0;
 
   app.querySelector("#summary").textContent =
@@ -292,16 +328,20 @@ function todoHtml(todo) {
   const labelHtml = todo.labels.length
     ? `<span class="todo-tags">${todo.labels.map((label) => `<span>${escapeHtml(label.name)}</span>`).join("")}</span>`
     : "";
+  const titleHtml =
+    editingTodoId === todo.id && todo.canRename
+      ? `<input class="todo-title-editor" data-role="title-editor" data-id="${escapeAttr(todo.id)}" type="text" autocomplete="off" value="${escapeAttr(todo.title)}">`
+      : `<strong class="todo-title" data-role="title" data-id="${escapeAttr(todo.id)}">${escapeHtml(todo.title)}</strong>`;
   return `
     <li class="todo-item ${todo.done ? "done" : ""}">
-      <label class="todo-label">
-        <input type="checkbox" data-role="toggle" data-id="${escapeAttr(todo.id)}" ${todo.done ? "checked" : ""}>
+      <div class="todo-label">
+        <input type="checkbox" data-role="toggle" data-id="${escapeAttr(todo.id)}" aria-label="${escapeAttr(todo.title)}" ${todo.done ? "checked" : ""}>
         <span>
-          <strong>${escapeHtml(todo.title)}</strong>
+          ${titleHtml}
           <small>${escapeHtml(todo.projectTitle)} - by ${escapeHtml(todo.createdByName)}</small>
           ${labelHtml}
         </span>
-      </label>
+      </div>
       <button type="button" data-role="delete" data-id="${escapeAttr(todo.id)}" ${todo.canDelete ? "" : "disabled"}>Delete</button>
     </li>
   `;

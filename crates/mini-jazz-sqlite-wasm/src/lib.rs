@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-const SLOW_QUERY_LOG_THRESHOLD_MS: f64 = 1_000.0;
+const SLOW_QUERY_LOG_THRESHOLD_MS: f64 = 10.0;
 
 #[wasm_bindgen(start)]
 pub fn install_panic_hook() {

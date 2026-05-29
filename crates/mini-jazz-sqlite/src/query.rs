@@ -4,6 +4,7 @@ use crate::query_api::{
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, Operation, PolicyDef, SchemaDef};
+use crate::sync::history_op;
 use crate::types::RowView;
 use crate::{branch, policy, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
@@ -350,6 +351,7 @@ impl QueryContext<'_> {
             self.visibility()
                 .snapshot_policy_sql(table, "h", base_epoch)?
         };
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
@@ -359,7 +361,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {condition_sql}
                AND {policy_sql}
                AND NOT EXISTS (
@@ -623,6 +625,7 @@ impl QueryContext<'_> {
         };
         let select_columns =
             query_candidate_select_columns(table, "h", "ids", "tx", &(i64::MAX / 4).to_string());
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT {}
              FROM {} h
@@ -632,7 +635,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {policy_sql}
                AND NOT EXISTS (
                  SELECT 1
@@ -1413,6 +1416,7 @@ impl QueryContext<'_> {
             self.visibility()
                 .snapshot_policy_sql(table, "h", base_epoch)?
         };
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "WITH
              overlay_rows AS (
@@ -1437,7 +1441,7 @@ impl QueryContext<'_> {
                  AND tx.outcome != ?
                  AND tx.global_epoch IS NOT NULL
                  AND tx.global_epoch <= ?
-                 AND h.op != 3
+                 AND h.op != {delete_op}
                  AND h.{predicate_column} = ?
                  AND NOT EXISTS (
                    SELECT 1
@@ -2762,6 +2766,7 @@ impl QueryContext<'_> {
             "{} AS j_created_by",
             users::user_id_expr("h", "j_created_by")
         ));
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT {}
              FROM {} h
@@ -2771,7 +2776,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {policy_sql}
                AND NOT EXISTS (
                  SELECT 1

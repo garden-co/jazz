@@ -1,4 +1,5 @@
 use crate::schema::{FieldKind, Operation, PolicyDef, SchemaDef, TableDef};
+use crate::sync::history_op;
 use crate::{policy, tx, Result};
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 
@@ -60,6 +61,7 @@ impl ReadVisibility<'_> {
         let effective_branch_policy_sql =
             self.base_snapshot_effective_policy_sql(table, "h", base_epoch)?;
         let row_filter = row_filter_sql("h", row_nums);
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT h.row_num
              FROM {} h
@@ -69,7 +71,7 @@ impl ReadVisibility<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {snapshot_policy_sql}
                AND {effective_branch_policy_sql}
                AND NOT EXISTS (
@@ -238,6 +240,7 @@ impl ReadVisibility<'_> {
                     base_epoch,
                     depth + 1,
                 )?;
+                let delete_op = history_op::DELETE;
                 Ok(format!(
                     "(
                        EXISTS (
@@ -265,7 +268,7 @@ impl ReadVisibility<'_> {
                              ON {snapshot_tx_alias}.tx_num = {snapshot_alias}.tx_num
                            WHERE {snapshot_alias}.row_num = {alias}.{ref_column}
                              AND {snapshot_alias}.j_branch_num = 1
-                             AND {snapshot_alias}.op != 3
+                             AND {snapshot_alias}.op != {delete_op}
                              AND {snapshot_tx_alias}.outcome != {}
                              AND {snapshot_tx_alias}.global_epoch IS NOT NULL
                              AND {snapshot_tx_alias}.global_epoch <= {base_epoch}

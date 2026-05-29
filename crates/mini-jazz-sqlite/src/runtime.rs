@@ -4,7 +4,7 @@ use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_n
 use crate::schema::{FieldDef, FieldKind, Operation, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
-    BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
+    history_op, BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
@@ -314,7 +314,7 @@ impl Runtime {
         id: &str,
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
-        self.write_row(table_name, id, values, 1)
+        self.write_row(table_name, id, values, history_op::INSERT)
     }
 
     pub fn update_row(
@@ -324,7 +324,7 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         self.physical_row_num_for(id)?;
-        self.write_row(table_name, id, values, 2)
+        self.write_row(table_name, id, values, history_op::UPDATE)
     }
 
     pub fn upsert_row(
@@ -334,9 +334,9 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         let op = if self.row_has_current_branch_value(table_name, id)? {
-            2
+            history_op::UPDATE
         } else {
-            1
+            history_op::INSERT
         };
         self.write_row(table_name, id, values, op)
     }
@@ -348,9 +348,9 @@ impl Runtime {
         values: BTreeMap<String, JsonValue>,
     ) -> Result<String> {
         let op = if self.row_has_current_branch_value(table_name, id)? {
-            2
+            history_op::UPDATE
         } else {
-            1
+            history_op::INSERT
         };
         self.write_row(table_name, id, values, op)
     }
@@ -1296,6 +1296,7 @@ impl Runtime {
                 table,
                 row_num,
                 record,
+                tx_num,
                 Some(auth_user),
             )?;
             if !allowed {
@@ -1366,6 +1367,7 @@ impl Runtime {
                     table,
                     row_num,
                     &record,
+                    awaiting.tx_num,
                     Some(awaiting.auth_user.as_str()),
                 )?;
                 if !allowed {
@@ -1712,11 +1714,12 @@ impl Runtime {
                              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                              WHERE ids.row_id != ?
                                AND h.j_branch_num = ?
-                               AND h.op != 3
+                               AND h.op != {delete_op}
                                AND tx.outcome != ?
                            )",
                         current_table = crate::schema::current_table(&query_read.table),
                         history_table = crate::schema::history_table(&query_read.table),
+                        delete_op = history_op::DELETE,
                     ),
                     params![
                         branch_num,
@@ -1742,11 +1745,12 @@ impl Runtime {
                              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                              WHERE h.row_num = ?
                                AND h.j_branch_num = ?
-                               AND h.op != 3
+                               AND h.op != {delete_op}
                                AND tx.outcome != ?
                            )",
                         crate::schema::current_table(&query_read.table),
                         history_table = crate::schema::history_table(&query_read.table),
+                        delete_op = history_op::DELETE,
                     ),
                     params![
                         branch_num,
@@ -1792,11 +1796,12 @@ impl Runtime {
                          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                          WHERE h.j_branch_num = ?
                            AND {history_created_by_sql}
-                           AND h.op != 3
+                           AND h.op != {delete_op}
                            AND tx.outcome != ?
                        )",
                     crate::schema::current_table(&query_read.table),
                     history_table = crate::schema::history_table(&query_read.table),
+                    delete_op = history_op::DELETE,
                 ),
                 params![
                     branch_num,
@@ -1832,12 +1837,13 @@ impl Runtime {
                      JOIN {history_table} h ON h.row_num = ids.row_num
                      JOIN jazz_tx tx ON tx.tx_num = h.tx_num
                      WHERE h.j_branch_num = ?
-                       AND h.op != 3
+                       AND h.op != {delete_op}
                        AND tx.outcome != ?
                        AND {history_predicate_sql}
                    )",
                 crate::schema::current_table(&query_read.table),
                 history_table = crate::schema::history_table(&query_read.table),
+                delete_op = history_op::DELETE,
                 history_predicate_sql =
                     query_predicate::sql(field, &format!("h.{predicate_column}"), &query_read.op)?,
             ),
@@ -2099,7 +2105,7 @@ impl Runtime {
                 return Ok(());
             }
         }
-        if outcome != tx::OUTCOME_REJECTED && record.op == 3 {
+        if outcome != tx::OUTCOME_REJECTED && record.op == history_op::DELETE {
             context.db.execute(
                 &format!(
                     "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
@@ -2498,15 +2504,17 @@ impl Runtime {
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
         let row_num = row_num(&db, id)?;
-        record_policy_read_set_for_write(
-            &db,
-            &self.schema,
-            &table,
-            table.delete_policy(),
-            &visible_row.values,
-            self.branch_num,
-            tx_num,
-        )?;
+        if let Some(policy) = table.effective_delete_using() {
+            record_policy_read_set_for_write(
+                &db,
+                &self.schema,
+                &table,
+                policy,
+                &visible_row.values,
+                self.branch_num,
+                tx_num,
+            )?;
+        }
         let allowed = bypass_policy
             || local_write_allowed(LocalWriteCheck {
                 db: &db,
@@ -2514,9 +2522,10 @@ impl Runtime {
                 table: &table,
                 row_num,
                 branch_num: self.branch_num,
-                values: &visible_row.values,
+                old_values: Some(&visible_row.values),
+                new_values: &visible_row.values,
                 user: &user,
-                op: 3,
+                op: history_op::DELETE,
                 created_by: Some(&visible_row.created_by),
             })?;
 
@@ -2542,7 +2551,7 @@ impl Runtime {
             "row_num".to_owned(),
             "?".to_owned(),
             "j_branch_num".to_owned(),
-            "3".to_owned(),
+            history_op::DELETE.to_string(),
         ];
         select_columns.extend(field_columns.iter().cloned());
         select_columns.extend([
@@ -2570,7 +2579,7 @@ impl Runtime {
                 rusqlite::types::Value::Integer(row_num),
                 rusqlite::types::Value::Integer(tx_num),
                 rusqlite::types::Value::Integer(self.branch_num),
-                rusqlite::types::Value::Integer(3),
+                rusqlite::types::Value::Integer(history_op::DELETE),
             ];
             for field in &table.fields {
                 let value = visible_row
@@ -2647,7 +2656,7 @@ impl Runtime {
                 &current_values,
             )?;
         }
-        record_tx_write(&db, tx_num, &table.name, row_num, 3)?;
+        record_tx_write(&db, tx_num, &table.name, row_num, history_op::DELETE)?;
         if !allowed {
             tx::reject(&db, &tx_id, "policy_denied")?;
             projection::rebuild(&db, &self.schema, self.node_num)?;
@@ -2675,12 +2684,13 @@ impl Runtime {
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = ?
-               AND h.op = 3
+               AND h.op = {delete_op}
                AND tx.outcome != ?
              ORDER BY tx.global_epoch DESC NULLS LAST, h.tx_num DESC
              LIMIT 1",
             field_columns.join(", "),
-            crate::schema::history_table(table_name)
+            crate::schema::history_table(table_name),
+            delete_op = history_op::DELETE,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(
@@ -2704,7 +2714,7 @@ impl Runtime {
         }
         drop(rows);
         drop(stmt);
-        self.write_row(table_name, id, values, 1)
+        self.write_row(table_name, id, values, history_op::INSERT)
     }
 
     pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
@@ -4410,7 +4420,7 @@ struct EffectiveWriteValues<'a> {
 
 fn effective_write_values(args: EffectiveWriteValues<'_>) -> Result<BTreeMap<String, JsonValue>> {
     let table = args.schema.table_def(args.table_name)?;
-    if args.op == 1 {
+    if args.op == history_op::INSERT {
         let mut values = args.patch_values.clone();
         for field in &table.fields {
             if !values.contains_key(&field.name) {
@@ -4437,7 +4447,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
     let table = args.schema.table_def(args.table_name)?;
     validate_write_fields(table, args.values)?;
     let (row_num, row_id_created) = ensure_row_id_with_status(args.db, args.id)?;
-    if args.op == 1 && !row_id_created {
+    if args.op == history_op::INSERT && !row_id_created {
         if row_id_used_by_other_table(args.db, args.schema, args.table_name, row_num)? {
             return Err(crate::Error::new(format!(
                 "row id {} is already used by another table",
@@ -4461,7 +4471,21 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         patch_values: args.values,
         op: args.op,
     })?;
-    if args.op == 1 {
+    let previous_values = if args.op == history_op::UPDATE {
+        Some(
+            effective::row_values(
+                args.db,
+                args.schema,
+                args.table_name,
+                row_num,
+                args.branch_num,
+            )?
+            .ok_or_else(|| crate::Error::new(format!("row {} is not visible", args.id)))?,
+        )
+    } else {
+        None
+    };
+    if args.op == history_op::INSERT {
         if row_id_created {
             read_set::record_tx_absent_read(args.db, args.tx_num, args.table_name, row_num)?;
         } else {
@@ -4483,11 +4507,12 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             2,
         )?;
     }
-    record_policy_read_set_for_write(
+    record_policy_read_sets_for_write(
         args.db,
         args.schema,
         table,
-        &table.write_policy,
+        args.op,
+        previous_values.as_ref(),
         &effective_values,
         args.branch_num,
         args.tx_num,
@@ -4499,10 +4524,11 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
             table,
             row_num,
             branch_num: args.branch_num,
-            values: &effective_values,
+            old_values: previous_values.as_ref(),
+            new_values: &effective_values,
             user: args.user,
             op: args.op,
-            created_by: (args.op == 1).then_some(args.user),
+            created_by: (args.op == history_op::INSERT).then_some(args.user),
         })?;
 
     let mut columns = vec![
@@ -4537,7 +4563,7 @@ fn insert_row_in_tx(args: InsertRowInTx<'_>) -> Result<bool> {
         "j_created_by".to_owned(),
         "j_updated_by".to_owned(),
     ]);
-    let (created_at, created_by) = if args.op == 1 {
+    let (created_at, created_by) = if args.op == history_op::INSERT {
         (args.now, args.user.to_owned())
     } else {
         current_creation_metadata(args.db, &table.name, row_num, args.branch_num)?
@@ -4665,19 +4691,119 @@ struct LocalWriteCheck<'a> {
     table: &'a crate::schema::TableDef,
     row_num: i64,
     branch_num: i64,
-    values: &'a BTreeMap<String, JsonValue>,
+    old_values: Option<&'a BTreeMap<String, JsonValue>>,
+    new_values: &'a BTreeMap<String, JsonValue>,
     user: &'a str,
     op: i64,
     created_by: Option<&'a str>,
 }
 
 fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
-    let policy = write_policy_for_op(check.table, check.op);
+    operation_policy_allowed_for_op(&check)
+}
+
+fn operation_policy_allowed_for_op(check: &LocalWriteCheck<'_>) -> Result<bool> {
+    if check.op == history_op::DELETE {
+        let Some(policy) = check.table.effective_delete_using() else {
+            return Ok(true);
+        };
+        let Some(old_values) = check.old_values else {
+            return Ok(false);
+        };
+        return policy_allowed_for_values(PolicyValueCheck {
+            db: check.db,
+            schema: check.schema,
+            table: check.table,
+            policy,
+            row_num: check.row_num,
+            branch_num: check.branch_num,
+            values: old_values,
+            user: check.user,
+            created_by: check.created_by,
+        });
+    }
+    operation_policy_allowed(OperationPolicyCheck {
+        db: check.db,
+        schema: check.schema,
+        table: check.table,
+        row_num: check.row_num,
+        branch_num: check.branch_num,
+        policy: operation_policy_for_op(check.table, check.op),
+        old_values: check.old_values,
+        new_values: check.new_values,
+        user: check.user,
+        created_by: check.created_by,
+    })
+}
+
+struct OperationPolicyCheck<'a> {
+    db: &'a Connection,
+    schema: &'a SchemaDef,
+    table: &'a crate::schema::TableDef,
+    row_num: i64,
+    branch_num: i64,
+    policy: &'a crate::schema::OperationPolicy,
+    old_values: Option<&'a BTreeMap<String, JsonValue>>,
+    new_values: &'a BTreeMap<String, JsonValue>,
+    user: &'a str,
+    created_by: Option<&'a str>,
+}
+
+fn operation_policy_allowed(check: OperationPolicyCheck<'_>) -> Result<bool> {
+    if let Some(using) = &check.policy.using {
+        let Some(old_values) = check.old_values else {
+            return Ok(false);
+        };
+        if !policy_allowed_for_values(PolicyValueCheck {
+            db: check.db,
+            schema: check.schema,
+            table: check.table,
+            policy: using,
+            row_num: check.row_num,
+            branch_num: check.branch_num,
+            values: old_values,
+            user: check.user,
+            created_by: check.created_by,
+        })? {
+            return Ok(false);
+        }
+    }
+    if let Some(with_check) = &check.policy.with_check {
+        if !policy_allowed_for_values(PolicyValueCheck {
+            db: check.db,
+            schema: check.schema,
+            table: check.table,
+            policy: with_check,
+            row_num: check.row_num,
+            branch_num: check.branch_num,
+            values: check.new_values,
+            user: check.user,
+            created_by: check.created_by,
+        })? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+struct PolicyValueCheck<'a> {
+    db: &'a Connection,
+    schema: &'a SchemaDef,
+    table: &'a crate::schema::TableDef,
+    policy: &'a PolicyDef,
+    row_num: i64,
+    branch_num: i64,
+    values: &'a BTreeMap<String, JsonValue>,
+    user: &'a str,
+    created_by: Option<&'a str>,
+}
+
+fn policy_allowed_for_values(check: PolicyValueCheck<'_>) -> Result<bool> {
     policy::write_allowed(policy::WriteCheck {
         db: check.db,
         schema: check.schema,
         table: check.table,
-        policy,
+        policy: check.policy,
         row_num: check.row_num,
         branch_num: check.branch_num,
         values: check.values,
@@ -4686,11 +4812,15 @@ fn local_write_allowed(check: LocalWriteCheck<'_>) -> Result<bool> {
     })
 }
 
-fn write_policy_for_op(table: &crate::schema::TableDef, op: i64) -> &PolicyDef {
-    if op == 3 {
-        table.delete_policy()
-    } else {
-        &table.write_policy
+fn operation_policy_for_op(
+    table: &crate::schema::TableDef,
+    op: i64,
+) -> &crate::schema::OperationPolicy {
+    match op {
+        history_op::INSERT => &table.insert_policy,
+        history_op::UPDATE => &table.update_policy,
+        history_op::DELETE => &table.delete_policy,
+        _ => &table.update_policy,
     }
 }
 
@@ -4705,6 +4835,23 @@ fn inherited_ref_policy_field(policy: &PolicyDef) -> Option<&str> {
     }
 }
 
+fn inherited_ref_policy_fields<'a>(policy: &'a PolicyDef, fields: &mut Vec<&'a str>) {
+    match policy {
+        PolicyDef::Inherits {
+            operation: Operation::Select,
+            via_column,
+            ..
+        } => fields.push(via_column),
+        PolicyDef::And(children) | PolicyDef::Or(children) => {
+            for child in children {
+                inherited_ref_policy_fields(child, fields);
+            }
+        }
+        PolicyDef::Not(child) => inherited_ref_policy_fields(child, fields),
+        _ => {}
+    }
+}
+
 fn policy_denial_detail_for_history_record(
     conn: &Connection,
     table: &crate::schema::TableDef,
@@ -4712,7 +4859,6 @@ fn policy_denial_detail_for_history_record(
     tx_num: i64,
 ) -> Result<JsonValue> {
     let branch_num = branch::checkout(conn, &record.branch_id)?;
-    let policy = write_policy_for_op(table, record.op);
     if let Some(dependency) = unavailable_recorded_policy_dependency(conn, tx_num, branch_num)? {
         return Ok(json!({
             "reason": "policy_dependency_unavailable",
@@ -4722,16 +4868,27 @@ fn policy_denial_detail_for_history_record(
             "dependency_row_id": dependency.1,
         }));
     }
-    if let Some(field) = inherited_ref_policy_field(policy) {
-        if let Some(dependency) = unavailable_policy_dependency(conn, table, record, tx_num, field)?
-        {
-            return Ok(json!({
-                "reason": "policy_dependency_unavailable",
-                "table": record.table,
-                "row_id": record.row_id,
-                "dependency_table": dependency.0,
-                "dependency_row_id": dependency.1,
-            }));
+    let policies = if record.op == history_op::DELETE {
+        vec![table.effective_delete_using()]
+    } else {
+        let policy = operation_policy_for_op(table, record.op);
+        vec![policy.using.as_ref(), policy.with_check.as_ref()]
+    };
+    for policy in policies.into_iter().flatten() {
+        let mut fields = Vec::new();
+        inherited_ref_policy_fields(policy, &mut fields);
+        for field in fields {
+            if let Some(dependency) =
+                unavailable_policy_dependency(conn, table, record, tx_num, field)?
+            {
+                return Ok(json!({
+                    "reason": "policy_dependency_unavailable",
+                    "table": record.table,
+                    "row_id": record.row_id,
+                    "dependency_table": dependency.0,
+                    "dependency_row_id": dependency.1,
+                }));
+            }
         }
     }
     Ok(json!({
@@ -5087,35 +5244,96 @@ fn record_policy_read_set_for_write(
     branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
-    let Some(field) = inherited_ref_policy_field(policy) else {
+    let mut fields = Vec::new();
+    inherited_ref_policy_fields(policy, &mut fields);
+    if fields.is_empty() {
         return Ok(());
     };
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == *field)
-        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref {
-        table: ref_table_name,
-    } = &field.kind
-    else {
+    for field in fields {
+        let field = table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == *field)
+            .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+        let FieldKind::Ref {
+            table: ref_table_name,
+        } = &field.kind
+        else {
+            continue;
+        };
+        let Some(row_id) = values.get(&field.name).and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let row_num = ensure_row_id(conn, ref_table_name, row_id)?;
+        read_set::record_tx_read(conn, tx_num, ref_table_name, row_num, branch_num, 1)?;
+        let ref_table = schema.table_def(ref_table_name)?;
+        record_policy_read_dependencies_for_row(
+            conn,
+            schema,
+            ref_table,
+            &ref_table.read_policy,
+            row_num,
+            branch_num,
+            tx_num,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_policy_read_sets_for_write(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    op: i64,
+    old_values: Option<&BTreeMap<String, JsonValue>>,
+    new_values: &BTreeMap<String, JsonValue>,
+    branch_num: i64,
+    tx_num: i64,
+) -> Result<()> {
+    if op == history_op::DELETE {
+        if let (Some(policy), Some(old_values)) = (table.effective_delete_using(), old_values) {
+            record_policy_read_set_for_write(
+                conn, schema, table, policy, old_values, branch_num, tx_num,
+            )?;
+        }
         return Ok(());
-    };
-    let Some(row_id) = values.get(&field.name).and_then(JsonValue::as_str) else {
-        return Ok(());
-    };
-    let row_num = ensure_row_id(conn, ref_table_name, row_id)?;
-    read_set::record_tx_read(conn, tx_num, ref_table_name, row_num, branch_num, 1)?;
-    let ref_table = schema.table_def(ref_table_name)?;
-    record_policy_read_dependencies_for_row(
+    }
+    record_operation_policy_read_set_for_write(
         conn,
         schema,
-        ref_table,
-        &ref_table.read_policy,
-        row_num,
+        table,
+        operation_policy_for_op(table, op),
+        old_values,
+        new_values,
         branch_num,
         tx_num,
-    )
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_operation_policy_read_set_for_write(
+    conn: &Connection,
+    schema: &SchemaDef,
+    table: &crate::schema::TableDef,
+    policy: &crate::schema::OperationPolicy,
+    old_values: Option<&BTreeMap<String, JsonValue>>,
+    new_values: &BTreeMap<String, JsonValue>,
+    branch_num: i64,
+    tx_num: i64,
+) -> Result<()> {
+    if let (Some(using), Some(old_values)) = (&policy.using, old_values) {
+        record_policy_read_set_for_write(
+            conn, schema, table, using, old_values, branch_num, tx_num,
+        )?;
+    }
+    if let Some(with_check) = &policy.with_check {
+        record_policy_read_set_for_write(
+            conn, schema, table, with_check, new_values, branch_num, tx_num,
+        )?;
+    }
+    Ok(())
 }
 
 fn record_policy_read_dependencies_for_row(
@@ -5127,36 +5345,41 @@ fn record_policy_read_dependencies_for_row(
     branch_num: i64,
     tx_num: i64,
 ) -> Result<()> {
-    let Some(field) = inherited_ref_policy_field(policy) else {
+    let mut fields = Vec::new();
+    inherited_ref_policy_fields(policy, &mut fields);
+    if fields.is_empty() {
         return Ok(());
     };
-    let field = table
-        .fields
-        .iter()
-        .find(|candidate| candidate.name == *field)
-        .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-    let FieldKind::Ref {
-        table: ref_table_name,
-    } = &field.kind
-    else {
-        return Ok(());
-    };
-    let Some(parent_row_num) =
-        current_ref_field_row_num(conn, &table.name, field, row_num, branch_num)?
-    else {
-        return Ok(());
-    };
-    read_set::record_tx_read(conn, tx_num, ref_table_name, parent_row_num, branch_num, 1)?;
-    let parent_table = schema.table_def(ref_table_name)?;
-    record_policy_read_dependencies_for_row(
-        conn,
-        schema,
-        parent_table,
-        &parent_table.read_policy,
-        parent_row_num,
-        branch_num,
-        tx_num,
-    )
+    for field in fields {
+        let field = table
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == *field)
+            .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+        let FieldKind::Ref {
+            table: ref_table_name,
+        } = &field.kind
+        else {
+            continue;
+        };
+        let Some(parent_row_num) =
+            current_ref_field_row_num(conn, &table.name, field, row_num, branch_num)?
+        else {
+            continue;
+        };
+        read_set::record_tx_read(conn, tx_num, ref_table_name, parent_row_num, branch_num, 1)?;
+        let parent_table = schema.table_def(ref_table_name)?;
+        record_policy_read_dependencies_for_row(
+            conn,
+            schema,
+            parent_table,
+            &parent_table.read_policy,
+            parent_row_num,
+            branch_num,
+            tx_num,
+        )?;
+    }
+    Ok(())
 }
 
 fn current_ref_field_row_num(
@@ -5230,7 +5453,7 @@ fn snapshot_ref_field_row_num(
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
-               AND h.op != 3
+               AND h.op != ?
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
@@ -5251,6 +5474,7 @@ fn snapshot_ref_field_row_num(
         ),
         params![
             row_num,
+            history_op::DELETE,
             tx::OUTCOME_REJECTED,
             base_epoch,
             tx::OUTCOME_REJECTED,
@@ -5363,7 +5587,7 @@ fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
                 Mutation::Row { values, op, .. },
             ) => {
                 existing_values.extend(values);
-                if *existing_op != 1 {
+                if *existing_op != history_op::INSERT {
                     *existing_op = op;
                 }
             }
@@ -5398,7 +5622,7 @@ impl<'a> TransactionBuilder<'a> {
             table: table.to_owned(),
             id: id.to_owned(),
             values,
-            op: 1,
+            op: history_op::INSERT,
         });
         self
     }
@@ -5413,7 +5637,7 @@ impl<'a> TransactionBuilder<'a> {
             table: table.to_owned(),
             id: id.to_owned(),
             values,
-            op: 2,
+            op: history_op::UPDATE,
         });
         self
     }
@@ -5425,8 +5649,8 @@ impl<'a> TransactionBuilder<'a> {
         values: BTreeMap<String, JsonValue>,
     ) -> Self {
         let op = match self.runtime.row_has_current_branch_value(table, id) {
-            Ok(true) => 2,
-            Ok(false) | Err(_) => 1,
+            Ok(true) => history_op::UPDATE,
+            Ok(false) | Err(_) => history_op::INSERT,
         };
         self.mutations.push(Mutation::Row {
             table: table.to_owned(),
@@ -5539,15 +5763,17 @@ impl<'a> TransactionBuilder<'a> {
                         .ok_or_else(|| {
                             crate::Error::new(format!("missing delete snapshot {id}"))
                         })?;
-                    record_policy_read_set_for_write(
-                        &db,
-                        &self.runtime.schema,
-                        table_def,
-                        table_def.delete_policy(),
-                        &visible_row.values,
-                        self.runtime.branch_num,
-                        tx_num,
-                    )?;
+                    if let Some(policy) = table_def.effective_delete_using() {
+                        record_policy_read_set_for_write(
+                            &db,
+                            &self.runtime.schema,
+                            table_def,
+                            policy,
+                            &visible_row.values,
+                            self.runtime.branch_num,
+                            tx_num,
+                        )?;
+                    }
                     allowed &= bypass_policy
                         || local_write_allowed(LocalWriteCheck {
                             db: &db,
@@ -5555,9 +5781,10 @@ impl<'a> TransactionBuilder<'a> {
                             table: table_def,
                             row_num,
                             branch_num: self.runtime.branch_num,
-                            values: &visible_row.values,
+                            old_values: Some(&visible_row.values),
+                            new_values: &visible_row.values,
                             user: &user,
-                            op: 3,
+                            op: history_op::DELETE,
                             created_by: Some(&visible_row.created_by),
                         })?;
                     let field_columns = table_def
@@ -5584,7 +5811,7 @@ impl<'a> TransactionBuilder<'a> {
                         "row_num".to_owned(),
                         "?".to_owned(),
                         "j_branch_num".to_owned(),
-                        "3".to_owned(),
+                        history_op::DELETE.to_string(),
                     ];
                     select_columns.extend(field_columns.iter().cloned());
                     select_columns.extend([
@@ -5612,7 +5839,7 @@ impl<'a> TransactionBuilder<'a> {
                             rusqlite::types::Value::Integer(row_num),
                             rusqlite::types::Value::Integer(tx_num),
                             rusqlite::types::Value::Integer(self.runtime.branch_num),
-                            rusqlite::types::Value::Integer(3),
+                            rusqlite::types::Value::Integer(history_op::DELETE),
                         ];
                         for field in &table_def.fields {
                             let value = visible_row.values.get(&field.name).ok_or_else(|| {
@@ -5687,7 +5914,7 @@ impl<'a> TransactionBuilder<'a> {
                             &current_values,
                         )?;
                     }
-                    record_tx_write(&db, tx_num, &table, row_num, 3)?;
+                    record_tx_write(&db, tx_num, &table, row_num, history_op::DELETE)?;
                 }
             }
         }
@@ -5792,23 +6019,114 @@ fn write_allowed_for_history_record(
     table: &crate::schema::TableDef,
     row_num: i64,
     record: &HistoryRecord,
+    tx_num: i64,
     auth_user: Option<&str>,
 ) -> Result<bool> {
     let user = auth_user
         .ok_or_else(|| crate::Error::new("untrusted policy validation requires auth user"))?;
     let branch_num = branch::ensure(conn, &record.branch_id, None, now_ms())?;
-    let policy = write_policy_for_op(table, record.op);
-    policy::write_allowed(policy::WriteCheck {
-        db: conn,
-        schema,
-        table,
-        policy,
-        row_num,
-        branch_num,
-        values: &record.values,
-        user,
-        created_by: Some(&record.created_by),
-    })
+    let previous_values = match record.op {
+        history_op::UPDATE => {
+            previous_history_values_before_tx(conn, table, row_num, branch_num, tx_num)?
+        }
+        history_op::DELETE => Some(record.values.clone()),
+        _ => None,
+    };
+    let row_policy_allowed = if record.op == history_op::DELETE {
+        if let Some(policy) = table.effective_delete_using() {
+            let Some(old_values) = previous_values.as_ref() else {
+                return Ok(false);
+            };
+            policy_allowed_for_values(PolicyValueCheck {
+                db: conn,
+                schema,
+                table,
+                policy,
+                row_num,
+                branch_num,
+                values: old_values,
+                user,
+                created_by: Some(&record.created_by),
+            })?
+        } else {
+            true
+        }
+    } else {
+        operation_policy_allowed(OperationPolicyCheck {
+            db: conn,
+            schema,
+            table,
+            row_num,
+            branch_num,
+            policy: operation_policy_for_op(table, record.op),
+            old_values: previous_values.as_ref(),
+            new_values: &record.values,
+            user,
+            created_by: Some(&record.created_by),
+        })?
+    };
+    if !row_policy_allowed {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn previous_history_values_before_tx(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    row_num: i64,
+    branch_num: i64,
+    tx_num: i64,
+) -> Result<Option<BTreeMap<String, JsonValue>>> {
+    let field_columns = table
+        .fields
+        .iter()
+        .map(|field| {
+            format!(
+                "h.{}",
+                crate::schema::quote_ident(&crate::schema::storage_column(field))
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}
+         FROM {} h
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+         WHERE h.row_num = ?
+           AND h.j_branch_num = ?
+           AND h.tx_num < ?
+           AND h.op != ?
+           AND tx.outcome != ?
+         ORDER BY h.tx_num DESC
+         LIMIT 1",
+        field_columns.join(", "),
+        crate::schema::history_table(&table.name)
+    ))?;
+    let mut rows = stmt.query_map(
+        params![
+            row_num,
+            branch_num,
+            tx_num,
+            history_op::DELETE,
+            tx::OUTCOME_REJECTED
+        ],
+        |row| {
+            (0..table.fields.len())
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        },
+    )?;
+    let Some(row) = rows.next().transpose()? else {
+        return Ok(None);
+    };
+    let mut values = BTreeMap::new();
+    for (idx, field) in table.fields.iter().enumerate() {
+        values.insert(
+            field.name.clone(),
+            query::sql_value_to_json(conn, field, &row[idx])?,
+        );
+    }
+    Ok(Some(values))
 }
 
 fn is_newest_version_for_current(
@@ -6270,24 +6588,36 @@ fn export_table_history(
             child_row_nums: None,
         },
     )?);
-    records.extend(export_policy_dependency_history(
-        &visibility,
-        PolicyDependencyExport {
-            table_name,
-            policy: &schema.table_def(table_name)?.write_policy,
-            branch_nums: &branch_nums,
-            child_row_nums: None,
-        },
-    )?);
-    records.extend(export_policy_dependency_history(
-        &visibility,
-        PolicyDependencyExport {
-            table_name,
-            policy: schema.table_def(table_name)?.delete_policy(),
-            branch_nums: &branch_nums,
-            child_row_nums: None,
-        },
-    )?);
+    let table = schema.table_def(table_name)?;
+    for policy in [
+        table.insert_policy.with_check.as_ref(),
+        table.update_policy.using.as_ref(),
+        table.update_policy.with_check.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        records.extend(export_policy_dependency_history(
+            &visibility,
+            PolicyDependencyExport {
+                table_name,
+                policy,
+                branch_nums: &branch_nums,
+                child_row_nums: None,
+            },
+        )?);
+    }
+    if let Some(policy) = table.effective_delete_using() {
+        records.extend(export_policy_dependency_history(
+            &visibility,
+            PolicyDependencyExport {
+                table_name,
+                policy,
+                branch_nums: &branch_nums,
+                child_row_nums: None,
+            },
+        )?);
+    }
     if branch_num != 1 {
         if let Some(base_epoch) = branch::base_global_epoch(conn, branch_num)? {
             records.extend(export_main_base_snapshot_history(
@@ -6359,7 +6689,7 @@ fn export_snapshot_policy_dependency_history(
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          WHERE {row_filter}
            AND h.j_branch_num = 1
-           AND h.op != 3
+           AND h.op != {delete_op}
            AND tx.outcome != {}
            AND tx.global_epoch IS NOT NULL
            AND tx.global_epoch <= {base_epoch}
@@ -6374,10 +6704,11 @@ fn export_snapshot_policy_dependency_history(
                AND newer_tx.global_epoch IS NOT NULL
                AND newer_tx.global_epoch <= {base_epoch}
                AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
-           )",
+        )",
         crate::schema::history_table(table_name),
         tx::OUTCOME_REJECTED,
         tx::OUTCOME_REJECTED,
+        delete_op = history_op::DELETE,
         row_filter = history_row_filter_sql("h", child_row_nums),
         history_table = crate::schema::history_table(table_name),
     );
@@ -6459,7 +6790,7 @@ fn export_snapshot_policy_dependency_history_for_query_scope_at_depth(
            JOIN {child_scope_name} child_scope ON child_scope.row_num = h.row_num
            JOIN jazz_tx tx ON tx.tx_num = h.tx_num
            WHERE h.j_branch_num = 1
-             AND h.op != 3
+             AND h.op != {delete_op}
              AND tx.outcome != {}
              AND tx.global_epoch IS NOT NULL
              AND tx.global_epoch <= {base_epoch}
@@ -6475,10 +6806,11 @@ fn export_snapshot_policy_dependency_history_for_query_scope_at_depth(
                  AND newer_tx.global_epoch <= {base_epoch}
                  AND (newer_tx.global_epoch > tx.global_epoch OR (newer_tx.global_epoch = tx.global_epoch AND newer_tx.tx_num > tx.tx_num))
              )
-         )",
+        )",
         crate::schema::history_table(table_name),
         tx::OUTCOME_REJECTED,
         tx::OUTCOME_REJECTED,
+        delete_op = history_op::DELETE,
         history_table = crate::schema::history_table(table_name),
     ));
     let parent_scope = query::LoweredQueryRowScope {
@@ -6831,6 +7163,37 @@ fn export_policy_dependency_history_for_query_scope_at_depth(
     let conn = visibility.conn;
     let schema = visibility.schema;
     let table = schema.table_def(args.table_name)?;
+    match args.policy {
+        PolicyDef::And(children) | PolicyDef::Or(children) => {
+            let mut records = Vec::new();
+            for child in children {
+                records.extend(export_policy_dependency_history_for_query_scope_at_depth(
+                    visibility,
+                    PolicyDependencyQueryScopeExport {
+                        table_name: args.table_name,
+                        policy: child,
+                        branch_nums: args.branch_nums,
+                        child_scope: args.child_scope,
+                    },
+                    depth,
+                )?);
+            }
+            return Ok(records);
+        }
+        PolicyDef::Not(child) => {
+            return export_policy_dependency_history_for_query_scope_at_depth(
+                visibility,
+                PolicyDependencyQueryScopeExport {
+                    table_name: args.table_name,
+                    policy: child,
+                    branch_nums: args.branch_nums,
+                    child_scope: args.child_scope,
+                },
+                depth,
+            );
+        }
+        _ => {}
+    }
     let Some(field) = inherited_ref_policy_field(args.policy) else {
         return Ok(Vec::new());
     };
@@ -6933,7 +7296,7 @@ fn export_deleted_table_history(
         "SELECT h.row_num
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-         WHERE h.op = 3
+         WHERE h.op = {delete_op}
            AND {}
            AND tx.outcome != {}
            AND NOT EXISTS (
@@ -6949,6 +7312,7 @@ fn export_deleted_table_history(
         branch_filter_sql("h", branch_nums),
         tx::OUTCOME_REJECTED,
         tx::OUTCOME_REJECTED,
+        delete_op = history_op::DELETE,
         history_table = crate::schema::history_table(table_name),
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -6983,7 +7347,7 @@ fn export_deleted_recursive_descendant_history(
            SELECT h.row_num
            FROM {history_table} h
            JOIN jazz_tx tx ON tx.tx_num = h.tx_num
-           WHERE h.op = 3
+           WHERE h.op = {delete_op}
              AND {branch_filter}
              AND h.{parent_column} IN ({parent_row_nums})
              AND tx.outcome != {rejected}
@@ -7001,7 +7365,7 @@ fn export_deleted_recursive_descendant_history(
            FROM {history_table} child
            JOIN jazz_tx child_tx ON child_tx.tx_num = child.tx_num
            JOIN deleted_tree parent ON child.{parent_column} = parent.row_num
-           WHERE child.op = 3
+           WHERE child.op = {delete_op}
              AND {child_branch_filter}
              AND child_tx.outcome != {rejected}
              AND NOT EXISTS (
@@ -7019,6 +7383,7 @@ fn export_deleted_recursive_descendant_history(
         branch_filter = branch_filter_sql("h", branch_nums),
         child_branch_filter = branch_filter_sql("child", branch_nums),
         rejected = tx::OUTCOME_REJECTED,
+        delete_op = history_op::DELETE,
         parent_row_nums = integer_list_sql(&parent_row_nums),
     );
     let mut stmt = conn.prepare(&sql)?;

@@ -82,6 +82,73 @@ fn mini_sqlite_todo_fixture_allows_group_reads_but_only_authors_can_delete_todos
 }
 
 #[test]
+fn mini_sqlite_todo_fixture_allows_visible_done_updates_but_only_authors_can_rename_todos() {
+    let mut db = Runtime::open_trusted_with_schema(
+        Storage::Memory,
+        "seed-node",
+        SchemaDef::mini_sqlite_todo_fixture(),
+    )
+    .unwrap();
+
+    seed_group_visibility_fixture(&mut db);
+
+    db.run_as_user("user-bob", |bob| {
+        let tx = bob
+            .update_row(
+                "todos",
+                "todo-engineering",
+                BTreeMap::from([("done".to_owned(), json!(true))]),
+            )
+            .unwrap();
+        assert_eq!(bob.transaction_info(&tx).unwrap().rejection_code, None);
+        let todo = bob
+            .read_rows("todos")
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "todo-engineering")
+            .unwrap();
+        assert_eq!(todo.values["done"], json!(true));
+
+        let tx = bob
+            .update_row(
+                "todos",
+                "todo-engineering",
+                BTreeMap::from([("title".to_owned(), json!("Bob renames Alice's task"))]),
+            )
+            .unwrap();
+        assert_eq!(
+            bob.transaction_info(&tx).unwrap().rejection_code,
+            Some("policy_denied".to_owned())
+        );
+        let todo = bob
+            .read_rows("todos")
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "todo-engineering")
+            .unwrap();
+        assert_eq!(todo.values["title"], json!("Plan sync protocol"));
+    });
+
+    db.run_as_user("user-alice", |alice| {
+        let tx = alice
+            .update_row(
+                "todos",
+                "todo-engineering",
+                BTreeMap::from([("title".to_owned(), json!("Alice renames her task"))]),
+            )
+            .unwrap();
+        assert_eq!(alice.transaction_info(&tx).unwrap().rejection_code, None);
+        let todo = alice
+            .read_rows("todos")
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "todo-engineering")
+            .unwrap();
+        assert_eq!(todo.values["title"], json!("Alice renames her task"));
+    });
+}
+
+#[test]
 fn mini_sqlite_todo_fixture_explains_project_visibility_query() {
     let mut db = Runtime::open_trusted_with_schema(
         Storage::Memory,
@@ -200,6 +267,8 @@ fn nested_group_policy_schema() -> SchemaDef {
             table.index("by_title", ["title"]);
             table.index("open_visible", ["done", "project", "$createdAt"]);
             table.read_if_inherits("project");
+            table.write_if_ref_readable("project");
+            table.update_protected_fields_if_created_by_user(["title", "project"]);
             table.delete_if_created_by_user();
         })
         .table("labels", |table| {

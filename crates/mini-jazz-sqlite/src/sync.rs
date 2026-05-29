@@ -6,6 +6,16 @@ use std::collections::BTreeMap;
 
 pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
 
+/// Persisted integer codes used by `HistoryRecord::op` in bundles and history tables.
+pub mod history_op {
+    /// A row creation.
+    pub const INSERT: i64 = 1;
+    /// A row update.
+    pub const UPDATE: i64 = 2;
+    /// A row deletion tombstone.
+    pub const DELETE: i64 = 3;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     #[serde(default = "default_bundle_protocol_version")]
