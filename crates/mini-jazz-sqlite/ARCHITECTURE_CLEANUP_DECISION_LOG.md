@@ -527,3 +527,9 @@ regress.
 - Extracted the public predicate/window query export and profiling methods into `runtime::query_export`, while leaving the shared query-scope bundle assembly in `runtime.rs` for now.
 - This gives callers and future work a named API layer for "export a query-shaped sync bundle" without pretending the underlying scope machinery is already clean enough to be a standalone component.
 - Focused query-scope export tests pass. This moved another roughly 425 lines out of the central runtime file and made the next cleanup decision sharper: either extract the internal query-scope assembly as its own subsystem, or extract writes/apply first.
+
+## 2026-05-29 01:56 PDT - Row write API moved behind a write module
+
+- Moved generic insert/update/upsert/conflict-resolution/delete/restore runtime APIs into `runtime::writes`.
+- Left the lower-level history materialization helpers in `runtime.rs` for now because they are shared with transaction builders, batched writes, and bundle apply. The module boundary still helps by making the caller-facing row mutation semantics findable.
+- Focused storage/projection tests pass, including delete/restore, batched writes, and hyphen-safe transaction identity.
