@@ -1,3 +1,4 @@
+use crate::types::{HistoryBlockExport, HistoryBlockManifest, HistoryBlockTxRange, HistoryDelta};
 use crate::Result;
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +7,7 @@ use std::collections::BTreeMap;
 
 pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
 const COLUMNAR_BUNDLE_MAGIC: &[u8; 4] = b"MJZC";
+const HISTORY_DELTA_MAGIC: &[u8; 4] = b"MJZD";
 
 #[derive(Clone, Debug)]
 pub struct Bundle {
@@ -503,6 +505,66 @@ pub fn decode_bundle(bytes: &[u8]) -> Result<Bundle> {
         return decode_bundle_payload(&decompressed);
     }
     Err(crate::Error::new("unsupported bundle encoding"))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireHistoryDelta {
+    bundle: Vec<u8>,
+    blocks: Vec<WireHistoryBlockExport>,
+    text_ops_delta: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireHistoryBlockExport {
+    manifest: HistoryBlockManifest,
+    tx_ranges: Vec<HistoryBlockTxRange>,
+    payload: Vec<u8>,
+}
+
+impl From<&HistoryBlockExport> for WireHistoryBlockExport {
+    fn from(block: &HistoryBlockExport) -> Self {
+        Self {
+            manifest: block.manifest.clone(),
+            tx_ranges: block.tx_ranges.clone(),
+            payload: block.payload.clone(),
+        }
+    }
+}
+
+impl From<WireHistoryBlockExport> for HistoryBlockExport {
+    fn from(block: WireHistoryBlockExport) -> Self {
+        Self {
+            manifest: block.manifest,
+            tx_ranges: block.tx_ranges,
+            payload: block.payload,
+        }
+    }
+}
+
+pub fn encode_history_delta(delta: &HistoryDelta) -> Result<Vec<u8>> {
+    let wire = WireHistoryDelta {
+        bundle: encode_bundle(&delta.bundle)?,
+        blocks: delta.blocks.iter().map(Into::into).collect(),
+        text_ops_delta: delta.text_ops_delta.clone(),
+    };
+    let payload = postcard::to_allocvec(&wire)
+        .map_err(|err| crate::Error::new(format!("encode history delta: {err}")))?;
+    let mut bytes = Vec::from(HISTORY_DELTA_MAGIC);
+    bytes.extend(payload);
+    Ok(bytes)
+}
+
+pub fn decode_history_delta(bytes: &[u8]) -> Result<HistoryDelta> {
+    let Some(payload) = bytes.strip_prefix(HISTORY_DELTA_MAGIC) else {
+        return Err(crate::Error::new("unsupported history delta encoding"));
+    };
+    let wire = postcard::from_bytes::<WireHistoryDelta>(payload)
+        .map_err(|err| crate::Error::new(format!("decode history delta: {err}")))?;
+    Ok(HistoryDelta {
+        bundle: decode_bundle(&wire.bundle)?,
+        blocks: wire.blocks.into_iter().map(Into::into).collect(),
+        text_ops_delta: wire.text_ops_delta,
+    })
 }
 
 pub(crate) fn decode_bundle_payload(payload: &[u8]) -> Result<Bundle> {

@@ -12723,6 +12723,8 @@ mod tests {
 
         let delta = alice.export_all_history_delta(&[]).unwrap();
         assert!(!delta.text_ops_delta.is_empty());
+        let encoded = crate::sync::encode_history_delta(&delta).unwrap();
+        let delta = crate::sync::decode_history_delta(&encoded).unwrap();
         bob.apply_history_delta(&delta).unwrap();
 
         assert_eq!(

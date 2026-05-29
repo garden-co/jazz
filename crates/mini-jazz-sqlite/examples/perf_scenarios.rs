@@ -1,4 +1,6 @@
-use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
+use mini_jazz_sqlite::sync::{
+    decode_history_delta, encode_bundle, encode_history_delta, merge_bundles, Bundle,
+};
 use mini_jazz_sqlite::{
     reset_runtime_write_phase_stats, take_runtime_write_phase_stats, ApplyBundleProfile,
     DeepTextEdit, HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta, QueryExportProfile,
@@ -4130,31 +4132,10 @@ impl BundleSummary {
     }
 }
 
-fn encode_native_bundle(bundle: &Bundle) -> BenchResult<Vec<u8>> {
-    Ok(encode_bundle(bundle)?)
-}
-
-fn decode_native_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
-    Ok(decode_bundle(bytes)?)
-}
-
 fn encode_decode_native_delta(delta: HistoryDelta) -> BenchResult<(HistoryDelta, usize)> {
-    let bundle_wire = encode_native_bundle(&delta.bundle)?;
-    let text_ops_wire = delta.text_ops_delta.clone();
-    let block_payload_bytes = delta
-        .blocks
-        .iter()
-        .map(|block| block.payload.len())
-        .sum::<usize>();
-    let total_bytes = bundle_wire.len() + text_ops_wire.len() + block_payload_bytes;
-    Ok((
-        HistoryDelta {
-            bundle: decode_native_bundle(&bundle_wire)?,
-            blocks: delta.blocks,
-            text_ops_delta: text_ops_wire,
-        },
-        total_bytes,
-    ))
+    let wire = encode_history_delta(&delta)?;
+    let bytes = wire.len();
+    Ok((decode_history_delta(&wire)?, bytes))
 }
 
 fn max_local_epoch_for_node(bundle: &Bundle, node_id: &str) -> i64 {

@@ -62,6 +62,14 @@ Why: the benchmark had already counted text-op delta bytes in `native_sync_bytes
 
 Scope impact: text scenarios now clone the raw text-op delta during native delta encode/decode and reconstruct a full `HistoryDelta` before apply. `/tmp/deep_history_runtime_real_delta_wire_all_block_ops.json` is the refreshed run used for the latest `Block+Ops6` numbers.
 
+## Thu May 28 23:08:19 PDT 2026
+
+Decision: promote the deep-history delta envelope into the sync module.
+
+Why: a benchmark-local "bundle plus sidecar bytes" helper was still not the shape callers would use. The runtime should expose one native history-delta codec that carries the compressed columnar bundle, raw sealed blocks, and raw text-op delta without JSON compatibility conversions.
+
+Scope impact: `sync::encode_history_delta` / `decode_history_delta` now define the `MJZD` native envelope. Runtime deep-text sync tests round-trip through it, and the benchmark uses it for all text delta encode/decode timing. `/tmp/deep_history_runtime_native_delta_codec_all_block_ops.json` is the refreshed run.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
