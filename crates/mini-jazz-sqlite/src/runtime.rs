@@ -629,16 +629,6 @@ impl Runtime {
         crate::persisted_text_ops::current_watermark(&self.conn)
     }
 
-    pub fn export_text_ops_delta_since(
-        &self,
-        watermark: crate::persisted_text_ops::DeltaWatermark,
-    ) -> Result<Vec<u8>> {
-        if !self.schema_has_deep_text_fields() {
-            return Ok(Vec::new());
-        }
-        Ok(crate::persisted_text_ops::export_delta(&self.conn, watermark)?.bytes)
-    }
-
     fn export_text_ops_delta_for_bundle_since(
         &self,
         bundle: &Bundle,
