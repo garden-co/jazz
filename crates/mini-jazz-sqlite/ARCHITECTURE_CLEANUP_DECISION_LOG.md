@@ -178,3 +178,7 @@ Next #947 slice: tiered one-shot reads are in place, but subscription semantics 
 ## 2026-05-28 23:29 PDT
 
 Subscription architecture cleanup: collapsed the duplicated rerun logic used by `subscription_delta` and legacy `poll_subscription` into one `Runtime::subscription_rows` helper. This should make future subscription/tier/query changes hit one boundary instead of two nearly identical matches.
+
+## 2026-05-28 23:32 PDT
+
+#945 branch-conflict isolation slice is green. `TransactionSnapshot` no longer keys rows by id because that collapsed conflict candidates; it preserves candidate multiplicity and rejects ambiguous implicit base lookup when committing an update. This is a concrete example where a "clean" map abstraction was semantically wrong for Jazz branch views.

@@ -32,6 +32,10 @@ feature exists.
   happen after the transaction starts.
 - Explicit transaction patch updates use the transaction start snapshot as the
   base for omitted fields.
+- Explicit transaction reads preserve branch conflict candidates present in the
+  start snapshot.
+- Implicit row updates inside a transaction reject ambiguous branch conflict
+  candidates rather than choosing an arbitrary candidate.
 - An explicit transaction with no staged mutations is a no-op and creates no
   transaction record.
 - Multiple staged mutations to the same row in one explicit transaction

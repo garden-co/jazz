@@ -5377,7 +5377,7 @@ impl<'a> TransactionBuilder<'a> {
                     op,
                 } => {
                     let base_values =
-                        snapshot_result(&self.start_snapshot)?.base_values(&table, &id);
+                        snapshot_result(&self.start_snapshot)?.base_values(&table, &id)?;
                     allowed &= insert_row_in_tx(InsertRowInTx {
                         db: &db,
                         schema: &self.runtime.schema,

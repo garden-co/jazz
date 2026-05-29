@@ -79,6 +79,8 @@ Coverage labels:
 - `query_scope_is_not_table_replication`: D.7, D.6
 - `query_scope_excludes_rows_outside_current_result_set`: D.7, D.6
 - `accepted_global_fate_update_reaches_peer_transaction_info`: D.2, D.7
+- `transaction_reads_preserve_branch_conflict_candidates`: D.2, D.5, D.12
+- `transaction_update_rejects_ambiguous_branch_conflict`: D.2, D.5, D.12
 - `stale_pending_bundle_does_not_downgrade_accepted_fate`: D.2, D.7
 - `out_of_order_global_epochs_do_not_regress_current_projection`: D.3, D.7
 - `rebuild_uses_global_epoch_order_not_local_tx_order`: D.3
