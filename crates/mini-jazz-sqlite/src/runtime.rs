@@ -7370,35 +7370,28 @@ fn validate_public_deep_text_write_values(
 
 fn text_replacement_diff<'a>(old: &str, new: &'a str) -> (usize, usize, &'a str) {
     let mut prefix = 0;
-    let max_prefix = old.len().min(new.len());
-    while prefix < max_prefix
-        && old.as_bytes()[prefix] == new.as_bytes()[prefix]
-        && old.is_char_boundary(prefix + 1)
-        && new.is_char_boundary(prefix + 1)
-    {
-        prefix += 1;
-    }
-    while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
-        prefix -= 1;
+    for ((old_idx, old_char), (new_idx, new_char)) in old.char_indices().zip(new.char_indices()) {
+        if old_idx != new_idx || old_char != new_char {
+            break;
+        }
+        prefix = old_idx + old_char.len_utf8();
     }
 
-    let mut suffix = 0;
-    let max_suffix = old.len().min(new.len()) - prefix;
-    while suffix < max_suffix
-        && old.as_bytes()[old.len() - suffix - 1] == new.as_bytes()[new.len() - suffix - 1]
-        && old.is_char_boundary(old.len() - suffix - 1)
-        && new.is_char_boundary(new.len() - suffix - 1)
-    {
-        suffix += 1;
+    let mut old_end = old.len();
+    let mut new_end = new.len();
+    while old_end > prefix && new_end > prefix {
+        let Some((old_idx, old_char)) = old[..old_end].char_indices().next_back() else {
+            break;
+        };
+        let Some((new_idx, new_char)) = new[..new_end].char_indices().next_back() else {
+            break;
+        };
+        if old_char != new_char {
+            break;
+        }
+        old_end = old_idx;
+        new_end = new_idx;
     }
-    while suffix > 0
-        && (!old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix))
-    {
-        suffix -= 1;
-    }
-
-    let old_end = old.len() - suffix;
-    let new_end = new.len() - suffix;
     (prefix, old_end - prefix, &new[prefix..new_end])
 }
 
