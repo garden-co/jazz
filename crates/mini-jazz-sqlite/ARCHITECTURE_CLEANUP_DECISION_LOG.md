@@ -689,7 +689,7 @@ regress.
 - This makes the explicit transaction layer read more like its own API boundary instead of an extension of the old monolithic runtime namespace.
 - Focused transaction tests pass.
 
-## 2026-05-29 03:04 PDT - Made observed query descriptors connection-local
+## 2026-05-29 02:57 PDT - Made observed query descriptors connection-local
 
 - Implemented the newer sync design direction: runtime open clears `jazz_query_read`, so query interest does not persist on disk across durable node restarts.
 - Existing cached rows/history remain durable; downstream clients or tabs must replay query descriptors after reconnect/restart, and applying those refresh bundles records the descriptors for the live connection again.
