@@ -795,3 +795,11 @@ Decision: add a regression test for branch query history deltas after accepted-h
 Why: bundle query export and block-native query delta export are separate surfaces. Both must respect pinned branch bases and avoid leaking future main history once compaction has moved cold history around.
 
 Scope impact: test-only coverage for `export_query_where_eq_history_delta` plus `apply_history_delta` in a compacted branch-base scenario.
+
+## Thu May 28 21:17:25 PDT 2026 - Cache Exact Applied Transactions During Receive
+
+Decision: add a runtime-local exact applied-tx cache for `apply_bundle`.
+
+Why: the canonical live receive benchmark currently applies cumulative table-history bundles. After `Block+Ops3`, live apply dominated total loop time. Exact txs that this runtime has already fully applied can skip repeated tx upsert, read tuple append, and history/current work on later overlapping bundles. The cache is intentionally conservative: it only marks a tx after a bundle carried history for that tx, and it only reuses the cache when outcome, conflict mode, global epoch, and awaiting-dependency state still match. This preserves fate-before-history and policy-dependency cases, which the whole-system tests caught during the first too-eager attempt.
+
+Scope impact: canonical `all-block-ops` receive/update moved from roughly `0.289 -> 0.201` ms for append, `0.281 -> 0.196` ms for Automerge, and `0.223 -> 0.136` ms for canvas. `cargo test -q -p mini-jazz-sqlite` passes.

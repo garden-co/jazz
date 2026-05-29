@@ -43,6 +43,13 @@ pub struct Runtime {
     branch_num: i64,
     history_block_cache: RefCell<BTreeMap<i64, Arc<Bundle>>>,
     history_block_cache_order: RefCell<VecDeque<i64>>,
+    applied_tx_cache: RefCell<BTreeMap<String, CachedAppliedTx>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedAppliedTx {
+    tx_num: i64,
+    info: ApplyTxInfo,
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
@@ -277,6 +284,7 @@ impl Runtime {
             branch_num: 1,
             history_block_cache: RefCell::new(BTreeMap::new()),
             history_block_cache_order: RefCell::new(VecDeque::new()),
+            applied_tx_cache: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -1779,6 +1787,13 @@ impl Runtime {
         let txs_started = Instant::now();
         let mut tx_nums_by_id = BTreeMap::new();
         let mut tx_info_by_num = BTreeMap::new();
+        let mut already_applied_tx_ids = BTreeSet::new();
+        let mut pending_applied_tx_cache = BTreeMap::new();
+        let tx_ids_with_history = bundle
+            .history
+            .iter()
+            .map(|record| record.tx_id.as_str())
+            .collect::<BTreeSet<_>>();
         let mut upsert_tx_stmt = db.prepare_cached(
             "INSERT INTO jazz_tx
              (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata)
@@ -1799,6 +1814,18 @@ impl Runtime {
              VALUES (?, ?, ?, '{}')",
         )?;
         for tx_record in &bundle.txs {
+            if let Some(cached) = self
+                .applied_tx_cache
+                .borrow()
+                .get(&tx_record.tx_id)
+                .copied()
+                .filter(|cached| cached_tx_matches_record(cached.info, tx_record))
+            {
+                tx_nums_by_id.insert(tx_record.tx_id.clone(), cached.tx_num);
+                tx_info_by_num.insert(cached.tx_num, cached.info);
+                already_applied_tx_ids.insert(tx_record.tx_id.clone());
+                continue;
+            }
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
             upsert_tx_stmt.execute(params![
@@ -1813,7 +1840,12 @@ impl Runtime {
             ])?;
             let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
             tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
-            tx_info_by_num.insert(tx_num, tx_apply_info(&db, tx_num)?);
+            let info = tx_apply_info(&db, tx_num)?;
+            tx_info_by_num.insert(tx_num, info);
+            if tx_ids_with_history.contains(tx_record.tx_id.as_str()) {
+                pending_applied_tx_cache
+                    .insert(tx_record.tx_id.clone(), CachedAppliedTx { tx_num, info });
+            }
             if tx_record.outcome == tx::OUTCOME_REJECTED {
                 if let Some(code) = &tx_record.rejection_code {
                     let detail = encode_optional_value_text(tx_record.rejection_detail.as_ref())?;
@@ -1843,6 +1875,9 @@ impl Runtime {
         let mut user_nums_by_id = BTreeMap::new();
         let mut reads_by_tx = BTreeMap::<i64, Vec<tx::PackedRead>>::new();
         for read_record in &bundle.reads {
+            if already_applied_tx_ids.contains(&read_record.tx_id) {
+                continue;
+            }
             let tx_num = tx_nums_by_id
                 .get(&read_record.tx_id)
                 .copied()
@@ -1922,6 +1957,7 @@ impl Runtime {
             touched_current_rows: BTreeSet::new(),
             current_candidates: BTreeMap::new(),
             writes_by_tx: BTreeMap::new(),
+            already_applied_tx_ids: &already_applied_tx_ids,
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
@@ -1964,6 +2000,9 @@ impl Runtime {
         let commit_started = Instant::now();
         db.commit()?;
         let commit_ms = duration_ms(commit_started.elapsed());
+        self.applied_tx_cache
+            .borrow_mut()
+            .extend(pending_applied_tx_cache);
 
         let revalidate_started = Instant::now();
         self.revalidate_awaiting_dependencies()?;
@@ -3037,6 +3076,9 @@ impl Runtime {
         context: &mut ApplyHistoryContext<'_>,
         record: &HistoryRecord,
     ) -> Result<()> {
+        if context.already_applied_tx_ids.contains(&record.tx_id) {
+            return Ok(());
+        }
         let table = context.schema.table_def(&record.table)?;
         let row_num = cached_ensure_row_id_with_status(
             context.db,
@@ -7597,6 +7639,13 @@ struct ApplyTxInfo {
     has_awaiting_dependency: bool,
 }
 
+fn cached_tx_matches_record(cached: ApplyTxInfo, record: &TxRecord) -> bool {
+    cached.outcome == record.outcome
+        && cached.conflict_mode == record.conflict_mode
+        && cached.global_epoch == record.global_epoch
+        && !cached.has_awaiting_dependency
+}
+
 struct ApplyHistoryContext<'a> {
     schema: &'a SchemaDef,
     db: &'a Connection,
@@ -7611,6 +7660,7 @@ struct ApplyHistoryContext<'a> {
     touched_current_rows: BTreeSet<(String, i64, i64)>,
     current_candidates: BTreeMap<(String, i64, i64), CurrentCandidate>,
     writes_by_tx: BTreeMap<i64, Vec<tx::PackedWrite>>,
+    already_applied_tx_ids: &'a BTreeSet<String>,
 }
 
 #[derive(Clone)]

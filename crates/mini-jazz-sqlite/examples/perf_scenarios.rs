@@ -289,6 +289,8 @@ struct DeepHistoryPhaseReport {
     current_read: f64,
     historical_reads: f64,
     transaction_info_reads: f64,
+    live_apply_profile: ApplyBundleProfile,
+    cold_apply_profile: ApplyBundleProfile,
     jazz_write_detail: RuntimeWritePhaseStats,
     jazz_write_sqlite_transactions: usize,
     jazz_write_updates_per_transaction_avg: Option<f64>,
@@ -319,6 +321,30 @@ fn add_write_detail(total: &mut RuntimeWritePhaseStats, sample: RuntimeWritePhas
     total.current_upsert_ms += sample.current_upsert_ms;
     total.reject_cleanup_ms += sample.reject_cleanup_ms;
     total.commit_ms += sample.commit_ms;
+}
+
+fn empty_apply_profile() -> ApplyBundleProfile {
+    ApplyBundleProfile::default()
+}
+
+fn add_apply_profile(total: &mut ApplyBundleProfile, sample: ApplyBundleProfile) {
+    total.total_ms += sample.total_ms;
+    total.validation_ms += sample.validation_ms;
+    total.begin_tx_ms += sample.begin_tx_ms;
+    total.branches_ms += sample.branches_ms;
+    total.txs_ms += sample.txs_ms;
+    total.reads_ms += sample.reads_ms;
+    total.rejected_cleanup_ms += sample.rejected_cleanup_ms;
+    total.query_reads_ms += sample.query_reads_ms;
+    total.history_ms += sample.history_ms;
+    total.query_scope_repair_ms += sample.query_scope_repair_ms;
+    total.commit_ms += sample.commit_ms;
+    total.revalidate_awaiting_ms += sample.revalidate_awaiting_ms;
+    total.branch_rows += sample.branch_rows;
+    total.tx_rows += sample.tx_rows;
+    total.read_rows += sample.read_rows;
+    total.query_read_rows += sample.query_read_rows;
+    total.history_rows += sample.history_rows;
 }
 
 #[derive(Serialize)]
@@ -4673,6 +4699,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
     let mut phase_ms = DeepHistoryPhaseReport::default();
+    let mut live_apply_profile = empty_apply_profile();
+    let mut cold_apply_profile = empty_apply_profile();
     let mut jazz_write_detail = RuntimeWritePhaseStats::default();
     let mut jazz_write_sqlite_transactions = 0usize;
     let mut jazz_write_updates_per_transaction_total = 0usize;
@@ -4742,7 +4770,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
                 encode_decode_started,
             );
             let apply_started = Instant::now();
-            receiver.profile_apply_bundle(&bundle)?;
+            let profile = receiver.profile_apply_bundle(&bundle)?;
+            add_apply_profile(&mut live_apply_profile, profile);
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_apply, apply_started);
             let sidecar_apply_started = Instant::now();
             apply_inline_text_ops_from_bundle(
@@ -4868,7 +4897,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut cold_watermark = 0i64;
     let cold_started = Instant::now();
     let cold_apply_started = Instant::now();
-    cold.profile_apply_bundle(&final_bundle)?;
+    let profile = cold.profile_apply_bundle(&final_bundle)?;
+    add_apply_profile(&mut cold_apply_profile, profile);
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
     let cold_sidecar_started = Instant::now();
     apply_inline_text_ops_from_bundle(
@@ -5015,6 +5045,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         extrapolated_database_bytes_for_target: None,
         phase_ms: DeepHistoryPhaseReport {
             jazz_write_detail,
+            live_apply_profile,
+            cold_apply_profile,
             jazz_write_sqlite_transactions,
             jazz_write_updates_per_transaction_avg: if jazz_write_sqlite_transactions == 0 {
                 None
@@ -5103,6 +5135,8 @@ fn run_naive_deep_history_case(
     let mut write_only_ms = 0.0;
     let mut sampled_receive_total_ms = 0.0;
     let mut phase_ms = DeepHistoryPhaseReport::default();
+    let mut live_apply_profile = empty_apply_profile();
+    let mut cold_apply_profile = empty_apply_profile();
     let mut jazz_write_detail = RuntimeWritePhaseStats::default();
     let mut jazz_write_sqlite_transactions = 0usize;
     let mut jazz_write_updates_per_transaction_total = 0usize;
@@ -5213,7 +5247,8 @@ fn run_naive_deep_history_case(
             let bundle = writer.export_table_history(input.table)?;
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_export, export_started);
             let apply_started = Instant::now();
-            receiver.profile_apply_bundle(&bundle)?;
+            let profile = receiver.profile_apply_bundle(&bundle)?;
+            add_apply_profile(&mut live_apply_profile, profile);
             DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.live_apply, apply_started);
             let listener_started = Instant::now();
             let diffs = receiver.poll_subscription(&mut subscription)?;
@@ -5345,7 +5380,8 @@ fn run_naive_deep_history_case(
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", cold_schema)?;
     let cold_started = Instant::now();
     let cold_apply_started = Instant::now();
-    cold.profile_apply_bundle(&bundle)?;
+    let profile = cold.profile_apply_bundle(&bundle)?;
+    add_apply_profile(&mut cold_apply_profile, profile);
     DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.cold_apply, cold_apply_started);
     let cold_verify_started = Instant::now();
     let cold_rows = cold.read_rows(input.table)?;
@@ -5517,6 +5553,8 @@ fn run_naive_deep_history_case(
         extrapolated_database_bytes_for_target,
         phase_ms: DeepHistoryPhaseReport {
             jazz_write_detail,
+            live_apply_profile,
+            cold_apply_profile,
             jazz_write_sqlite_transactions,
             jazz_write_updates_per_transaction_avg: if jazz_write_sqlite_transactions == 0 {
                 None

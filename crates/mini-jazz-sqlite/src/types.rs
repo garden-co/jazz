@@ -280,6 +280,30 @@ pub struct ApplyBundleProfile {
     pub history_rows: usize,
 }
 
+impl Default for ApplyBundleProfile {
+    fn default() -> Self {
+        Self {
+            total_ms: 0.0,
+            validation_ms: 0.0,
+            begin_tx_ms: 0.0,
+            branches_ms: 0.0,
+            txs_ms: 0.0,
+            reads_ms: 0.0,
+            rejected_cleanup_ms: 0.0,
+            query_reads_ms: 0.0,
+            history_ms: 0.0,
+            query_scope_repair_ms: 0.0,
+            commit_ms: 0.0,
+            revalidate_awaiting_ms: 0.0,
+            branch_rows: 0,
+            tx_rows: 0,
+            read_rows: 0,
+            query_read_rows: 0,
+            history_rows: 0,
+        }
+    }
+}
+
 impl StorageStats {
     pub(crate) fn new(
         history_counts: StorageHistoryCounts,
