@@ -497,3 +497,9 @@ regress.
 - Moved branch creation, checkout, source-list mutation, branch-scoped queries, and branch backing-row inspection into `runtime::branches`.
 - This is another facade cleanup: branch behavior already has a storage module, but the runtime public API was still parked in the middle of unrelated write and transaction code.
 - Focused branch tests pass after the move.
+
+## 2026-05-29 01:35 PDT - Subscription runtime API moved behind a subscription module
+
+- Moved subscription construction, observed-query subscription reconstruction, polling, and rejection polling into `runtime::subscriptions`.
+- This keeps reactive behavior findable and separate from sync export/apply and storage maintenance.
+- Focused subscription tests pass after the move.
