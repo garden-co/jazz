@@ -2142,7 +2142,7 @@ fn out_of_order_global_epochs_do_not_regress_current_projection() {
         json!("epoch 20")
     );
 
-    peer.clear_current_projection_for_test().unwrap();
+    peer.clear_current_projection().unwrap();
     peer.rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
@@ -2192,7 +2192,7 @@ fn rebuild_uses_global_epoch_order_not_local_tx_order() {
         json!("epoch 20")
     );
 
-    peer.clear_current_projection_for_test().unwrap();
+    peer.clear_current_projection().unwrap();
     peer.rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],
@@ -2257,8 +2257,8 @@ fn same_global_epoch_same_row_uses_stable_tie_breaker_across_apply_order_and_reb
     let peer_b_body = peer_b.read_rows("notes").unwrap()[0].values["body"].clone();
     assert_eq!(peer_a_body, peer_b_body);
 
-    peer_a.clear_current_projection_for_test().unwrap();
-    peer_b.clear_current_projection_for_test().unwrap();
+    peer_a.clear_current_projection().unwrap();
+    peer_b.clear_current_projection().unwrap();
     peer_a.rebuild_current_projection().unwrap();
     peer_b.rebuild_current_projection().unwrap();
     assert_eq!(
@@ -2357,7 +2357,7 @@ fn remote_pending_update_does_not_override_global_current_on_peer() {
         json!("global")
     );
 
-    peer.clear_current_projection_for_test().unwrap();
+    peer.clear_current_projection().unwrap();
     peer.rebuild_current_projection().unwrap();
     assert_eq!(
         peer.read_rows("notes").unwrap()[0].values["body"],

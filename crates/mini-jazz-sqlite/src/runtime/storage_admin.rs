@@ -2,7 +2,7 @@ use super::Runtime;
 use crate::{projection, rows::row_num, stats, storage, types::StorageStats, Result};
 
 impl Runtime {
-    pub fn clear_current_projection_for_test(&mut self) -> Result<()> {
+    pub fn clear_current_projection(&mut self) -> Result<()> {
         projection::clear(&self.conn, &self.schema)
     }
 

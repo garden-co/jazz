@@ -923,7 +923,7 @@ fn branch_delete_shadows_pinned_base_row() {
     peer.checkout_branch("draft").unwrap();
     assert!(peer.read_rows("tasks").unwrap().is_empty());
 
-    peer.clear_current_projection_for_test().unwrap();
+    peer.clear_current_projection().unwrap();
     peer.rebuild_current_projection().unwrap();
     assert!(peer.read_rows("tasks").unwrap().is_empty());
 }
@@ -972,7 +972,7 @@ fn rejected_branch_update_reveals_pinned_base_row_again() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["title"], json!("Base"));
 
-    alice.clear_current_projection_for_test().unwrap();
+    alice.clear_current_projection().unwrap();
     alice.rebuild_current_projection().unwrap();
     let rebuilt = alice.read_rows("tasks").unwrap();
     assert_eq!(rebuilt.len(), 1);
@@ -2625,7 +2625,7 @@ fn branch_conflict_resolution_transaction_clears_conflict_meta_after_rebuild() {
     assert_eq!(rows[0].values["title"], json!("Resolved title"));
     assert_eq!(rows[0].conflict_count, 0);
 
-    alice.clear_current_projection_for_test().unwrap();
+    alice.clear_current_projection().unwrap();
     alice.rebuild_current_projection().unwrap();
 
     let rows = alice.read_rows_with_conflict_meta("tasks").unwrap();

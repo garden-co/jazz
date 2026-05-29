@@ -20,7 +20,7 @@ fn runtime_can_install_and_write_a_non_todo_schema() {
     assert!(stats.physical_tx_num_for(&tx).is_some());
     assert!(runtime.physical_row_num_for("note-1").is_ok());
 
-    runtime.clear_current_projection_for_test().unwrap();
+    runtime.clear_current_projection().unwrap();
     assert_eq!(runtime.storage_stats().unwrap().current_rows, 0);
 
     runtime.rebuild_current_projection().unwrap();
@@ -1004,7 +1004,7 @@ fn generic_schema_rows_rebuild_and_sync_by_public_ids() {
 
     let bundle = alice.export_table_history("comments").unwrap();
     bob.apply_bundle(&bundle).unwrap();
-    bob.clear_current_projection_for_test().unwrap();
+    bob.clear_current_projection().unwrap();
     bob.rebuild_current_projection().unwrap();
 
     let comments = bob.read_rows("comments").unwrap();

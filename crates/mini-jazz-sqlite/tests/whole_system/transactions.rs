@@ -334,7 +334,7 @@ fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 0);
 
-    alice.clear_current_projection_for_test().unwrap();
+    alice.clear_current_projection().unwrap();
     alice.rebuild_current_projection().unwrap();
 
     assert!(alice.open_todos().unwrap().is_empty());

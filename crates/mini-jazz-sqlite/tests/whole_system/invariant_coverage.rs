@@ -1016,7 +1016,7 @@ fn projection_rebuild_is_semantically_identical_to_current_reads_after_mixed_fat
         .unwrap();
 
     let before = alice.read_rows("notes").unwrap();
-    alice.clear_current_projection_for_test().unwrap();
+    alice.clear_current_projection().unwrap();
     alice.rebuild_current_projection().unwrap();
     let after = alice.read_rows("notes").unwrap();
 
@@ -1809,7 +1809,7 @@ fn declared_defaults_are_materialized_and_survive_sync_rebuild() {
         .unwrap();
     bob.apply_bundle(&alice.export_table_history("tasks").unwrap())
         .unwrap();
-    bob.clear_current_projection_for_test().unwrap();
+    bob.clear_current_projection().unwrap();
     bob.rebuild_current_projection().unwrap();
 
     let rows = bob.read_rows("tasks").unwrap();
@@ -1982,7 +1982,7 @@ fn update_preserves_omitted_fields_across_sync_and_rebuild() {
         .unwrap();
     bob.apply_bundle(&alice.export_table_history("notes").unwrap())
         .unwrap();
-    bob.clear_current_projection_for_test().unwrap();
+    bob.clear_current_projection().unwrap();
     bob.rebuild_current_projection().unwrap();
 
     let row = bob.read_rows("notes").unwrap().remove(0);
@@ -2279,7 +2279,7 @@ fn same_global_epoch_tie_breaker_is_stable_after_rebuild() {
     alice.accept_transaction_at_global(&second, 7).unwrap();
     let before = alice.read_rows("notes").unwrap();
 
-    alice.clear_current_projection_for_test().unwrap();
+    alice.clear_current_projection().unwrap();
     alice.rebuild_current_projection().unwrap();
     let after = alice.read_rows("notes").unwrap();
 
@@ -3378,7 +3378,7 @@ fn query_scope_export_includes_full_history_for_result_rows() {
     );
 
     peer.apply_bundle(&bundle).unwrap();
-    peer.clear_current_projection_for_test().unwrap();
+    peer.clear_current_projection().unwrap();
     peer.rebuild_current_projection().unwrap();
     let row = peer.read_rows("notes").unwrap().remove(0);
     assert_eq!(row.id, "note-history");

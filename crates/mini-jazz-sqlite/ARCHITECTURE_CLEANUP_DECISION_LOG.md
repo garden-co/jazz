@@ -513,7 +513,7 @@ regress.
 ## 2026-05-29 01:39 PDT - Storage/projection administration moved behind a small module
 
 - Moved storage stats/version, local policy fingerprint, physical row lookup, and projection rebuild helpers into `runtime::storage_admin`.
-- The `clear_current_projection_for_test` name is still a smell, but at least it is now isolated with other storage/projection maintenance APIs instead of buried in the read/query block.
+- The `clear_current_projection` name is still a smell, but at least it is now isolated with other storage/projection maintenance APIs instead of buried in the read/query block.
 - Focused storage projection tests pass after the move.
 
 ## 2026-05-29 01:43 PDT - Runtime read surface moved behind a read module
@@ -752,3 +752,9 @@ regress.
 - Replaced the subscription wildcard runtime import with explicit query/subscription/type dependencies.
 - This makes subscriptions read like a thin reactive layer over the real query APIs instead of another hidden owner of runtime internals.
 - Focused subscription tests pass.
+
+## 2026-05-29 03:17 PDT - Renamed projection-clear maintenance API
+
+- Renamed `clear_current_projection_for_test` to `clear_current_projection`, because clearing a derived projection is a real storage-admin maintenance operation used by invariants, not a fixture-only backdoor.
+- This removes one more test-shaped name from the runtime public surface while preserving the rebuild/recovery tests.
+- Full `cargo test -p mini-jazz-sqlite` passes: 439 passed, 18 ignored placeholders, 0 failed.
