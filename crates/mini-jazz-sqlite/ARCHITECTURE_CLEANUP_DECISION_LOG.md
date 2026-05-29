@@ -958,3 +958,9 @@ regress.
 - Removed the unused public `export_query_where_eq_top_created_at_desc_with_ref_include` convenience API.
 - Narrowed single-module helper visibility in `history_export` and `query_export` from `pub(super)` to private where sibling modules had no callers.
 - Decision: for the remaining large export modules, prefer shrinking visible helper surface before doing more structural splits. A private helper inside a large file is less misleading than a sibling-visible helper bag that invites accidental reuse.
+
+## 2026-05-29 13:19 PDT - Simplified profiled query export
+
+- Replaced the hand-copied `profile_export_query_where_eq_top_field_desc` export implementation with a wrapper around the normal query-scope export path.
+- The profile still reports total time, read time, export time, and bundle row counts, but no longer maintains a second semantic copy of repair/history/read/tx/branch construction.
+- Decision: profiling should not justify duplicated core behavior. If detailed stage timings are needed later, add them inside the shared export path rather than reimplementing it.

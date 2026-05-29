@@ -252,165 +252,39 @@ impl Runtime {
         )?;
         let read_rows_ms = read_started.elapsed_ms();
 
-        let table = self.schema.table_def(table_name)?;
-
-        let resolve_started = ProfileTimer::start();
-        let visible_row_nums = rows
-            .iter()
-            .map(|row| row_num(&self.conn, &row.id))
-            .collect::<Result<Vec<_>>>()?;
-        let resolve_visible_row_nums_ms = resolve_started.elapsed_ms();
-
-        let repair_started = ProfileTimer::start();
         let query_value = json!({
             "eq": value.clone(),
             "order_field": order_field_name,
             "limit": limit,
             "observed_ids": observed_row_ids(&rows),
         });
-        let mut repair_row_nums = query_scope_repair_row_nums(
-            &self.conn,
-            table,
-            field_name,
-            "eq_top_field_desc",
-            &query_value,
-        )?;
-        let visible_row_num_set = visible_row_nums.iter().copied().collect::<BTreeSet<_>>();
-        repair_row_nums.retain(|row_num| !visible_row_num_set.contains(row_num));
-        repair_row_nums.sort();
-        repair_row_nums.dedup();
-        let repair_row_nums_ms = repair_started.elapsed_ms();
-
-        let mut row_nums = visible_row_nums.clone();
-        row_nums.extend(repair_row_nums.iter());
-        row_nums.sort();
-        row_nums.dedup();
-        let branch_nums = branch::scope_nums(&self.conn, self.branch_num)?;
-        let visibility = self.read_visibility();
-
-        let visible_history_started = ProfileTimer::start();
-        let mut history = export_history_versions_for_rows_in_branches(
-            &self.conn,
-            &self.schema,
+        let export_started = ProfileTimer::start();
+        let bundle = self.export_query_scope(
             table_name,
-            Some(&visible_row_nums),
-            None,
-            &branch_nums,
-        )?;
-        let visible_history_ms = visible_history_started.elapsed_ms();
-
-        let repair_visible_started = ProfileTimer::start();
-        if !repair_row_nums.is_empty() {
-            history.extend(export_visible_table_history(
-                &visibility,
-                table_name,
-                &branch_nums,
-                Some(&repair_row_nums),
-            )?);
-        }
-        let repair_visible_history_ms = repair_visible_started.elapsed_ms();
-
-        let repair_all_started = ProfileTimer::start();
-        if !repair_row_nums.is_empty() {
-            history.extend(export_history_versions_for_rows_in_branches(
-                &self.conn,
-                &self.schema,
-                table_name,
-                Some(&repair_row_nums),
-                None,
-                &branch_nums,
-            )?);
-        }
-        let repair_all_history_ms = repair_all_started.elapsed_ms();
-
-        let policy_started = ProfileTimer::start();
-        history.extend(export_policy_dependency_history(
-            &visibility,
-            PolicyDependencyExport {
-                table_name,
-                policy: &self.schema.table_def(table_name)?.read_policy,
-                branch_nums: &branch_nums,
-                child_row_nums: Some(&row_nums),
-            },
-        )?);
-        let policy_dependency_history_ms = policy_started.elapsed_ms();
-
-        let snapshot_started = ProfileTimer::start();
-        if self.branch_num != 1 {
-            if let Some(base_epoch) = branch::base_global_epoch(&self.conn, self.branch_num)? {
-                history.extend(export_history_versions_for_rows_in_branches(
-                    &self.conn,
-                    &self.schema,
-                    table_name,
-                    Some(&row_nums),
-                    Some(base_epoch),
-                    &[1],
-                )?);
-                history.extend(export_snapshot_policy_dependency_history(
-                    &visibility,
-                    table_name,
-                    base_epoch,
-                    Some(&row_nums),
-                )?);
-            }
-        }
-        let branch_snapshot_history_ms = snapshot_started.elapsed_ms();
-
-        let dedupe_started = ProfileTimer::start();
-        dedupe_history_records(&mut history);
-        let dedupe_history_ms = dedupe_started.elapsed_ms();
-
-        let reads_started = ProfileTimer::start();
-        let reads = export_reads_for_history(&self.conn, &history)?;
-        let reads_ms = reads_started.elapsed_ms();
-
-        let rejected_started = ProfileTimer::start();
-        let rejected_tx_ids = query_scope_rejected_tx_ids(
-            &self.conn,
-            table,
             field_name,
             "eq_top_field_desc",
-            &query_value,
+            query_value,
+            rows,
+            QueryScopeOptions::empty(),
         )?;
-        let rejected_tx_ids_ms = rejected_started.elapsed_ms();
-
-        let txs_started = ProfileTimer::start();
-        let txs =
-            export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &rejected_tx_ids)?;
-        let txs_ms = txs_started.elapsed_ms();
-
-        let branches_started = ProfileTimer::start();
-        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
-        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
-        let branches_ms = branches_started.elapsed_ms();
-
-        let make_started = ProfileTimer::start();
-        let query_reads = vec![QueryReadRecord {
-            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
-            table: table_name.to_owned(),
-            field: field_name.to_owned(),
-            op: "eq_top_field_desc".to_owned(),
-            value: query_value,
-        }];
-        let bundle = make_bundle(&self.schema, branches, txs, reads, query_reads, history);
-        let make_bundle_ms = make_started.elapsed_ms();
+        let export_ms = export_started.elapsed_ms();
 
         let profile = QueryExportProfile {
             total_ms: total_started.elapsed_ms(),
             read_rows_ms,
-            resolve_visible_row_nums_ms,
-            repair_row_nums_ms,
-            visible_history_ms,
-            repair_visible_history_ms,
-            repair_all_history_ms,
-            policy_dependency_history_ms,
-            branch_snapshot_history_ms,
-            dedupe_history_ms,
-            reads_ms,
-            rejected_tx_ids_ms,
-            txs_ms,
-            branches_ms,
-            make_bundle_ms,
+            resolve_visible_row_nums_ms: 0.0,
+            repair_row_nums_ms: 0.0,
+            visible_history_ms: 0.0,
+            repair_visible_history_ms: 0.0,
+            repair_all_history_ms: 0.0,
+            policy_dependency_history_ms: 0.0,
+            branch_snapshot_history_ms: 0.0,
+            dedupe_history_ms: 0.0,
+            reads_ms: 0.0,
+            rejected_tx_ids_ms: 0.0,
+            txs_ms: 0.0,
+            branches_ms: 0.0,
+            make_bundle_ms: export_ms,
             history_rows: bundle.history.len(),
             read_rows: bundle.reads.len(),
             tx_rows: bundle.txs.len(),
