@@ -611,15 +611,12 @@ impl Runtime {
         let Some(row) = self.read_row_at_node_epoch(table_name, id, node_id, local_epoch)? else {
             return Ok(None);
         };
-        let root = row
+        let text = row
             .values
             .get(field_name)
-            .and_then(JsonValue::as_u64)
-            .map(|root| root as i64)
-            .filter(|root| *root != 0);
-        Ok(Some(crate::persisted_text_ops::materialize(
-            &self.conn, root,
-        )?))
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| crate::Error::new(format!("{field_name} is not a deep_text field")))?;
+        Ok(Some(text.to_owned()))
     }
 
     pub fn current_text_ops_watermark(&self) -> Result<crate::persisted_text_ops::DeltaWatermark> {
@@ -4341,14 +4338,38 @@ impl Runtime {
         if record.op == 3 {
             return Ok(None);
         }
+        let values = self.materialize_deep_text_values(table_name, record.values)?;
         Ok(Some(RowView {
             table: record.table,
             id: record.row_id,
-            values: record.values,
+            values,
             created_by: record.created_by,
             tx_id: record.tx_id,
             conflict_count: 0,
         }))
+    }
+
+    fn materialize_deep_text_values(
+        &self,
+        table_name: &str,
+        mut values: BTreeMap<String, JsonValue>,
+    ) -> Result<BTreeMap<String, JsonValue>> {
+        let table = self.schema.table_def(table_name)?;
+        for field in &table.fields {
+            if !matches!(field.kind, FieldKind::DeepText) {
+                continue;
+            }
+            let root = values
+                .get(&field.name)
+                .and_then(JsonValue::as_u64)
+                .map(|root| root as i64)
+                .filter(|root| *root != 0);
+            values.insert(
+                field.name.clone(),
+                JsonValue::String(crate::persisted_text_ops::materialize(&self.conn, root)?),
+            );
+        }
+        Ok(values)
     }
 
     fn sealed_history_records_for_row_at_epoch(
@@ -4464,10 +4485,11 @@ impl Runtime {
         if record.op == 3 {
             return Ok(None);
         }
+        let values = self.materialize_deep_text_values(table_name, record.values)?;
         Ok(Some(RowView {
             table: record.table,
             id: record.row_id,
-            values: record.values,
+            values,
             created_by: record.created_by,
             tx_id: record.tx_id,
             conflict_count: 0,
@@ -13022,6 +13044,39 @@ mod tests {
         assert_eq!(
             rows[0].values["body"],
             JsonValue::from("hello searchable text")
+        );
+    }
+
+    #[test]
+    fn historical_deep_text_row_reads_are_materialized() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " history")
+            .unwrap();
+
+        let row = alice
+            .read_row_at_node_epoch("docs", "doc-1", "alice-node", 3)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(row.values["body"], JsonValue::from("hello history"));
+        assert_eq!(
+            alice
+                .read_deep_text_at_node_epoch("docs", "doc-1", "body", "alice-node", 3)
+                .unwrap()
+                .unwrap(),
+            "hello history"
         );
     }
 

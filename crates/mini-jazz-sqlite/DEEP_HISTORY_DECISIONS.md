@@ -1070,3 +1070,11 @@ Decision: do not keep the allow-all deep-text fast path that batch-inserted `jaz
 Why: the idea was semantically clean enough for main-branch allow-all batches: still one Jazz tx/history row per edit, but fewer individual tx insert statements. The canonical sample disagreed. Append write/update stayed around 0.36 ms, Automerge got worse, `tx_create_ms` rose from about 24-25 ms to 37-42 ms for text scenarios, and append commit time spiked. The larger `INSERT ... VALUES ... RETURNING` statement appears to be a worse fit for SQLite here than the cached single-row insert loop.
 
 Scope impact: the uncommitted fast path was reverted. The useful lesson is that the next tx-write improvement probably needs a different representation or transaction table shape, not just a bigger VALUES statement.
+
+## Fri May 29 00:30:50 PDT 2026 - Materialize Deep Text For Historical Row Reads Too
+
+Decision: `read_row_at_node_epoch` and global point-in-time row reads now materialize `deep_text` fields before returning `RowView`; `read_deep_text_at_node_epoch` is a convenience wrapper over that public row value.
+
+Why: current row reads had become text-shaped, but historical reads still leaked sidecar roots. That would make branch snapshots and point-in-time APIs behave differently from normal reads, exactly where the RFC cares about random-ish historical access.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. Historical benchmark reads were already using `read_deep_text_at_node_epoch`, so the measured behavior remains materially the same while the public API boundary is cleaner.
