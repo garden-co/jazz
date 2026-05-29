@@ -851,3 +851,11 @@ Decision: apply bundle tx records with multi-row `INSERT ... ON CONFLICT ... RET
 Why: after direct tuple writes and incremental export, receive still paid one SQLite tx-row upsert for every incoming Jazz transaction. Live bundles in the benchmark contain hundreds of txs from the same ingest slice, so the receive path should use that batch shape while preserving the same durable `jazz_tx` rows and cache eligibility checks.
 
 Scope impact: with the incremental live-export env flag enabled, apply `txs_ms/update` moved from roughly `0.0102 -> 0.0088` ms for append, `0.0102 -> 0.0086` ms for Automerge, and `0.0104 -> 0.0087` ms for canvas. Total apply/update moved from roughly `0.0332 -> 0.0324`, `0.0332 -> 0.0316`, and `0.0326 -> 0.0308` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:54:06 PDT 2026 - Batch Received History Inserts
+
+Decision: during bundle apply, collect received history rows per table and insert them with multi-row `INSERT OR REPLACE` batches before repairing current projection.
+
+Why: the receive path still inserted one open-history row at a time. Since bundle apply already owns a SQLite transaction and current projection repair only needs history to be durable before repair, we can batch the history table writes without changing the one-history-row-per-update storage model.
+
+Scope impact: with the incremental live-export env flag enabled, apply `history_ms/update` moved from roughly `0.0193 -> 0.0164` ms for append, `0.0188 -> 0.0157` ms for Automerge, and `0.0182 -> 0.0147` ms for canvas. Total apply/update moved to roughly `0.0292`, `0.0284`, and `0.0275` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.

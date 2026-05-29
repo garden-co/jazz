@@ -2001,11 +2001,12 @@ impl Runtime {
             current_candidates: BTreeMap::new(),
             writes_by_tx: BTreeMap::new(),
             already_applied_tx_ids: &already_applied_tx_ids,
-            history_sql_by_table: BTreeMap::new(),
+            history_values_by_table: BTreeMap::new(),
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
         }
+        insert_apply_history_batches(&db, &schema, &mut history_context.history_values_by_table)?;
         let mut tuple_tx_nums = history_context
             .writes_by_tx
             .keys()
@@ -3195,14 +3196,11 @@ impl Runtime {
             rusqlite::types::Value::Integer(created_by_num),
             rusqlite::types::Value::Integer(updated_by_num),
         ]);
-        let history_sql = context
-            .history_sql_by_table
-            .entry(record.table.clone())
-            .or_insert_with(|| AppWriteSql::new(table).history_sql.clone());
         context
-            .db
-            .prepare_cached(history_sql)?
-            .execute(params_from_iter(values.iter()))?;
+            .history_values_by_table
+            .entry(record.table.clone())
+            .or_default()
+            .push(values.clone());
         let table_num = context
             .table_nums_by_name
             .get(&record.table)
@@ -6314,24 +6312,7 @@ struct AppWriteSql {
 
 impl AppWriteSql {
     fn new(table: &crate::schema::TableDef) -> Self {
-        let mut history_columns = vec![
-            "row_num".to_owned(),
-            "tx_num".to_owned(),
-            "j_branch_num".to_owned(),
-            "op".to_owned(),
-        ];
-        history_columns.extend(
-            table
-                .fields
-                .iter()
-                .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field))),
-        );
-        history_columns.extend([
-            "j_created_at".to_owned(),
-            "j_updated_at".to_owned(),
-            "j_created_by".to_owned(),
-            "j_updated_by".to_owned(),
-        ]);
+        let history_columns = history_insert_columns(table);
         let mut current_columns = vec![
             "row_num".to_owned(),
             "j_branch_num".to_owned(),
@@ -6352,6 +6333,28 @@ impl AppWriteSql {
     }
 }
 
+fn history_insert_columns(table: &crate::schema::TableDef) -> Vec<String> {
+    let mut history_columns = vec![
+        "row_num".to_owned(),
+        "tx_num".to_owned(),
+        "j_branch_num".to_owned(),
+        "op".to_owned(),
+    ];
+    history_columns.extend(
+        table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field))),
+    );
+    history_columns.extend([
+        "j_created_at".to_owned(),
+        "j_updated_at".to_owned(),
+        "j_created_by".to_owned(),
+        "j_updated_by".to_owned(),
+    ]);
+    history_columns
+}
+
 fn insert_or_replace_sql(table: &str, columns: &[String]) -> String {
     let placeholders = (0..columns.len())
         .map(|_| "?")
@@ -6361,6 +6364,53 @@ fn insert_or_replace_sql(table: &str, columns: &[String]) -> String {
         "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
         columns.join(", ")
     )
+}
+
+fn insert_or_replace_many_sql(table: &str, columns: &[String], rows: usize) -> String {
+    let row_placeholders = format!(
+        "({})",
+        (0..columns.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let placeholders = (0..rows)
+        .map(|_| row_placeholders.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT OR REPLACE INTO {table} ({}) VALUES {placeholders}",
+        columns.join(", ")
+    )
+}
+
+fn insert_apply_history_batches(
+    db: &Connection,
+    schema: &SchemaDef,
+    values_by_table: &mut BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+) -> Result<()> {
+    for (table_name, rows) in std::mem::take(values_by_table) {
+        if rows.is_empty() {
+            continue;
+        }
+        let table = schema.table_def(&table_name)?;
+        let columns = history_insert_columns(table);
+        let row_width = columns.len();
+        for chunk in rows.chunks(500) {
+            let sql = insert_or_replace_many_sql(
+                &crate::schema::history_table(&table_name),
+                &columns,
+                chunk.len(),
+            );
+            let mut values = Vec::with_capacity(chunk.len() * row_width);
+            for row in chunk {
+                values.extend(row.iter().cloned());
+            }
+            db.prepare_cached(&sql)?
+                .execute(params_from_iter(values.iter()))?;
+        }
+    }
+    Ok(())
 }
 
 struct EffectiveWriteValues<'a> {
@@ -7835,7 +7885,7 @@ struct ApplyHistoryContext<'a> {
     current_candidates: BTreeMap<(String, i64, i64), CurrentCandidate>,
     writes_by_tx: BTreeMap<i64, Vec<tx::PackedWrite>>,
     already_applied_tx_ids: &'a BTreeSet<String>,
-    history_sql_by_table: BTreeMap<String, String>,
+    history_values_by_table: BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
 }
 
 #[derive(Clone)]
