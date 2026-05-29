@@ -1,6 +1,612 @@
 use super::*;
 
 #[test]
+fn tiered_table_reads_filter_by_settlement_level() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-local",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Pending locally")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Edge)
+        .unwrap()
+        .is_empty());
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&tx).unwrap();
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Edge)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_global(&tx, 1).unwrap();
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Global)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn tiered_built_queries_filter_by_settlement_level() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let matching_tx = alice
+        .insert_row(
+            "notes",
+            "note-pinned",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Pinned and pending")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let hidden_tx = alice
+        .insert_row(
+            "notes",
+            "note-unpinned",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Unpinned and global")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&hidden_tx, 1).unwrap();
+
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+    assert_eq!(
+        alice
+            .query_at_tier(pinned.clone(), ReadTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Edge)
+        .unwrap()
+        .is_empty());
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&matching_tx).unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(pinned.clone(), ReadTier::Edge)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_global(&matching_tx, 2).unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(pinned, ReadTier::Global)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-pinned"]
+    );
+}
+
+#[test]
+fn tiered_built_queries_read_previous_settled_version_when_local_current_is_newer() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let create_tx = alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Global pinned version")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&create_tx, 1).unwrap();
+    alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Local unpinned version")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Local)
+        .unwrap()
+        .is_empty());
+
+    let global_rows = alice.query_at_tier(pinned, ReadTier::Global).unwrap();
+    assert_eq!(global_rows.len(), 1);
+    assert_eq!(global_rows[0].id, "note-1");
+    assert_eq!(
+        global_rows[0].values["body"],
+        json!("Global pinned version")
+    );
+}
+
+#[test]
+fn tiered_table_subscription_updates_only_after_requested_settlement() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_at_tier("notes", ReadTier::Global)
+        .unwrap();
+    assert!(subscription.initial_rows().is_empty());
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-global",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Not globally settled yet")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_edge(&tx).unwrap();
+
+    let edge_delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert!(edge_delta.all.is_empty());
+    assert!(edge_delta.delta.is_empty());
+
+    alice.accept_transaction_at_global(&tx, 1).unwrap();
+    let global_delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        global_delta
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-global"]
+    );
+    assert!(global_delta.delta.iter().any(
+        |delta| matches!(delta, SubscriptionRowDelta::Added { id, .. } if id == "note-global")
+    ));
+}
+
+#[test]
+fn tiered_built_query_subscription_matches_requested_settlement() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+
+    let mut subscription = alice
+        .subscribe_query_at_tier(pinned.clone(), ReadTier::Edge)
+        .unwrap();
+    assert!(subscription.initial_rows().is_empty());
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-edge",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Settles at edge")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    assert!(alice
+        .subscription_delta(&mut subscription)
+        .unwrap()
+        .all
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&tx).unwrap();
+    let delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        delta
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-edge"]
+    );
+    assert_eq!(
+        alice.query_at_tier(pinned, ReadTier::Edge).unwrap(),
+        delta.all
+    );
+}
+
+#[test]
+fn for_branch_read_uses_branch_policy_and_backing_row_visibility() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        edge.insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    });
+    support::run_attributing_to_user(&mut edge, "bob", |edge| {
+        edge.insert_row(
+            "branches",
+            "draft-b",
+            BTreeMap::from([("project".to_owned(), json!("project-b"))]),
+        )
+        .unwrap();
+    });
+
+    edge.create_branch("draft-a", None).unwrap();
+    edge.checkout_branch("draft-a").unwrap();
+    support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        edge.insert_row(
+            "todos",
+            "todo-matches-branch",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Visible on draft A")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+        edge.insert_row(
+            "todos",
+            "todo-wrong-project",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Wrong project")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+    });
+
+    edge.create_branch("draft-b", None).unwrap();
+    edge.checkout_branch("draft-b").unwrap();
+    support::run_attributing_to_user(&mut edge, "bob", |edge| {
+        edge.insert_row(
+            "todos",
+            "todo-hidden-by-backing-row",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Bob branch")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+    });
+    edge.checkout_branch("main").unwrap();
+
+    let draft_a_rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-a",
+            BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "orderBy": [["title", "asc"]]
+            }))
+            .unwrap(),
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        draft_a_rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-matches-branch"]
+    );
+
+    let draft_b_rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-b",
+            BuiltQuery::from_json_value(json!({ "table": "todos" })).unwrap(),
+        )
+    })
+    .unwrap();
+    assert!(draft_b_rows.is_empty());
+}
+
+#[test]
+fn for_branch_read_policy_applies_to_pinned_base_rows() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let tx_ids = support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        let mut tx_ids = Vec::new();
+        tx_ids.push(edge.insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "todos",
+            "todo-base-match",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base visible")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "todos",
+            "todo-base-wrong-project",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base hidden")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )?);
+        Ok::<_, mini_jazz_sqlite::Error>(tx_ids)
+    });
+    for (idx, tx_id) in tx_ids.unwrap().into_iter().enumerate() {
+        edge.accept_transaction_at_global(&tx_id, (idx + 1) as i64)
+            .unwrap();
+    }
+
+    edge.create_branch("draft-a", Some(5)).unwrap();
+    let rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-a",
+            BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "orderBy": [["title", "asc"]]
+            }))
+            .unwrap(),
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["todo-base-match"]
+    );
+}
+
+#[test]
+fn branch_query_scope_exports_branch_policy_backing_row() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "upstream", schema.clone()).unwrap();
+    let mut peer = Runtime::open_with_schema(Storage::Memory, "peer", "alice", schema).unwrap();
+
+    support::run_attributing_to_user(&mut upstream, "alice", |upstream| {
+        upstream
+            .insert_row(
+                "projects",
+                "project-a",
+                BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+            )
+            .unwrap();
+        upstream
+            .insert_row(
+                "branches",
+                "draft-a",
+                BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+            )
+            .unwrap();
+    });
+    upstream.create_branch("draft-a", None).unwrap();
+    upstream.checkout_branch("draft-a").unwrap();
+    support::run_attributing_to_user(&mut upstream, "alice", |upstream| {
+        upstream
+            .insert_row(
+                "todos",
+                "todo-draft",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Visible through branch policy")),
+                    ("project".to_owned(), json!("project-a")),
+                ]),
+            )
+            .unwrap();
+    });
+
+    let bundle = support::run_as_user(&mut upstream, "alice", |upstream| {
+        upstream.export_query(BuiltQuery::from_json_value(json!({ "table": "todos" })).unwrap())
+    })
+    .unwrap();
+    peer.apply_bundle(&bundle).unwrap();
+    peer.checkout_branch("draft-a").unwrap();
+
+    assert_eq!(
+        peer.read_rows("branches")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["draft-a"]
+    );
+    assert_eq!(
+        peer.read_rows("todos")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-draft"]
+    );
+}
+
+#[test]
+fn for_branch_write_uses_branch_policy_and_backing_row_visibility() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+            table.read_if_created_by_user();
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+            table.write_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )
+        .unwrap();
+    alice
+        .insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )
+        .unwrap();
+    alice.create_branch("draft-a", None).unwrap();
+    alice.checkout_branch("draft-a").unwrap();
+
+    let accepted = alice
+        .insert_row(
+            "todos",
+            "todo-allowed",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Allowed")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )
+        .unwrap();
+    let rejected = alice
+        .insert_row(
+            "todos",
+            "todo-denied",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Denied")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )
+        .unwrap();
+
+    assert!(alice
+        .transaction_info(&accepted)
+        .unwrap()
+        .rejection_code
+        .is_none());
+    assert_eq!(
+        alice.transaction_info(&rejected).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert_eq!(
+        alice
+            .read_rows("todos")
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["todo-allowed"]
+    );
+    assert_eq!(
+        alice.transaction_policy_read_rows(&accepted).unwrap(),
+        vec![("branches".to_owned(), "draft-a".to_owned())]
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

@@ -39,9 +39,11 @@ fn seeded_bundle_schedule(bundle_count: usize, seed: u64) -> Vec<usize> {
 
 #[test]
 fn batched_refresh_matches_individual_refresh_for_mixed_predicates_and_pages() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
-    let mut batched_peer = Runtime::open(Storage::Memory, "batched-peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut individual_peer =
+        support::open_todo_app(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batched_peer =
+        support::open_todo_app(Storage::Memory, "batched-peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     for (id, title, done) in [
@@ -214,7 +216,7 @@ fn refresh_planner_does_not_batch_across_descriptor_boundaries() {
         .iter()
         .map(|bundle| bundle.query_reads.len())
         .collect::<Vec<_>>();
-    assert_eq!(query_read_counts, vec![1, 1, 2, 1, 1]);
+    assert_eq!(query_read_counts, vec![2, 1, 1, 1, 1]);
 }
 
 #[test]
@@ -284,8 +286,8 @@ fn large_same_shape_page_refreshes_survive_multi_value_sql_chunking() {
 
 #[test]
 fn query_scope_refresh_is_idempotent_after_scope_contraction() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -317,9 +319,11 @@ fn query_scope_refresh_is_idempotent_after_scope_contraction() {
 
 #[test]
 fn semantic_system_field_page_refresh_matches_individual_application() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
-    let mut batched_peer = Runtime::open(Storage::Memory, "batched-peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut individual_peer =
+        support::open_todo_app(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batched_peer =
+        support::open_todo_app(Storage::Memory, "batched-peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -413,8 +417,8 @@ fn transaction_causality_is_recorded_at_row_granularity() {
 
 #[test]
 fn rejected_fate_repairs_query_scope_and_survives_replay() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     let tx = upstream
@@ -591,8 +595,8 @@ fn renamed_lens_query_refresh_keeps_observed_row_current_across_schema_versions(
 
 #[test]
 fn observed_query_subscription_emits_deterministic_diff_after_batched_refresh() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -721,7 +725,7 @@ fn recursive_batched_refresh_matches_individual_refresh_after_subtree_changes() 
 fn multi_hop_topology_refreshes_cold_client_query_after_upstream_change() {
     let harness = support::Harness::new();
     let mut mesh =
-        support::TrustedMeshTopology::memory(&harness, SchemaDef::attempt3_fixture()).unwrap();
+        support::TrustedMeshTopology::memory(&harness, support::todo_app_schema()).unwrap();
 
     mesh.alice_tab
         .create_project("project-1", "Distributed work")
@@ -761,8 +765,8 @@ fn multi_hop_topology_refreshes_cold_client_query_after_upstream_change() {
 
 #[test]
 fn repeated_observed_query_descriptor_is_deduped() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -781,8 +785,8 @@ fn repeated_observed_query_descriptor_is_deduped() {
 
 #[test]
 fn forgotten_observed_query_descriptor_is_not_refreshed() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     peer.apply_bundle(
@@ -806,8 +810,8 @@ fn forgotten_observed_query_descriptor_is_not_refreshed() {
 
 #[test]
 fn empty_observed_refresh_request_is_noop() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -933,8 +937,8 @@ fn not_equal_null_matches_present_optional_values_only() {
 
 #[test]
 fn repeated_bundle_replay_does_not_duplicate_history_or_current_rows() {
-    let mut alice = Runtime::open(Storage::Memory, "alice", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1245,8 +1249,8 @@ fn rejection_then_stale_pending_replay_does_not_resurrect_current_row() {
 
 #[test]
 fn query_scope_retains_previous_row_as_local_fact_after_predicate_exit() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -1279,8 +1283,8 @@ fn query_scope_retains_previous_row_as_local_fact_after_predicate_exit() {
 
 #[test]
 fn stale_query_refresh_cannot_regress_row_after_later_update() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -1338,8 +1342,8 @@ fn stale_query_refresh_cannot_regress_row_after_later_update() {
 
 #[test]
 fn query_refresh_for_deleted_result_row_keeps_unrelated_cached_rows() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -1388,8 +1392,8 @@ fn query_refresh_for_deleted_result_row_keeps_unrelated_cached_rows() {
 
 #[test]
 fn duplicate_overlapping_query_refreshes_dedupe_history_and_query_reads() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -1834,9 +1838,9 @@ fn ordered_page_subscription_emits_deterministic_diff_for_order_only_change() {
 
 #[test]
 fn query_read_order_is_deterministic_after_mixed_descriptor_application() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut left = Runtime::open(Storage::Memory, "left-peer", "alice").unwrap();
-    let mut right = Runtime::open(Storage::Memory, "right-peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut left = support::open_todo_app(Storage::Memory, "left-peer", "alice").unwrap();
+    let mut right = support::open_todo_app(Storage::Memory, "right-peer", "alice").unwrap();
 
     upstream.create_project("project-1", "Spec work").unwrap();
     upstream
@@ -2029,7 +2033,7 @@ fn direct_branch_source_cycle_fails_without_partial_source_change() {
 
 #[test]
 fn query_export_with_unknown_table_fails_without_recording_interest() {
-    let alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let err = alice
         .export_query_where_eq("missing_table", "done", json!(false))
@@ -2040,7 +2044,7 @@ fn query_export_with_unknown_table_fails_without_recording_interest() {
 
 #[test]
 fn query_export_with_unknown_field_fails_without_recording_interest() {
-    let alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let err = alice
         .export_query_where_eq("todos", "missing_field", json!(false))
@@ -2514,7 +2518,6 @@ fn durable_node_recovers_when_fate_arrives_before_history() {
 }
 
 #[test]
-#[ignore = "requires explicit resubscribe/query-settlement protocol before persisted descriptors can be removed"]
 fn durable_observed_query_reads_are_connection_local_not_persisted() {
     let schema = support::tasks_schema();
     let harness = support::Harness::new();
@@ -2551,14 +2554,14 @@ fn durable_observed_query_reads_are_connection_local_not_persisted() {
 
 #[test]
 fn duplicated_and_reordered_table_bundles_converge_across_topology() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-tab", "alice").unwrap();
     let mut edge =
-        Runtime::open_trusted_with_schema(Storage::Memory, "edge", SchemaDef::attempt3_fixture())
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge", support::todo_app_schema())
             .unwrap();
     let mut core =
-        Runtime::open_trusted_with_schema(Storage::Memory, "core", SchemaDef::attempt3_fixture())
+        Runtime::open_trusted_with_schema(Storage::Memory, "core", support::todo_app_schema())
             .unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-tab", "bob").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-tab", "bob").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -3615,9 +3618,9 @@ fn synced_history_cannot_reuse_public_row_id_in_another_table() {
 #[test]
 #[ignore = "bundle merge currently requires identical scoped metadata; union semantics are still underspecified"]
 fn merging_overlapping_query_bundles_is_order_independent_and_deduped() {
-    let mut upstream = Runtime::open(Storage::Memory, "upstream", "alice").unwrap();
-    let mut left_peer = Runtime::open(Storage::Memory, "left-peer", "alice").unwrap();
-    let mut right_peer = Runtime::open(Storage::Memory, "right-peer", "alice").unwrap();
+    let mut upstream = support::open_todo_app(Storage::Memory, "upstream", "alice").unwrap();
+    let mut left_peer = support::open_todo_app(Storage::Memory, "left-peer", "alice").unwrap();
+    let mut right_peer = support::open_todo_app(Storage::Memory, "right-peer", "alice").unwrap();
 
     upstream
         .create_project("project-1", "Shared dependency")

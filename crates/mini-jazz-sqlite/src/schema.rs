@@ -16,31 +16,6 @@ impl SchemaDef {
         }
     }
 
-    pub fn attempt3_fixture() -> Self {
-        Self::new()
-            .table("projects", |table| {
-                table.text("title");
-            })
-            .table("todos", |table| {
-                table.text("title");
-                table.bool("done");
-                table.ref_("project", "projects");
-                table.index("open_created", ["done", "$createdAt"]);
-                table.index("created", ["$createdAt"]);
-                table.index("by_title", ["title"]);
-            })
-            .table("labels", |table| {
-                table.text("name");
-                table.index("by_name", ["name"]);
-            })
-            .table("todo_labels", |table| {
-                table.ref_("todo", "todos");
-                table.ref_("label", "labels");
-                table.index("by_todo", ["todo"]);
-                table.index("by_label", ["label"]);
-            })
-    }
-
     pub fn table(mut self, name: &str, build: impl FnOnce(&mut TableBuilder)) -> Self {
         let mut builder = TableBuilder::new(name);
         build(&mut builder);
@@ -91,6 +66,22 @@ impl SchemaDef {
                 table.name,
                 table.write_policy.fingerprint_for_table(table)
             ));
+            for (branch_table, branch_policy) in &table.branch_policies {
+                parts.push(format!(
+                    "{table}:for_branch:{branch_table}:read:{read}:write:{write}",
+                    table = table.name,
+                    read = branch_policy
+                        .read_policy
+                        .as_ref()
+                        .map(|policy| policy.fingerprint_for_table(table))
+                        .unwrap_or_else(|| "deny".to_owned()),
+                    write = branch_policy
+                        .write_policy
+                        .as_ref()
+                        .map(|policy| policy.fingerprint_for_table(table))
+                        .unwrap_or_else(|| "deny".to_owned()),
+                ));
+            }
         }
         parts.join("|")
     }
@@ -109,6 +100,7 @@ pub(crate) struct TableDef {
     pub(crate) indexes: Vec<IndexDef>,
     pub(crate) read_policy: PolicyDef,
     pub(crate) write_policy: PolicyDef,
+    pub(crate) branch_policies: BTreeMap<String, BranchPolicyDef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +144,16 @@ pub(crate) enum PolicyDef {
     RefReadable {
         field: String,
     },
+    BranchFieldEquals {
+        field: String,
+        branch_field: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct BranchPolicyDef {
+    pub(crate) read_policy: Option<PolicyDef>,
+    pub(crate) write_policy: Option<PolicyDef>,
 }
 
 impl PolicyDef {
@@ -167,6 +169,18 @@ impl PolicyDef {
                     .map(|field| field.storage_name.as_str())
                     .unwrap_or(field);
                 format!("ref_readable:{storage_field}")
+            }
+            PolicyDef::BranchFieldEquals {
+                field,
+                branch_field,
+            } => {
+                let storage_field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .map(|field| field.storage_name.as_str())
+                    .unwrap_or(field);
+                format!("branch_field_eq:{storage_field}:{branch_field}")
             }
         }
     }
@@ -185,6 +199,7 @@ impl TableBuilder {
                 indexes: Vec::new(),
                 read_policy: PolicyDef::AllowAll,
                 write_policy: PolicyDef::AllowAll,
+                branch_policies: BTreeMap::new(),
             },
         }
     }
@@ -310,6 +325,38 @@ impl TableBuilder {
         self.table.read_policy = PolicyDef::RefReadable {
             field: field.to_owned(),
         };
+    }
+
+    pub fn read_for_branch_if_field_matches(
+        &mut self,
+        branch_table: &str,
+        field: &str,
+        branch_field: &str,
+    ) {
+        self.table
+            .branch_policies
+            .entry(branch_table.to_owned())
+            .or_default()
+            .read_policy = Some(PolicyDef::BranchFieldEquals {
+            field: field.to_owned(),
+            branch_field: branch_field.to_owned(),
+        });
+    }
+
+    pub fn write_for_branch_if_field_matches(
+        &mut self,
+        branch_table: &str,
+        field: &str,
+        branch_field: &str,
+    ) {
+        self.table
+            .branch_policies
+            .entry(branch_table.to_owned())
+            .or_default()
+            .write_policy = Some(PolicyDef::BranchFieldEquals {
+            field: field.to_owned(),
+            branch_field: branch_field.to_owned(),
+        });
     }
 
     fn finish(self) -> TableDef {
@@ -480,6 +527,15 @@ fn validate_schema_shape(schema: &SchemaDef) -> Result<()> {
                 }
             }
         }
+        if table.branch_policies.len() > 1 {
+            return Err(crate::Error::new(format!(
+                "table {} declares multiple branch policy tables; the prototype supports one branch policy table per row table",
+                table.name
+            )));
+        }
+        for branch_table_name in table.branch_policies.keys() {
+            schema.table_def(branch_table_name)?;
+        }
     }
     Ok(())
 }
@@ -488,6 +544,50 @@ fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
     for table in schema.tables() {
         validate_policy_cycle(schema, table, &table.read_policy, &mut BTreeSet::new())?;
         validate_policy_cycle(schema, table, &table.write_policy, &mut BTreeSet::new())?;
+        for (branch_table_name, branch_policy) in &table.branch_policies {
+            let branch_table = schema.table_def(branch_table_name)?;
+            if let Some(read_policy) = &branch_policy.read_policy {
+                validate_branch_policy(table, branch_table, read_policy)?;
+            }
+            if let Some(write_policy) = &branch_policy.write_policy {
+                validate_branch_policy(table, branch_table, write_policy)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_branch_policy(
+    table: &TableDef,
+    branch_table: &TableDef,
+    policy: &PolicyDef,
+) -> Result<()> {
+    let PolicyDef::BranchFieldEquals {
+        field,
+        branch_field,
+    } = policy
+    else {
+        return Ok(());
+    };
+    if !table
+        .fields
+        .iter()
+        .any(|candidate| candidate.name == *field)
+    {
+        return Err(crate::Error::new(format!(
+            "branch policy on {} references unknown field {}",
+            table.name, field
+        )));
+    }
+    if !branch_table
+        .fields
+        .iter()
+        .any(|candidate| candidate.name == *branch_field)
+    {
+        return Err(crate::Error::new(format!(
+            "branch policy on {} references unknown branch field {}.{}",
+            table.name, branch_table.name, branch_field
+        )));
     }
     Ok(())
 }
@@ -706,9 +806,34 @@ mod tests {
     use super::*;
     use crate::{storage, Storage};
 
+    fn todo_app_schema() -> SchemaDef {
+        SchemaDef::new()
+            .table("projects", |table| {
+                table.text("title");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+            })
+            .table("labels", |table| {
+                table.text("name");
+                table.index("by_name", ["name"]);
+            })
+            .table("todo_labels", |table| {
+                table.ref_("todo", "todos");
+                table.ref_("label", "labels");
+                table.index("by_todo", ["todo"]);
+                table.index("by_label", ["label"]);
+            })
+    }
+
     #[test]
     fn current_index_for_created_at_page_queries_matches_query_order() -> Result<()> {
-        let schema = SchemaDef::attempt3_fixture();
+        let schema = todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         install(&conn, &schema)?;
 

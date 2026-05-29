@@ -27,6 +27,15 @@ feature exists.
 - One simple write creates one sealed transaction.
 - One explicit transaction may contain multiple row mutations and still seals as
   one transaction.
+- Explicit transaction reads use a start snapshot, include their own staged
+  writes, exclude other transactions' staged writes, and exclude commits that
+  happen after the transaction starts.
+- Explicit transaction patch updates use the transaction start snapshot as the
+  base for omitted fields.
+- Explicit transaction reads preserve branch conflict candidates present in the
+  start snapshot.
+- Implicit row updates inside a transaction reject ambiguous branch conflict
+  candidates rather than choosing an arbitrary candidate.
 - An explicit transaction with no staged mutations is a no-op and creates no
   transaction record.
 - Multiple staged mutations to the same row in one explicit transaction
@@ -116,6 +125,18 @@ feature exists.
   policy.
 - Branch access checks both backing-row permission and row/version permission
   through the branch view.
+- Branch-view read policies never apply to ordinary main reads.
+- If a branch-view read policy is declared for a table, branch reads for that
+  table do not fall back to the main read policy.
+- Hidden or missing app-visible branch backing rows deny branch-scoped row
+  visibility.
+- Branch-view field policies compare against the backing row for the branch
+  being queried, not an arbitrary row with similar contents.
+- Query-scoped export includes branch backing rows needed to reproduce
+  branch-view policy decisions on a receiver.
+- Branch-view write policies validate proposed values against the same backing
+  row context as branch-view read policies.
+- Branch-view write policies record backing rows as policy read-set facts.
 - A branch-local transaction may be globally accepted while invisible to main.
 - Main visibility does not automatically include branch-local history.
 - Branch reads use source precedence, not incidental storage order.
@@ -143,6 +164,8 @@ feature exists.
 - Edge validation of untrusted branch writes reproduces the same pinned-base
   policy decision from synced branch/base history.
 - Branch query-scope repair is scoped by branch id.
+- Direct branch queries evaluate the same view as checking out the branch and
+  querying, while preserving the caller's previous checkout.
 - Stale branch-source metadata replay cannot override newer source-list state.
 - A branch delete of a pinned-base row exports a branch tombstone sufficient to
   repair peer recursive reads.
@@ -224,6 +247,8 @@ feature exists.
 
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
+- One-shot tiered current reads use the same local/edge/global settlement
+  predicate for full table reads and built-query reads.
 - Subscription updates are semantic row diffs.
 - Ordered subscriptions emit deterministic moved diffs for order-only changes.
 - Subscription diff ordering is deterministic and follows the same effective

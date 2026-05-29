@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage};
+use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, SchemaDef, Storage};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
@@ -50,7 +50,7 @@ impl From<JsValue> for NotificationError {
 impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
-        Runtime::open(Storage::Memory, node_id, user)
+        Runtime::open_with_schema(Storage::Memory, node_id, user, todo_app_schema())
             .map(MiniJazzRuntime::new)
             .map_err(to_js_error)
     }
@@ -72,9 +72,14 @@ impl MiniJazzRuntime {
             .await
             .map_err(|error| JsValue::from_str(&format!("install OPFS SQLite VFS: {error}")))?;
 
-        Runtime::open(Storage::File(db_name.into()), node_id, user)
-            .map(MiniJazzRuntime::new)
-            .map_err(to_js_error)
+        Runtime::open_with_schema(
+            Storage::File(db_name.into()),
+            node_id,
+            user,
+            todo_app_schema(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = insertRow)]
@@ -670,4 +675,29 @@ fn opfs_pool_name(db_name: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("mini-jazz-sqlite-{hash:016x}")
+}
+
+fn todo_app_schema() -> SchemaDef {
+    SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.index("open_created", ["done", "$createdAt"]);
+            table.index("created", ["$createdAt"]);
+            table.index("by_title", ["title"]);
+        })
+        .table("labels", |table| {
+            table.text("name");
+            table.index("by_name", ["name"]);
+        })
+        .table("todo_labels", |table| {
+            table.ref_("todo", "todos");
+            table.ref_("label", "labels");
+            table.index("by_todo", ["todo"]);
+            table.index("by_label", ["label"]);
+        })
 }

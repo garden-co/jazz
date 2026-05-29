@@ -1,11 +1,17 @@
+mod apply;
+mod auth;
 mod branch;
 mod effective;
 mod error;
 mod policy;
+mod policy_read_set;
+mod profile;
 mod projection;
 mod query;
 mod query_api;
+mod query_observation;
 mod query_predicate;
+mod query_refresh;
 mod read_set;
 mod read_visibility;
 mod rows;
@@ -16,6 +22,7 @@ mod storage;
 mod subscription;
 pub mod sync;
 mod time;
+mod transaction;
 mod tx;
 mod types;
 mod users;
@@ -29,6 +36,6 @@ pub use schema::SchemaDef;
 pub use storage::Storage;
 pub use subscription::RowsSubscription;
 pub use types::{
-    ApplyBundleProfile, QueryExportProfile, RejectionInfo, RowDiff, RowView, StorageStats,
-    SubscriptionDelta, SubscriptionRowDelta, TransactionInfo,
+    ApplyBundleProfile, QueryExportProfile, ReadTier, RejectionInfo, RowDiff, RowView,
+    StorageStats, SubscriptionDelta, SubscriptionRowDelta, TransactionInfo,
 };

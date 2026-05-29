@@ -4,11 +4,12 @@ use crate::query_api::{
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::types::RowView;
+use crate::types::{ReadTier, RowView};
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
 const MAX_MULTI_VALUE_TOP_PAGE_VALUES: usize = 400;
@@ -19,11 +20,26 @@ pub(crate) struct QueryContext<'a> {
     pub(crate) branch_num: i64,
     pub(crate) user: &'a str,
     pub(crate) bypass_policy: bool,
+    pub(crate) read_tier: ReadTier,
 }
 
 struct LoweredCondition {
     sql: String,
     params: Vec<SqlValue>,
+}
+
+pub(crate) struct LoweredQueryRowScope {
+    pub(crate) ctes: Vec<String>,
+    pub(crate) select_sql: String,
+    pub(crate) params: Vec<SqlValue>,
+}
+
+impl LoweredQueryRowScope {
+    pub(crate) fn with_scope_cte(&self, scope_name: &str) -> String {
+        let mut ctes = self.ctes.clone();
+        ctes.push(format!("{scope_name}(row_num) AS ({})", self.select_sql));
+        format!("WITH {}", ctes.join(",\n"))
+    }
 }
 
 enum QueryColumn<'a> {
@@ -36,6 +52,10 @@ enum QueryColumn<'a> {
 
 impl QueryContext<'_> {
     pub(crate) fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        if self.read_tier != ReadTier::Local {
+            let rows = self.read_rows_from_history_at_tier(table_name, self.read_tier)?;
+            return self.filter_rows_by_effective_branch_policy(table_name, rows);
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows = self.read_rows_from_current(table_name, false)?;
@@ -97,6 +117,9 @@ impl QueryContext<'_> {
 
     pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(&query.table)?;
+        if self.read_tier != ReadTier::Local {
+            return self.read_tiered_rows_for_built_query(query, table);
+        }
         let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
         let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
         if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
@@ -153,6 +176,106 @@ impl QueryContext<'_> {
         Ok(rows)
     }
 
+    fn read_tiered_rows_for_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+    ) -> Result<Vec<RowView>> {
+        let mut rows = self
+            .read_rows_from_history_at_tier(&query.table, self.read_tier)?
+            .into_iter()
+            .filter_map(|row| {
+                self.row_matches_built_query(table, &row, &query.conditions)
+                    .map(|matches| matches.then_some(row))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        rows.sort_by(|left, right| self.compare_built_query_rows(table, query, left, right));
+        Ok(apply_query_window(rows, query.limit, query.offset))
+    }
+
+    fn row_matches_built_query(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        conditions: &[QueryCondition],
+    ) -> Result<bool> {
+        for condition in conditions {
+            if !self.row_matches_condition(table, row, condition)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn row_matches_condition(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        condition: &QueryCondition,
+    ) -> Result<bool> {
+        let value = self.row_query_value(table, row, &condition.column)?;
+        Ok(match condition.op {
+            QueryConditionOp::Eq => value == condition.value,
+            QueryConditionOp::Ne => value != condition.value,
+            QueryConditionOp::Contains => value
+                .as_str()
+                .zip(condition.value.as_str())
+                .is_some_and(|(haystack, needle)| haystack.contains(needle)),
+            QueryConditionOp::In => condition
+                .value
+                .as_array()
+                .is_some_and(|values| values.iter().any(|candidate| candidate == &value)),
+        })
+    }
+
+    fn compare_built_query_rows(
+        &self,
+        table: &crate::schema::TableDef,
+        query: &BuiltQuery,
+        left: &RowView,
+        right: &RowView,
+    ) -> Ordering {
+        if query.order_by.is_empty() {
+            return right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.id.cmp(&right.id));
+        }
+        for order in &query.order_by {
+            let left_value = self.row_query_value(table, left, &order.column).ok();
+            let right_value = self.row_query_value(table, right, &order.column).ok();
+            let cmp = json_sort_key(left_value.as_ref()).cmp(&json_sort_key(right_value.as_ref()));
+            let cmp = match order.direction {
+                QueryDirection::Asc => cmp,
+                QueryDirection::Desc => cmp.reverse(),
+            };
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        left.id.cmp(&right.id)
+    }
+
+    fn row_query_value(
+        &self,
+        table: &crate::schema::TableDef,
+        row: &RowView,
+        column: &str,
+    ) -> Result<JsonValue> {
+        match query_column(table, column)? {
+            QueryColumn::Id => Ok(JsonValue::String(row.id.clone())),
+            QueryColumn::CreatedBy => Ok(JsonValue::String(row.created_by.clone())),
+            QueryColumn::CreatedAt => Ok(JsonValue::Number(row.created_at.into())),
+            QueryColumn::UpdatedAt => Ok(JsonValue::Number(row.created_at.into())),
+            QueryColumn::Field(field) => Ok(row
+                .values
+                .get(&field.name)
+                .cloned()
+                .unwrap_or(JsonValue::Null)),
+        }
+    }
+
     pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {
         if query.limit.is_some() || query.offset.is_some() {
             let support_query = repair_support_query(query)?;
@@ -179,6 +302,71 @@ impl QueryContext<'_> {
         Ok(row_nums)
     }
 
+    pub(crate) fn lower_built_query_row_scope(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<Option<LoweredQueryRowScope>> {
+        let table = self.schema.table_def(&query.table)?;
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
+        if self.defer_query_window_until_effective_branch_policy(table, query, base_epoch) {
+            return Ok(None);
+        }
+
+        if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
+            let (condition_sql, mut condition_params) =
+                self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
+            let order_sql =
+                self.lower_source_query_order(table, &query.order_by, "current", "ids")?;
+            let mut select_sql = format!(
+                "SELECT current.row_num AS row_num
+                 FROM {} current
+                 JOIN jazz_row_id ids ON ids.row_num = current.row_num
+                 JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                 WHERE current.j_branch_num = ?
+                   AND current.is_deleted = 0
+                   AND {tier_sql}
+                   AND {condition_sql}
+                   AND {policy_sql}
+                 ORDER BY {order_sql}",
+                crate::schema::current_table(&query.table),
+                policy_sql = self.read_policy_sql(table)?,
+                tier_sql = self.read_tier_sql("tx"),
+            );
+            let mut params = vec![SqlValue::Integer(self.branch_num)];
+            params.append(&mut condition_params);
+            append_query_window_sql(&mut select_sql, &mut params, query.limit, query.offset)?;
+            return Ok(Some(LoweredQueryRowScope {
+                ctes: Vec::new(),
+                select_sql,
+                params,
+            }));
+        }
+
+        let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
+        let order_sql = self.lower_query_order(table, &query.order_by)?;
+        let mut select_sql = format!(
+            "SELECT j_query_row_num AS row_num
+             FROM j_query_ranked
+             WHERE j_query_branch_depth = j_query_min_branch_depth
+             ORDER BY {order_sql}",
+        );
+        append_query_window_sql(&mut select_sql, &mut params, query.limit, query.offset)?;
+        Ok(Some(LoweredQueryRowScope {
+            ctes: vec![
+                format!("j_query_candidates AS ({candidates_sql})"),
+                "j_query_ranked AS (
+                   SELECT *,
+                          MIN(j_query_branch_depth) OVER (PARTITION BY j_query_row_id) AS j_query_min_branch_depth
+                   FROM j_query_candidates
+                 )"
+                .to_owned(),
+            ],
+            select_sql,
+            params,
+        }))
+    }
+
     fn repair_current_row_nums_for_built_query(
         &self,
         query: &BuiltQuery,
@@ -199,18 +387,18 @@ impl QueryContext<'_> {
              JOIN jazz_row_id ids ON ids.row_num = h.row_num
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.j_branch_num IN ({branch_placeholders})
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND {condition_sql}
                AND {policy_sql}
-             ORDER BY h.row_num",
+            ORDER BY h.row_num",
             crate::schema::history_table(&query.table),
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut query_params = branch_nums
             .iter()
             .copied()
             .map(SqlValue::Integer)
             .collect::<Vec<_>>();
-        query_params.push(SqlValue::Integer(tx::OUTCOME_REJECTED));
         query_params.extend(condition_params);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
@@ -309,18 +497,16 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num = ?
                AND current.is_deleted = 0
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND {condition_sql}
                AND {policy_sql}
              ORDER BY {order_sql}",
             select_columns.join(", "),
             crate::schema::current_table(&query.table),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
-        let mut query_params = vec![
-            SqlValue::Integer(self.branch_num),
-            SqlValue::Integer(tx::OUTCOME_REJECTED),
-        ];
+        let mut query_params = vec![SqlValue::Integer(self.branch_num)];
         query_params.append(&mut params);
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
@@ -397,7 +583,7 @@ impl QueryContext<'_> {
                    )
                  )
                )
-               AND tx.outcome != ?
+	               AND {tier_sql}
                AND NOT (
                  current.j_branch_num != ?
                  AND EXISTS (
@@ -413,6 +599,7 @@ impl QueryContext<'_> {
             crate::schema::current_table(&query.table),
             current_table = crate::schema::current_table(&query.table),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut params = scope_nums
             .iter()
@@ -425,7 +612,6 @@ impl QueryContext<'_> {
         ]);
         params.extend(scope_nums.iter().copied().map(SqlValue::Integer));
         params.extend([
-            SqlValue::Integer(tx::OUTCOME_REJECTED),
             SqlValue::Integer(self.branch_num),
             SqlValue::Integer(self.branch_num),
         ]);
@@ -997,7 +1183,7 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num = 1
                AND current.is_deleted = 0
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND current.{predicate_column} = ?
                AND {policy_sql}
              ORDER BY current.{order_column} DESC, ids.row_id
@@ -1005,17 +1191,15 @@ impl QueryContext<'_> {
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(
-            params![tx::OUTCOME_REJECTED, predicate_value, limit as i64],
-            |row| {
-                (0..row_width)
-                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            },
-        )?;
+        let rows = stmt.query_map(params![predicate_value, limit as i64], |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
     }
@@ -1796,6 +1980,152 @@ impl QueryContext<'_> {
         self.visibility().current_policy_sql(table, "current")
     }
 
+    fn read_tier_sql(&self, tx_alias: &str) -> String {
+        tier_visibility_sql(tx_alias, self.read_tier)
+    }
+
+    fn read_rows_from_history_at_tier(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+    ) -> Result<Vec<RowView>> {
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let shadowed_main_ids =
+            self.tier_visible_row_ids_for_branches(table_name, tier, &scope_nums)?;
+        let mut rows = self.read_history_rows_at_tier(table_name, tier, &scope_nums, None)?;
+
+        if self.branch_num != 1 && !scope_nums.contains(&1) {
+            let main_epoch_ceiling = branch::base_global_epoch(self.conn, self.branch_num)?;
+            rows.extend(
+                self.read_history_rows_at_tier(table_name, tier, &[1], main_epoch_ceiling)?
+                    .into_iter()
+                    .filter(|(_, row)| !shadowed_main_ids.contains(&row.id)),
+            );
+        }
+
+        self.collapse_shadowed_current_rows(rows)
+    }
+
+    fn read_history_rows_at_tier(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+        branch_nums: &[i64],
+        max_global_epoch: Option<i64>,
+    ) -> Result<Vec<(i64, RowView)>> {
+        let table = self.schema.table_def(table_name)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "h.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ));
+        let branch_placeholders = placeholders(branch_nums.len());
+        let tx_tier_sql = tier_visibility_sql("tx", tier);
+        let newer_tier_sql = tier_visibility_sql("newer_tx", tier);
+        let newer_order_sql = tier_newer_order_sql("newer_tx", "tx", tier);
+        let tx_epoch_sql = if max_global_epoch.is_some() {
+            "AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?"
+        } else {
+            ""
+        };
+        let newer_epoch_sql = if max_global_epoch.is_some() {
+            "AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num IN ({branch_placeholders})
+               AND {tx_tier_sql}
+               {tx_epoch_sql}
+               AND h.op != 3
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = h.j_branch_num
+                   AND {newer_tier_sql}
+                   {newer_epoch_sql}
+                   AND {newer_order_sql}
+               )
+             ORDER BY h.j_created_at DESC, ids.row_id",
+            select_columns.join(", "),
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+        );
+        let mut params = branch_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        if let Some(max_global_epoch) = max_global_epoch {
+            params.push(rusqlite::types::Value::Integer(max_global_epoch));
+        }
+        if let Some(max_global_epoch) = max_global_epoch {
+            params.push(rusqlite::types::Value::Integer(max_global_epoch));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| {
+            let mut row = row?;
+            let branch_num = branch_num_from_row(&mut row)?;
+            Ok((branch_num, row_to_view(self.conn, table_name, table, row)?))
+        })
+        .collect()
+    }
+
+    fn tier_visible_row_ids_for_branches(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+        branch_nums: &[i64],
+    ) -> Result<BTreeSet<String>> {
+        let branch_placeholders = placeholders(branch_nums.len());
+        let tx_tier_sql = tier_visibility_sql("tx", tier);
+        let sql = format!(
+            "SELECT DISTINCT ids.row_id
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num IN ({branch_placeholders})
+               AND {tx_tier_sql}
+             ORDER BY ids.row_id",
+            crate::schema::history_table(table_name),
+        );
+        let params = branch_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn visibility(&self) -> ReadVisibility<'_> {
         ReadVisibility {
             conn: self.conn,
@@ -1896,6 +2226,7 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
+            PolicyDef::BranchFieldEquals { .. } => Ok(false),
         }
     }
 
@@ -1991,7 +2322,7 @@ impl QueryContext<'_> {
                    )
                  )
                )
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND NOT (
                  current.j_branch_num != ?
                  AND EXISTS (
@@ -2007,6 +2338,7 @@ impl QueryContext<'_> {
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut params = scope_nums
             .iter()
@@ -2023,7 +2355,6 @@ impl QueryContext<'_> {
                 .copied()
                 .map(rusqlite::types::Value::Integer),
         );
-        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
         params.extend([
             rusqlite::types::Value::Integer(self.branch_num),
             rusqlite::types::Value::Integer(self.branch_num),
@@ -2832,6 +3163,34 @@ fn placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
 
+fn tier_visibility_sql(tx_alias: &str, tier: ReadTier) -> String {
+    match tier {
+        ReadTier::Local => format!("{tx_alias}.outcome != {}", tx::OUTCOME_REJECTED),
+        ReadTier::Edge => format!(
+            "{tx_alias}.outcome != {} AND ({tx_alias}.global_epoch IS NOT NULL OR EXISTS (SELECT 1 FROM jazz_tx_receipt tier_receipt WHERE tier_receipt.tx_num = {tx_alias}.tx_num AND tier_receipt.tier >= {}))",
+            tx::OUTCOME_REJECTED,
+            tx::TIER_EDGE
+        ),
+        ReadTier::Global => format!(
+            "{tx_alias}.outcome != {} AND {tx_alias}.global_epoch IS NOT NULL",
+            tx::OUTCOME_REJECTED
+        ),
+    }
+}
+
+fn tier_newer_order_sql(newer_tx_alias: &str, current_tx_alias: &str, tier: ReadTier) -> String {
+    match tier {
+        ReadTier::Global => format!(
+            "({newer_tx_alias}.global_epoch > {current_tx_alias}.global_epoch
+              OR ({newer_tx_alias}.global_epoch = {current_tx_alias}.global_epoch
+                  AND {newer_tx_alias}.tx_num > {current_tx_alias}.tx_num))"
+        ),
+        ReadTier::Local | ReadTier::Edge => {
+            format!("{newer_tx_alias}.tx_num > {current_tx_alias}.tx_num")
+        }
+    }
+}
+
 fn in_predicate_sql(predicate_expr: &str, value_count: usize, includes_null: bool) -> String {
     let mut clauses = Vec::new();
     if value_count > 0 {
@@ -2890,9 +3249,24 @@ mod tests {
     use rusqlite::params;
     use serde_json::json;
 
+    fn todo_app_schema() -> SchemaDef {
+        SchemaDef::new()
+            .table("projects", |table| {
+                table.text("title");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+            })
+    }
+
     #[test]
     fn top_created_at_query_returns_only_latest_page() -> Result<()> {
-        let schema = SchemaDef::attempt3_fixture();
+        let schema = todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         schema::install(&conn, &schema)?;
         seed_todos(&conn, 100)?;
@@ -2903,6 +3277,7 @@ mod tests {
             branch_num: 1,
             user: "alice",
             bypass_policy: false,
+            read_tier: ReadTier::Local,
         };
 
         let query = BuiltQuery::from_json_value(json!({

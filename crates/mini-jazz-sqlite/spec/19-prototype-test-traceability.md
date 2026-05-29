@@ -22,7 +22,7 @@ Coverage labels:
 | D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
 | D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
 | D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
-| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
+| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, branch policy contexts, and a narrow read-only app backing-row branch policy are tested. Merge commits are not.        |
 | D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
 | D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries and ephemeral observed interests are not.  |
 | D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
@@ -60,6 +60,10 @@ Coverage labels:
 - `generic_transaction_delete_records_previous_row_read_set`: D.9, D.11
 - `exclusive_transaction_rejects_same_row_conflict`: D.11, D.12
 - `generic_transaction_delete_shadows_pinned_base_row`: D.5, D.3
+- `transaction_reads_are_fixed_to_start_snapshot`: D.2
+- `transaction_reads_include_own_staged_writes`: D.2
+- `transactions_do_not_see_each_others_staged_writes`: D.2
+- `transaction_patch_updates_are_applied_to_start_snapshot`: D.2
 - `global_epoch_can_accept_multiple_transactions`: D.2, D.3
 
 #### `sync_fate.rs`
@@ -75,6 +79,8 @@ Coverage labels:
 - `query_scope_is_not_table_replication`: D.7, D.6
 - `query_scope_excludes_rows_outside_current_result_set`: D.7, D.6
 - `accepted_global_fate_update_reaches_peer_transaction_info`: D.2, D.7
+- `transaction_reads_preserve_branch_conflict_candidates`: D.2, D.5, D.12
+- `transaction_update_rejects_ambiguous_branch_conflict`: D.2, D.5, D.12
 - `stale_pending_bundle_does_not_downgrade_accepted_fate`: D.2, D.7
 - `out_of_order_global_epochs_do_not_regress_current_projection`: D.3, D.7
 - `rebuild_uses_global_epoch_order_not_local_tx_order`: D.3
@@ -90,6 +96,8 @@ Coverage labels:
 #### `branches.rs`
 
 - `branch_local_write_is_invisible_on_main`: D.5
+- `direct_branch_query_matches_checkout_without_changing_current_branch`: D.5,
+  D.6
 - `branch_scoped_export_excludes_unrelated_branch_rows`: D.5, D.7
 - `branch_scoped_export_excludes_unrelated_deleted_rows`: D.5, D.7
 - `branch_reads_main_base_with_sparse_overlay`: D.5, D.4
@@ -156,6 +164,11 @@ Coverage labels:
 - `branch_write_policy_uses_parent_visible_from_pinned_base`: D.5, D.9
 - `branch_recursive_write_policy_uses_parent_state_from_pinned_base`: D.5,
   D.9
+- `for_branch_read_uses_branch_policy_and_backing_row_visibility`: D.5, D.9
+- `for_branch_read_policy_applies_to_pinned_base_rows`: D.4, D.5, D.9
+- `branch_query_scope_exports_branch_policy_backing_row`: D.5, D.7, D.9
+- `for_branch_write_uses_branch_policy_and_backing_row_visibility`: D.2,
+  D.5, D.9
 - `trusted_edge_validates_branch_recursive_write_policy_against_pinned_base`:
   D.5, D.9, D.11
 - `trusted_edge_rejects_untrusted_delete_policy_violation`: D.9, D.11
@@ -472,6 +485,8 @@ them concrete:
 - removing durable observed-query descriptors requires an explicit
   resubscribe/query-settlement protocol, because retained local facts and
   current query results are not the same thing
+- windowed built-query refresh uses previously observed row ids as repair
+  candidates and current support rows as page-boundary replacements
 - duplicated/reordered table bundles converge across a simple multi-tier
   topology
 - seeded duplicate/reorder schedules converge after mixed insert, update,
@@ -532,7 +547,8 @@ The largest gaps between Appendix D and the current prototype tests are:
 - union semantics for merging overlapping query bundles with different scoped
   metadata fingerprints
 - catalogue observed facts
-- tier-gated query/subscription settlement semantics
+- tier-gated branch snapshot reads; main-branch table/built-query reads and
+  subscriptions have first-pass tier coverage
 - missing catalogue and missing permission fail-closed behavior
 - admin-controlled catalogue publication and separate catalogue sync lane
 - full authority predicate/range read-set validation beyond current row,

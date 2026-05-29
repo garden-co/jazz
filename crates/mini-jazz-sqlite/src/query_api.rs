@@ -1,8 +1,8 @@
 use crate::runtime::Runtime;
-use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
+use crate::subscription::RowsSubscription;
 use crate::sync::Bundle;
 use crate::types::{RowView, SubscriptionDelta};
-use crate::{Error, Result};
+use crate::{Error, ReadTier, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -157,12 +157,33 @@ impl Runtime {
         self.read_rows_for_built_query(&query)
     }
 
+    pub fn query_at_tier(&self, query: BuiltQuery, tier: ReadTier) -> Result<Vec<RowView>> {
+        self.query_context_at_tier(tier)
+            .read_rows_for_built_query(&query)
+    }
+
+    pub fn query_branch(&mut self, branch_id: &str, query: BuiltQuery) -> Result<Vec<RowView>> {
+        self.query_in_branch(branch_id, |runtime| runtime.query(query))
+    }
+
     pub fn one(&self, query: BuiltQuery) -> Result<Option<RowView>> {
         Ok(self.query(query)?.into_iter().next())
     }
 
     pub fn subscribe_query(&self, query: BuiltQuery) -> Result<RowsSubscription> {
         Ok(RowsSubscription::query(query.clone(), self.query(query)?))
+    }
+
+    pub fn subscribe_query_at_tier(
+        &self,
+        query: BuiltQuery,
+        tier: ReadTier,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::query_at_tier(
+            query.clone(),
+            tier,
+            self.query_at_tier(query, tier)?,
+        ))
     }
 
     pub fn export_query(&self, query: BuiltQuery) -> Result<Bundle> {
@@ -182,68 +203,7 @@ impl Runtime {
         &self,
         subscription: &mut RowsSubscription,
     ) -> Result<SubscriptionDelta> {
-        let rows = match &subscription.query {
-            RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
-            RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
-                self.query(predicate_query(
-                    &query.table,
-                    &query.field,
-                    QueryConditionOp::Eq,
-                    query.value.clone(),
-                ))?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "ne" => {
-                self.read_rows_where_ne(&query.table, &query.field, query.value.clone())?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "contains" => {
-                let Some(needle) = query.value.as_str() else {
-                    return Err(Error::new("contains expects a string value"));
-                };
-                self.read_rows_where_contains(&query.table, &query.field, needle)?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "in" => {
-                let Some(values) = query.value.as_array() else {
-                    return Err(Error::new("in predicate expects an array value"));
-                };
-                self.read_rows_where_in(&query.table, &query.field, values.clone())?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "recursive_refs" => {
-                let Some(root_id) = query.value.as_str() else {
-                    return Err(Error::new("recursive refs expects root id string"));
-                };
-                self.read_recursive_refs(&query.table, root_id, &query.field)?
-            }
-            RowsSubscriptionQuery::Predicate(query) if query.op == "eq_top_field_desc" => {
-                let value = query
-                    .value
-                    .get("eq")
-                    .ok_or_else(|| Error::new("top field query expects eq value"))?;
-                let order_field = query
-                    .value
-                    .get("order_field")
-                    .and_then(JsonValue::as_str)
-                    .ok_or_else(|| Error::new("top field query expects order_field"))?;
-                let limit = query
-                    .value
-                    .get("limit")
-                    .and_then(JsonValue::as_u64)
-                    .ok_or_else(|| Error::new("top field query expects numeric limit"))?;
-                self.read_rows_where_eq_top_field_desc(
-                    &query.table,
-                    &query.field,
-                    value.clone(),
-                    order_field,
-                    limit as usize,
-                )?
-            }
-            RowsSubscriptionQuery::Predicate(query) => {
-                return Err(Error::new(format!(
-                    "unsupported subscription query {}",
-                    query.op
-                )));
-            }
-            RowsSubscriptionQuery::Built(query) => self.query(query.clone())?,
-        };
+        let rows = self.subscription_rows(subscription)?;
         Ok(subscription.replace_with_subscription_delta(rows))
     }
 }

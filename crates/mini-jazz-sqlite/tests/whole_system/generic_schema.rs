@@ -300,6 +300,7 @@ fn durable_id_in_query_refreshes_deleted_selected_row_after_restart() {
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -308,13 +309,11 @@ fn durable_id_in_query_refreshes_deleted_selected_row_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_in("notes", "id", vec![json!("note-1"), json!("note-3")])
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap()[0].field, "id");
         assert_eq!(worker.read_rows("notes").unwrap().len(), 2);
     }
@@ -328,10 +327,7 @@ fn durable_id_in_query_refreshes_deleted_selected_row_after_restart() {
         schema,
     )
     .unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -438,6 +434,7 @@ fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart()
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -446,13 +443,11 @@ fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart()
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_in("notes", "body", vec![json!("alpha"), json!("beta")])
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap()[0].op, "in");
         assert_eq!(
             worker
@@ -478,10 +473,7 @@ fn durable_in_query_read_refresh_repairs_row_that_left_value_set_after_restart()
         schema,
     )
     .unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -647,6 +639,7 @@ fn durable_contains_query_read_refresh_repairs_row_that_left_predicate_after_res
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -655,13 +648,11 @@ fn durable_contains_query_read_refresh_repairs_row_that_left_predicate_after_res
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_contains("notes", "body", "target")
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_contains("notes", "body", "target")
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap()[0].op, "contains");
         assert_eq!(
             worker
@@ -687,10 +678,7 @@ fn durable_contains_query_read_refresh_repairs_row_that_left_predicate_after_res
         schema,
     )
     .unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -1514,6 +1502,7 @@ fn durable_not_equal_null_query_read_refreshes_present_optional_values_after_res
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -1522,13 +1511,11 @@ fn durable_not_equal_null_query_read_refreshes_present_optional_values_after_res
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_ne("notes", "tag", json!(null))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_ne("notes", "tag", json!(null))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap()[0].op, "ne");
         assert_eq!(
             worker
@@ -1554,10 +1541,7 @@ fn durable_not_equal_null_query_read_refreshes_present_optional_values_after_res
         schema,
     )
     .unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -1674,6 +1658,7 @@ fn durable_created_by_not_equal_query_refreshes_after_restart() {
         .apply_bundle(&bob.export_table_history("notes").unwrap())
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -1682,13 +1667,11 @@ fn durable_created_by_not_equal_query_refreshes_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &alice
-                    .export_query_where_ne("notes", "$createdBy", json!("alice"))
-                    .unwrap(),
-            )
+        let bundle = alice
+            .export_query_where_ne("notes", "$createdBy", json!("alice"))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(
             worker.observed_query_reads().unwrap()[0].field,
             "$createdBy"
@@ -1717,10 +1700,7 @@ fn durable_created_by_not_equal_query_refreshes_after_restart() {
         schema,
     )
     .unwrap();
-    for refresh in alice
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in alice.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -2189,6 +2169,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -2197,13 +2178,11 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(
             worker
                 .query(support::eq_query("tasks", "done", json!(false)))
@@ -2237,11 +2216,7 @@ fn durable_query_read_refresh_repairs_policy_dependency_change_after_restart() {
         schema,
     )
     .unwrap();
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -2507,11 +2482,40 @@ fn query_predicate_reads_survive_bundle_serialization() {
     let bundle = alice
         .export_query_where_contains("notes", "body", "predicate")
         .unwrap();
-    let encoded = serde_json::to_string(&bundle).unwrap();
-    let decoded: mini_jazz_sqlite::sync::Bundle = serde_json::from_str(&encoded).unwrap();
+    let encoded = mini_jazz_sqlite::sync::encode_bundle(&bundle).unwrap();
+    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
 
     assert_eq!(decoded.query_reads, bundle.query_reads);
     assert_eq!(decoded.query_reads[0].op, "contains");
+}
+
+#[test]
+fn native_query_read_records_roundtrip_equality_operator() {
+    let schema = SchemaDef::new().table("tasks", |table| {
+        table.text("title");
+        table.bool("done");
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Native bundle")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let bundle = alice
+        .export_query_where_eq("tasks", "done", json!(false))
+        .unwrap();
+    let encoded = mini_jazz_sqlite::sync::encode_bundle(&bundle).unwrap();
+    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+
+    assert_eq!(decoded.query_reads, bundle.query_reads);
+    assert_eq!(decoded.query_reads[0].op, "eq");
 }
 
 #[test]

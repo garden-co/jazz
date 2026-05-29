@@ -6,6 +6,15 @@ use std::collections::BTreeMap;
 
 pub const BUNDLE_PROTOCOL_VERSION: i64 = 1;
 
+pub fn encode_bundle(bundle: &Bundle) -> Result<Vec<u8>> {
+    serde_json::to_vec(bundle).map_err(|err| crate::Error::new(format!("encode bundle: {err}")))
+}
+
+pub fn decode_bundle(encoded: &[u8]) -> Result<Bundle> {
+    serde_json::from_slice(encoded)
+        .map_err(|err| crate::Error::new(format!("decode bundle: {err}")))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bundle {
     #[serde(default = "default_bundle_protocol_version")]
@@ -90,7 +99,7 @@ fn legacy_policy_fingerprint() -> String {
     "legacy".to_owned()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BranchRecord {
     pub branch_id: String,
     pub base_global_epoch: Option<i64>,
@@ -99,7 +108,7 @@ pub struct BranchRecord {
     pub source_version: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TxRecord {
     pub tx_id: String,
     pub node_id: String,
@@ -116,7 +125,7 @@ pub struct TxRecord {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadRecord {
     pub tx_id: String,
     pub table: String,
@@ -159,7 +168,7 @@ fn default_query_predicate_op() -> String {
     "eq".to_owned()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryRecord {
     pub table: String,
     pub row_id: String,

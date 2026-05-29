@@ -1,8 +1,52 @@
 use super::*;
 
 #[test]
+fn direct_branch_query_matches_checkout_without_changing_current_branch() {
+    let schema = support::tasks_schema();
+    let mut alice =
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
+
+    let base_tx = alice
+        .insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("main title")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&base_tx, 1).unwrap();
+    alice.create_branch("draft", Some(1)).unwrap();
+    alice.checkout_branch("draft").unwrap();
+    alice
+        .update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("title".to_owned(), json!("draft title"))]),
+        )
+        .unwrap();
+    alice.checkout_branch("main").unwrap();
+
+    let query = BuiltQuery {
+        table: "tasks".to_owned(),
+        conditions: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+
+    let draft_rows = alice.query_branch("draft", query).unwrap();
+    assert_eq!(draft_rows[0].values["title"], json!("draft title"));
+
+    let current_rows = alice.read_rows("tasks").unwrap();
+    assert_eq!(current_rows[0].values["title"], json!("main title"));
+}
+
+#[test]
 fn branch_sources_reject_direct_and_indirect_cycles() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_branch("left", None).unwrap();
     assert!(alice.add_branch_source("left", "left").is_err());
@@ -23,8 +67,8 @@ fn branch_sources_reject_direct_and_indirect_cycles() {
 
 #[test]
 fn synced_branch_source_cycle_fails_without_partial_catalogue_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
     let branches_before = peer.branches().unwrap();
 
     alice.create_branch("left", None).unwrap();
@@ -64,7 +108,8 @@ fn branch_local_write_is_invisible_on_main() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -84,8 +129,8 @@ fn branch_local_write_is_invisible_on_main() {
 
 #[test]
 fn branch_absence_refresh_uses_branch_context_not_latest_main() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -171,6 +216,7 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
         .unwrap();
     upstream.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -191,6 +237,7 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
             .unwrap();
         absent_bundle.history.clear();
         absent_bundle.query_reads[0].op = "absent".to_owned();
+        query_reads = absent_bundle.query_reads.clone();
         worker.apply_bundle(&absent_bundle).unwrap();
         let non_absent_reads = worker
             .observed_query_reads()
@@ -217,15 +264,14 @@ fn durable_absent_observed_refresh_carries_branch_source_changes_after_reconnect
     upstream.remove_branch_source("merge", "left").unwrap();
     let mut reopened =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = reopened.observed_query_reads().unwrap();
-    assert!(observed.iter().any(|read| {
+    assert!(query_reads.iter().any(|read| {
         read.branch_id == "merge"
             && read.table == "tasks"
             && read.field == "id"
             && read.op == "absent"
             && read.value == json!("task-missing")
     }));
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
     reopened.checkout_branch("merge").unwrap();
@@ -354,6 +400,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
     upstream.create_branch("draft", Some(1)).unwrap();
     upstream.checkout_branch("draft").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -362,13 +409,11 @@ fn durable_branch_query_read_refreshes_after_restart() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("draft").unwrap();
         assert_eq!(
             worker
@@ -398,11 +443,7 @@ fn durable_branch_query_read_refreshes_after_restart() {
     )
     .unwrap();
     reopened.checkout_branch("draft").unwrap();
-    let desired_queries = reopened.observed_query_reads().unwrap();
-    for refresh in upstream
-        .export_query_read_refreshes(&desired_queries)
-        .unwrap()
-    {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -419,7 +460,8 @@ fn branch_scoped_export_excludes_unrelated_branch_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -466,7 +508,8 @@ fn branch_scoped_built_query_export_excludes_unrelated_branch_repair_rows() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("draft", None).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -521,7 +564,8 @@ fn branch_scoped_built_query_export_excludes_unrelated_versions_of_same_row() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice
         .insert_row(
@@ -671,7 +715,7 @@ fn branch_reads_main_base_with_sparse_overlay() {
 
 #[test]
 fn fixture_open_todos_reads_pinned_base_with_sparse_overlay() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let project_tx = alice.create_project("project-1", "Base project").unwrap();
     alice.accept_transaction_at_global(&project_tx, 1).unwrap();
@@ -1173,7 +1217,8 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1198,15 +1243,15 @@ fn branch_ref_policy_uses_branch_local_parent_visibility() {
     alice.checkout_branch("draft").unwrap();
     assert_eq!(alice.read_rows("todos").unwrap().len(), 1);
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice.read_rows("todos").unwrap().is_empty());
 }
@@ -1224,7 +1269,8 @@ fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1248,15 +1294,15 @@ fn branch_table_export_uses_effective_branch_policy_for_base_rows() {
     alice.create_branch("draft", Some(2)).unwrap();
     alice.checkout_branch("draft").unwrap();
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice.read_rows("todos").unwrap().is_empty());
 
@@ -1280,7 +1326,8 @@ fn branch_equality_query_uses_effective_branch_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let project_tx = alice
         .insert_row(
@@ -1304,15 +1351,15 @@ fn branch_equality_query_uses_effective_branch_policy() {
     alice.create_branch("draft", Some(2)).unwrap();
     alice.checkout_branch("draft").unwrap();
 
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-1",
-            BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-1",
+                BTreeMap::from([("title".to_owned(), json!("Bob-owned branch project"))]),
+            )
+            .unwrap();
+    });
 
     assert!(alice
         .query(support::eq_query("todos", "title", json!("Find me")))
@@ -1333,7 +1380,8 @@ fn branch_ordered_query_applies_effective_policy_before_pagination() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     let visible_project_tx = alice
         .insert_row(
@@ -1385,15 +1433,15 @@ fn branch_ordered_query_applies_effective_policy_before_pagination() {
 
     alice.create_branch("draft", Some(4)).unwrap();
     alice.checkout_branch("draft").unwrap();
-    alice.session_user_for_test("bob");
-    alice
-        .update_row(
-            "projects",
-            "project-hidden",
-            BTreeMap::from([("title".to_owned(), json!("Bob branch project"))]),
-        )
-        .unwrap();
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice
+            .update_row(
+                "projects",
+                "project-hidden",
+                BTreeMap::from([("title".to_owned(), json!("Bob branch project"))]),
+            )
+            .unwrap();
+    });
 
     let rows = alice
         .query(
@@ -1489,7 +1537,8 @@ fn branch_multi_base_conflicts_expose_multiple_candidates() {
         table.bool("done");
     });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();
@@ -2470,6 +2519,7 @@ fn durable_branch_source_removal_survives_reopen() {
         .unwrap();
     alice.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -2478,13 +2528,11 @@ fn durable_branch_source_removal_survives_reopen() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &alice
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = alice
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("merge").unwrap();
         assert_eq!(
             worker
@@ -2499,10 +2547,7 @@ fn durable_branch_source_removal_survives_reopen() {
     let mut reopened =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
     reopened.checkout_branch("merge").unwrap();
-    for refresh in alice
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap()
-    {
+    for refresh in alice.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
 
@@ -2882,6 +2927,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
         .unwrap();
     upstream.checkout_branch("merge").unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -2890,13 +2936,11 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         worker.checkout_branch("merge").unwrap();
         assert!(worker
             .query(support::eq_query("tasks", "done", json!(false)))
@@ -2924,8 +2968,7 @@ fn durable_merge_branch_refresh_preserves_pinned_source_branch_bases_after_resta
         schema.clone(),
     )
     .unwrap();
-    let observed = reopened.observed_query_reads().unwrap();
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         reopened.apply_bundle(&refresh).unwrap();
     }
     reopened.checkout_branch("merge").unwrap();
@@ -3052,7 +3095,8 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
             table.read_if_ref_readable("project");
         });
     let mut alice =
-        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+        Runtime::open_trusted_with_session_user(Storage::Memory, "alice-node", "alice", schema)
+            .unwrap();
 
     alice.create_branch("left", None).unwrap();
     alice.checkout_branch("left").unwrap();
@@ -3075,29 +3119,28 @@ fn branch_conflict_candidates_respect_effective_row_policy() {
         )
         .unwrap();
 
-    alice.session_user_for_test("bob");
-    alice.create_branch("right", None).unwrap();
-    alice.checkout_branch("right").unwrap();
-    alice
-        .insert_row(
-            "projects",
-            "project-right",
-            BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
-        )
-        .unwrap();
-    alice
-        .insert_row(
-            "tasks",
-            "task-1",
-            BTreeMap::from([
-                ("title".to_owned(), json!("Hidden candidate")),
-                ("done".to_owned(), json!(false)),
-                ("project".to_owned(), json!("project-right")),
-            ]),
-        )
-        .unwrap();
-
-    alice.session_user_for_test("alice");
+    alice.run_as_user("bob", |alice| {
+        alice.create_branch("right", None).unwrap();
+        alice.checkout_branch("right").unwrap();
+        alice
+            .insert_row(
+                "projects",
+                "project-right",
+                BTreeMap::from([("title".to_owned(), json!("Bob project"))]),
+            )
+            .unwrap();
+        alice
+            .insert_row(
+                "tasks",
+                "task-1",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Hidden candidate")),
+                    ("done".to_owned(), json!(false)),
+                    ("project".to_owned(), json!("project-right")),
+                ]),
+            )
+            .unwrap();
+    });
     alice
         .create_branch_from_branches("merge", &["left", "right"])
         .unwrap();

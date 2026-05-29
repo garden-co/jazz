@@ -68,13 +68,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         .create_todo("todo-1", "Initially open", false, "project-1")
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness.durable("worker.sqlite", "worker", "alice").unwrap();
-        support::apply(
-            upstream.export_query_scope_open_todos().unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream.export_query_scope_open_todos().unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(worker.open_todos().unwrap().len(), 1);
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
@@ -95,11 +94,12 @@ fn durable_query_reads_drive_reconnect_refresh_after_restart() {
         .durable("worker.sqlite", "worker-reopened", "alice")
         .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
+    assert!(reopened.observed_query_reads().unwrap().is_empty());
 
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert!(reopened.open_todos().unwrap().is_empty());
-    assert_eq!(reopened.observed_query_reads().unwrap().len(), 1);
+    assert_eq!(reopened.observed_query_reads().unwrap(), query_reads);
 }
 
 #[test]
@@ -132,22 +132,21 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema("ordered-worker.sqlite", "worker", "alice", schema.clone())
             .unwrap();
-        support::apply(
-            upstream
-                .export_query(support::top_created_query(
-                    "notes",
-                    "pinned",
-                    json!(true),
-                    2,
-                ))
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .query(support::top_created_query(
@@ -179,7 +178,7 @@ fn durable_ordered_query_read_refreshes_page_boundary_after_restart() {
     let mut reopened = harness
         .durable_with_schema("ordered-worker.sqlite", "worker-reopened", "alice", schema)
         .unwrap();
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert_eq!(
         reopened
@@ -231,6 +230,7 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema(
@@ -240,19 +240,17 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
                 schema.clone(),
             )
             .unwrap();
-        support::apply(
-            upstream
-                .export_query_where_eq_top_field_desc(
-                    "documents",
-                    "owner_id",
-                    json!("alice"),
-                    "updated_at",
-                    2,
-                )
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                2,
+            )
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .read_rows_where_eq_top_field_desc(
@@ -290,7 +288,7 @@ fn durable_user_column_ordered_query_read_refreshes_page_boundary_after_restart(
             schema,
         )
         .unwrap();
-    support::refresh_observed_queries(&upstream, &mut reopened).unwrap();
+    support::refresh_query_reads(&upstream, &mut reopened, &query_reads).unwrap();
 
     assert_eq!(
         reopened
@@ -393,6 +391,7 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
             .unwrap();
     }
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = harness
             .durable_with_schema(
@@ -402,19 +401,17 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
                 schema.clone(),
             )
             .unwrap();
-        support::apply(
-            upstream
-                .export_query_where_eq_top_field_desc(
-                    "documents",
-                    "owner_id",
-                    json!("alice"),
-                    "updated_at",
-                    2,
-                )
-                .unwrap(),
-            &mut worker,
-        )
-        .unwrap();
+        let bundle = upstream
+            .export_query_where_eq_top_field_desc(
+                "documents",
+                "owner_id",
+                json!("alice"),
+                "updated_at",
+                2,
+            )
+            .unwrap();
+        query_reads = bundle.query_reads.clone();
+        support::apply(bundle, &mut worker).unwrap();
         assert_eq!(
             worker
                 .read_rows_where_eq_top_field_desc(
@@ -442,9 +439,7 @@ fn ordered_page_refresh_repairs_previously_observed_deleted_rows() {
             schema,
         )
         .unwrap();
-    let refresh_bundles = upstream
-        .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
-        .unwrap();
+    let refresh_bundles = upstream.export_query_read_refreshes(&query_reads).unwrap();
     let exported_doc_ids = refresh_bundles[0]
         .history
         .iter()
@@ -521,7 +516,7 @@ fn durable_worker_rehydrates_fresh_memory_tab_after_restart() {
 
 #[test]
 fn rejected_transaction_remains_history_but_is_hidden_from_current() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -544,8 +539,8 @@ fn rejected_transaction_remains_history_but_is_hidden_from_current() {
 
 #[test]
 fn rejected_fate_update_repairs_peer_current_projection() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -568,7 +563,7 @@ fn durable_worker_reconciles_rejected_fate_after_restart() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
 
-    let mut tab = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    let mut tab = support::open_todo_app(Storage::Memory, "alice-tab", "alice").unwrap();
     tab.create_project("project-1", "Spec work").unwrap();
     let tx = tab
         .create_todo("todo-1", "Optimistic before restart", false, "project-1")
@@ -576,7 +571,8 @@ fn durable_worker_reconciles_rejected_fate_after_restart() {
 
     {
         let mut worker =
-            Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+            support::open_todo_app(Storage::File(worker_path.clone()), "alice-worker", "alice")
+                .unwrap();
         worker
             .apply_bundle(&tab.export_table_history("todos").unwrap())
             .unwrap();
@@ -586,7 +582,8 @@ fn durable_worker_reconciles_rejected_fate_after_restart() {
     tab.reject_transaction(&tx, "policy_denied").unwrap();
 
     let mut reopened =
-        Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
+        support::open_todo_app(Storage::File(worker_path.clone()), "alice-worker", "alice")
+            .unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
     reopened
         .apply_bundle(&tab.export_table_history("todos").unwrap())
@@ -629,8 +626,8 @@ fn rejecting_generic_transaction_repairs_schema_driven_projection() {
 
 #[test]
 fn query_scope_rejection_refresh_removes_previously_delivered_row() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -654,8 +651,8 @@ fn query_scope_rejection_refresh_removes_previously_delivered_row() {
 
 #[test]
 fn missing_optional_ref_include_round_trips_as_null_then_updates_when_dependency_arrives() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice
         .create_todo("todo-1", "Project may arrive later", false, "project-late")
@@ -699,7 +696,7 @@ fn missing_optional_ref_include_round_trips_as_null_then_updates_when_dependency
 
 #[test]
 fn required_ref_include_filters_parent_until_dependency_arrives() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice
         .create_todo("todo-1", "Project required", false, "project-late")
@@ -721,8 +718,8 @@ fn required_ref_include_filters_parent_until_dependency_arrives() {
 
 #[test]
 fn required_ref_include_survives_query_scoped_sync_and_later_dependency_arrival() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice
         .create_todo("todo-1", "Project required", false, "project-late")
@@ -749,8 +746,8 @@ fn required_ref_include_survives_query_scoped_sync_and_later_dependency_arrival(
 
 #[test]
 fn table_scope_sync_exports_delete_so_peer_removes_row() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -769,8 +766,8 @@ fn table_scope_sync_exports_delete_so_peer_removes_row() {
 
 #[test]
 fn same_bundle_twice_is_idempotent() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-node", "bob").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -787,8 +784,8 @@ fn same_bundle_twice_is_idempotent() {
 
 #[test]
 fn bundle_with_unknown_table_fails_closed_without_partial_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -811,8 +808,8 @@ fn bundle_with_unknown_table_fails_closed_without_partial_apply() {
 
 #[test]
 fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -832,8 +829,8 @@ fn bundle_with_unknown_query_scope_fails_closed_without_partial_apply() {
 
 #[test]
 fn absent_query_with_unknown_field_fails_closed_without_partial_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice
         .create_todo(
@@ -896,7 +893,7 @@ fn recursive_query_with_unknown_parent_field_fails_closed_without_partial_apply(
 fn durable_peer_remembers_query_scope_after_restart() {
     let dir = tempdir().unwrap();
     let peer_path = dir.path().join("peer.sqlite");
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -906,21 +903,22 @@ fn durable_peer_remembers_query_scope_after_restart() {
 
     {
         let mut peer =
-            Runtime::open(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
+            support::open_todo_app(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
         peer.apply_bundle(&bundle).unwrap();
         peer.apply_bundle(&bundle).unwrap();
         assert_eq!(peer.observed_query_reads().unwrap(), bundle.query_reads);
     }
 
-    let reopened = Runtime::open(Storage::File(peer_path), "peer-node", "alice").unwrap();
-    assert_eq!(reopened.observed_query_reads().unwrap(), bundle.query_reads);
+    let reopened = support::open_todo_app(Storage::File(peer_path), "peer-node", "alice").unwrap();
+    assert!(reopened.observed_query_reads().unwrap().is_empty());
+    assert_eq!(reopened.open_todos().unwrap().len(), 1);
 }
 
 #[test]
 fn forgotten_query_read_does_not_refresh_after_restart() {
     let dir = tempdir().unwrap();
     let peer_path = dir.path().join("forgotten-query.sqlite");
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -930,7 +928,7 @@ fn forgotten_query_read_does_not_refresh_after_restart() {
 
     {
         let mut peer =
-            Runtime::open(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
+            support::open_todo_app(Storage::File(peer_path.clone()), "peer-node", "alice").unwrap();
         peer.apply_bundle(&bundle).unwrap();
         let observed = peer.observed_query_reads().unwrap();
         assert_eq!(observed, bundle.query_reads);
@@ -939,7 +937,7 @@ fn forgotten_query_read_does_not_refresh_after_restart() {
         assert!(peer.observed_query_reads().unwrap().is_empty());
     }
 
-    let reopened = Runtime::open(Storage::File(peer_path), "peer-node", "alice").unwrap();
+    let reopened = support::open_todo_app(Storage::File(peer_path), "peer-node", "alice").unwrap();
     assert!(reopened.observed_query_reads().unwrap().is_empty());
     assert!(alice
         .export_query_read_refreshes(&reopened.observed_query_reads().unwrap())
@@ -949,7 +947,7 @@ fn forgotten_query_read_does_not_refresh_after_restart() {
 
 #[test]
 fn exported_bundles_carry_protocol_version() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -978,6 +976,26 @@ fn older_untagged_bundles_decode_as_protocol_version_one() {
     assert_eq!(bundle.protocol_version, 1);
     assert_eq!(bundle.schema_fingerprint, "legacy");
     assert_eq!(bundle.policy_fingerprint, "legacy");
+}
+
+#[test]
+fn native_bundles_roundtrip_protocol_metadata() {
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+
+    alice.create_project("project-1", "Spec work").unwrap();
+    alice
+        .create_todo("todo-1", "Native bundle metadata", false, "project-1")
+        .unwrap();
+
+    let exported = alice.export_query_scope_open_todos().unwrap();
+    let encoded = mini_jazz_sqlite::sync::encode_bundle(&exported).unwrap();
+    let decoded = mini_jazz_sqlite::sync::decode_bundle(&encoded).unwrap();
+
+    assert_eq!(decoded.protocol_version, 1);
+    assert_eq!(decoded.schema_fingerprint, exported.schema_fingerprint);
+    assert_eq!(decoded.policy_fingerprint, exported.policy_fingerprint);
+    assert_eq!(decoded.history, exported.history);
+    assert_eq!(decoded.query_reads, exported.query_reads);
 }
 
 #[test]
@@ -1050,8 +1068,8 @@ fn permission_fingerprint_mismatch_fails_closed_without_partial_apply() {
 
 #[test]
 fn future_bundle_protocol_versions_fail_closed_without_partial_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1071,8 +1089,8 @@ fn future_bundle_protocol_versions_fail_closed_without_partial_apply() {
 
 #[test]
 fn replicas_may_use_different_physical_ids_for_same_public_ids() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-node", "bob").unwrap();
 
     bob.create_project("bob-local-project", "Bob local")
         .unwrap();
@@ -1093,8 +1111,8 @@ fn replicas_may_use_different_physical_ids_for_same_public_ids() {
 
 #[test]
 fn replicas_may_use_different_physical_tx_nums_for_same_public_tx_id() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-node", "bob").unwrap();
 
     bob.create_project("bob-local-project", "Bob local")
         .unwrap();
@@ -1174,8 +1192,8 @@ fn same_user_on_two_nodes_preserves_authorship_and_distinct_node_epochs() {
 
 #[test]
 fn query_scope_is_not_table_replication() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-node", "bob").unwrap();
 
     alice
         .create_project("project-1", "Visible project")
@@ -1197,8 +1215,8 @@ fn query_scope_is_not_table_replication() {
 
 #[test]
 fn query_scope_excludes_rows_outside_current_result_set() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut bob = Runtime::open(Storage::Memory, "bob-node", "bob").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut bob = support::open_todo_app(Storage::Memory, "bob-node", "bob").unwrap();
 
     alice
         .create_project("project-1", "Visible project")
@@ -1227,9 +1245,44 @@ fn query_scope_excludes_rows_outside_current_result_set() {
 }
 
 #[test]
+fn query_scope_hydrates_current_for_previously_pruned_history_row() {
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
+
+    alice
+        .create_project("project-1", "Visible project")
+        .unwrap();
+    alice
+        .create_todo("todo-old", "Pruned then rehydrated", false, "project-1")
+        .unwrap();
+    alice
+        .create_todo("todo-new", "Newest row", false, "project-1")
+        .unwrap();
+
+    peer.apply_bundle(&alice.export_table_history("projects").unwrap())
+        .unwrap();
+    peer.apply_bundle(&alice.export_table_history("todos").unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 2);
+
+    peer.apply_bundle(
+        &alice
+            .export_query_where_eq_top_created_at_desc("todos", "done", json!(false), 1)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 1);
+    assert!(peer.physical_row_num_for("todo-old").is_ok());
+
+    peer.apply_bundle(&alice.export_query_scope_open_todos().unwrap())
+        .unwrap();
+    assert_eq!(peer.open_todos().unwrap().len(), 2);
+}
+
+#[test]
 fn top_created_at_query_scope_refresh_replaces_displaced_page_boundary_row() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1373,8 +1426,8 @@ fn top_created_at_query_scope_refresh_repairs_system_predicates() {
 
 #[test]
 fn accepted_global_fate_update_reaches_peer_transaction_info() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1395,8 +1448,8 @@ fn accepted_global_fate_update_reaches_peer_transaction_info() {
 
 #[test]
 fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1420,8 +1473,8 @@ fn stale_pending_bundle_does_not_downgrade_accepted_fate() {
 
 #[test]
 fn rejected_fate_arriving_before_history_keeps_later_rows_invisible() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1454,8 +1507,8 @@ fn rejected_fate_arriving_before_history_keeps_later_rows_invisible() {
 
 #[test]
 fn accepted_fate_arriving_before_history_materializes_later_rows() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1487,10 +1540,11 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
 
-    let mut alice = Runtime::open(Storage::Memory, "alice-tab", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-tab", "alice").unwrap();
     let mut worker =
-        Runtime::open(Storage::File(worker_path.clone()), "alice-worker", "alice").unwrap();
-    let mut stale_phone = Runtime::open(Storage::Memory, "alice-phone", "alice").unwrap();
+        support::open_todo_app(Storage::File(worker_path.clone()), "alice-worker", "alice")
+            .unwrap();
+    let mut stale_phone = support::open_todo_app(Storage::Memory, "alice-phone", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1512,7 +1566,8 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
     assert!(worker.open_todos().unwrap().is_empty());
 
     drop(worker);
-    let mut worker = Runtime::open(Storage::File(worker_path), "alice-worker", "alice").unwrap();
+    let mut worker =
+        support::open_todo_app(Storage::File(worker_path), "alice-worker", "alice").unwrap();
     assert_eq!(
         worker.transaction_info(&tx).unwrap().rejection_detail,
         Some(json!({"reason": "authority"}))
@@ -1536,8 +1591,8 @@ fn stale_pending_bundle_does_not_resurrect_rejected_fate_after_reconnect() {
 
 #[test]
 fn top_field_query_with_ref_include_syncs_page_and_dependency() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1567,9 +1622,10 @@ fn top_field_query_with_ref_include_syncs_page_and_dependency() {
 
 #[test]
 fn batched_top_field_ref_include_matches_individual_exports() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
-    let mut batch_peer = Runtime::open(Storage::Memory, "batch-peer", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut individual_peer =
+        support::open_todo_app(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batch_peer = support::open_todo_app(Storage::Memory, "batch-peer", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1626,9 +1682,10 @@ fn batched_top_field_ref_include_matches_individual_exports() {
 
 #[test]
 fn batched_top_field_query_matches_individual_exports_without_include() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut individual_peer = Runtime::open(Storage::Memory, "individual-peer", "alice").unwrap();
-    let mut batch_peer = Runtime::open(Storage::Memory, "batch-peer", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut individual_peer =
+        support::open_todo_app(Storage::Memory, "individual-peer", "alice").unwrap();
+    let mut batch_peer = support::open_todo_app(Storage::Memory, "batch-peer", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1670,8 +1727,8 @@ fn batched_top_field_query_matches_individual_exports_without_include() {
 
 #[test]
 fn top_field_query_read_refresh_batches_same_shape_queries() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1733,8 +1790,8 @@ fn top_field_query_read_refresh_batches_same_shape_queries() {
 
 #[test]
 fn top_created_at_query_read_refresh_batches_same_shape_queries() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1782,8 +1839,8 @@ fn top_created_at_query_read_refresh_batches_same_shape_queries() {
 
 #[test]
 fn predicate_query_read_refresh_batches_same_shape_queries() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1823,8 +1880,8 @@ fn predicate_query_read_refresh_batches_same_shape_queries() {
 
 #[test]
 fn non_eq_predicate_query_read_refreshes_batch_by_operator() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     for (id, title, done) in [
@@ -1900,8 +1957,8 @@ fn non_eq_predicate_query_read_refreshes_batch_by_operator() {
 
 #[test]
 fn top_created_at_query_can_filter_by_created_by_magic_field() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -1924,8 +1981,8 @@ fn top_created_at_query_can_filter_by_created_by_magic_field() {
 
 #[test]
 fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice
         .create_todo(
@@ -1963,8 +2020,8 @@ fn missing_optional_ref_include_observed_refresh_delivers_later_dependency() {
 
 #[test]
 fn optional_ref_include_observed_refresh_removes_deleted_dependency_again() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "alice-peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "alice-peer-node", "alice").unwrap();
 
     alice
         .create_todo(
@@ -2435,9 +2492,11 @@ fn older_global_mergeable_update_cannot_override_newer_exclusive_current() {
 
 #[test]
 fn accepted_bundle_does_not_resurrect_rejected_fate() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut rejected_peer = Runtime::open(Storage::Memory, "rejected-peer", "alice").unwrap();
-    let mut accepted_peer = Runtime::open(Storage::Memory, "accepted-peer", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut rejected_peer =
+        support::open_todo_app(Storage::Memory, "rejected-peer", "alice").unwrap();
+    let mut accepted_peer =
+        support::open_todo_app(Storage::Memory, "accepted-peer", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -2479,7 +2538,7 @@ fn accepted_bundle_does_not_resurrect_rejected_fate() {
 
 #[test]
 fn direct_accept_after_reject_preserves_rejected_outcome_with_global_metadata() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -2498,7 +2557,7 @@ fn direct_accept_after_reject_preserves_rejected_outcome_with_global_metadata() 
 
 #[test]
 fn direct_reject_after_accept_removes_current_but_preserves_global_metadata() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice

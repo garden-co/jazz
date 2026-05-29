@@ -152,6 +152,14 @@ the first subscription delivery at that tier.
 
 Every subscription update is tier-gated, not only the first result.
 
+Prototype API note: the current Rust spike exposes explicit local/edge/global
+read tiers for main-branch current table reads, built queries, table
+subscriptions, and built-query subscriptions. This is the first reusable
+lowering for #947-style semantics: local reads include accepted local
+optimistic state, edge reads require an edge receipt or global epoch, and
+global reads require a global epoch. Branch snapshot reads should reuse the same
+tier predicate rather than adding bespoke SQL.
+
 Subscription latency measurements should include local rerun/diff or
 poll/diff work. The product-observed update path ends when the subscription can
 publish semantic diffs, not when incoming history has merely been applied.

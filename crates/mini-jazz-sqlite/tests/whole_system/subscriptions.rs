@@ -119,6 +119,169 @@ fn built_query_reads_newest_matching_rows_from_jazz_tools_json_shape() {
     assert_eq!(alice.one(query).unwrap().unwrap().id, "note-new");
 }
 
+fn open_tasks_runtime(node_id: &str) -> Runtime {
+    Runtime::open_with_schema(Storage::Memory, node_id, "alice", support::tasks_schema()).unwrap()
+}
+
+fn insert_task(runtime: &mut Runtime, id: &str, title: &str) -> String {
+    runtime
+        .insert_row(
+            "tasks",
+            id,
+            BTreeMap::from([
+                ("title".to_owned(), json!(title)),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap()
+}
+
+fn update_task_title(runtime: &mut Runtime, id: &str, title: &str) -> String {
+    runtime
+        .update_row(
+            "tasks",
+            id,
+            BTreeMap::from([("title".to_owned(), json!(title))]),
+        )
+        .unwrap()
+}
+
+#[test]
+fn tiered_subscription_waits_for_required_receipt() {
+    let mut edge = open_tasks_runtime("edge-node");
+    let edge_tx = insert_task(&mut edge, "task-edge", "Edge settled");
+
+    assert_eq!(edge.read_rows("tasks").unwrap().len(), 1);
+    assert!(edge
+        .read_rows_at_tier("tasks", ReadTier::Edge)
+        .unwrap()
+        .is_empty());
+
+    let mut edge_subscription = edge
+        .subscribe_rows_at_tier("tasks", ReadTier::Edge)
+        .unwrap();
+    assert!(edge_subscription.initial_rows().is_empty());
+    assert!(edge
+        .poll_subscription(&mut edge_subscription)
+        .unwrap()
+        .is_empty());
+
+    edge.accept_transaction_at_edge(&edge_tx).unwrap();
+    let diffs = edge.poll_subscription(&mut edge_subscription).unwrap();
+
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "task-edge"));
+    assert_eq!(
+        edge.transaction_info(&edge_tx).unwrap().receipt_tiers,
+        vec!["edge".to_owned()]
+    );
+
+    let mut global = open_tasks_runtime("global-node");
+    let global_tx = insert_task(&mut global, "task-global", "Global settled");
+    let mut global_subscription = global
+        .subscribe_rows_at_tier("tasks", ReadTier::Global)
+        .unwrap();
+    assert!(global_subscription.initial_rows().is_empty());
+
+    global.accept_transaction_at_edge(&global_tx).unwrap();
+    assert!(global
+        .poll_subscription(&mut global_subscription)
+        .unwrap()
+        .is_empty());
+    assert!(global
+        .read_rows_at_tier("tasks", ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    global.accept_transaction_at_global(&global_tx, 1).unwrap();
+    let diffs = global.poll_subscription(&mut global_subscription).unwrap();
+
+    assert!(matches!(&diffs[..], [RowDiff::Added(row)] if row.id == "task-global"));
+}
+
+#[test]
+fn global_tier_subscription_updates_are_gated_after_initial_delivery() {
+    let mut alice = open_tasks_runtime("alice-node");
+
+    let insert_tx = insert_task(&mut alice, "task-1", "Base");
+    alice.accept_transaction_at_global(&insert_tx, 1).unwrap();
+    let mut subscription = alice
+        .subscribe_rows_at_tier("tasks", ReadTier::Global)
+        .unwrap();
+    assert_eq!(subscription.initial_rows().len(), 1);
+    assert_eq!(
+        subscription.initial_rows()[0].values["title"],
+        json!("Base")
+    );
+
+    let update_tx = update_task_title(&mut alice, "task-1", "Pending global");
+    assert_eq!(
+        alice.read_rows("tasks").unwrap()[0].values["title"],
+        json!("Pending global")
+    );
+    assert_eq!(
+        alice.read_rows_at_tier("tasks", ReadTier::Global).unwrap()[0].values["title"],
+        json!("Base")
+    );
+    assert!(alice
+        .poll_subscription(&mut subscription)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&update_tx).unwrap();
+    assert!(alice
+        .poll_subscription(&mut subscription)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_global(&update_tx, 2).unwrap();
+    let diffs = alice.poll_subscription(&mut subscription).unwrap();
+
+    assert!(matches!(
+        &diffs[..],
+        [RowDiff::Updated { before, after }]
+            if before.values["title"] == json!("Base")
+                && after.values["title"] == json!("Pending global")
+    ));
+}
+
+#[test]
+fn tiered_subscription_preserves_branch_inherited_rows() {
+    let mut alice = open_tasks_runtime("alice-node");
+
+    let main_tx = insert_task(&mut alice, "task-main", "Main");
+    alice.accept_transaction_at_global(&main_tx, 1).unwrap();
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let mut inherited_subscription = alice
+        .subscribe_rows_at_tier("tasks", ReadTier::Global)
+        .unwrap();
+    assert_eq!(inherited_subscription.initial_rows().len(), 1);
+    assert_eq!(inherited_subscription.initial_rows()[0].id, "task-main");
+    assert!(alice
+        .poll_subscription(&mut inherited_subscription)
+        .unwrap()
+        .is_empty());
+
+    alice.checkout_branch("main").unwrap();
+    let base_tx = insert_task(&mut alice, "task-base", "Pinned base");
+    alice.accept_transaction_at_global(&base_tx, 2).unwrap();
+    alice.create_branch("pinned", Some(2)).unwrap();
+    alice.checkout_branch("pinned").unwrap();
+
+    let pinned_subscription = alice
+        .subscribe_rows_at_tier("tasks", ReadTier::Global)
+        .unwrap();
+    assert_eq!(
+        pinned_subscription
+            .initial_rows()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task-base", "task-main"]
+    );
+}
+
 #[test]
 fn built_query_lowers_predicates_ordering_and_window_to_sqlite() {
     let schema = support::notes_schema();
@@ -711,7 +874,7 @@ fn observed_id_not_equal_subscription_removes_deleted_remote_row() {
 }
 
 #[test]
-fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
+fn restarted_subscription_uses_replayed_query_read_and_emits_refresh_diff() {
     let dir = tempdir().unwrap();
     let worker_path = dir.path().join("worker.sqlite");
     let schema = SchemaDef::new().table("tasks", |table| {
@@ -731,6 +894,7 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
             ]),
         )
         .unwrap();
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -739,13 +903,11 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query_where_eq("tasks", "done", json!(false))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query_where_eq("tasks", "done", json!(false))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
         assert_eq!(worker.observed_query_reads().unwrap().len(), 1);
     }
 
@@ -759,11 +921,11 @@ fn restarted_subscription_uses_persisted_query_read_and_emits_refresh_diff() {
 
     let mut worker =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = worker.observed_query_reads().unwrap();
-    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
+    assert!(worker.observed_query_reads().unwrap().is_empty());
+    let mut subscription = worker.subscribe_observed_query(&query_reads[0]).unwrap();
     assert_eq!(subscription.initial_rows().len(), 1);
 
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         worker.apply_bundle(&refresh).unwrap();
     }
     let diffs = worker.poll_subscription(&mut subscription).unwrap();
@@ -800,6 +962,7 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
         )
         .unwrap();
 
+    let query_reads: Vec<QueryReadRecord>;
     {
         let mut worker = Runtime::open_with_schema(
             Storage::File(worker_path.clone()),
@@ -808,18 +971,16 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
             schema.clone(),
         )
         .unwrap();
-        worker
-            .apply_bundle(
-                &upstream
-                    .export_query(support::top_created_query(
-                        "notes",
-                        "pinned",
-                        json!(true),
-                        2,
-                    ))
-                    .unwrap(),
-            )
+        let bundle = upstream
+            .export_query(support::top_created_query(
+                "notes",
+                "pinned",
+                json!(true),
+                2,
+            ))
             .unwrap();
+        query_reads = bundle.query_reads.clone();
+        worker.apply_bundle(&bundle).unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -836,9 +997,9 @@ fn restarted_ordered_page_subscription_emits_boundary_refresh_diff() {
 
     let mut worker =
         Runtime::open_with_schema(Storage::File(worker_path), "worker", "alice", schema).unwrap();
-    let observed = worker.observed_query_reads().unwrap();
-    let mut subscription = worker.subscribe_observed_query(&observed[0]).unwrap();
-    for refresh in upstream.export_query_read_refreshes(&observed).unwrap() {
+    assert!(worker.observed_query_reads().unwrap().is_empty());
+    let mut subscription = worker.subscribe_observed_query(&query_reads[0]).unwrap();
+    for refresh in upstream.export_query_read_refreshes(&query_reads).unwrap() {
         worker.apply_bundle(&refresh).unwrap();
     }
 

@@ -1,6 +1,8 @@
 use crate::query_api::BuiltQuery;
 use crate::sync::QueryPredicateRecord;
-use crate::types::{RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta};
+use crate::types::{
+    ReadTier, RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta,
+};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -17,69 +19,22 @@ pub struct RejectionSubscription {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RowsSubscriptionQuery {
-    Table { table: String },
+    Table { table: String, tier: ReadTier },
     Predicate(QueryPredicateRecord),
-    Built(BuiltQuery),
+    Built { query: BuiltQuery, tier: ReadTier },
 }
 
 impl RowsSubscription {
     pub(crate) fn new(table: &str, rows: Vec<RowView>) -> Self {
+        Self::new_at_tier(table, ReadTier::Local, rows)
+    }
+
+    pub(crate) fn new_at_tier(table: &str, tier: ReadTier, rows: Vec<RowView>) -> Self {
         Self {
             query: RowsSubscriptionQuery::Table {
                 table: table.to_owned(),
+                tier,
             },
-            last_rows: rows,
-        }
-    }
-
-    pub(crate) fn where_eq(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table, field, "eq", value,
-            )),
-            last_rows: rows,
-        }
-    }
-
-    pub(crate) fn where_contains(
-        table: &str,
-        field: &str,
-        needle: &str,
-        rows: Vec<RowView>,
-    ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                field,
-                "contains",
-                JsonValue::String(needle.to_owned()),
-            )),
-            last_rows: rows,
-        }
-    }
-
-    pub(crate) fn where_in(
-        table: &str,
-        field: &str,
-        values: Vec<JsonValue>,
-        rows: Vec<RowView>,
-    ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                field,
-                "in",
-                JsonValue::Array(values),
-            )),
-            last_rows: rows,
-        }
-    }
-
-    pub(crate) fn where_ne(table: &str, field: &str, value: JsonValue, rows: Vec<RowView>) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table, field, "ne", value,
-            )),
             last_rows: rows,
         }
     }
@@ -101,53 +56,13 @@ impl RowsSubscription {
         }
     }
 
-    pub(crate) fn where_eq_top_created_at_desc(
-        table: &str,
-        field: &str,
-        value: JsonValue,
-        limit: usize,
-        rows: Vec<RowView>,
-    ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                field,
-                "eq_top_created_at_desc",
-                serde_json::json!({
-                    "eq": value,
-                    "limit": limit,
-                }),
-            )),
-            last_rows: rows,
-        }
-    }
-
-    pub(crate) fn where_eq_top_field_desc(
-        table: &str,
-        field: &str,
-        value: JsonValue,
-        order_field: &str,
-        limit: usize,
-        rows: Vec<RowView>,
-    ) -> Self {
-        Self {
-            query: RowsSubscriptionQuery::Predicate(QueryPredicateRecord::new(
-                table,
-                field,
-                "eq_top_field_desc",
-                serde_json::json!({
-                    "eq": value,
-                    "order_field": order_field,
-                    "limit": limit,
-                }),
-            )),
-            last_rows: rows,
-        }
-    }
-
     pub(crate) fn query(query: BuiltQuery, rows: Vec<RowView>) -> Self {
+        Self::query_at_tier(query, ReadTier::Local, rows)
+    }
+
+    pub(crate) fn query_at_tier(query: BuiltQuery, tier: ReadTier, rows: Vec<RowView>) -> Self {
         Self {
-            query: RowsSubscriptionQuery::Built(query),
+            query: RowsSubscriptionQuery::Built { query, tier },
             last_rows: rows,
         }
     }

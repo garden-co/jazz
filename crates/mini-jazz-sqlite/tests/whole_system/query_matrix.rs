@@ -123,6 +123,117 @@ fn large_built_query_export_does_not_exceed_sqlite_variable_limit() {
 }
 
 #[test]
+fn built_query_offset_page_export_supports_peer_pagination() {
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "page-upstream", schema.clone())
+            .unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "page-peer", "alice", schema).unwrap();
+
+    for index in 0..40 {
+        upstream
+            .insert_row(
+                "tasks",
+                &format!("task-{index:02}"),
+                BTreeMap::from([
+                    ("title".to_owned(), json!(format!("Task {index:02}"))),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["title", "asc"]],
+        "limit": 10,
+        "offset": 20,
+    }))
+    .unwrap();
+
+    peer.apply_bundle(&upstream.export_query(query.clone()).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        query_ids(&peer, query),
+        (20..30)
+            .map(|index| format!("task-{index:02}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn built_query_page_refresh_removes_stale_rows_and_adds_new_boundary_rows() {
+    let schema = support::tasks_schema();
+    let mut upstream =
+        Runtime::open_trusted_with_schema(Storage::Memory, "refresh-upstream", schema.clone())
+            .unwrap();
+    let mut peer =
+        Runtime::open_with_schema(Storage::Memory, "refresh-peer", "alice", schema).unwrap();
+
+    for title in ["alpha", "beta", "charlie"] {
+        upstream
+            .insert_row(
+                "tasks",
+                &format!("task-{title}"),
+                BTreeMap::from([
+                    ("title".to_owned(), json!(title)),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let query = BuiltQuery::from_json_value(json!({
+        "table": "tasks",
+        "conditions": [{"column": "done", "op": "eq", "value": false}],
+        "orderBy": [["title", "asc"]],
+        "limit": 2,
+    }))
+    .unwrap();
+
+    peer.apply_bundle(&upstream.export_query(query.clone()).unwrap())
+        .unwrap();
+    assert_eq!(
+        query_ids(&peer, query.clone()),
+        vec!["task-alpha", "task-beta"]
+    );
+    let mut subscription = peer.subscribe_query(query.clone()).unwrap();
+
+    upstream
+        .update_row(
+            "tasks",
+            "task-alpha",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )
+        .unwrap();
+    for refresh in upstream
+        .export_query_read_refreshes(&peer.observed_query_reads().unwrap())
+        .unwrap()
+    {
+        peer.apply_bundle(&refresh).unwrap();
+    }
+
+    let update = peer.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        update
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task-beta", "task-charlie"]
+    );
+    assert!(update.delta.iter().any(
+        |delta| matches!(delta, SubscriptionRowDelta::Removed { id, .. } if id == "task-alpha")
+    ));
+    assert!(update.delta.iter().any(
+        |delta| matches!(delta, SubscriptionRowDelta::Added { id, .. } if id == "task-charlie")
+    ));
+}
+
+#[test]
 fn policy_filtered_built_query_subscription_tracks_rows_entering_and_leaving() {
     let mut runtime = Runtime::open_trusted_with_schema(
         Storage::Memory,
