@@ -451,6 +451,7 @@ pub fn apply_delta(
     let payload = lz4_flex::decompress_size_prepended(encoded)
         .map_err(|err| Error::new(format!("decode text op delta: {err}")))?;
     let (ops, snapshots, chunks) = decode_delta_payload(&payload)?;
+    validate_delta_references(conn, &ops, &snapshots)?;
     for chunk in ops.chunks(500) {
         let placeholders = (0..chunk.len())
             .map(|_| "(?, ?, ?, ?, ?, ?)")
@@ -536,6 +537,50 @@ fn snapshot_exists(conn: &Connection, op_id: i64) -> Result<bool> {
         .query_row(params![op_id], |_| Ok(()))
         .optional()?
         .is_some())
+}
+
+fn validate_delta_references(
+    conn: &Connection,
+    ops: &[TextOpRow],
+    snapshots: &[SnapshotRow],
+) -> Result<()> {
+    let incoming_ops = ops.iter().map(|op| op.op_id).collect::<BTreeSet<_>>();
+    let mut op_exists_stmt = conn.prepare_cached("SELECT 1 FROM jazz_text_op WHERE op_id = ?")?;
+    for op in ops {
+        let Some(parent_op_id) = op.parent_op_id else {
+            continue;
+        };
+        if incoming_ops.contains(&parent_op_id) {
+            continue;
+        }
+        let parent_exists = op_exists_stmt
+            .query_row(params![parent_op_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !parent_exists {
+            return Err(Error::new(format!(
+                "missing text op parent {parent_op_id} for op {}",
+                op.op_id
+            )));
+        }
+    }
+
+    for snapshot in snapshots {
+        if incoming_ops.contains(&snapshot.op_id) {
+            continue;
+        }
+        let op_exists = op_exists_stmt
+            .query_row(params![snapshot.op_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !op_exists {
+            return Err(Error::new(format!(
+                "missing text op {} for snapshot {}",
+                snapshot.op_id, snapshot.snapshot_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn ancestor_ops_to_replay(

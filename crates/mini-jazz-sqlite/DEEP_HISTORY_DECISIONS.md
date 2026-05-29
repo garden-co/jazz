@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 01:57:29 PDT 2026
+
+Decision: validate text-op delta parent references before importing sidecar rows.
+
+Why: root existence is not enough. A malformed incremental delta can include op 2 without op 1, let row history point at root 2, and only fail later when materializing the text. The sidecar's own binary delta decoder is the right boundary to reject that, because it has the full set of incoming ops and can check whether each missing parent already exists locally.
+
+Scope impact: `persisted_text_ops::apply_delta` now rejects missing op parents and snapshots that reference unavailable ops before inserting anything. `HistoryDelta` receive then uses the existing failure cleanup path, so bad sidecar deltas leave neither Jazz row history nor orphan text-op rows behind.
+
 ## Fri May 29 01:53:52 PDT 2026
 
 Decision: failed `HistoryDelta` receive should roll back imported deep-text sidecar and block rows to the pre-apply watermarks.

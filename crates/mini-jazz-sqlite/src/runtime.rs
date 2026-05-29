@@ -13738,6 +13738,48 @@ mod tests {
     }
 
     #[test]
+    fn history_delta_rejects_deep_text_delta_with_missing_parent_op() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", "hello")
+            .unwrap();
+        alice
+            .append_deep_text("docs", "doc-1", "body", " broken")
+            .unwrap();
+        let delta = alice
+            .export_table_history_since_node_epoch_delta_since_text_watermark(
+                "docs",
+                "alice-node",
+                1,
+                crate::persisted_text_ops::DeltaWatermark {
+                    op_id: 1,
+                    snapshot_id: 0,
+                },
+            )
+            .unwrap();
+
+        let err = bob.apply_history_delta(&delta).unwrap_err();
+
+        assert!(err.to_string().contains("missing text op parent"));
+        assert!(bob.read_rows("docs").unwrap().is_empty());
+        assert_eq!(
+            bob.current_text_ops_watermark().unwrap(),
+            crate::persisted_text_ops::DeltaWatermark::default()
+        );
+    }
+
+    #[test]
     fn history_delta_carries_deep_text_roots_for_historical_reads() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
