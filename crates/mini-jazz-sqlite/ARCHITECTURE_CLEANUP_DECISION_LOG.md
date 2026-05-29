@@ -921,3 +921,10 @@ regress.
 - Fetched PR #973 latest head for inspection.
 - The newest commits are mostly sealed-history/deep-text API and block-delta work (`Document deep text runtime API`, `Expose text delta watermark at runtime boundary`, `Hide raw text sidecar internals`, delta-block repair/filtering).
 - Nothing in the newest tail looks like a small architecture-boundary port for this PR; keep treating #973 as a separate feature/perf lane.
+
+## 2026-05-29 04:17 PDT - Final leakage scan before timebox close
+
+- Ran a final scan for stale constructor/session names and todo-specific leakage in the mini SQLite core and examples.
+- The remaining todo references are either crate-local tests or intentional example/WASM todo convenience wrappers.
+- The remaining `principal` references are in current Jazz packages/docs outside this mini SQLite architecture-cleanup branch, not in the new mini core API surface changed here.
+- Re-fetched PR #973 again; it had not advanced beyond the already-logged deep-history/deep-text/block-delta commits. Decision unchanged: keep it separate from this cleanup PR.
