@@ -491,3 +491,9 @@ regress.
 - Added `upsert_rows_batched` and a `BatchedWriteMode` inside the write-batch module.
 - This keeps batched writes from being a pair of one-off insert/update helpers. The mode is still intentionally small and private, but the module now has enough shape to grow into a generic write-call batching boundary.
 - Focused batched logical write tests pass.
+
+## 2026-05-29 01:32 PDT - Branch runtime API moved behind a branch module
+
+- Moved branch creation, checkout, source-list mutation, branch-scoped queries, and branch backing-row inspection into `runtime::branches`.
+- This is another facade cleanup: branch behavior already has a storage module, but the runtime public API was still parked in the middle of unrelated write and transaction code.
+- Focused branch tests pass after the move.
