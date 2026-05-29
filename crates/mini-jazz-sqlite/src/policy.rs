@@ -259,15 +259,42 @@ pub(crate) fn snapshot_read_policy_sql_for_alias(
     user: &str,
     base_epoch: i64,
 ) -> Result<String> {
-    lower_snapshot_policy(
+    SnapshotPolicyLowering {
         schema,
-        table,
-        alias,
-        &table.read_policy,
         user,
         base_epoch,
-        0,
-    )
+        branch_context: None,
+    }
+    .lower(table, alias, &table.read_policy, 0)
+}
+
+pub(crate) fn branch_snapshot_read_policy_sql_for_alias(
+    schema: &SchemaDef,
+    table: &TableDef,
+    alias: &str,
+    user: &str,
+    branch_num: i64,
+    base_epoch: i64,
+) -> Result<String> {
+    if let Some((branch_table, branch_policy)) = active_branch_policy(table, branch_num) {
+        let Some(read_policy) = branch_policy.read_policy.as_ref() else {
+            return Ok("0 = 1".to_owned());
+        };
+        let context = BranchPolicyContext {
+            branch_num,
+            branch_table,
+        };
+        let backing_sql = branch_backing_row_visible_sql(schema, user, context, 0, None)?;
+        let policy_sql = SnapshotPolicyLowering {
+            schema,
+            user,
+            base_epoch,
+            branch_context: Some(context),
+        }
+        .lower(table, alias, read_policy, 0)?;
+        return Ok(format!("({backing_sql}) AND ({policy_sql})"));
+    }
+    snapshot_read_policy_sql_for_alias(schema, table, alias, user, base_epoch)
 }
 
 fn lower_policy(
@@ -449,56 +476,55 @@ fn branch_backing_row_visible_sql(
     ))
 }
 
-fn lower_snapshot_policy(
-    schema: &SchemaDef,
-    table: &TableDef,
-    alias: &str,
-    policy: &PolicyDef,
-    user: &str,
+struct SnapshotPolicyLowering<'a> {
+    schema: &'a SchemaDef,
+    user: &'a str,
     base_epoch: i64,
-    depth: usize,
-) -> Result<String> {
-    if depth > MAX_POLICY_RECURSION_DEPTH {
-        return Err(crate::Error::new(
-            "snapshot policy recursion depth exceeded",
-        ));
-    }
-    match policy {
-        PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
-        PolicyDef::CreatedByUser => Ok(format!(
-            "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
-            user.replace('\'', "''")
-        )),
-        PolicyDef::RefReadable { field } => {
-            let field = table
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
-            let FieldKind::Ref {
-                table: ref_table_name,
-            } = &field.kind
-            else {
-                return Err(crate::Error::new(format!(
-                    "policy field {} is not a ref",
-                    field.name
-                )));
-            };
-            let ref_table = schema.table_def(ref_table_name)?;
-            let parent_alias = format!("snapshot_policy_parent_{depth}");
-            let parent_tx_alias = format!("snapshot_policy_parent_tx_{depth}");
-            let newer_alias = format!("snapshot_policy_newer_{depth}");
-            let newer_tx_alias = format!("snapshot_policy_newer_tx_{depth}");
-            let parent_policy = lower_snapshot_policy(
-                schema,
-                ref_table,
-                &parent_alias,
-                &ref_table.read_policy,
-                user,
-                base_epoch,
-                depth + 1,
-            )?;
-            Ok(format!(
+    branch_context: Option<BranchPolicyContext<'a>>,
+}
+
+impl SnapshotPolicyLowering<'_> {
+    fn lower(
+        &self,
+        table: &TableDef,
+        alias: &str,
+        policy: &PolicyDef,
+        depth: usize,
+    ) -> Result<String> {
+        if depth > MAX_POLICY_RECURSION_DEPTH {
+            return Err(crate::Error::new(
+                "snapshot policy recursion depth exceeded",
+            ));
+        }
+        match policy {
+            PolicyDef::AllowAll => Ok("1 = 1".to_owned()),
+            PolicyDef::CreatedByUser => Ok(format!(
+                "{alias}.j_created_by = (SELECT user_num FROM jazz_user WHERE user_id = '{}')",
+                self.user.replace('\'', "''")
+            )),
+            PolicyDef::RefReadable { field } => {
+                let field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .ok_or_else(|| crate::Error::new(format!("unknown policy ref {field}")))?;
+                let FieldKind::Ref {
+                    table: ref_table_name,
+                } = &field.kind
+                else {
+                    return Err(crate::Error::new(format!(
+                        "policy field {} is not a ref",
+                        field.name
+                    )));
+                };
+                let ref_table = self.schema.table_def(ref_table_name)?;
+                let parent_alias = format!("snapshot_policy_parent_{depth}");
+                let parent_tx_alias = format!("snapshot_policy_parent_tx_{depth}");
+                let newer_alias = format!("snapshot_policy_newer_{depth}");
+                let newer_tx_alias = format!("snapshot_policy_newer_tx_{depth}");
+                let parent_policy =
+                    self.lower(ref_table, &parent_alias, &ref_table.read_policy, depth + 1)?;
+                Ok(format!(
                 "EXISTS (
                    SELECT 1
                    FROM {} {parent_alias}
@@ -509,7 +535,7 @@ fn lower_snapshot_policy(
                      AND {parent_alias}.op != 3
                      AND {parent_tx_alias}.outcome != {}
                      AND {parent_tx_alias}.global_epoch IS NOT NULL
-                     AND {parent_tx_alias}.global_epoch <= {base_epoch}
+                     AND {parent_tx_alias}.global_epoch <= {}
                      AND NOT EXISTS (
                        SELECT 1
                        FROM {} {newer_alias}
@@ -519,7 +545,7 @@ fn lower_snapshot_policy(
                          AND {newer_alias}.j_branch_num = 1
                          AND {newer_tx_alias}.outcome != {}
                          AND {newer_tx_alias}.global_epoch IS NOT NULL
-                         AND {newer_tx_alias}.global_epoch <= {base_epoch}
+                         AND {newer_tx_alias}.global_epoch <= {}
                          AND ({newer_tx_alias}.global_epoch > {parent_tx_alias}.global_epoch OR ({newer_tx_alias}.global_epoch = {parent_tx_alias}.global_epoch AND {newer_tx_alias}.tx_num > {parent_tx_alias}.tx_num))
                      )
                      AND {parent_policy}
@@ -527,12 +553,47 @@ fn lower_snapshot_policy(
                 crate::schema::history_table(&ref_table.name),
                 crate::schema::quote_ident(&crate::schema::storage_column(field)),
                 tx::OUTCOME_REJECTED,
+                self.base_epoch,
                 crate::schema::history_table(&ref_table.name),
                 tx::OUTCOME_REJECTED,
+                self.base_epoch,
             ))
+            }
+            PolicyDef::BranchFieldEquals {
+                field,
+                branch_field,
+            } => {
+                let Some(context) = self.branch_context else {
+                    return Err(crate::Error::new(
+                        "branch field snapshot policy requires branch context",
+                    ));
+                };
+                let field = table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *field)
+                    .ok_or_else(|| {
+                        crate::Error::new(format!("unknown branch policy field {field}"))
+                    })?;
+                let branch_table = self.schema.table_def(context.branch_table)?;
+                let branch_field = branch_table
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == *branch_field)
+                    .ok_or_else(|| {
+                        crate::Error::new(format!(
+                            "unknown branch policy field {}.{branch_field}",
+                            branch_table.name
+                        ))
+                    })?;
+                branch_backing_row_visible_sql(
+                    self.schema,
+                    self.user,
+                    context,
+                    depth,
+                    Some((alias, field, branch_field)),
+                )
+            }
         }
-        PolicyDef::BranchFieldEquals { .. } => Err(crate::Error::new(
-            "branch field snapshot policy is not implemented yet",
-        )),
     }
 }

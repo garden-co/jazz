@@ -299,3 +299,20 @@ row field to equal the backing-row field. This is deliberately narrower than
 and export filtering are not implemented yet. The first green test covers the
 product-shaped read case via generic `query_branch`, not a bespoke
 `read_rows_on_branch` API.
+
+## 2026-05-29 00:07 PDT
+
+Follow-up: the initial read-only `forBranch` slice is too narrow if it cannot
+read pinned-base rows, because branch bases are a core Jazz concept. Next slice
+should make branch-field read policy lower for branch base snapshots too, and
+add a test where the matching todo lives in main at the branch base rather than
+in the branch overlay.
+
+## 2026-05-29 00:10 PDT
+
+Pinned-base `forBranch` reads are now green. Branch snapshot policy lowering
+uses the same app-visible backing row check and branch-field equality as current
+branch reads, so a row inherited from a pinned main base is visible only if it
+matches the backing branch row. Remaining branch-policy gaps: writes,
+inherit-main shorthand, query-scope export/repair tests, and multi-branch-table
+policy selection if we allow more than one branch backing table per target.

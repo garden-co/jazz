@@ -36,11 +36,12 @@ impl ReadVisibility<'_> {
         if self.bypass_policy {
             Ok("1 = 1".to_owned())
         } else {
-            policy::snapshot_read_policy_sql_for_alias(
+            policy::branch_snapshot_read_policy_sql_for_alias(
                 self.schema,
                 table,
                 alias,
                 self.user,
+                self.branch_num,
                 base_epoch,
             )
         }
@@ -255,9 +256,16 @@ impl ReadVisibility<'_> {
                     tx::OUTCOME_REJECTED,
                 ))
             }
-            PolicyDef::BranchFieldEquals { .. } => Err(crate::Error::new(
-                "branch field effective policy is not implemented yet",
-            )),
+            PolicyDef::BranchFieldEquals { .. } => {
+                policy::branch_snapshot_read_policy_sql_for_alias(
+                    self.schema,
+                    table,
+                    alias,
+                    self.user,
+                    self.branch_num,
+                    base_epoch,
+                )
+            }
         }
     }
 }

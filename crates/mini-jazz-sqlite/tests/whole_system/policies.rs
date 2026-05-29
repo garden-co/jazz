@@ -327,6 +327,81 @@ fn for_branch_read_uses_branch_policy_and_backing_row_visibility() {
 }
 
 #[test]
+fn for_branch_read_policy_applies_to_pinned_base_rows() {
+    let schema = SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("branches", |table| {
+            table.ref_("project", "projects");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.ref_("project", "projects");
+            table.read_for_branch_if_field_matches("branches", "project", "project");
+        });
+    let mut edge = Runtime::open_trusted_with_schema(Storage::Memory, "edge", schema).unwrap();
+
+    let tx_ids = support::run_attributing_to_user(&mut edge, "alice", |edge| {
+        let mut tx_ids = Vec::new();
+        tx_ids.push(edge.insert_row(
+            "projects",
+            "project-a",
+            BTreeMap::from([("title".to_owned(), json!("Project A"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "projects",
+            "project-b",
+            BTreeMap::from([("title".to_owned(), json!("Project B"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "branches",
+            "draft-a",
+            BTreeMap::from([("project".to_owned(), json!("project-a"))]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "todos",
+            "todo-base-match",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base visible")),
+                ("project".to_owned(), json!("project-a")),
+            ]),
+        )?);
+        tx_ids.push(edge.insert_row(
+            "todos",
+            "todo-base-wrong-project",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Base hidden")),
+                ("project".to_owned(), json!("project-b")),
+            ]),
+        )?);
+        Ok::<_, mini_jazz_sqlite::Error>(tx_ids)
+    });
+    for (idx, tx_id) in tx_ids.unwrap().into_iter().enumerate() {
+        edge.accept_transaction_at_global(&tx_id, (idx + 1) as i64)
+            .unwrap();
+    }
+
+    edge.create_branch("draft-a", Some(5)).unwrap();
+    let rows = support::run_as_user(&mut edge, "alice", |edge| {
+        edge.query_branch(
+            "draft-a",
+            BuiltQuery::from_json_value(json!({
+                "table": "todos",
+                "orderBy": [["title", "asc"]]
+            }))
+            .unwrap(),
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["todo-base-match"]
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
