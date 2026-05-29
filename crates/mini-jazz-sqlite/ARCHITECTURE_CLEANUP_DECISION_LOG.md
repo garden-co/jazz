@@ -892,3 +892,9 @@ regress.
 - Final read-only review caught that the plain JS todo demo still called `MiniJazzRuntime.openOpfs(...)` after the schema-explicit WASM rename.
 - Updated the demo to call `openTodoOpfs(...)`, which matches its fixture/demo role.
 - Also softened earlier decision-log wording that overstated sync export/apply separation; export still reuses one history reconstruction helper from `sync_apply`.
+
+## 2026-05-29 04:08 PDT - JS todo build partially validated
+
+- Ran `pnpm --filter mini-sqlite-todo build` to catch the JS demo constructor rename.
+- The `prebuild` wasm-pack step succeeded and regenerated the WASM package with the renamed binding.
+- The Vite build then failed because this worktree does not have `node_modules` installed (`vite: command not found`), so the browser app bundle itself remains unvalidated in this worktree.
