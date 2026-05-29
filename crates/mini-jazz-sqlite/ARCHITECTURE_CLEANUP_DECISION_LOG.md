@@ -465,3 +465,10 @@ regress.
 - Moved that builder implementation into `runtime::transaction_builder`, re-exporting only the public `TransactionBuilder` type from `runtime`.
 - This is mostly a shape improvement, but it matters: transactions are a core semantic layer, not a miscellaneous appendage on the runtime facade.
 - Focused transaction tests pass after the move.
+
+## 2026-05-29 01:25 PDT - Ported #973 batched logical write boundary generically
+
+- Took the useful non-sealed idea from #973: multiple independent Jazz transactions can be written inside one SQLite transaction for commit overhead without changing Jazz transaction granularity.
+- Implemented this as `runtime::write_batch` with generic `insert_rows_batched` and `update_rows_batched`, rather than a test-specific helper.
+- Tests cover distinct tx ids, sync replay, previous-read tracking for later updates in the same SQLite commit, and full rollback when validation fails halfway through the batch.
+- This is still intentionally narrower than a general write-call batch builder. Deletes, upserts, and mixed table batches are now obvious next increments if this API proves useful.

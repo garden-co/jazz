@@ -265,3 +265,125 @@ fn restored_deleted_row_syncs_to_peer() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values["body"], json!("Sync restore"));
 }
+
+#[test]
+fn batched_logical_inserts_keep_distinct_jazz_transactions_but_commit_together() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    let tx_ids = alice
+        .insert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("First")),
+                        ("pinned".to_owned(), json!(false)),
+                    ]),
+                ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("Second")),
+                        ("pinned".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-1", "tx-alice-node-2"]);
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 2);
+    assert_eq!(alice.read_rows("notes").unwrap().len(), 2);
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(bob.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
+fn batched_logical_updates_keep_distinct_jazz_transactions_but_commit_together() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx_ids = alice
+        .update_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("v2"))]),
+                ),
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("v3"))]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-2", "tx-alice-node-3"]);
+    assert_eq!(
+        alice.read_rows("notes").unwrap()[0].values["body"],
+        json!("v3")
+    );
+    assert_eq!(
+        alice.transaction_previous_read_rows(&tx_ids[1]).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(
+        bob.read_rows("notes").unwrap()[0].values["body"],
+        json!("v3")
+    );
+}
+
+#[test]
+fn batched_logical_writes_roll_back_atomically_on_validation_error() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let err = alice
+        .insert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-1".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("first")),
+                        ("pinned".to_owned(), json!(false)),
+                    ]),
+                ),
+                (
+                    "note-2".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("second")),
+                        ("unknown".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unknown field unknown"));
+    assert!(alice.read_rows("notes").unwrap().is_empty());
+    assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
+}

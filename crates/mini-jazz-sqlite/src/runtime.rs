@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod query_scope_export;
 mod transaction_builder;
+mod write_batch;
 pub use transaction_builder::TransactionBuilder;
 
 pub struct Runtime {
