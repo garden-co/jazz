@@ -877,6 +877,12 @@ regress.
 - PR #973 moved again to `0f579fe6014a11fcd87d43ec342a28c20ee6463f` and is still draft.
 - Nico's #945 has not moved; this branch has ported the isolation tests/semantics rather than his WIP implementation.
 
+## 2026-05-29 04:11 PDT - Perf PR continues to move
+
+- Rechecked open PRs against `codex/mini-jazz-sqlite-spec`.
+- PR #973 has moved again to `e1fe2689ad7b86a91cfbd12f6e08d9eb8e94b69c` and is still draft.
+- The set of open stacked PRs remains #974, #973, and #945.
+
 ## 2026-05-29 04:03 PDT - Full validation passes after final boundary/name cleanup
 
 - Ran `cargo test -p mini-jazz-sqlite` after removing runtime-root helper re-export indirection and renaming the WASM todo constructors.
