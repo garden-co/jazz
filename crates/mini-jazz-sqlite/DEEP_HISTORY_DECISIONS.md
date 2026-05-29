@@ -1062,3 +1062,11 @@ Decision: equality, `IN`, and `contains` queries over `deep_text` fields now fil
 Why: after public `read_rows` returns strings, predicates must not leak the internal root representation either. This fallback is intentionally simple and correct first: it uses the normal row-query path, then filters materialized strings in memory. A future indexed/full-text path can replace it without changing the API contract.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. This is not tuned for large deep-text search result sets yet, but it keeps the runtime semantics honest for the spike.
+
+## Fri May 29 00:28:07 PDT 2026 - Rejected Batched Deep-Text Tx Insert Fast Path
+
+Decision: do not keep the allow-all deep-text fast path that batch-inserted `jazz_tx` rows with tuple data already present.
+
+Why: the idea was semantically clean enough for main-branch allow-all batches: still one Jazz tx/history row per edit, but fewer individual tx insert statements. The canonical sample disagreed. Append write/update stayed around 0.36 ms, Automerge got worse, `tx_create_ms` rose from about 24-25 ms to 37-42 ms for text scenarios, and append commit time spiked. The larger `INSERT ... VALUES ... RETURNING` statement appears to be a worse fit for SQLite here than the cached single-row insert loop.
+
+Scope impact: the uncommitted fast path was reverted. The useful lesson is that the next tx-write improvement probably needs a different representation or transaction table shape, not just a bigger VALUES statement.
