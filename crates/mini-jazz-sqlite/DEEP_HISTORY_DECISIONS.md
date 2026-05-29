@@ -86,6 +86,14 @@ Why: the implementation now has a real `SchemaDef::deep_text` API, but without a
 
 Scope impact: the local mini-jazz-sqlite schema spec now describes deep-history text as opt-in and keeps ordinary text as the default.
 
+## Thu May 28 23:18:55 PDT 2026
+
+Decision: make text-op roots independent per text value, then recover document-edit speed with a runtime materialization cache inside batched edits.
+
+Why: self-review caught that the persisted text op table was still a single global chain. That made the benchmark's one-row cases pass, but two `deep_text` rows would replay each other's ops. The fix is to store `parent_op_id` per op and materialize by following the root's ancestor chain. That is semantically necessary, even though it makes append/history reads a bit slower. For document-style batches, the runtime can still be efficient honestly by materializing the current text once per SQLite batch and validating/applying every replace against that string.
+
+Scope impact: persisted text ops now support independent roots and have a regression for interleaved Ada/Grace documents. Automerge canonical time improved from about 1.16 s after the parent-chain fix to about 0.41 s with the batched materialization cache. `/tmp/deep_history_runtime_parent_ops_cached_all_block_ops.json` is the latest all-scenario run.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.

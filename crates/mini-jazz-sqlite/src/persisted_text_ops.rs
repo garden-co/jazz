@@ -33,6 +33,7 @@ pub fn install(conn: &Connection) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS jazz_text_op (
           op_id INTEGER PRIMARY KEY,
+          parent_op_id INTEGER,
           start_byte INTEGER NOT NULL,
           delete_bytes INTEGER NOT NULL,
           insert_text TEXT NOT NULL,
@@ -90,11 +91,36 @@ pub fn replace_range(
             ));
         }
     }
+    replace_range_known_len(
+        conn,
+        root,
+        total_len,
+        start_byte,
+        delete_bytes,
+        insert,
+        snapshot_every,
+    )
+}
+
+pub(crate) fn replace_range_known_len(
+    conn: &Connection,
+    root: TextRoot,
+    total_len: usize,
+    start_byte: usize,
+    delete_bytes: usize,
+    insert: &str,
+    snapshot_every: usize,
+) -> Result<TextRoot> {
+    if start_byte > total_len || start_byte + delete_bytes > total_len {
+        return Err(Error::new("text op replace range out of bounds"));
+    }
     conn.prepare_cached(
-        "INSERT INTO jazz_text_op (start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO jazz_text_op
+           (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
+         VALUES (?, ?, ?, ?, ?)",
     )?
     .execute(params![
+        root,
         start_byte as i64,
         delete_bytes as i64,
         insert,
@@ -111,28 +137,17 @@ pub fn materialize(conn: &Connection, root: TextRoot) -> Result<String> {
     let Some(root_op_id) = root else {
         return Ok(String::new());
     };
-    let snapshot = nearest_snapshot(conn, root_op_id)?;
-    let (mut text, after_op) = if let Some(snapshot) = snapshot {
-        (snapshot_text(conn, &snapshot.chunk_hashes)?, snapshot.op_id)
+    let (snapshot, mut ops) = ancestor_ops_to_replay(conn, root_op_id)?;
+    let mut text = if let Some(snapshot) = snapshot {
+        snapshot_text(conn, &snapshot.chunk_hashes)?
     } else {
-        (String::new(), 0)
+        String::new()
     };
-    let mut stmt = conn.prepare_cached(
-        "SELECT start_byte, delete_bytes, insert_text
-         FROM jazz_text_op
-         WHERE op_id > ? AND op_id <= ?
-         ORDER BY op_id",
-    )?;
-    let rows = stmt.query_map(params![after_op, root_op_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)? as usize,
-            row.get::<_, i64>(1)? as usize,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (start, delete_bytes, insert) = row?;
-        text.replace_range(start..start + delete_bytes, &insert);
+    ops.reverse();
+    for op in ops {
+        let start = op.start_byte as usize;
+        let delete_bytes = op.delete_bytes as usize;
+        text.replace_range(start..start + delete_bytes, &op.insert_text);
     }
     Ok(text)
 }
@@ -170,20 +185,22 @@ pub fn inline_op_bytes(conn: &Connection, root: TextRoot) -> Result<Vec<u8>> {
     };
     let op = conn
         .prepare_cached(
-            "SELECT op_id, start_byte, delete_bytes, insert_text, resulting_len
+            "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
              FROM jazz_text_op
              WHERE op_id = ?",
         )?
         .query_row(params![op_id], |row| {
             Ok(TextOpRow {
                 op_id: row.get(0)?,
-                start_byte: row.get(1)?,
-                delete_bytes: row.get(2)?,
-                insert_text: row.get(3)?,
-                resulting_len: row.get(4)?,
+                parent_op_id: row.get(1)?,
+                start_byte: row.get(2)?,
+                delete_bytes: row.get(3)?,
+                insert_text: row.get(4)?,
+                resulting_len: row.get(5)?,
             })
         })?;
     let mut out = Vec::new();
+    write_varint(&mut out, op.parent_op_id.unwrap_or(0) as u64);
     write_varint(&mut out, op.start_byte as u64);
     write_varint(&mut out, op.delete_bytes as u64);
     write_bytes(&mut out, op.insert_text.as_bytes());
@@ -196,6 +213,10 @@ pub fn apply_inline_op(conn: &Connection, bytes: &[u8], snapshot_every: usize) -
         return Ok(None);
     }
     let mut cursor = ByteCursor::new(bytes);
+    let parent_op_id = match cursor.read_varint()? as i64 {
+        0 => None,
+        parent => Some(parent),
+    };
     let start_byte = cursor.read_varint()? as i64;
     let delete_bytes = cursor.read_varint()? as i64;
     let insert_text = String::from_utf8(cursor.read_bytes()?.to_vec())
@@ -203,10 +224,11 @@ pub fn apply_inline_op(conn: &Connection, bytes: &[u8], snapshot_every: usize) -
     let resulting_len = cursor.read_varint()? as i64;
     cursor.expect_end()?;
     conn.prepare_cached(
-        "INSERT INTO jazz_text_op (start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO jazz_text_op (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
+         VALUES (?, ?, ?, ?, ?)",
     )?
     .execute(params![
+        parent_op_id,
         start_byte,
         delete_bytes,
         insert_text,
@@ -234,7 +256,7 @@ pub fn bundle_bytes(conn: &Connection) -> Result<usize> {
 pub fn export_delta(conn: &Connection, watermark: DeltaWatermark) -> Result<EncodedDelta> {
     let mut ops = Vec::new();
     let mut op_stmt = conn.prepare_cached(
-        "SELECT op_id, start_byte, delete_bytes, insert_text, resulting_len
+        "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
          FROM jazz_text_op
          WHERE op_id > ?
          ORDER BY op_id",
@@ -242,10 +264,11 @@ pub fn export_delta(conn: &Connection, watermark: DeltaWatermark) -> Result<Enco
     let op_rows = op_stmt.query_map(params![watermark.op_id], |row| {
         Ok(TextOpRow {
             op_id: row.get(0)?,
-            start_byte: row.get(1)?,
-            delete_bytes: row.get(2)?,
-            insert_text: row.get(3)?,
-            resulting_len: row.get(4)?,
+            parent_op_id: row.get(1)?,
+            start_byte: row.get(2)?,
+            delete_bytes: row.get(3)?,
+            insert_text: row.get(4)?,
+            resulting_len: row.get(5)?,
         })
     })?;
     for row in op_rows {
@@ -323,12 +346,13 @@ pub fn apply_delta(
     let (ops, snapshots, chunks) = decode_delta_payload(&payload)?;
     let mut insert_op = conn.prepare_cached(
         "INSERT OR REPLACE INTO jazz_text_op
-         (op_id, start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?, ?)",
+         (op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )?;
     for op in &ops {
         insert_op.execute(params![
             op.op_id,
+            op.parent_op_id,
             op.start_byte,
             op.delete_bytes,
             op.insert_text,
@@ -376,22 +400,43 @@ fn snapshot_exists(conn: &Connection, op_id: i64) -> Result<bool> {
         .is_some())
 }
 
-fn nearest_snapshot(conn: &Connection, op_id: i64) -> Result<Option<Snapshot>> {
-    conn.prepare_cached(
-        "SELECT op_id, chunk_hashes
-         FROM jazz_text_snapshot
-         WHERE op_id <= ?
-         ORDER BY op_id DESC
-         LIMIT 1",
-    )?
-    .query_row(params![op_id], |row| {
-        Ok(Snapshot {
-            op_id: row.get(0)?,
-            chunk_hashes: row.get(1)?,
-        })
-    })
-    .optional()
-    .map_err(Into::into)
+fn ancestor_ops_to_replay(
+    conn: &Connection,
+    root_op_id: i64,
+) -> Result<(Option<Snapshot>, Vec<TextOpRow>)> {
+    let mut ops = Vec::new();
+    let mut current = Some(root_op_id);
+    let mut snapshot_stmt =
+        conn.prepare_cached("SELECT chunk_hashes FROM jazz_text_snapshot WHERE op_id = ?")?;
+    let mut op_stmt = conn.prepare_cached(
+        "SELECT op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len
+         FROM jazz_text_op
+         WHERE op_id = ?",
+    )?;
+    while let Some(op_id) = current {
+        if let Some(chunk_hashes) = snapshot_stmt
+            .query_row(params![op_id], |row| row.get::<_, Vec<u8>>(0))
+            .optional()?
+        {
+            return Ok((Some(Snapshot { chunk_hashes }), ops));
+        }
+        let op = op_stmt
+            .query_row(params![op_id], |row| {
+                Ok(TextOpRow {
+                    op_id: row.get(0)?,
+                    parent_op_id: row.get(1)?,
+                    start_byte: row.get(2)?,
+                    delete_bytes: row.get(3)?,
+                    insert_text: row.get(4)?,
+                    resulting_len: row.get(5)?,
+                })
+            })
+            .optional()?
+            .ok_or_else(|| Error::new("unknown text op root"))?;
+        current = op.parent_op_id;
+        ops.push(op);
+    }
+    Ok((None, ops))
 }
 
 fn store_chunks(conn: &Connection, text: &str) -> Result<Vec<u8>> {
@@ -437,12 +482,12 @@ fn chunk_text(text: &str, max_bytes: usize) -> Vec<&str> {
 }
 
 struct Snapshot {
-    op_id: i64,
     chunk_hashes: Vec<u8>,
 }
 
 struct TextOpRow {
     op_id: i64,
+    parent_op_id: Option<i64>,
     start_byte: i64,
     delete_bytes: i64,
     insert_text: String,
@@ -470,15 +515,18 @@ fn encode_delta_payload(
     out.extend_from_slice(DELTA_MAGIC);
     write_varint(out, ops.len() as u64);
     let mut previous_op_id = 0i64;
+    let mut previous_parent_op_id = 0i64;
     let mut previous_start = 0i64;
     let mut previous_resulting_len = 0i64;
     for op in ops {
         write_signed_delta(out, op.op_id - previous_op_id);
+        write_signed_delta(out, op.parent_op_id.unwrap_or(0) - previous_parent_op_id);
         write_signed_delta(out, op.start_byte - previous_start);
         write_varint(out, op.delete_bytes as u64);
         write_bytes(out, op.insert_text.as_bytes());
         write_signed_delta(out, op.resulting_len - previous_resulting_len);
         previous_op_id = op.op_id;
+        previous_parent_op_id = op.parent_op_id.unwrap_or(0);
         previous_start = op.start_byte;
         previous_resulting_len = op.resulting_len;
     }
@@ -510,10 +558,12 @@ fn decode_delta_payload(
     let op_count = cursor.read_varint()? as usize;
     let mut ops = Vec::with_capacity(op_count);
     let mut previous_op_id = 0i64;
+    let mut previous_parent_op_id = 0i64;
     let mut previous_start = 0i64;
     let mut previous_resulting_len = 0i64;
     for _ in 0..op_count {
         let op_id = previous_op_id + cursor.read_signed_delta()?;
+        let parent = previous_parent_op_id + cursor.read_signed_delta()?;
         let start_byte = previous_start + cursor.read_signed_delta()?;
         let delete_bytes = cursor.read_varint()? as i64;
         let insert_text = String::from_utf8(cursor.read_bytes()?.to_vec())
@@ -521,12 +571,14 @@ fn decode_delta_payload(
         let resulting_len = previous_resulting_len + cursor.read_signed_delta()?;
         ops.push(TextOpRow {
             op_id,
+            parent_op_id: if parent == 0 { None } else { Some(parent) },
             start_byte,
             delete_bytes,
             insert_text,
             resulting_len,
         });
         previous_op_id = op_id;
+        previous_parent_op_id = parent;
         previous_start = start_byte;
         previous_resulting_len = resulting_len;
     }
@@ -668,6 +720,27 @@ mod tests {
 
         assert_eq!(materialize(&conn, root).expect("materialize"), "Hello, Ada");
         assert_eq!(root_len(&conn, root).expect("root len"), 10);
+    }
+
+    #[test]
+    fn independent_roots_do_not_replay_each_others_ops() {
+        let conn = open_text_store();
+
+        let mut ada = None;
+        let mut grace = None;
+        ada = append(&conn, ada, "Ada", 2).expect("append ada");
+        grace = append(&conn, grace, "Grace", 2).expect("append grace");
+        ada = append(&conn, ada, " Lovelace", 2).expect("append ada surname");
+        grace = append(&conn, grace, " Hopper", 2).expect("append grace surname");
+
+        assert_eq!(
+            materialize(&conn, ada).expect("materialize ada"),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            materialize(&conn, grace).expect("materialize grace"),
+            "Grace Hopper"
+        );
     }
 
     #[test]

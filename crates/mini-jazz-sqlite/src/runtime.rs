@@ -506,9 +506,17 @@ impl Runtime {
         let mut creation_metadata_cache = BTreeMap::new();
         let mut row_num_cache = BTreeMap::new();
         let mut visible_tx_cache = BTreeMap::new();
+        let mut materialized_text = if edits
+            .iter()
+            .any(|edit| matches!(edit, DeepTextEdit::ReplaceRanges(_)))
+        {
+            Some(crate::persisted_text_ops::materialize(&db, root)?)
+        } else {
+            None
+        };
         let mut tx_ids = Vec::with_capacity(edits.len());
         for edit in edits {
-            root = apply_deep_text_edit(&db, root, edit)?;
+            root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
             let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
             let now = now_ms();
             let outcome = insert_row_in_tx(InsertRowInTx {
@@ -7042,20 +7050,51 @@ fn apply_deep_text_edit(
     conn: &Connection,
     root: crate::persisted_text_ops::TextRoot,
     edit: &DeepTextEdit,
+    materialized_text: Option<&mut String>,
 ) -> Result<crate::persisted_text_ops::TextRoot> {
     match edit {
-        DeepTextEdit::Append(text) => crate::persisted_text_ops::append(conn, root, text, 256),
-        DeepTextEdit::ReplaceRanges(patches) => {
-            let mut root = root;
-            for (start_byte, delete_bytes, insert) in patches {
-                root = crate::persisted_text_ops::replace_range(
+        DeepTextEdit::Append(text) => {
+            if let Some(materialized_text) = materialized_text {
+                let next_root = crate::persisted_text_ops::replace_range_known_len(
                     conn,
                     root,
+                    materialized_text.len(),
+                    materialized_text.len(),
+                    0,
+                    text,
+                    256,
+                )?;
+                materialized_text.push_str(text);
+                Ok(next_root)
+            } else {
+                crate::persisted_text_ops::append(conn, root, text, 256)
+            }
+        }
+        DeepTextEdit::ReplaceRanges(patches) => {
+            let mut root = root;
+            let materialized_text = materialized_text.ok_or_else(|| {
+                crate::Error::new("replace range edits require materialized text cache")
+            })?;
+            for (start_byte, delete_bytes, insert) in patches {
+                if *start_byte > materialized_text.len()
+                    || start_byte + delete_bytes > materialized_text.len()
+                    || !materialized_text.is_char_boundary(*start_byte)
+                    || !materialized_text.is_char_boundary(start_byte + delete_bytes)
+                {
+                    return Err(crate::Error::new(
+                        "text op replace range must use UTF-8 boundaries",
+                    ));
+                }
+                root = crate::persisted_text_ops::replace_range_known_len(
+                    conn,
+                    root,
+                    materialized_text.len(),
                     *start_byte,
                     *delete_bytes,
                     insert,
                     256,
                 )?;
+                materialized_text.replace_range(*start_byte..*start_byte + *delete_bytes, insert);
             }
             Ok(root)
         }
