@@ -120,7 +120,7 @@ struct QueryScopeDeltaOptions<'a> {
     ref_include_fields: &'a [&'a str],
     extra_row_ids: &'a [String],
     remote_block_manifests: &'a [HistoryBlockManifest],
-    text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    text_ops_watermark: crate::DeltaWatermark,
 }
 
 struct BatchedQueryScopeItem {
@@ -186,7 +186,7 @@ impl QueryScopeOptions<'_> {
 impl<'a> QueryScopeDeltaOptions<'a> {
     fn remote_since_text_watermark(
         remote_block_manifests: &'a [HistoryBlockManifest],
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Self {
         Self {
             ref_include_fields: &[],
@@ -650,9 +650,9 @@ impl Runtime {
         Ok(Some(text.to_owned()))
     }
 
-    pub fn current_text_ops_watermark(&self) -> Result<crate::persisted_text_ops::DeltaWatermark> {
+    pub fn current_text_ops_watermark(&self) -> Result<crate::DeltaWatermark> {
         if !self.schema_has_deep_text_fields() {
-            return Ok(crate::persisted_text_ops::DeltaWatermark::default());
+            return Ok(crate::DeltaWatermark::default());
         }
         crate::persisted_text_ops::current_watermark(&self.conn)
     }
@@ -680,7 +680,7 @@ impl Runtime {
         &self,
         bundle: &Bundle,
         blocks: &[HistoryBlockExport],
-        watermark: crate::persisted_text_ops::DeltaWatermark,
+        watermark: crate::DeltaWatermark,
     ) -> Result<Vec<u8>> {
         if !self.schema_has_deep_text_fields() {
             return Ok(Vec::new());
@@ -1141,7 +1141,7 @@ impl Runtime {
         let text_ops_delta = self.export_text_ops_delta_for_bundle_since(
             &bundle,
             &[],
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            crate::DeltaWatermark::default(),
         )?;
         Ok(HistoryDelta {
             bundle,
@@ -1155,7 +1155,7 @@ impl Runtime {
         table_name: &str,
         node_id: &str,
         after_local_epoch: i64,
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Result<HistoryDelta> {
         self.export_table_history_since_node_epoch_delta_with_options(
             table_name,
@@ -2056,7 +2056,7 @@ impl Runtime {
             root_id,
             parent_field,
             remote_block_manifests,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            crate::DeltaWatermark::default(),
         )
     }
 
@@ -2066,7 +2066,7 @@ impl Runtime {
         root_id: &str,
         parent_field: &str,
         remote_block_manifests: &[HistoryBlockManifest],
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Result<HistoryDelta> {
         self.schema.table_def(table_name)?;
         let user = self.policy_user();
@@ -2310,7 +2310,7 @@ impl Runtime {
         delta: &HistoryDelta,
     ) -> Result<ApplyBundleProfile> {
         if !delta.text_ops_delta.is_empty() {
-            let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
+            let mut watermark = crate::DeltaWatermark::default();
             crate::persisted_text_ops::apply_delta(
                 &self.conn,
                 &delta.text_ops_delta,
@@ -2789,14 +2789,14 @@ impl Runtime {
     ) -> Result<Vec<HistoryDelta>> {
         self.export_observed_query_refresh_deltas_since_text_watermark(
             remote_block_manifests,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            crate::DeltaWatermark::default(),
         )
     }
 
     pub fn export_observed_query_refresh_deltas_since_text_watermark(
         &self,
         remote_block_manifests: &[HistoryBlockManifest],
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Result<Vec<HistoryDelta>> {
         self.export_observed_query_refresh_deltas_with_options(
             HistoryDeltaExportOptions::new()
@@ -2821,7 +2821,7 @@ impl Runtime {
         self.export_query_read_refresh_deltas_since_text_watermark(
             reads,
             remote_block_manifests,
-            crate::persisted_text_ops::DeltaWatermark::default(),
+            crate::DeltaWatermark::default(),
         )
     }
 
@@ -2829,7 +2829,7 @@ impl Runtime {
         &self,
         reads: &[QueryReadRecord],
         remote_block_manifests: &[HistoryBlockManifest],
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Result<Vec<HistoryDelta>> {
         self.export_query_read_refresh_deltas_with_options(
             reads,
@@ -2892,7 +2892,7 @@ impl Runtime {
         &self,
         read: &QueryReadRecord,
         remote_block_manifests: &[HistoryBlockManifest],
-        text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+        text_ops_watermark: crate::DeltaWatermark,
     ) -> Result<HistoryDelta> {
         if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new("query refresh branch is not checked out"));
@@ -14151,7 +14151,7 @@ mod tests {
         assert!(err.to_string().contains("incompatible schema fingerprint"));
         assert_eq!(
             bob.current_text_ops_watermark().unwrap(),
-            crate::persisted_text_ops::DeltaWatermark::default()
+            crate::DeltaWatermark::default()
         );
     }
 
@@ -14206,7 +14206,7 @@ mod tests {
         assert!(err.to_string().contains("references missing tx"));
         assert_eq!(
             bob.current_text_ops_watermark().unwrap(),
-            crate::persisted_text_ops::DeltaWatermark::default()
+            crate::DeltaWatermark::default()
         );
     }
 
@@ -14241,7 +14241,7 @@ mod tests {
         assert!(bob.read_rows("docs").unwrap().is_empty());
         assert_eq!(
             bob.current_text_ops_watermark().unwrap(),
-            crate::persisted_text_ops::DeltaWatermark::default()
+            crate::DeltaWatermark::default()
         );
     }
 
@@ -14270,7 +14270,7 @@ mod tests {
                 "docs",
                 "alice-node",
                 1,
-                crate::persisted_text_ops::DeltaWatermark {
+                crate::DeltaWatermark {
                     op_id: 1,
                     snapshot_id: 0,
                 },
@@ -14283,7 +14283,7 @@ mod tests {
         assert!(bob.read_rows("docs").unwrap().is_empty());
         assert_eq!(
             bob.current_text_ops_watermark().unwrap(),
-            crate::persisted_text_ops::DeltaWatermark::default()
+            crate::DeltaWatermark::default()
         );
     }
 
@@ -14529,7 +14529,7 @@ mod tests {
         assert!(second_delta.blocks.is_empty());
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut sidecar_watermark = crate::DeltaWatermark::default();
         crate::persisted_text_ops::apply_delta(
             &text_conn,
             &first_delta.text_ops_delta,
@@ -14583,7 +14583,7 @@ mod tests {
             .unwrap();
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut watermark = crate::DeltaWatermark::default();
         let stats = crate::persisted_text_ops::apply_delta(
             &text_conn,
             &delta.text_ops_delta,
@@ -14655,7 +14655,7 @@ mod tests {
                     ref_include_fields: &["doc"],
                     extra_row_ids: &[],
                     remote_block_manifests: &[],
-                    text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+                    text_ops_watermark: crate::DeltaWatermark::default(),
                 },
             )
             .unwrap();
@@ -14709,7 +14709,7 @@ mod tests {
 
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut sidecar_watermark = crate::DeltaWatermark::default();
         crate::persisted_text_ops::apply_delta(
             &text_conn,
             &first_delta.text_ops_delta,
@@ -14772,7 +14772,7 @@ mod tests {
 
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut sidecar_watermark = crate::DeltaWatermark::default();
         crate::persisted_text_ops::apply_delta(
             &text_conn,
             &first_delta.text_ops_delta,
@@ -14844,7 +14844,7 @@ mod tests {
 
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut sidecar_watermark = crate::DeltaWatermark::default();
         crate::persisted_text_ops::apply_delta(
             &text_conn,
             &first_delta.text_ops_delta,
@@ -14909,7 +14909,7 @@ mod tests {
 
         let text_conn = Connection::open_in_memory().unwrap();
         crate::persisted_text_ops::install(&text_conn).unwrap();
-        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        let mut sidecar_watermark = crate::DeltaWatermark::default();
         crate::persisted_text_ops::apply_delta(
             &text_conn,
             &first_delta.text_ops_delta,

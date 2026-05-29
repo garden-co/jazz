@@ -197,7 +197,7 @@ pub struct HistoryDelta {
 #[derive(Clone, Debug, Default)]
 pub struct HistoryDeltaExportOptions {
     pub remote_block_manifests: Vec<HistoryBlockManifest>,
-    pub text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    pub text_ops_watermark: crate::DeltaWatermark,
 }
 
 impl HistoryDeltaExportOptions {
@@ -210,10 +210,7 @@ impl HistoryDeltaExportOptions {
         self
     }
 
-    pub fn with_text_ops_watermark(
-        mut self,
-        watermark: crate::persisted_text_ops::DeltaWatermark,
-    ) -> Self {
+    pub fn with_text_ops_watermark(mut self, watermark: crate::DeltaWatermark) -> Self {
         self.text_ops_watermark = watermark;
         self
     }
@@ -224,7 +221,7 @@ pub struct TopCreatedHistoryDeltaOptions {
     pub limit: usize,
     pub previous_observed_ids: Vec<String>,
     pub remote_block_manifests: Vec<HistoryBlockManifest>,
-    pub text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    pub text_ops_watermark: crate::DeltaWatermark,
 }
 
 impl TopCreatedHistoryDeltaOptions {
@@ -233,7 +230,7 @@ impl TopCreatedHistoryDeltaOptions {
             limit,
             previous_observed_ids: Vec::new(),
             remote_block_manifests: Vec::new(),
-            text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+            text_ops_watermark: crate::DeltaWatermark::default(),
         }
     }
 
@@ -247,10 +244,7 @@ impl TopCreatedHistoryDeltaOptions {
         self
     }
 
-    pub fn with_text_ops_watermark(
-        mut self,
-        watermark: crate::persisted_text_ops::DeltaWatermark,
-    ) -> Self {
+    pub fn with_text_ops_watermark(mut self, watermark: crate::DeltaWatermark) -> Self {
         self.text_ops_watermark = watermark;
         self
     }
@@ -262,7 +256,7 @@ pub struct TopFieldHistoryDeltaOptions {
     pub limit: usize,
     pub previous_observed_ids: Vec<String>,
     pub remote_block_manifests: Vec<HistoryBlockManifest>,
-    pub text_ops_watermark: crate::persisted_text_ops::DeltaWatermark,
+    pub text_ops_watermark: crate::DeltaWatermark,
 }
 
 impl TopFieldHistoryDeltaOptions {
@@ -272,7 +266,7 @@ impl TopFieldHistoryDeltaOptions {
             limit,
             previous_observed_ids: Vec::new(),
             remote_block_manifests: Vec::new(),
-            text_ops_watermark: crate::persisted_text_ops::DeltaWatermark::default(),
+            text_ops_watermark: crate::DeltaWatermark::default(),
         }
     }
 
@@ -286,10 +280,7 @@ impl TopFieldHistoryDeltaOptions {
         self
     }
 
-    pub fn with_text_ops_watermark(
-        mut self,
-        watermark: crate::persisted_text_ops::DeltaWatermark,
-    ) -> Self {
+    pub fn with_text_ops_watermark(mut self, watermark: crate::DeltaWatermark) -> Self {
         self.text_ops_watermark = watermark;
         self
     }
