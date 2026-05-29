@@ -28,6 +28,13 @@ export interface RunStarterOptions {
   keepTempDir?: boolean;
   /** Stream child stdout/stderr instead of buffering. */
   verbose?: boolean;
+  /**
+   * If provided, skip the in-process `pnpm pack` step and resolve workspace
+   * tarballs from this directory (one `*.tgz` per package in PACKAGES_TO_PACK).
+   * The CI workflow uses this to build tarballs once in a prepare job and reuse
+   * them across the matrix without rebuilding the workspace each time.
+   */
+  tarballDir?: string;
 }
 
 export interface PhaseTiming {
@@ -143,6 +150,22 @@ function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
   }
 }
 
+function discoverPrebuiltTarballs(dir: string): Record<string, string> {
+  if (!fs.existsSync(dir)) {
+    throw new Error(`--tarball-dir ${dir} does not exist`);
+  }
+  const entries = fs.readdirSync(dir);
+  const tarballs: Record<string, string> = {};
+  for (const pkg of PACKAGES_TO_PACK) {
+    const matches = entries.filter((f) => f.startsWith(`${pkg}-`) && f.endsWith(".tgz")).sort();
+    if (matches.length === 0) {
+      throw new Error(`--tarball-dir ${dir} has no tarball for "${pkg}"`);
+    }
+    tarballs[pkg] = path.join(dir, matches[matches.length - 1]);
+  }
+  return tarballs;
+}
+
 async function packWorkspaceTarballs(
   repoRoot: string,
   destDir: string,
@@ -226,8 +249,10 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
   };
 
   try {
-    const tarballs = await recordPhase("pack", () =>
-      packWorkspaceTarballs(opts.repoRoot, tarballDir, verbose),
+    const tarballs = await recordPhase("pack", async () =>
+      opts.tarballDir
+        ? discoverPrebuiltTarballs(opts.tarballDir)
+        : packWorkspaceTarballs(opts.repoRoot, tarballDir, verbose),
     );
 
     await recordPhase("scaffold", async () => {
