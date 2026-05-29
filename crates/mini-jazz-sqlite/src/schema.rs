@@ -16,31 +16,6 @@ impl SchemaDef {
         }
     }
 
-    pub fn todo_app_schema() -> Self {
-        Self::new()
-            .table("projects", |table| {
-                table.text("title");
-            })
-            .table("todos", |table| {
-                table.text("title");
-                table.bool("done");
-                table.ref_("project", "projects");
-                table.index("open_created", ["done", "$createdAt"]);
-                table.index("created", ["$createdAt"]);
-                table.index("by_title", ["title"]);
-            })
-            .table("labels", |table| {
-                table.text("name");
-                table.index("by_name", ["name"]);
-            })
-            .table("todo_labels", |table| {
-                table.ref_("todo", "todos");
-                table.ref_("label", "labels");
-                table.index("by_todo", ["todo"]);
-                table.index("by_label", ["label"]);
-            })
-    }
-
     pub fn table(mut self, name: &str, build: impl FnOnce(&mut TableBuilder)) -> Self {
         let mut builder = TableBuilder::new(name);
         build(&mut builder);
@@ -825,9 +800,34 @@ mod tests {
     use super::*;
     use crate::{storage, Storage};
 
+    fn todo_app_schema() -> SchemaDef {
+        SchemaDef::new()
+            .table("projects", |table| {
+                table.text("title");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+            })
+            .table("labels", |table| {
+                table.text("name");
+                table.index("by_name", ["name"]);
+            })
+            .table("todo_labels", |table| {
+                table.ref_("todo", "todos");
+                table.ref_("label", "labels");
+                table.index("by_todo", ["todo"]);
+                table.index("by_label", ["label"]);
+            })
+    }
+
     #[test]
     fn current_index_for_created_at_page_queries_matches_query_order() -> Result<()> {
-        let schema = SchemaDef::todo_app_schema();
+        let schema = todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         install(&conn, &schema)?;
 

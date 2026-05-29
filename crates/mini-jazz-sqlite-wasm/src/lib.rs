@@ -50,7 +50,7 @@ impl From<JsValue> for NotificationError {
 impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
-        Runtime::open_with_schema(Storage::Memory, node_id, user, SchemaDef::todo_app_schema())
+        Runtime::open_with_schema(Storage::Memory, node_id, user, todo_app_schema())
             .map(MiniJazzRuntime::new)
             .map_err(to_js_error)
     }
@@ -76,7 +76,7 @@ impl MiniJazzRuntime {
             Storage::File(db_name.into()),
             node_id,
             user,
-            SchemaDef::todo_app_schema(),
+            todo_app_schema(),
         )
         .map(MiniJazzRuntime::new)
         .map_err(to_js_error)
@@ -675,4 +675,29 @@ fn opfs_pool_name(db_name: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("mini-jazz-sqlite-{hash:016x}")
+}
+
+fn todo_app_schema() -> SchemaDef {
+    SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.index("open_created", ["done", "$createdAt"]);
+            table.index("created", ["$createdAt"]);
+            table.index("by_title", ["title"]);
+        })
+        .table("labels", |table| {
+            table.text("name");
+            table.index("by_name", ["name"]);
+        })
+        .table("todo_labels", |table| {
+            table.ref_("todo", "todos");
+            table.ref_("label", "labels");
+            table.index("by_todo", ["todo"]);
+            table.index("by_label", ["label"]);
+        })
 }

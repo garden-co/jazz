@@ -2903,9 +2903,24 @@ mod tests {
     use rusqlite::params;
     use serde_json::json;
 
+    fn todo_app_schema() -> SchemaDef {
+        SchemaDef::new()
+            .table("projects", |table| {
+                table.text("title");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+            })
+    }
+
     #[test]
     fn top_created_at_query_returns_only_latest_page() -> Result<()> {
-        let schema = SchemaDef::todo_app_schema();
+        let schema = todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         schema::install(&conn, &schema)?;
         seed_todos(&conn, 100)?;

@@ -381,3 +381,9 @@ Removing the public `Runtime::open(...)` todo-schema shortcut. Keeping a
 convenient todo app fixture in test support is fine, but the core runtime's
 entry point should require a schema so new agents don't infer that the runtime
 itself is a todo-shaped product.
+
+## 2026-05-29 00:36 PDT
+
+Continuing that cleanup by removing `SchemaDef::todo_app_schema()` from the core
+API as well. Tests and the demo wrapper can define a todo schema fixture, but
+the production-facing schema builder should stay generic.

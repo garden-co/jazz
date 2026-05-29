@@ -149,7 +149,32 @@ impl Harness {
 }
 
 pub fn open_todo_app(storage: Storage, node_id: &str, user: &str) -> Result<Runtime> {
-    Runtime::open_with_schema(storage, node_id, user, SchemaDef::todo_app_schema())
+    Runtime::open_with_schema(storage, node_id, user, todo_app_schema())
+}
+
+pub fn todo_app_schema() -> SchemaDef {
+    SchemaDef::new()
+        .table("projects", |table| {
+            table.text("title");
+        })
+        .table("todos", |table| {
+            table.text("title");
+            table.bool("done");
+            table.ref_("project", "projects");
+            table.index("open_created", ["done", "$createdAt"]);
+            table.index("created", ["$createdAt"]);
+            table.index("by_title", ["title"]);
+        })
+        .table("labels", |table| {
+            table.text("name");
+            table.index("by_name", ["name"]);
+        })
+        .table("todo_labels", |table| {
+            table.ref_("todo", "todos");
+            table.ref_("label", "labels");
+            table.index("by_todo", ["todo"]);
+            table.index("by_label", ["label"]);
+        })
 }
 
 pub fn run_as_user<T>(

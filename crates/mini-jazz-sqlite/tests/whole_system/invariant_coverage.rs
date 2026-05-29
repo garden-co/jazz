@@ -725,7 +725,7 @@ fn recursive_batched_refresh_matches_individual_refresh_after_subtree_changes() 
 fn multi_hop_topology_refreshes_cold_client_query_after_upstream_change() {
     let harness = support::Harness::new();
     let mut mesh =
-        support::TrustedMeshTopology::memory(&harness, SchemaDef::todo_app_schema()).unwrap();
+        support::TrustedMeshTopology::memory(&harness, support::todo_app_schema()).unwrap();
 
     mesh.alice_tab
         .create_project("project-1", "Distributed work")
@@ -2557,10 +2557,10 @@ fn durable_observed_query_reads_are_connection_local_not_persisted() {
 fn duplicated_and_reordered_table_bundles_converge_across_topology() {
     let mut alice = support::open_todo_app(Storage::Memory, "alice-tab", "alice").unwrap();
     let mut edge =
-        Runtime::open_trusted_with_schema(Storage::Memory, "edge", SchemaDef::todo_app_schema())
+        Runtime::open_trusted_with_schema(Storage::Memory, "edge", support::todo_app_schema())
             .unwrap();
     let mut core =
-        Runtime::open_trusted_with_schema(Storage::Memory, "core", SchemaDef::todo_app_schema())
+        Runtime::open_trusted_with_schema(Storage::Memory, "core", support::todo_app_schema())
             .unwrap();
     let mut bob = support::open_todo_app(Storage::Memory, "bob-tab", "bob").unwrap();
 
