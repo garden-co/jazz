@@ -250,3 +250,14 @@ Extract query-read import as an apply phase too. Query descriptors are durable
 sync facts with their own replay/repair semantics; even if the current phase is
 small, naming it keeps subscription/query-scope behavior from being another
 hidden side effect of runtime bundle application.
+
+## 2026-05-28 23:55 PDT
+
+Spawned a read-only explorer for #952 branch-permission semantics while I keep
+working locally. Parallel question: what is the smallest valuable branch-policy
+slice to port without reintroducing hardcoded paths?
+
+Local cleanup continues with branch-record import. Branch metadata application
+already has phase shape: ensure branch records, sync source lists, and produce
+`branch_id -> branch_num` for later history application. Extract that so branch
+catalogue behavior is not an inline prelude to row history import.

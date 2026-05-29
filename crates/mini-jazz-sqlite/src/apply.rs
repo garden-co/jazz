@@ -1,7 +1,7 @@
 use crate::schema::SchemaDef;
 use crate::sync::{Bundle, BUNDLE_PROTOCOL_VERSION};
 use crate::time::now_ms;
-use crate::{rows, tx, users, Result};
+use crate::{branch, rows, tx, users, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -215,6 +215,32 @@ pub(crate) fn apply_tx_records(db: &Connection, bundle: &Bundle) -> Result<Appli
         tx_nums_by_id,
         tx_info_by_num,
     })
+}
+
+pub(crate) fn apply_branch_records(
+    db: &Connection,
+    bundle: &Bundle,
+) -> Result<BTreeMap<String, i64>> {
+    for branch_record in &bundle.branches {
+        let branch_num = branch::ensure(
+            db,
+            &branch_record.branch_id,
+            branch_record.base_global_epoch,
+            now_ms(),
+        )?;
+        branch::set_sources_from_sync(
+            db,
+            branch_num,
+            &branch_record.source_branch_ids,
+            branch_record.source_version,
+        )?;
+    }
+    let mut branch_nums_by_id = BTreeMap::new();
+    for branch_record in &bundle.branches {
+        let branch_num = branch::checkout(db, &branch_record.branch_id)?;
+        branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
+    }
+    Ok(branch_nums_by_id)
 }
 
 pub(crate) fn apply_read_records(

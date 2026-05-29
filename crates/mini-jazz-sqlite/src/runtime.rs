@@ -1,6 +1,6 @@
 use crate::apply::{
-    apply_query_read_records, apply_read_records, apply_tx_records, encode_optional_json,
-    tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
+    apply_branch_records, apply_query_read_records, apply_read_records, apply_tx_records,
+    encode_optional_json, tx_apply_info, ApplyCaches, ApplyTxInfo, BundleApplyPlan,
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
@@ -602,25 +602,7 @@ impl Runtime {
         let begin_tx_ms = begin_tx_started.elapsed_ms();
 
         let branches_started = ProfileTimer::start();
-        for branch_record in &bundle.branches {
-            let branch_num = branch::ensure(
-                &db,
-                &branch_record.branch_id,
-                branch_record.base_global_epoch,
-                now_ms(),
-            )?;
-            branch::set_sources_from_sync(
-                &db,
-                branch_num,
-                &branch_record.source_branch_ids,
-                branch_record.source_version,
-            )?;
-        }
-        let mut branch_nums_by_id = BTreeMap::new();
-        for branch_record in &bundle.branches {
-            let branch_num = branch::checkout(&db, &branch_record.branch_id)?;
-            branch_nums_by_id.insert(branch_record.branch_id.clone(), branch_num);
-        }
+        let branch_nums_by_id = apply_branch_records(&db, bundle)?;
         let branches_ms = branches_started.elapsed_ms();
 
         let table_nums_by_name = crate::schema::table_nums(&db)?;
