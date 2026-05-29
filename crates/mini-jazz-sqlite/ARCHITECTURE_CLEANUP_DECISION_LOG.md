@@ -728,3 +728,9 @@ regress.
 - Replaced the query-refresh wildcard runtime import with explicit dependencies.
 - This makes the live query-descriptor/refresh boundary clearer after extracting `query_descriptor`, and removes one more module from the old monolithic runtime namespace habit.
 - Focused query-read tests pass.
+
+## 2026-05-29 03:13 PDT - Tightened transaction-status imports
+
+- Replaced the transaction-status wildcard runtime import with explicit dependencies.
+- This clarifies the transaction status/fate surface after the larger runtime split and keeps public status helpers from depending on ambient runtime internals.
+- Focused transaction and rejection test suites pass.

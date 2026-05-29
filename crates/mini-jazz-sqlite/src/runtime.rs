@@ -20,9 +20,7 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::types::{
-    ApplyBundleProfile, QueryExportProfile, ReadTier, RejectionInfo, RowView, TransactionInfo,
-};
+use crate::types::{ApplyBundleProfile, QueryExportProfile, ReadTier, RejectionInfo, RowView};
 use crate::{
     branch, effective, policy, policy_read_set, projection, query, query_predicate, read_set, tx,
     users, Result,
