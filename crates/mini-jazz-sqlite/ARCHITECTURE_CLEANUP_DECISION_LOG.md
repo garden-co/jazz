@@ -451,3 +451,10 @@ regress.
 - Ported the remaining #972 product-shaped test as an example-level regression: a memory main runtime flips several page-five todos to done, syncs through the worker in id batches, then a freshly reloaded main runtime hydrates done/open pages and subscriptions.
 - This is intentionally not a new core abstraction; it protects the browser todo app's real reload/filter failure mode now that query hydration and SQL-scoped built-query exports are in place.
 - Running the example test initially hit the disk limit. Cleared generated Rust `target/` output, reran, and the focused example test passed.
+
+## 2026-05-29 01:18 PDT - Extracting SQL-scope export out of the runtime body
+
+- The #972 SQL-scoped export port worked but made `runtime.rs` larger, which works against the "stop looking like a test-shaped prototype" goal.
+- Created a `runtime::query_scope_export` child module and moved the built-query SQL row-scope bundle export entry point there.
+- I deliberately left the lower-level history/policy helper functions in `runtime.rs` for this slice. They are shared by legacy row-id export and SQL-scope export, so moving them safely needs a broader export-boundary refactor rather than a purely mechanical copy.
+- Focused `query_matrix` tests pass after the extraction.
