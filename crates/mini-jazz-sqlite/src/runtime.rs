@@ -472,7 +472,7 @@ impl Runtime {
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         let query_reads = vec![QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
             table: table_name.to_owned(),
             field: parent_field.to_owned(),
             op: "recursive_refs".to_owned(),
@@ -508,7 +508,7 @@ impl Runtime {
                     .collect::<Result<Vec<_>>>()?,
             );
             query_reads.push(QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
                 table: table_name.to_owned(),
                 field: parent_field.to_owned(),
                 op: "recursive_refs".to_owned(),
@@ -738,7 +738,7 @@ impl Runtime {
     }
 
     pub fn export_query_read_refreshes(&self, reads: &[QueryReadRecord]) -> Result<Vec<Bundle>> {
-        let current_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let current_branch_id = branch::id_for_num(&self.conn, self.branch_num)?;
         let mut bundles = Vec::new();
 
         for plan in plan_query_read_refreshes(&current_branch_id, reads)? {
@@ -809,7 +809,7 @@ impl Runtime {
     }
 
     fn export_query_read_refresh(&self, read: &QueryReadRecord) -> Result<Bundle> {
-        if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+        if read.branch_id != branch::id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new("query refresh branch is not checked out"));
         }
         match read.op.as_str() {
@@ -2164,7 +2164,7 @@ impl Runtime {
         branch_id: &str,
         query: impl FnOnce(&mut Runtime) -> Result<T>,
     ) -> Result<T> {
-        let previous_branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let previous_branch_id = branch::id_for_num(&self.conn, self.branch_num)?;
         self.checkout_branch(branch_id)?;
         let result = query(self);
         let restore_result = self.checkout_branch(&previous_branch_id);
@@ -3014,7 +3014,7 @@ impl Runtime {
         previous_observed_ids: Vec<String>,
     ) -> Result<Bundle> {
         let query_read = QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
             table: query.table.clone(),
             field: "$query".to_owned(),
             op: "query".to_owned(),
@@ -3361,7 +3361,7 @@ impl Runtime {
 
         let make_started = ProfileTimer::start();
         let query_reads = vec![QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
             table: table_name.to_owned(),
             field: field_name.to_owned(),
             op: "eq_top_field_desc".to_owned(),
@@ -3404,7 +3404,7 @@ impl Runtime {
         options: QueryScopeOptions<'_>,
     ) -> Result<Bundle> {
         let query_read = QueryReadRecord {
-            branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+            branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
             table: table_name.to_owned(),
             field: field_name.to_owned(),
             op: op.to_owned(),
@@ -3453,7 +3453,7 @@ impl Runtime {
                 &item.value,
             )?);
             query_reads.push(QueryReadRecord {
-                branch_id: branch_id_for_num(&self.conn, self.branch_num)?,
+                branch_id: branch::id_for_num(&self.conn, self.branch_num)?,
                 table: table_name.to_owned(),
                 field: field_name.to_owned(),
                 op: item.op,
@@ -3746,7 +3746,7 @@ impl Runtime {
     }
 
     pub fn subscribe_observed_query(&self, read: &QueryReadRecord) -> Result<RowsSubscription> {
-        if read.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+        if read.branch_id != branch::id_for_num(&self.conn, self.branch_num)? {
             return Err(crate::Error::new(
                 "observed query branch is not checked out",
             ));
@@ -5820,15 +5820,6 @@ fn include_branch_record(
         include_branch_record(conn, records, source_branch_num)?;
     }
     Ok(())
-}
-
-fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
-    conn.query_row(
-        "SELECT branch_id FROM jazz_branch WHERE branch_num = ?",
-        params![branch_num],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
 }
 
 fn export_table_history(

@@ -20,7 +20,7 @@ pub(crate) fn record_for_write(args: WritePolicyReadSet<'_>) -> Result<()> {
     if args.branch_num != 1 {
         if let Some((branch_table_name, branch_policy)) = args.table.branch_policies.iter().next() {
             if let Some(branch_write_policy) = branch_policy.write_policy.as_ref() {
-                let branch_id = branch_id_for_num(args.conn, args.branch_num)?;
+                let branch_id = branch::id_for_num(args.conn, args.branch_num)?;
                 let branch_row_num = ensure_row_id(args.conn, branch_table_name, &branch_id)?;
                 read_set::record_tx_read(
                     args.conn,
@@ -256,13 +256,4 @@ fn current_effective_branch_sql(alias: &str, table_name: &str, branch_num: i64) 
           ))",
         schema::current_table(table_name)
     )
-}
-
-fn branch_id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
-    conn.query_row(
-        "SELECT branch_id FROM jazz_branch WHERE branch_num = ?",
-        params![branch_num],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
 }

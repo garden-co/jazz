@@ -49,6 +49,15 @@ pub(crate) fn checkout(conn: &Connection, branch_id: &str) -> Result<i64> {
     )?)
 }
 
+pub(crate) fn id_for_num(conn: &Connection, branch_num: i64) -> Result<String> {
+    conn.query_row(
+        "SELECT branch_id FROM jazz_branch WHERE branch_num = ?",
+        params![branch_num],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 pub(crate) fn base_global_epoch(conn: &Connection, branch_num: i64) -> Result<Option<i64>> {
     Ok(conn.query_row(
         "SELECT base_global_epoch FROM jazz_branch WHERE branch_num = ?",

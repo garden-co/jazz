@@ -359,3 +359,10 @@ Starting a cleanup slice to extract policy read-set recording out of
 read facts, then delegate policy-dependency recording to a policy/read-set
 boundary that knows about ordinary ref-readable policies, recursive policy
 dependencies, branch bases, and branch backing rows.
+
+## 2026-05-29 00:28 PDT
+
+Follow-on boundary cleanup: the inverse branch lookup should live in
+`branch.rs`, not be duplicated by whichever module happens to need to turn a
+physical branch number back into the public branch id. This is exactly the kind
+of tiny centralization that prevents future hardcoded helper drift.
