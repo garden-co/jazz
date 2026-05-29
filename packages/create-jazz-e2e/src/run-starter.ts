@@ -55,6 +55,14 @@ async function runChild(
   args: string[],
   opts: {
     cwd: string;
+    /**
+     * If provided, this is the COMPLETE environment for the child — runChild
+     * does not merge in `process.env`. Callers that want to inherit the parent
+     * env should spread it themselves (`{ ...process.env, EXTRA: "..." }`).
+     * This is so callers can `delete` keys (e.g. `npm_config_user_agent` to
+     * stop create-jazz auto-detecting a package manager) without runChild
+     * re-introducing them via the spread.
+     */
     env?: NodeJS.ProcessEnv;
     verbose?: boolean;
     description: string;
@@ -65,7 +73,7 @@ async function runChild(
   return await new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env },
+      env: opts.env ?? process.env,
       stdio: opts.verbose ? "inherit" : ["ignore", "pipe", "pipe"],
     });
     const chunks: string[] = [];
@@ -322,7 +330,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       await recordPhase("e2e", () =>
         runChild("pnpm", ["exec", "playwright", "test", "--reporter=line"], {
           cwd: appDir,
-          env: { JAZZ_E2E_PROD: "1" },
+          env: { ...process.env, JAZZ_E2E_PROD: "1" },
           verbose,
           description: `playwright test ${opts.starter}`,
         }),

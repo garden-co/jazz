@@ -11,9 +11,9 @@ name: Starters E2E
 # workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
 # artifacts the harness needs (jazz-tools/dist, jazz-napi index + .node).
 # The `e2e` matrix then downloads those and runs the harness per starter,
-# skipping the ~10-minute `build:core` step entirely. The prepare job adds
-# ~10 minutes of wall-clock but removes ~10 minutes from each of 12 matrix
-# jobs, dropping total runner-minutes by ~3x.
+# skipping the ~10-minute `build:core` step entirely. Playwright browsers
+# and the pnpm store are cached between jobs so the matrix doesn't repeat
+# the 280 MB chromium download or the lockfile resolution per runner.
 
 on:
   pull_request:
@@ -34,6 +34,10 @@ env:
   # The scaffolded starter pins its own pnpm via `packageManager`; without
   # this, Corepack prompts on first download and the non-TTY CI run aborts.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  # actions/upload-artifact and friends still ship a Node 20 entrypoint;
+  # GitHub started warning about that. Force the runner to execute JS actions
+  # under Node 24 so the warning goes away without bumping every action SHA.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   prepare:
@@ -75,6 +79,22 @@ jobs:
             (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/_e2e-state/tarballs")
           done
           ls -la "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+
+      - name: Cache Playwright browsers
+        # Same key in the matrix below — prepare populates, matrix restores.
+        # The cache is per-OS; we don't key on lockfile because the harness
+        # installs Playwright from inside the scaffolded folder anyway, which
+        # pins its own version. The install command below is idempotent on a
+        # cache hit (Playwright skips re-downloading already-present browsers).
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
 
       - name: Upload prebuilt artifacts
         uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4
@@ -129,7 +149,18 @@ jobs:
           name: starters-e2e-build-state
           path: .
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
       - name: Install Playwright browsers
+        # On a cache hit this is effectively just the apt step (~30s); the
+        # browser binaries are restored from cache. --with-deps still runs each
+        # job because the system libs aren't part of the cache.
         run: pnpm exec playwright install chromium --with-deps
 
       - name: Skip if starter doesn't match dispatch filter
