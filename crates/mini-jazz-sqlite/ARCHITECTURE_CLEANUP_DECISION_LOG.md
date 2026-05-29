@@ -439,3 +439,9 @@ regress.
 - `Runtime::export_built_query_read_scope_sql` uses that scope for visible history export and policy dependency export, while keeping repair rows explicit because they represent previous observed rows and rows that left the result.
 - Kept the existing fallback when branch effective policy requires post-filter pagination. That is a real semantic edge where SQL-only lowering would be wrong until the policy/window boundary is made sharper.
 - Query matrix tests pass, including large built-query export, policy-filtered exports, and page refreshes.
+
+## 2026-05-29 01:10 PDT - Avoiding deep-history feature ingestion; extracting SQL-scope boundary instead
+
+- #973 is still moving and remains draft/dirty. The new scout pass confirms the sealed-history/deep-text work is coherent but too feature-shaped for this architecture-boundary PR.
+- The small #973 candidates are apply profiling, incremental read export, and batching local history/current writes. I am only taking these if they can land as clean generic boundaries with tests.
+- Because the #972 SQL-scope port added a lot of code to `runtime.rs`, I delegated a bounded refactor to move that logic into a child module. That is more aligned with this PR's purpose than piling on another runtime-local feature path.
