@@ -387,3 +387,44 @@ fn batched_logical_writes_roll_back_atomically_on_validation_error() {
     assert!(alice.read_rows("notes").unwrap().is_empty());
     assert_eq!(alice.storage_stats().unwrap().history_rows, 0);
 }
+
+#[test]
+fn transaction_lookup_handles_hyphenated_node_ids() {
+    let schema = support::notes_schema();
+    let mut alice = Runtime::open_with_schema(
+        Storage::Memory,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "alice",
+        schema,
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([
+                ("body".to_owned(), json!("v1")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice
+        .update_row(
+            "notes",
+            "note-1",
+            BTreeMap::from([("body".to_owned(), json!("v2"))]),
+        )
+        .unwrap();
+
+    assert_eq!(tx, "tx-550e8400-e29b-41d4-a716-446655440000-2");
+    assert_eq!(alice.transaction_info(&tx).unwrap().tx_id, tx);
+    assert_eq!(
+        alice.transaction_write_rows(&tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+    assert_eq!(
+        alice.transaction_previous_read_rows(&tx).unwrap(),
+        vec![("notes".to_owned(), "note-1".to_owned())]
+    );
+}

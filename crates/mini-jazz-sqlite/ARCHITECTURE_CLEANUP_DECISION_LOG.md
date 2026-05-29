@@ -472,3 +472,9 @@ regress.
 - Implemented this as `runtime::write_batch` with generic `insert_rows_batched` and `update_rows_batched`, rather than a test-specific helper.
 - Tests cover distinct tx ids, sync replay, previous-read tracking for later updates in the same SQLite commit, and full rollback when validation fails halfway through the batch.
 - This is still intentionally narrower than a general write-call batch builder. Deletes, upserts, and mixed table batches are now obvious next increments if this API proves useful.
+
+## 2026-05-29 01:26 PDT - Ported hyphen-safe tx-id invariant without sealed-history coupling
+
+- #973 had useful coverage that hyphenated node ids must not break transaction lookup, but the test was coupled to sealed history compaction.
+- Added a non-sealed whole-system test using a UUID-shaped node id and normal transaction lookup/read-set APIs.
+- This guards the generic invariant directly: transaction identity is opaque text and must never be recovered by splitting `tx-{node}-{epoch}` on hyphens.
