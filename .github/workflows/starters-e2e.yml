@@ -1,0 +1,92 @@
+name: Starters E2E
+
+# Runs the create-jazz-e2e harness against every starter as a matrix job,
+# blocking the changesets release PR if any starter fails to scaffold, install,
+# build, or pass its Playwright suite against the production build.
+#
+# Trigger: any push to the changesets-managed release branch
+# (`changeset-release/main`), plus manual dispatch for ad-hoc runs.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      starter:
+        description: "Single starter to run (omit for all twelve)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    # On PR events, only fire on the changesets release PR. Manual dispatch is
+    # always allowed (handy for testing a starter in isolation).
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    env:
+      JAZZ_SKIP_RN_DEPS: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        starter:
+          - next-betterauth
+          - next-localfirst
+          - next-hybrid
+          - sveltekit-betterauth
+          - sveltekit-localfirst
+          - sveltekit-hybrid
+          - react-betterauth
+          - react-localfirst
+          - react-hybrid
+          - ts-betterauth
+          - ts-localfirst
+          - ts-hybrid
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Rust prerequisites
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build core workspace
+        run: pnpm run build:core
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Skip if starter doesn't match dispatch filter
+        id: filter
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.starter != '' && github.event.inputs.starter != matrix.starter
+        run: echo "skip=1" >> "$GITHUB_OUTPUT"
+
+      - name: Run create-jazz-e2e harness
+        if: steps.filter.outputs.skip != '1'
+        # `--keep` retains the scaffolded project so the artifact-upload step
+        # below can grab Playwright traces on failure. The runner is torn down
+        # at end-of-job anyway, so there's no on-disk leak.
+        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --verbose --keep
+
+      - name: Upload Playwright traces on failure
+        if: failure() && steps.filter.outputs.skip != '1'
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4
+        with:
+          name: playwright-traces-${{ matrix.starter }}
+          path: /tmp/cje2e-${{ matrix.starter }}-*/test-app/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7
