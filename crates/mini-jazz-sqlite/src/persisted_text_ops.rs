@@ -37,7 +37,8 @@ pub fn install(conn: &Connection) -> Result<()> {
           start_byte INTEGER NOT NULL,
           delete_bytes INTEGER NOT NULL,
           insert_text TEXT NOT NULL,
-          resulting_len INTEGER NOT NULL
+          resulting_len INTEGER NOT NULL,
+          depth_since_snapshot INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS jazz_text_chunk (
@@ -114,20 +115,22 @@ pub(crate) fn replace_range_known_len(
     if start_byte > total_len || start_byte + delete_bytes > total_len {
         return Err(Error::new("text op replace range out of bounds"));
     }
+    let depth_since_snapshot = next_depth_since_snapshot(conn, root)?;
     conn.prepare_cached(
         "INSERT INTO jazz_text_op
-           (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
-         VALUES (?, ?, ?, ?, ?)",
+           (parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )?
     .execute(params![
         root,
         start_byte as i64,
         delete_bytes as i64,
         insert,
-        (total_len + insert.len() - delete_bytes) as i64
+        (total_len + insert.len() - delete_bytes) as i64,
+        depth_since_snapshot
     ])?;
     let op_id = conn.last_insert_rowid();
-    if should_snapshot_root(conn, op_id, snapshot_every)? {
+    if snapshot_every > 0 && depth_since_snapshot >= snapshot_every as i64 {
         snapshot(conn, Some(op_id))?;
     }
     Ok(Some(op_id))
@@ -458,18 +461,18 @@ pub fn apply_delta(
     let payload = lz4_flex::decompress_size_prepended(encoded)
         .map_err(|err| Error::new(format!("decode text op delta: {err}")))?;
     let (ops, snapshots, chunks) = decode_delta_payload(&payload)?;
-    validate_delta_references(conn, &ops, &snapshots, &chunks)?;
+    let op_depths = validate_delta_references(conn, &ops, &snapshots, &chunks)?;
     for chunk in ops.chunks(500) {
         let placeholders = (0..chunk.len())
-            .map(|_| "(?, ?, ?, ?, ?, ?)")
+            .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
             "INSERT OR REPLACE INTO jazz_text_op
-             (op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len)
+             (op_id, parent_op_id, start_byte, delete_bytes, insert_text, resulting_len, depth_since_snapshot)
              VALUES {placeholders}"
         );
-        let mut values = Vec::with_capacity(chunk.len() * 6);
+        let mut values = Vec::with_capacity(chunk.len() * 7);
         for op in chunk {
             values.push(rusqlite::types::Value::Integer(op.op_id));
             values.push(
@@ -481,6 +484,9 @@ pub fn apply_delta(
             values.push(rusqlite::types::Value::Integer(op.delete_bytes));
             values.push(rusqlite::types::Value::Text(op.insert_text.clone()));
             values.push(rusqlite::types::Value::Integer(op.resulting_len));
+            values.push(rusqlite::types::Value::Integer(
+                op_depths.get(&op.op_id).copied().unwrap_or(1),
+            ));
         }
         conn.prepare_cached(&sql)?
             .execute(params_from_iter(values.iter()))?;
@@ -546,30 +552,18 @@ fn snapshot_exists(conn: &Connection, op_id: i64) -> Result<bool> {
         .is_some())
 }
 
-fn should_snapshot_root(conn: &Connection, op_id: i64, snapshot_every: usize) -> Result<bool> {
-    if snapshot_every == 0 || snapshot_exists(conn, op_id)? {
-        return Ok(false);
+fn next_depth_since_snapshot(conn: &Connection, parent: TextRoot) -> Result<i64> {
+    let Some(parent_op_id) = parent else {
+        return Ok(1);
+    };
+    if snapshot_exists(conn, parent_op_id)? {
+        return Ok(1);
     }
-    let mut depth = 0;
-    let mut current = Some(op_id);
-    let mut parent_stmt =
-        conn.prepare_cached("SELECT parent_op_id FROM jazz_text_op WHERE op_id = ?")?;
-    while let Some(current_op_id) = current {
-        depth += 1;
-        if depth >= snapshot_every {
-            return Ok(true);
-        }
-        current = parent_stmt
-            .query_row(params![current_op_id], |row| row.get::<_, Option<i64>>(0))
-            .optional()?
-            .ok_or_else(|| Error::new("unknown text op root"))?;
-        if let Some(parent_op_id) = current {
-            if snapshot_exists(conn, parent_op_id)? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(false)
+    conn.prepare_cached("SELECT depth_since_snapshot FROM jazz_text_op WHERE op_id = ?")?
+        .query_row(params![parent_op_id], |row| row.get::<_, i64>(0))
+        .optional()?
+        .map(|depth| depth + 1)
+        .ok_or_else(|| Error::new("unknown text op root"))
 }
 
 fn validate_delta_references(
@@ -577,14 +571,21 @@ fn validate_delta_references(
     ops: &[TextOpRow],
     snapshots: &[SnapshotRow],
     chunks: &[ChunkRow],
-) -> Result<()> {
+) -> Result<BTreeMap<i64, i64>> {
     let incoming_ops = ops.iter().map(|op| op.op_id).collect::<BTreeSet<_>>();
+    let incoming_snapshot_ops = snapshots
+        .iter()
+        .map(|snapshot| snapshot.op_id)
+        .collect::<BTreeSet<_>>();
     let mut op_exists_stmt = conn.prepare_cached("SELECT 1 FROM jazz_text_op WHERE op_id = ?")?;
     let mut root_len_stmt =
         conn.prepare_cached("SELECT resulting_len FROM jazz_text_op WHERE op_id = ?")?;
+    let mut root_depth_stmt =
+        conn.prepare_cached("SELECT depth_since_snapshot FROM jazz_text_op WHERE op_id = ?")?;
     let mut incoming_lengths = BTreeMap::new();
+    let mut incoming_depths = BTreeMap::new();
     for op in ops {
-        let parent_len = if let Some(parent_op_id) = op.parent_op_id {
+        let (parent_len, depth_since_snapshot) = if let Some(parent_op_id) = op.parent_op_id {
             if parent_op_id >= op.op_id {
                 return Err(Error::new(format!(
                     "text op {} parent {} is not older",
@@ -592,14 +593,20 @@ fn validate_delta_references(
                 )));
             }
             if let Some(parent_len) = incoming_lengths.get(&parent_op_id).copied() {
-                parent_len
+                let parent_depth = incoming_depths.get(&parent_op_id).copied().unwrap_or(1);
+                let depth = if incoming_snapshot_ops.contains(&parent_op_id) {
+                    1
+                } else {
+                    parent_depth + 1
+                };
+                (parent_len, depth)
             } else if incoming_ops.contains(&parent_op_id) {
                 return Err(Error::new(format!(
                     "text op parent {parent_op_id} for op {} appears after child",
                     op.op_id
                 )));
             } else {
-                root_len_stmt
+                let parent_len = root_len_stmt
                     .query_row(params![parent_op_id], |row| row.get::<_, i64>(0))
                     .optional()?
                     .ok_or_else(|| {
@@ -607,10 +614,20 @@ fn validate_delta_references(
                             "missing text op parent {parent_op_id} for op {}",
                             op.op_id
                         ))
-                    })?
+                    })?;
+                let parent_depth = root_depth_stmt
+                    .query_row(params![parent_op_id], |row| row.get::<_, i64>(0))
+                    .optional()?
+                    .unwrap_or(1);
+                let depth = if snapshot_exists(conn, parent_op_id)? {
+                    1
+                } else {
+                    parent_depth + 1
+                };
+                (parent_len, depth)
             }
         } else {
-            0
+            (0, 1)
         };
         if op.start_byte < 0 || op.delete_bytes < 0 {
             return Err(Error::new(format!(
@@ -632,6 +649,7 @@ fn validate_delta_references(
             )));
         }
         incoming_lengths.insert(op.op_id, op.resulting_len);
+        incoming_depths.insert(op.op_id, depth_since_snapshot);
     }
 
     let mut incoming_chunks = BTreeSet::new();
@@ -678,7 +696,7 @@ fn validate_delta_references(
             }
         }
     }
-    Ok(())
+    Ok(incoming_depths)
 }
 
 fn ancestor_ops_to_replay(

@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:27:40 PDT 2026
+
+Decision: persist `depth_since_snapshot` on text ops so per-root snapshot scheduling stays O(1).
+
+Why: the first per-root snapshot implementation walked the parent chain on every write. That was semantically right but measured badly: append/document write cost roughly doubled and Automerge emitted more snapshot bytes. Since replay depth is intrinsic op metadata, storing it with each op gives the same per-root snapshot invariant without per-write chain scans.
+
+Scope impact: `jazz_text_op` now has `depth_since_snapshot`. Local writes compute it from the parent op and snapshot table, and imported deltas reconstruct it while validating op structure. The wire format stays unchanged because depth is derived metadata.
+
 ## Fri May 29 02:24:40 PDT 2026
 
 Decision: schedule deep-text snapshots by per-root replay depth, not global op id.
