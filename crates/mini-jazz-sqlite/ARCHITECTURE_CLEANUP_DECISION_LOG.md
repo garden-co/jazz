@@ -928,3 +928,9 @@ regress.
 - The remaining todo references are either crate-local tests or intentional example/WASM todo convenience wrappers.
 - The remaining `principal` references are in current Jazz packages/docs outside this mini SQLite architecture-cleanup branch, not in the new mini core API surface changed here.
 - Re-fetched PR #973 again; it had not advanced beyond the already-logged deep-history/deep-text/block-delta commits. Decision unchanged: keep it separate from this cleanup PR.
+
+## 2026-05-29 04:18 PDT - Final full mini core validation remains green
+
+- Re-ran `cargo test -p mini-jazz-sqlite` after the final log/audit pass.
+- Result: 440 passed, 18 ignored placeholders, 0 failed.
+- Open stacked PRs against the SQLite spike base are #974 (this cleanup PR), #973 (moving deep-history/perf PR), and #945 (Nico transaction-isolation spec/tests).
