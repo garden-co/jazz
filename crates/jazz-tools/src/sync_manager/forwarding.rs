@@ -283,12 +283,7 @@ impl SyncManager {
 
             let (current, _) = stack.pop().expect("stack is non-empty");
             self.queue_row_to_server_with_storage(
-                storage,
-                table,
-                server_id,
-                object_id,
-                metadata,
-                current,
+                storage, table, server_id, object_id, metadata, current,
             );
         }
     }
