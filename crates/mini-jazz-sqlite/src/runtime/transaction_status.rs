@@ -1,7 +1,6 @@
-use super::{
-    clear_transaction_awaiting_dependency, conflict_mode_name, parse_rejection_detail,
-    parse_rejection_detail_for_sqlite, tier_name, Runtime,
-};
+use super::history_export::{parse_rejection_detail, parse_rejection_detail_for_sqlite};
+use super::sync_apply::clear_transaction_awaiting_dependency;
+use super::{conflict_mode_name, tier_name, Runtime};
 use crate::time::now_ms;
 use crate::types::{RejectionInfo, TransactionInfo};
 use crate::{projection, tx, Result};

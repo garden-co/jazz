@@ -19,8 +19,6 @@ mod transaction_status;
 mod write_batch;
 mod write_core;
 mod writes;
-use history_export::*;
-use sync_apply::*;
 #[allow(unused_imports)]
 pub use transaction_builder::TransactionBuilder;
 

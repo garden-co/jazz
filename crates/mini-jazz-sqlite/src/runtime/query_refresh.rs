@@ -1,4 +1,5 @@
-use super::{export_txs, include_branch_record, make_bundle, Runtime};
+use super::history_export::{export_txs, include_branch_record, make_bundle};
+use super::Runtime;
 use crate::observed_query::{self, ObservedQuery, PredicateOp};
 use crate::query_api::{predicate_query, QueryConditionOp};
 use crate::query_observation::support_window_query;

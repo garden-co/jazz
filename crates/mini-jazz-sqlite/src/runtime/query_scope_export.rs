@@ -1,4 +1,4 @@
-use super::{
+use super::history_export::{
     dedupe_history_records, export_branch_records_for_history,
     export_history_versions_for_query_scope_in_branches,
     export_history_versions_for_rows_in_branches, export_policy_dependency_history,
@@ -7,8 +7,9 @@ use super::{
     export_snapshot_policy_dependency_history_for_query_scope, export_txs_for_query_scope,
     export_visible_table_history, include_branch_record, make_bundle,
     query_scope_rejected_tx_ids_for_built_query, query_scope_repair_row_nums_for_read,
-    PolicyDependencyExport, PolicyDependencyQueryScopeExport, QueryScopeOptions, Runtime,
+    PolicyDependencyExport, PolicyDependencyQueryScopeExport,
 };
+use super::{QueryScopeOptions, Runtime};
 use crate::query_api::BuiltQuery;
 use crate::rows::row_num;
 use crate::sync::{Bundle, QueryReadRecord};

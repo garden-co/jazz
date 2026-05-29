@@ -858,3 +858,9 @@ regress.
 
 - Ran `cargo test -p mini-jazz-sqlite` after fixing generic built-query descriptor identity and the WASM schema constructor surface.
 - Result: 440 passed, 18 ignored placeholders, 0 failed.
+
+## 2026-05-29 03:59 PDT - Removed runtime-root helper re-export indirection
+
+- Addressed the review's second boundary finding: runtime child modules no longer reach `history_export` / `sync_apply` helpers through glob imports installed on the runtime root.
+- Query export, query refresh, query-scope export, sync export, and transaction status now import helpers from the sibling module that actually owns them.
+- Removed the `use history_export::*` and `use sync_apply::*` imports from `runtime.rs`; `cargo check -p mini-jazz-sqlite` is green.

@@ -1,11 +1,13 @@
-use super::{
+use super::history_export::{
     dedupe_history_records, export_branch_records_for_history,
     export_deleted_recursive_descendant_history, export_history_versions_for_rows,
     export_policy_dependency_history, export_reads_for_history,
     export_recursive_scope_repair_history, export_snapshot_policy_dependency_history,
     export_table_history, export_txs, export_txs_for_query_scope, export_visible_table_history,
-    history_records_for_tx, include_branch_record, make_bundle, PolicyDependencyExport, Runtime,
+    include_branch_record, make_bundle, PolicyDependencyExport,
 };
+use super::sync_apply::history_records_for_tx;
+use super::Runtime;
 use crate::rows::row_num;
 use crate::sync::{Bundle, QueryReadRecord};
 use crate::{branch, tx, Result};

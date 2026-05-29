@@ -1,11 +1,12 @@
-use super::{
+use super::history_export::{
     dedupe_history_records, export_branch_records_for_history,
     export_history_versions_for_rows_in_branches, export_policy_dependency_history,
     export_reads_for_history, export_snapshot_policy_dependency_history,
     export_txs_for_query_scope, export_visible_table_history, include_branch_record, make_bundle,
     query_scope_rejected_tx_ids, query_scope_rejected_tx_ids_for_read, query_scope_repair_row_nums,
-    query_scope_repair_row_nums_for_read, PolicyDependencyExport, QueryScopeOptions, Runtime,
+    query_scope_repair_row_nums_for_read, PolicyDependencyExport,
 };
+use super::{QueryScopeOptions, Runtime};
 use crate::profile::ProfileTimer;
 use crate::query_api::{predicate_query, BuiltQuery, QueryConditionOp};
 use crate::query_observation::{built_query_read_value, observed_row_ids, support_window_query};
