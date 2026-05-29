@@ -66,3 +66,10 @@ Integration strategy for this cleanup PR: first reduce broken-window pressure in
 the base by extracting crisp generic modules. Then pull in tests from #945/#952/
 #947/#972 as red/green slices. Avoid wholesale merges unless a PR becomes clean
 and narrow.
+
+## 2026-05-28 22:49 PDT
+
+Second cleanup target: remove stale "attempt3 fixture" naming from the core.
+The default todo app schema may still exist as a convenience/example while the
+tests are migrated, but names like `attempt3_fixture` invite test-specific
+thinking in core code. Rename to `todo_app_schema` as an incremental cleanup.

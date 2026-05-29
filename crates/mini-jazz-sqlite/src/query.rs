@@ -2892,7 +2892,7 @@ mod tests {
 
     #[test]
     fn top_created_at_query_returns_only_latest_page() -> Result<()> {
-        let schema = SchemaDef::attempt3_fixture();
+        let schema = SchemaDef::todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         schema::install(&conn, &schema)?;
         seed_todos(&conn, 100)?;

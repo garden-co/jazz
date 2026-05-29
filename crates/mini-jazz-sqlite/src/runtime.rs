@@ -135,7 +135,7 @@ impl QueryScopeOptions<'_> {
 
 impl Runtime {
     pub fn open(storage: Storage, node_id: &str, user: &str) -> Result<Self> {
-        Self::open_with_schema(storage, node_id, user, SchemaDef::attempt3_fixture())
+        Self::open_with_schema(storage, node_id, user, SchemaDef::todo_app_schema())
     }
 
     pub fn open_with_schema(

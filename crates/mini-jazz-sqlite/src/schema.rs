@@ -16,7 +16,7 @@ impl SchemaDef {
         }
     }
 
-    pub fn attempt3_fixture() -> Self {
+    pub fn todo_app_schema() -> Self {
         Self::new()
             .table("projects", |table| {
                 table.text("title");
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn current_index_for_created_at_page_queries_matches_query_order() -> Result<()> {
-        let schema = SchemaDef::attempt3_fixture();
+        let schema = SchemaDef::todo_app_schema();
         let conn = storage::open(Storage::Memory)?;
         install(&conn, &schema)?;
 
