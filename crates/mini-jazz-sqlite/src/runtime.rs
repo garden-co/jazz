@@ -13723,6 +13723,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_history_delta_apply_rolls_back_imported_blocks() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        for _ in 0..8 {
+            alice
+                .append_deep_text("docs", "doc-1", "body", "x")
+                .unwrap();
+        }
+        alice.compact_accepted_history("docs", "doc-1", 1).unwrap();
+        let mut delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!delta.blocks.is_empty());
+        delta.bundle.txs.clear();
+
+        let err = bob.apply_history_delta(&delta).unwrap_err();
+
+        assert!(err.to_string().contains("references missing tx"));
+        assert!(bob.history_block_manifests("docs").unwrap().is_empty());
+        assert!(bob.read_rows("docs").unwrap().is_empty());
+        assert_eq!(
+            bob.current_text_ops_watermark().unwrap(),
+            crate::persisted_text_ops::DeltaWatermark::default()
+        );
+    }
+
+    #[test]
     fn history_delta_rejects_deep_text_delta_with_missing_parent_op() {
         let schema = SchemaDef::new().table("docs", |table| {
             table.deep_text("body");
