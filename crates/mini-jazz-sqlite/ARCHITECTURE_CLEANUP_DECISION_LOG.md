@@ -722,3 +722,9 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after fixing the reviewer findings.
 - Result: 439 passed, 18 ignored placeholders, 0 failed.
 - This covers the new tiered timestamp, direct-delete read-set, and observed descriptor replacement regressions inside the full suite.
+
+## 2026-05-29 03:12 PDT - Tightened query-refresh imports after descriptor extraction
+
+- Replaced the query-refresh wildcard runtime import with explicit dependencies.
+- This makes the live query-descriptor/refresh boundary clearer after extracting `query_descriptor`, and removes one more module from the old monolithic runtime namespace habit.
+- Focused query-read tests pass.

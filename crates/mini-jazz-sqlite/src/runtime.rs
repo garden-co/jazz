@@ -11,7 +11,6 @@ use crate::query_observation::{
     built_query_from_read, built_query_read_value, observed_ids_from_query_value, observed_row_ids,
     support_window_query,
 };
-use crate::query_refresh::QueryRefreshPlan;
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
