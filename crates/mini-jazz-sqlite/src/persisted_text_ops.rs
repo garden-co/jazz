@@ -54,6 +54,23 @@ pub fn install(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
+    ensure_depth_since_snapshot_column(conn)?;
+    Ok(())
+}
+
+fn ensure_depth_since_snapshot_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(jazz_text_op)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == "depth_since_snapshot" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE jazz_text_op
+         ADD COLUMN depth_since_snapshot INTEGER NOT NULL DEFAULT 1",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1042,6 +1059,37 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         install(&conn).expect("install text op schema");
         conn
+    }
+
+    #[test]
+    fn install_adds_depth_column_to_existing_text_op_table() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE jazz_text_op (
+              op_id INTEGER PRIMARY KEY,
+              parent_op_id INTEGER,
+              start_byte INTEGER NOT NULL,
+              delete_bytes INTEGER NOT NULL,
+              insert_text TEXT NOT NULL,
+              resulting_len INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        install(&conn).unwrap();
+
+        let depth: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM pragma_table_info('jazz_text_op')
+                 WHERE name = 'depth_since_snapshot'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(depth, 1);
     }
 
     #[test]

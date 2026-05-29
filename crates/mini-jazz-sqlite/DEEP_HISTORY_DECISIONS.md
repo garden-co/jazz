@@ -6,6 +6,14 @@ Timebox target end: Fri May 29 04:29:56 PDT 2026
 Timebox start: Wed May 27 22:52:41 PDT 2026
 Timebox target end: Thu May 28 04:52:41 PDT 2026
 
+## Fri May 29 02:32:44 PDT 2026
+
+Decision: make text-op schema installation add the derived depth column to older local prototype databases.
+
+Why: we are free to break compatibility before launch, but local spike databases can survive across runs and produce confusing failures after adding `depth_since_snapshot`. The column is derived and has a safe default for old rows, so a tiny install-time `ALTER TABLE` keeps iteration smooth without adding protocol compatibility weight.
+
+Scope impact: `persisted_text_ops::install` now checks `PRAGMA table_info(jazz_text_op)` and adds `depth_since_snapshot INTEGER NOT NULL DEFAULT 1` when absent. A regression creates the previous table shape and verifies install upgrades it.
+
 ## Fri May 29 02:27:40 PDT 2026
 
 Decision: persist `depth_since_snapshot` on text ops so per-root snapshot scheduling stays O(1).
