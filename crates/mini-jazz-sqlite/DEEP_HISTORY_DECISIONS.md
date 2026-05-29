@@ -835,3 +835,11 @@ Decision: for batched local single-row writes, defer creating the `jazz_tx` row 
 Why: the hot local write path was creating a tx row and then immediately updating that same row to fill the compact read/write tuple columns. That made tuple maintenance a full SQLite update per application update. The deferred insert keeps the same one-jazz-history-row-per-update semantics, but turns tx tuple maintenance into part of the tx insert itself. While here, field validation stopped rebuilding a schema-field set for every write.
 
 Scope impact: with the incremental live-export env flag enabled, write-only/update moved from roughly `0.0559 -> 0.0496` ms for append, `0.0855 -> 0.0824` ms for Automerge, and `0.0302 -> 0.0249` ms for canvas. `tx_tuple_ms` drops to near zero; `tx_create_ms` rises slightly because it now includes tuple payload insertion. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:44:01 PDT 2026 - Export Incremental Txs By Node Range
+
+Decision: teach the experimental incremental live export path to export tx records by `(node_num, local_epoch >= watermark)` instead of building a string `IN (...)` over public tx ids.
+
+Why: in the realtime single-writer path, all newly exported history belongs to one writer node and a contiguous local-epoch range. Going through `jazz_tx_public` reconstructs tx ids in SQL and forces string matching. The range exporter resolves `node_num` once, builds tx ids in Rust, and falls back to the generic tx-id exporter only for missing cross-node dependencies.
+
+Scope impact: live export/update with the incremental env flag moved from roughly `0.0461 -> 0.0395` ms for append, `0.0457 -> 0.0396` ms for Automerge, and `0.0452 -> 0.0392` ms for canvas in the sample run. `cargo test -q -p mini-jazz-sqlite` passes.

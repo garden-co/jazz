@@ -724,7 +724,13 @@ impl Runtime {
             after_local_epoch,
         )?;
         let reads = export_reads_for_history(&self.conn, &history)?;
-        let txs = export_txs_for_query_scope(&self.conn, table_name, &history, &reads, &[])?;
+        let txs = export_txs_for_single_node_incremental(
+            &self.conn,
+            node_id,
+            after_local_epoch,
+            &history,
+            &reads,
+        )?;
         let mut branches = export_branch_records_for_history(&self.conn, &history)?;
         include_branch_record(&self.conn, &mut branches, self.branch_num)?;
         Ok(make_bundle(
@@ -8227,6 +8233,104 @@ fn export_txs_for_query_scope(
     export_txs_by_ids(conn, needed_tx_ids)
 }
 
+fn export_txs_for_single_node_incremental(
+    conn: &Connection,
+    node_id: &str,
+    after_local_epoch: i64,
+    history: &[HistoryRecord],
+    reads: &[ReadRecord],
+) -> Result<Vec<TxRecord>> {
+    let Some(node_num) = conn
+        .prepare_cached("SELECT node_num FROM jazz_node WHERE node_id = ?")?
+        .query_row(params![node_id], |row| row.get::<_, i64>(0))
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let min_local_epoch = after_local_epoch.max(1);
+    let mut receipt_stmt = conn.prepare_cached(
+        "SELECT tx.local_epoch, receipt.tier
+         FROM jazz_tx tx
+         JOIN jazz_tx_receipt receipt ON receipt.tx_num = tx.tx_num
+         WHERE tx.node_num = ?
+           AND tx.local_epoch >= ?
+         ORDER BY tx.tx_num, receipt.tier",
+    )?;
+    let receipt_rows = receipt_stmt.query_map(params![node_num, min_local_epoch], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut receipt_tiers_by_epoch = BTreeMap::<i64, Vec<i64>>::new();
+    for receipt_row in receipt_rows {
+        let (local_epoch, tier) = receipt_row?;
+        receipt_tiers_by_epoch
+            .entry(local_epoch)
+            .or_default()
+            .push(tier);
+    }
+
+    let mut stmt = conn.prepare_cached(
+        "SELECT tx.local_epoch, tx.global_epoch, tx.conflict_mode, tx.outcome,
+                rejection.code, rejection.detail, tx.created_at, tx.metadata
+         FROM jazz_tx tx
+         LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
+         WHERE tx.node_num = ?
+           AND tx.local_epoch >= ?
+         ORDER BY tx.tx_num",
+    )?;
+    let rows = stmt.query_map(params![node_num, min_local_epoch], |row| {
+        let local_epoch = row.get::<_, i64>(0)?;
+        Ok(TxRecord {
+            tx_id: format!("tx-{node_id}-{local_epoch}"),
+            node_id: node_id.to_owned(),
+            local_epoch,
+            global_epoch: row.get(1)?,
+            conflict_mode: row.get(2)?,
+            outcome: row.get(3)?,
+            auth_user: parse_tx_auth_user_for_sqlite(
+                row.get::<_, Option<String>>(7)?.as_deref(),
+                7,
+            )?,
+            rejection_code: row.get(4)?,
+            rejection_detail: row
+                .get::<_, Option<String>>(5)?
+                .map(|detail| parse_rejection_detail_for_sqlite(&detail, 5))
+                .transpose()?
+                .flatten(),
+            receipt_tiers: receipt_tiers_by_epoch
+                .get(&local_epoch)
+                .cloned()
+                .unwrap_or_default(),
+            created_at: row.get(6)?,
+        })
+    })?;
+    let mut records = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(crate::Error::from)?;
+    let present = records
+        .iter()
+        .map(|record| record.tx_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut missing = BTreeSet::new();
+    for record in history {
+        if !present.contains(record.tx_id.as_str()) {
+            missing.insert(record.tx_id.as_str());
+        }
+    }
+    for record in reads {
+        if !present.contains(record.tx_id.as_str()) {
+            missing.insert(record.tx_id.as_str());
+        }
+        if let Some(observed_tx_id) = &record.observed_tx_id {
+            if !present.contains(observed_tx_id.as_str()) {
+                missing.insert(observed_tx_id.as_str());
+            }
+        }
+    }
+    records.extend(export_txs_by_ids(conn, missing)?);
+    dedupe_txs(&mut records);
+    Ok(records)
+}
+
 fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<TxRecord>> {
     if tx_ids.is_empty() {
         return Ok(Vec::new());
@@ -11050,6 +11154,13 @@ fn export_visible_table_history_since_node_epoch(
     after_local_epoch: i64,
 ) -> Result<Vec<HistoryRecord>> {
     let table = schema.table_def(table_name)?;
+    let Some(node_num) = conn
+        .prepare_cached("SELECT node_num FROM jazz_node WHERE node_id = ?")?
+        .query_row(params![node_id], |row| row.get::<_, i64>(0))
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
     let policy_sql = export_read_policy_sql(schema, table, user, bypass_policy)?;
     let field_columns = table
         .fields
@@ -11059,7 +11170,7 @@ fn export_visible_table_history_since_node_epoch(
     let mut select_columns = vec![
         "ids.row_id".to_owned(),
         "branch.branch_id".to_owned(),
-        "tx.tx_id".to_owned(),
+        "tx.local_epoch".to_owned(),
         "h.op".to_owned(),
     ];
     select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
@@ -11079,14 +11190,14 @@ fn export_visible_table_history_since_node_epoch(
         "SELECT {}
          FROM {} h
          JOIN jazz_row_id ids ON ids.row_num = h.row_num
-         JOIN jazz_tx_public tx ON tx.tx_num = h.tx_num
+         JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          JOIN jazz_branch branch ON branch.branch_num = h.j_branch_num
-         WHERE tx.node_id = ?
+         WHERE tx.node_num = ?
            AND tx.local_epoch > ?
            AND EXISTS (
            SELECT 1
            FROM {} current
-           JOIN jazz_tx_public current_tx ON current_tx.tx_num = current.visible_tx_num
+           JOIN jazz_tx current_tx ON current_tx.tx_num = current.visible_tx_num
            WHERE current.row_num = h.row_num
              AND current.j_branch_num = h.j_branch_num
              AND current.is_deleted = 0
@@ -11104,7 +11215,7 @@ fn export_visible_table_history_since_node_epoch(
     let mut stmt = conn.prepare(&sql)?;
     let row_width = 4 + table.fields.len() + 4;
     let mut records = Vec::new();
-    let mut rows = stmt.query(params![node_id, after_local_epoch])?;
+    let mut rows = stmt.query(params![node_num, after_local_epoch])?;
     let mut public_row_id_cache = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let row = (0..row_width)
@@ -11122,7 +11233,7 @@ fn export_visible_table_history_since_node_epoch(
             table: table_name.to_owned(),
             row_id: text_value(&row[0], "row_id")?,
             branch_id: text_value(&row[1], "branch_id")?,
-            tx_id: text_value(&row[2], "tx_id")?,
+            tx_id: format!("tx-{node_id}-{}", integer_value(&row[2], "local_epoch")?),
             op: integer_value(&row[3], "op")?,
             values,
             created_at: integer_value(&row[sys], "j_created_at")?,
