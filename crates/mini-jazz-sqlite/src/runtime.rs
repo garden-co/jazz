@@ -480,6 +480,11 @@ impl Runtime {
         )
     }
 
+    /// Applies several deep-text edits for one row in one SQLite transaction.
+    ///
+    /// Each edit still creates its own Jazz transaction/history row. The batching only groups the
+    /// SQLite work, so sync and point-in-time semantics stay per edit while fast ingest avoids one
+    /// SQLite commit per keystroke/token/frame.
     pub fn edit_deep_texts_batched(
         &mut self,
         table_name: &str,
@@ -657,6 +662,11 @@ impl Runtime {
         crate::persisted_text_ops::current_watermark(&self.conn)
     }
 
+    /// Returns receiver-state options for exporting a table delta to this runtime.
+    ///
+    /// The options include both sealed history block manifests and the current deep-text sidecar
+    /// watermark, so senders can avoid resending compacted blocks and text ops this receiver
+    /// already has.
     pub fn history_delta_export_options_for_table(
         &self,
         table_name: &str,
@@ -666,6 +676,7 @@ impl Runtime {
             .with_text_ops_watermark(self.current_text_ops_watermark()?))
     }
 
+    /// Returns receiver-state options for exporting a database-wide delta to this runtime.
     pub fn history_delta_export_options(&self) -> Result<HistoryDeltaExportOptions> {
         let mut manifests = Vec::new();
         for table in self.schema.tables() {

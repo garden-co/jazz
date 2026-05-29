@@ -189,6 +189,11 @@ impl TableBuilder {
         });
     }
 
+    /// Stores user-visible text through a compact text-op sidecar while row history stores roots.
+    ///
+    /// Public reads and queries materialize the field as text. Public row writes accept strings,
+    /// and editor-style callers can use the runtime deep-text edit methods to avoid resending a
+    /// whole document for appends or short replacements.
     pub fn deep_text(&mut self, name: &str) {
         self.table.fields.push(FieldDef {
             name: name.to_owned(),
