@@ -1374,3 +1374,11 @@ Decision: only use the batch-local materialized append cache for append-heavy ba
 Why: caching the full text is a major win for large append batches, but for one or two appends on an already-large document, a length lookup is likely cheaper than materializing the whole value. The threshold keeps the optimization general instead of blindly favoring the canonical benchmark batch shape.
 
 Scope impact: canonical append batches are far above the threshold, so the Block+Ops16 numbers still apply. Small append batches keep the old lightweight path.
+
+## Fri May 29 03:08:34 PDT 2026 - Rejected Larger Receive Apply Chunks
+
+Decision: keep receive-side tx/history/tuple batch chunks at 500 rows instead of raising them to 1000.
+
+Why: a measured canonical run with 1000-row chunks did not improve the live apply path. Append was effectively neutral, Automerge was neutral-to-worse, and canvas got slower in tx/history/tuple buckets. Bigger SQL statements are not a free win here.
+
+Scope impact: the uncommitted chunk-size experiment was reverted.
