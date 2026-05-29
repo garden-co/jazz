@@ -6,7 +6,7 @@ impl Runtime {
         table_name: &str,
         rows: Vec<(String, BTreeMap<String, JsonValue>)>,
     ) -> Result<Vec<String>> {
-        self.write_rows_batched(table_name, rows, 1)
+        self.write_rows_batched(table_name, rows, BatchedWriteMode::Insert)
     }
 
     pub fn update_rows_batched(
@@ -14,14 +14,22 @@ impl Runtime {
         table_name: &str,
         rows: Vec<(String, BTreeMap<String, JsonValue>)>,
     ) -> Result<Vec<String>> {
-        self.write_rows_batched(table_name, rows, 2)
+        self.write_rows_batched(table_name, rows, BatchedWriteMode::Update)
+    }
+
+    pub fn upsert_rows_batched(
+        &mut self,
+        table_name: &str,
+        rows: Vec<(String, BTreeMap<String, JsonValue>)>,
+    ) -> Result<Vec<String>> {
+        self.write_rows_batched(table_name, rows, BatchedWriteMode::Upsert)
     }
 
     fn write_rows_batched(
         &mut self,
         table_name: &str,
         rows: Vec<(String, BTreeMap<String, JsonValue>)>,
-        op: i64,
+        mode: BatchedWriteMode,
     ) -> Result<Vec<String>> {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
@@ -31,6 +39,18 @@ impl Runtime {
         for (id, values) in rows {
             let now = now_ms();
             let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+            let op = match mode {
+                BatchedWriteMode::Insert => 1,
+                BatchedWriteMode::Update => 2,
+                BatchedWriteMode::Upsert => {
+                    let row_num = ensure_row_id(&db, table_name, &id)?;
+                    if row_has_current_branch_value(&db, table_name, row_num, self.branch_num)? {
+                        2
+                    } else {
+                        1
+                    }
+                }
+            };
             let allowed = insert_row_in_tx(InsertRowInTx {
                 db: &db,
                 schema: &self.schema,
@@ -61,4 +81,11 @@ impl Runtime {
         db.commit()?;
         Ok(tx_ids)
     }
+}
+
+#[derive(Clone, Copy)]
+enum BatchedWriteMode {
+    Insert,
+    Update,
+    Upsert,
 }

@@ -356,6 +356,57 @@ fn batched_logical_updates_keep_distinct_jazz_transactions_but_commit_together()
 }
 
 #[test]
+fn batched_logical_upserts_can_mix_creates_and_updates() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "alice", schema).unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-existing",
+            BTreeMap::from([
+                ("body".to_owned(), json!("before")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx_ids = alice
+        .upsert_rows_batched(
+            "notes",
+            vec![
+                (
+                    "note-existing".to_owned(),
+                    BTreeMap::from([("body".to_owned(), json!("after"))]),
+                ),
+                (
+                    "note-new".to_owned(),
+                    BTreeMap::from([
+                        ("body".to_owned(), json!("new")),
+                        ("pinned".to_owned(), json!(true)),
+                    ]),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(tx_ids, vec!["tx-alice-node-2", "tx-alice-node-3"]);
+    let rows = alice.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "note-existing" && row.values["body"] == json!("after")));
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "note-new" && row.values["body"] == json!("new")));
+
+    bob.apply_bundle(&alice.export_table_history("notes").unwrap())
+        .unwrap();
+    assert_eq!(bob.read_rows("notes").unwrap().len(), 2);
+}
+
+#[test]
 fn batched_logical_writes_roll_back_atomically_on_validation_error() {
     let schema = support::notes_schema();
     let mut alice =

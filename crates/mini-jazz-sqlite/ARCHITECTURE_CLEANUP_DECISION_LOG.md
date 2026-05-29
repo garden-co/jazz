@@ -485,3 +485,9 @@ regress.
 - Added `sync::encode_bundle` / `sync::decode_bundle` as the native codec boundary, currently implemented as JSON bytes.
 - Updated one existing serialization test to use that boundary and added smoke tests for protocol metadata and equality query-read roundtrips.
 - Also derived record equality for sync records, which makes codec roundtrip tests less awkward and gives future protocol changes sharper assertions.
+
+## 2026-05-29 01:30 PDT - Generalized batched logical writes to upserts
+
+- Added `upsert_rows_batched` and a `BatchedWriteMode` inside the write-batch module.
+- This keeps batched writes from being a pair of one-off insert/update helpers. The mode is still intentionally small and private, but the module now has enough shape to grow into a generic write-call batching boundary.
+- Focused batched logical write tests pass.
