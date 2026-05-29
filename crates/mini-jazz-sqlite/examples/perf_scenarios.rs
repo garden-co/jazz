@@ -1,8 +1,8 @@
 use mini_jazz_sqlite::sync::{decode_bundle, encode_bundle, merge_bundles, Bundle};
 use mini_jazz_sqlite::{
     reset_runtime_write_phase_stats, take_runtime_write_phase_stats, ApplyBundleProfile,
-    HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta, QueryExportProfile, Result,
-    RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats, SchemaDef, Storage, Value,
+    DeepTextEdit, HistoryBlockManifest, HistoryCompactionPolicy, HistoryDelta, QueryExportProfile,
+    Result, RowDiff, RowsSubscription, Runtime, RuntimeWritePhaseStats, SchemaDef, Storage, Value,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -4451,10 +4451,9 @@ fn run_append_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
         compact_hot_tail: Some(hot_tail),
         reference_gzip_bytes: None,
         snapshot_every,
-        next_edit: Box::new(move |writer, _index| {
+        next_edit: Box::new(move |_index| {
             state_len += token.len();
-            writer.append_deep_text("documents", "doc", "body", &token)?;
-            Ok(state_len)
+            Ok((DeepTextEdit::Append(token.clone()), state_len))
         }),
         notes: vec![
             format!(
@@ -4485,7 +4484,7 @@ fn run_automerge_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
         compact_hot_tail: Some(hot_tail),
         reference_gzip_bytes: Some(trace_bytes),
         snapshot_every,
-        next_edit: Box::new(move |writer, index| {
+        next_edit: Box::new(move |index| {
             let mut patches = Vec::new();
             for (pos, del, ins) in &txns[index].patches {
                 let start = byte_index_for_char(&materialized, *pos)?;
@@ -4493,8 +4492,7 @@ fn run_automerge_text_ops_probe() -> BenchResult<DeepHistoryCaseReport> {
                 patches.push((start, end - start, ins.clone()));
                 materialized.replace_range(start..end, ins);
             }
-            writer.replace_deep_text_ranges("documents", "doc", "body", &patches)?;
-            Ok(materialized.len())
+            Ok((DeepTextEdit::ReplaceRanges(patches), materialized.len()))
         }),
         notes: vec![
             format!("Source trace transactions available: {available_txns}"),
@@ -4608,7 +4606,7 @@ struct TextOpsCaseInput {
     notes: Vec<String>,
 }
 
-type TextOpsEditFn = dyn FnMut(&mut Runtime, usize) -> BenchResult<usize>;
+type TextOpsEditFn = dyn FnMut(usize) -> BenchResult<(DeepTextEdit, usize)>;
 
 fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCaseReport> {
     let tmp = tempdir()?;
@@ -4630,7 +4628,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         "doc",
         BTreeMap::<String, serde_json::Value>::new(),
     )?;
-    let mut final_payload_bytes = (input.next_edit)(&mut writer, 0)?;
+    let (initial_edit, mut final_payload_bytes) = (input.next_edit)(0)?;
+    writer.edit_deep_texts_batched("documents", "doc", "body", &[initial_edit])?;
     let initial_delta = writer.export_table_history_delta("documents", &[])?;
     let initial_wire = encode_native_bundle(&initial_delta.bundle)?;
     let initial_delta = HistoryDelta {
@@ -4659,6 +4658,11 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         "Runtime deep_text column: Jazz row history stores compact text roots; text ops live in the Runtime-owned sidecar tables with snapshots every {} ops.",
         input.snapshot_every
     ));
+    let batch_window = deep_history_sqlite_tx_batch_window();
+    input.notes.push(format!(
+        "Runtime deep_text batching: logical Jazz updates share SQLite commits for up to {} ms.",
+        batch_window.as_millis()
+    ));
     let mut index = 1usize;
     if self_sample.is_enabled() {
         self_sample.start_after_first_sample()?;
@@ -4667,8 +4671,27 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         let write_started = Instant::now();
         let jazz_write_started = Instant::now();
         reset_runtime_write_phase_stats();
-        final_payload_bytes = (input.next_edit)(&mut writer, index)?;
-        let batch_updates = 1;
+        let batch_started = Instant::now();
+        let mut edits = Vec::new();
+        let mut should_sample = false;
+        loop {
+            let (edit, payload_bytes) = (input.next_edit)(index)?;
+            final_payload_bytes = payload_bytes;
+            edits.push(edit);
+            should_sample = should_sample
+                || (!self_sample.is_enabled() && index == 1)
+                || (index + 1).is_multiple_of(input.sample_every)
+                || index + 1 == input.target_updates;
+            index += 1;
+            if index >= input.target_updates
+                || should_sample
+                || batch_started.elapsed() >= batch_window
+            {
+                break;
+            }
+        }
+        let batch_updates = edits.len();
+        writer.edit_deep_texts_batched("documents", "doc", "body", &edits)?;
         jazz_write_sqlite_transactions += 1;
         jazz_write_updates_per_transaction_total += batch_updates;
         jazz_write_updates_per_transaction_max =
@@ -4676,11 +4699,6 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         add_write_detail(&mut jazz_write_detail, take_runtime_write_phase_stats());
         DeepHistoryPhaseReport::add_elapsed(&mut phase_ms.jazz_write, jazz_write_started);
         write_only_ms += ms(write_started.elapsed());
-        let should_sample = (!self_sample.is_enabled() && index == 1)
-            || (index + 1).is_multiple_of(input.sample_every)
-            || index + 1 == input.target_updates;
-        index += 1;
-
         if should_sample {
             let receive_started = Instant::now();
             let export_started = Instant::now();

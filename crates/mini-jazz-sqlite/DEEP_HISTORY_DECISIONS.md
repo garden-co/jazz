@@ -38,6 +38,14 @@ Why: the first runtime API wrote the text op into Runtime-owned sidecar tables b
 
 Scope impact: `append_deep_text`, `replace_deep_text_range`, and `replace_deep_text_ranges` now share one `write_deep_text` transaction path. Append smoke write-only time improved modestly, and the write detail now correctly shows no separate update prelookup phase because the current root lookup happens inside the unified transaction.
 
+## Thu May 28 22:58:03 PDT 2026
+
+Decision: add a real deep-text batch API that preserves Jazz tx granularity.
+
+Why: the write-performance goal is not userland coalescing; each append/edit still needs its own Jazz transaction, history row, read dependency, write tuple, and row-root version. The optimization is only the SQLite boundary: many logical deep-text edits can share one SQLite transaction and reuse row/user/table/current lookup state.
+
+Scope impact: `Runtime::edit_deep_texts_batched` accepts a sequence of `DeepTextEdit`s and writes one Jazz version per edit inside one SQLite commit. The append/document benchmark now generates logical deep-text edits and batches them up to the 10 ms window or the next live-sync sample. Append smoke dropped from roughly 2281 ms total loop to roughly 461 ms with 2225 logical updates; the write profile reports 6 SQLite transactions for 2224 measured updates while preserving 2224 synced history rows.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.

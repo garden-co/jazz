@@ -21,7 +21,7 @@ pub mod value;
 
 pub use error::{Error, Result};
 pub use runtime::{
-    reset_runtime_write_phase_stats, take_runtime_write_phase_stats, Runtime,
+    reset_runtime_write_phase_stats, take_runtime_write_phase_stats, DeepTextEdit, Runtime,
     RuntimeWritePhaseStats,
 };
 pub use schema::SchemaDef;

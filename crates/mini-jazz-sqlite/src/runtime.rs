@@ -85,6 +85,12 @@ fn add_write_phase(slot: impl FnOnce(&mut RuntimeWritePhaseStats) -> &mut f64, s
     });
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeepTextEdit {
+    Append(String),
+    ReplaceRanges(Vec<(usize, usize, String)>),
+}
+
 pub fn reset_runtime_write_phase_stats() {
     WRITE_PHASE_STATS.with(|stats| *stats.borrow_mut() = RuntimeWritePhaseStats::default());
 }
@@ -426,9 +432,12 @@ impl Runtime {
         field_name: &str,
         text: &str,
     ) -> Result<String> {
-        self.write_deep_text(table_name, id, field_name, |db, root| {
-            crate::persisted_text_ops::append(db, root, text, 256)
-        })
+        self.write_deep_text_edit(
+            table_name,
+            id,
+            field_name,
+            &DeepTextEdit::Append(text.to_owned()),
+        )
     }
 
     pub fn replace_deep_text_range(
@@ -440,16 +449,12 @@ impl Runtime {
         delete_bytes: usize,
         insert: &str,
     ) -> Result<String> {
-        self.write_deep_text(table_name, id, field_name, |db, root| {
-            crate::persisted_text_ops::replace_range(
-                db,
-                root,
-                start_byte,
-                delete_bytes,
-                insert,
-                256,
-            )
-        })
+        self.write_deep_text_edit(
+            table_name,
+            id,
+            field_name,
+            &DeepTextEdit::ReplaceRanges(vec![(start_byte, delete_bytes, insert.to_owned())]),
+        )
     }
 
     pub fn replace_deep_text_ranges(
@@ -459,19 +464,114 @@ impl Runtime {
         field_name: &str,
         patches: &[(usize, usize, String)],
     ) -> Result<String> {
-        self.write_deep_text(table_name, id, field_name, |db, mut root| {
-            for (start_byte, delete_bytes, insert) in patches {
-                root = crate::persisted_text_ops::replace_range(
-                    db,
-                    root,
-                    *start_byte,
-                    *delete_bytes,
-                    insert,
-                    256,
+        self.write_deep_text_edit(
+            table_name,
+            id,
+            field_name,
+            &DeepTextEdit::ReplaceRanges(patches.to_vec()),
+        )
+    }
+
+    pub fn edit_deep_texts_batched(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        edits: &[DeepTextEdit],
+    ) -> Result<Vec<String>> {
+        if edits.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.validate_deep_text_field(table_name, field_name)?;
+        let table = self.schema.table_def(table_name)?.clone();
+        let user = self.attribution_user().to_owned();
+        let bypass_policy = self.bypasses_policy();
+        let write_sql = AppWriteSql::new(&table);
+        let begin_started = Instant::now();
+        let db = self.conn.transaction()?;
+        add_write_phase(|stats| &mut stats.begin_transaction_ms, begin_started);
+        let mut root = current_deep_text_root_in_tx(
+            &db,
+            &self.schema,
+            self.branch_num,
+            table_name,
+            id,
+            field_name,
+        )?;
+        let user_num = users::ensure_user(&db, &user)?;
+        let table_num = crate::schema::table_num(&db, &table.name)?;
+        let next_epoch_started = Instant::now();
+        let mut next_local_epoch = tx::next_local_epoch(&db, self.node_num)?;
+        add_write_phase(|stats| &mut stats.next_epoch_ms, next_epoch_started);
+        let mut creation_metadata_cache = BTreeMap::new();
+        let mut row_num_cache = BTreeMap::new();
+        let mut visible_tx_cache = BTreeMap::new();
+        let mut tx_ids = Vec::with_capacity(edits.len());
+        for edit in edits {
+            root = apply_deep_text_edit(&db, root, edit)?;
+            let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
+            let now = now_ms();
+            let outcome = insert_row_in_tx(InsertRowInTx {
+                db: &db,
+                schema: &self.schema,
+                table_name,
+                id,
+                values: &values,
+                tx_num: None,
+                deferred_tx: Some(DeferredTxInsert {
+                    node_num: self.node_num,
+                    node_id: &self.node_id,
+                    local_epoch: next_local_epoch,
+                    conflict_mode: tx::MODE_MERGEABLE,
+                    outcome: tx::OUTCOME_PENDING,
+                    global_epoch: None,
+                }),
+                branch_num: self.branch_num,
+                now,
+                user: &user,
+                user_num,
+                bypass_policy,
+                op: 2,
+                write_sql: &write_sql,
+                table_num,
+                compact_tx_tuples: self.branch_num == 1,
+                creation_metadata_cache: Some(&mut creation_metadata_cache),
+                row_num_cache: Some(&mut row_num_cache),
+                visible_tx_cache: Some(&mut visible_tx_cache),
+            })?;
+            next_local_epoch += 1;
+            if !outcome.allowed {
+                let reject_started = Instant::now();
+                tx::reject(&db, outcome.tx_id.as_ref(), "policy_denied")?;
+                db.execute(
+                    &format!(
+                        "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
+                        crate::schema::current_table(&table.name)
+                    ),
+                    params![outcome.row_num, self.branch_num, outcome.tx_num],
                 )?;
+                add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
             }
-            Ok(root)
-        })
+            tx_ids.push(outcome.tx_id);
+        }
+        let commit_started = Instant::now();
+        db.commit()?;
+        add_write_phase(|stats| &mut stats.commit_ms, commit_started);
+        Ok(tx_ids)
+    }
+
+    fn write_deep_text_edit(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        edit: &DeepTextEdit,
+    ) -> Result<String> {
+        Ok(self
+            .edit_deep_texts_batched(table_name, id, field_name, std::slice::from_ref(edit))?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
     }
 
     pub fn read_deep_text(&self, table_name: &str, id: &str, field_name: &str) -> Result<String> {
@@ -547,16 +647,7 @@ impl Runtime {
         )
     }
 
-    fn write_deep_text(
-        &mut self,
-        table_name: &str,
-        id: &str,
-        field_name: &str,
-        edit: impl FnOnce(
-            &Connection,
-            crate::persisted_text_ops::TextRoot,
-        ) -> Result<crate::persisted_text_ops::TextRoot>,
-    ) -> Result<String> {
+    fn validate_deep_text_field(&self, table_name: &str, field_name: &str) -> Result<()> {
         let table = self.schema.table_def(table_name)?;
         if !table
             .fields
@@ -567,66 +658,7 @@ impl Runtime {
                 "{field_name} is not a deep_text field"
             )));
         }
-        let table = table.clone();
-        let user = self.attribution_user().to_owned();
-        let bypass_policy = self.bypasses_policy();
-        let write_sql = AppWriteSql::new(&table);
-        let begin_started = Instant::now();
-        let db = self.conn.transaction()?;
-        add_write_phase(|stats| &mut stats.begin_transaction_ms, begin_started);
-        let root = current_deep_text_root_in_tx(
-            &db,
-            &self.schema,
-            self.branch_num,
-            table_name,
-            id,
-            field_name,
-        )?;
-        let next_root = edit(&db, root)?;
-        let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]);
-        let user_num = users::ensure_user(&db, &user)?;
-        let table_num = crate::schema::table_num(&db, &table.name)?;
-        let now = now_ms();
-        let tx_create_started = Instant::now();
-        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
-        add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
-        let outcome = insert_row_in_tx(InsertRowInTx {
-            db: &db,
-            schema: &self.schema,
-            table_name,
-            id,
-            values: &values,
-            tx_num: Some(tx_num),
-            deferred_tx: None,
-            branch_num: self.branch_num,
-            now,
-            user: &user,
-            user_num,
-            bypass_policy,
-            op: 2,
-            write_sql: &write_sql,
-            table_num,
-            compact_tx_tuples: self.branch_num == 1,
-            creation_metadata_cache: None,
-            row_num_cache: None,
-            visible_tx_cache: None,
-        })?;
-        if !outcome.allowed {
-            let reject_started = Instant::now();
-            tx::reject(&db, &tx_id, "policy_denied")?;
-            db.execute(
-                &format!(
-                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
-                    crate::schema::current_table(&table.name)
-                ),
-                params![outcome.row_num, self.branch_num, tx_num],
-            )?;
-            add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
-        }
-        let commit_started = Instant::now();
-        db.commit()?;
-        add_write_phase(|stats| &mut stats.commit_ms, commit_started);
-        Ok(tx_id)
+        Ok(())
     }
 
     pub fn upsert_rows_batched<V>(
@@ -7006,6 +7038,30 @@ fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue 
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
 }
 
+fn apply_deep_text_edit(
+    conn: &Connection,
+    root: crate::persisted_text_ops::TextRoot,
+    edit: &DeepTextEdit,
+) -> Result<crate::persisted_text_ops::TextRoot> {
+    match edit {
+        DeepTextEdit::Append(text) => crate::persisted_text_ops::append(conn, root, text, 256),
+        DeepTextEdit::ReplaceRanges(patches) => {
+            let mut root = root;
+            for (start_byte, delete_bytes, insert) in patches {
+                root = crate::persisted_text_ops::replace_range(
+                    conn,
+                    root,
+                    *start_byte,
+                    *delete_bytes,
+                    insert,
+                    256,
+                )?;
+            }
+            Ok(root)
+        }
+    }
+}
+
 fn current_deep_text_root_in_tx(
     conn: &Connection,
     schema: &SchemaDef,
@@ -12722,5 +12778,43 @@ mod tests {
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello again"
         );
+    }
+
+    #[test]
+    fn batched_deep_text_edits_share_sqlite_commit_but_keep_jazz_versions() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        let tx_ids = alice
+            .edit_deep_texts_batched(
+                "docs",
+                "doc-1",
+                "body",
+                &[
+                    DeepTextEdit::Append("a".to_owned()),
+                    DeepTextEdit::Append("b".to_owned()),
+                    DeepTextEdit::Append("c".to_owned()),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(tx_ids.len(), 3);
+        assert_eq!(
+            alice.read_deep_text("docs", "doc-1", "body").unwrap(),
+            "abc"
+        );
+        let bundle = alice.export_table_history("docs").unwrap();
+        let versions = bundle
+            .history
+            .iter()
+            .filter(|record| record.row_id == "doc-1")
+            .count();
+        assert_eq!(versions, 4);
     }
 }
