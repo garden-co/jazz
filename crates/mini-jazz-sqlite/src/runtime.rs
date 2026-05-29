@@ -4,11 +4,8 @@ use crate::apply::{
 };
 use crate::auth::RuntimeAuth;
 use crate::profile::ProfileTimer;
-use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
-use crate::query_observation::{
-    built_query_from_read, built_query_read_value, observed_ids_from_query_value, observed_row_ids,
-    support_window_query,
-};
+use crate::query_api::{BuiltQuery, QueryCondition, QueryConditionOp};
+use crate::query_observation::{built_query_from_read, observed_ids_from_query_value};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{ensure_row_id, public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
@@ -17,7 +14,7 @@ use crate::sync::{
     BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
-use crate::types::{ApplyBundleProfile, QueryExportProfile, ReadTier, RowView};
+use crate::types::{ApplyBundleProfile, ReadTier, RowView};
 use crate::{branch, policy, projection, query, query_predicate, read_set, tx, users, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};

@@ -764,3 +764,9 @@ regress.
 - Replaced the write-core wildcard runtime import with explicit dependencies.
 - This separates write staging from the rest of runtime wiring: it now names its schema, row-id, policy, read-set, transaction, and user catalogue dependencies directly.
 - Focused transaction/generic/storage tests pass, and `cargo check -p mini-jazz-sqlite` is warning-free.
+
+## 2026-05-29 03:19 PDT - Tightened query-export imports
+
+- Replaced the query-export wildcard runtime import with explicit dependencies.
+- This makes the query export surface name its profile, query API, observation, row-id, history-export, and bundle-construction dependencies directly.
+- Focused query-matrix and sync-fate tests pass, and `cargo check -p mini-jazz-sqlite` is green.
