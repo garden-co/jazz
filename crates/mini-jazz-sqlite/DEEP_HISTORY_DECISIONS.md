@@ -1414,3 +1414,11 @@ Decision: local batched writes now prepare the single-row transaction insert onc
 Why: the transaction row shape is identical for the hot mergeable single-row write case. Reusing the statement keeps one Jazz transaction per update but avoids repeatedly walking the statement cache during append/document/canvas ingest.
 
 Scope impact: only the deferred local batch path uses this helper. Non-batched writes and receive/apply keep their existing paths.
+
+## Fri May 29 03:22:01 PDT 2026 - Rejected Hash Lookups Inside Receive Apply
+
+Decision: keep the existing ordered maps/sets inside receive/apply for now.
+
+Why: a measured hash-map experiment was mixed-to-worse. Transaction bookkeeping sometimes improved a little, but history apply got slower enough that receive/update did not improve. The likely cost is noisier iteration/hash overhead around tiny-to-medium per-bundle maps.
+
+Scope impact: the uncommitted code experiment was reverted; only this decision-log note remains.
