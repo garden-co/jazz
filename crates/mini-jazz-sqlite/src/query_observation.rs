@@ -18,10 +18,11 @@ pub(crate) fn built_query_from_read(read: &QueryReadRecord) -> Result<BuiltQuery
 }
 
 pub(crate) fn built_query_read_value(query: &BuiltQuery, rows: &[RowView]) -> JsonValue {
-    json!({
-        "query": query.to_json_value(),
-        "observed_ids": observed_row_ids(rows),
-    })
+    let mut value = query.to_json_value();
+    if let JsonValue::Object(object) = &mut value {
+        object.insert("observed_ids".to_owned(), json!(observed_row_ids(rows)));
+    }
+    value
 }
 
 pub(crate) fn observed_row_ids(rows: &[RowView]) -> Vec<String> {

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use tempfile::tempdir;
 
 mod support;
-use support::FixtureRuntimeExt;
+use support::todo_app::FixtureRuntimeExt;
 
 #[path = "whole_system/branches.rs"]
 mod branches;

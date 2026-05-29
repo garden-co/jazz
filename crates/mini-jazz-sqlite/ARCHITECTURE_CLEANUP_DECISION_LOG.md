@@ -182,3 +182,19 @@ Subscription architecture cleanup: collapsed the duplicated rerun logic used by 
 ## 2026-05-28 23:32 PDT
 
 #945 branch-conflict isolation slice is green. `TransactionSnapshot` no longer keys rows by id because that collapsed conflict candidates; it preserves candidate multiplicity and rejects ambiguous implicit base lookup when committing an update. This is a concrete example where a "clean" map abstraction was semantically wrong for Jazz branch views.
+
+## 2026-05-28 23:33 PDT
+
+Maintenance: filesystem free space dropped below 600 MiB after repeated focused Rust builds. Removed the local `target/` directory to keep the overnight run able to compile and test additional slices.
+
+## 2026-05-28 23:36 PDT
+
+Subagent scan identified the top remaining broken-window areas: legacy query/export op matrix, repeated query SQL scaffolding, apply-bundle monolith, transaction write materialization, and todo-shaped test support. I spawned a worker for the disjoint test-support fixture split while I continue locally on query/export architecture.
+
+## 2026-05-28 23:37 PDT
+
+Tried routing legacy predicate export APIs directly through `BuiltQuery`. Reverted that local change after focused tests showed two semantic contracts would break: persisted/observed query descriptors intentionally retain legacy `field/op/value` shape, and query-scope contraction/repair differs from built-query descriptors. Lesson: the next cleanup needs an explicit adapter layer that preserves external descriptor shape while sharing lower-level row-scope mechanics; not a silent migration to `$query`.
+
+## 2026-05-28 23:39 PDT
+
+Test support cleanup integrated locally after the worker left `mod todo_app` without the file in this workspace. `tests/support/mod.rs` is now generic topology/schema helpers plus a re-export, while todo-app helpers live in `tests/support/todo_app.rs`. Also adjusted built-query observed descriptor metadata to preserve the previous public JSON shape and add `observed_ids` inline, instead of nesting under `query`; this preserves existing query-read contracts while supporting refresh repair.
