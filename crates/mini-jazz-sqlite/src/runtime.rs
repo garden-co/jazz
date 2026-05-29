@@ -426,13 +426,9 @@ impl Runtime {
         field_name: &str,
         text: &str,
     ) -> Result<String> {
-        let root = self.current_deep_text_root(table_name, id, field_name)?;
-        let next_root = crate::persisted_text_ops::append(&self.conn, root, text, 256)?;
-        self.update_row(
-            table_name,
-            id,
-            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]),
-        )
+        self.write_deep_text(table_name, id, field_name, |db, root| {
+            crate::persisted_text_ops::append(db, root, text, 256)
+        })
     }
 
     pub fn replace_deep_text_range(
@@ -444,20 +440,16 @@ impl Runtime {
         delete_bytes: usize,
         insert: &str,
     ) -> Result<String> {
-        let root = self.current_deep_text_root(table_name, id, field_name)?;
-        let next_root = crate::persisted_text_ops::replace_range(
-            &self.conn,
-            root,
-            start_byte,
-            delete_bytes,
-            insert,
-            256,
-        )?;
-        self.update_row(
-            table_name,
-            id,
-            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]),
-        )
+        self.write_deep_text(table_name, id, field_name, |db, root| {
+            crate::persisted_text_ops::replace_range(
+                db,
+                root,
+                start_byte,
+                delete_bytes,
+                insert,
+                256,
+            )
+        })
     }
 
     pub fn replace_deep_text_ranges(
@@ -467,22 +459,19 @@ impl Runtime {
         field_name: &str,
         patches: &[(usize, usize, String)],
     ) -> Result<String> {
-        let mut root = self.current_deep_text_root(table_name, id, field_name)?;
-        for (start_byte, delete_bytes, insert) in patches {
-            root = crate::persisted_text_ops::replace_range(
-                &self.conn,
-                root,
-                *start_byte,
-                *delete_bytes,
-                insert,
-                256,
-            )?;
-        }
-        self.update_row(
-            table_name,
-            id,
-            BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]),
-        )
+        self.write_deep_text(table_name, id, field_name, |db, mut root| {
+            for (start_byte, delete_bytes, insert) in patches {
+                root = crate::persisted_text_ops::replace_range(
+                    db,
+                    root,
+                    *start_byte,
+                    *delete_bytes,
+                    insert,
+                    256,
+                )?;
+            }
+            Ok(root)
+        })
     }
 
     pub fn read_deep_text(&self, table_name: &str, id: &str, field_name: &str) -> Result<String> {
@@ -548,36 +537,96 @@ impl Runtime {
         id: &str,
         field_name: &str,
     ) -> Result<crate::persisted_text_ops::TextRoot> {
+        current_deep_text_root_in_tx(
+            &self.conn,
+            &self.schema,
+            self.branch_num,
+            table_name,
+            id,
+            field_name,
+        )
+    }
+
+    fn write_deep_text(
+        &mut self,
+        table_name: &str,
+        id: &str,
+        field_name: &str,
+        edit: impl FnOnce(
+            &Connection,
+            crate::persisted_text_ops::TextRoot,
+        ) -> Result<crate::persisted_text_ops::TextRoot>,
+    ) -> Result<String> {
         let table = self.schema.table_def(table_name)?;
-        let field = table
+        if !table
             .fields
             .iter()
-            .find(|field| field.name == field_name)
-            .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
-        if !matches!(field.kind, FieldKind::DeepText) {
+            .any(|field| field.name == field_name && matches!(field.kind, FieldKind::DeepText))
+        {
             return Err(crate::Error::new(format!(
                 "{field_name} is not a deep_text field"
             )));
         }
-        let row_num = row_num(&self.conn, id)?;
-        let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
-        let value = self.conn.query_row(
-            &format!(
-                "SELECT {column}
-                 FROM {}
-                 WHERE row_num = ?
-                   AND j_branch_num = ?
-                   AND is_deleted = 0",
-                crate::schema::current_table(table_name)
-            ),
-            params![row_num, self.branch_num],
-            |row| row.get::<_, i64>(0),
+        let table = table.clone();
+        let user = self.attribution_user().to_owned();
+        let bypass_policy = self.bypasses_policy();
+        let write_sql = AppWriteSql::new(&table);
+        let begin_started = Instant::now();
+        let db = self.conn.transaction()?;
+        add_write_phase(|stats| &mut stats.begin_transaction_ms, begin_started);
+        let root = current_deep_text_root_in_tx(
+            &db,
+            &self.schema,
+            self.branch_num,
+            table_name,
+            id,
+            field_name,
         )?;
-        if value == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(value))
+        let next_root = edit(&db, root)?;
+        let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(next_root))]);
+        let user_num = users::ensure_user(&db, &user)?;
+        let table_num = crate::schema::table_num(&db, &table.name)?;
+        let now = now_ms();
+        let tx_create_started = Instant::now();
+        let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
+        add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
+        let outcome = insert_row_in_tx(InsertRowInTx {
+            db: &db,
+            schema: &self.schema,
+            table_name,
+            id,
+            values: &values,
+            tx_num: Some(tx_num),
+            deferred_tx: None,
+            branch_num: self.branch_num,
+            now,
+            user: &user,
+            user_num,
+            bypass_policy,
+            op: 2,
+            write_sql: &write_sql,
+            table_num,
+            compact_tx_tuples: self.branch_num == 1,
+            creation_metadata_cache: None,
+            row_num_cache: None,
+            visible_tx_cache: None,
+        })?;
+        if !outcome.allowed {
+            let reject_started = Instant::now();
+            tx::reject(&db, &tx_id, "policy_denied")?;
+            db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ? AND visible_tx_num = ?",
+                    crate::schema::current_table(&table.name)
+                ),
+                params![outcome.row_num, self.branch_num, tx_num],
+            )?;
+            add_write_phase(|stats| &mut stats.reject_cleanup_ms, reject_started);
         }
+        let commit_started = Instant::now();
+        db.commit()?;
+        add_write_phase(|stats| &mut stats.commit_ms, commit_started);
+        Ok(tx_id)
     }
 
     pub fn upsert_rows_batched<V>(
@@ -6955,6 +7004,46 @@ fn validate_write_fields(
 
 fn deep_text_root_value(root: crate::persisted_text_ops::TextRoot) -> JsonValue {
     JsonValue::Number(serde_json::Number::from(root.unwrap_or(0) as u64))
+}
+
+fn current_deep_text_root_in_tx(
+    conn: &Connection,
+    schema: &SchemaDef,
+    branch_num: i64,
+    table_name: &str,
+    id: &str,
+    field_name: &str,
+) -> Result<crate::persisted_text_ops::TextRoot> {
+    let table = schema.table_def(table_name)?;
+    let field = table
+        .fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .ok_or_else(|| crate::Error::new(format!("unknown field {field_name}")))?;
+    if !matches!(field.kind, FieldKind::DeepText) {
+        return Err(crate::Error::new(format!(
+            "{field_name} is not a deep_text field"
+        )));
+    }
+    let row_num = row_num(conn, id)?;
+    let column = crate::schema::quote_ident(&crate::schema::storage_column(field));
+    let value = conn.query_row(
+        &format!(
+            "SELECT {column}
+             FROM {}
+             WHERE row_num = ?
+               AND j_branch_num = ?
+               AND is_deleted = 0",
+            crate::schema::current_table(table_name)
+        ),
+        params![row_num, branch_num],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if value == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 fn row_has_current_branch_value(

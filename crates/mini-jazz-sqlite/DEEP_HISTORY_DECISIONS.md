@@ -30,6 +30,14 @@ Why: once text-op deltas were incremental, live export was dominated by ordinary
 
 Scope impact: every app history table now has a `(tx_num, row_num)` index. The single-node incremental export path uses a direct read-dependency query over the node/local-epoch range and also fixed an inclusive `>= after_local_epoch` off-by-one in tx export. Append smoke live export dropped from about 2806 ms to about 1259 ms across 446 samples, at the cost of a small live DB-size increase from the new index.
 
+## Thu May 28 22:55:02 PDT 2026
+
+Decision: make runtime deep-text edits atomic with their Jazz row-version writes before adding batching.
+
+Why: the first runtime API wrote the text op into Runtime-owned sidecar tables before entering the ordinary Jazz row transaction. That made the API easy to wire but not production-shaped: a failed row write could leave an unreferenced text op, and batching sidecar plus row work would remain awkward. The cleaner invariant is that a deep-text edit creates its text op(s), Jazz tx metadata, history row, and current projection in one SQLite transaction.
+
+Scope impact: `append_deep_text`, `replace_deep_text_range`, and `replace_deep_text_ranges` now share one `write_deep_text` transaction path. Append smoke write-only time improved modestly, and the write detail now correctly shows no separate update prelookup phase because the current root lookup happens inside the unified transaction.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
