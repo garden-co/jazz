@@ -46,6 +46,14 @@ Why: the write-performance goal is not userland coalescing; each append/edit sti
 
 Scope impact: `Runtime::edit_deep_texts_batched` accepts a sequence of `DeepTextEdit`s and writes one Jazz version per edit inside one SQLite commit. The append/document benchmark now generates logical deep-text edits and batches them up to the 10 ms window or the next live-sync sample. Append smoke dropped from roughly 2281 ms total loop to roughly 461 ms with 2225 logical updates; the write profile reports 6 SQLite transactions for 2224 measured updates while preserving 2224 synced history rows.
 
+## Thu May 28 23:01:34 PDT 2026
+
+Decision: refresh the benchmark overview with a new runtime-shaped `Block+Ops6` column instead of overwriting the previous benchmark-only columns.
+
+Why: the latest code is not a simple optimization of `Block+Ops5`; it moves the text sidecar behind schema-declared `deep_text` fields and Runtime APIs. Keeping the old columns makes the honesty cost visible: storage is somewhat larger and some text point reads are slower than the benchmark-only sidecar, while sync bytes and realtime loop time remain strong.
+
+Scope impact: `/tmp/deep_history_runtime_real_all_block_ops.json` is the current all-scenario run. The benchmark overview now compares `Block+Ops6` for append, Automerge, and canvas.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
