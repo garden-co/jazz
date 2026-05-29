@@ -196,14 +196,20 @@ impl BrowserRuntime {
     }
 
     pub fn unsubscribe(&self, id: SubscriptionId) {
-        let _ = self.with_inner(|inner| {
+        let result = self.with_inner(|inner| {
             if let Some(entry) = inner.subscriptions.remove(&id) {
-                inner
+                let client_messages = inner
                     .connection_manager
-                    .unsubscribe(&entry.connection_subscription);
+                    .unsubscribe(&entry.connection_subscription)
+                    .map_err(error_message)?;
+                inner.send_protocol_messages(client_messages)?;
             }
             Ok(())
         });
+        match result {
+            Ok(()) => self.emit_status(),
+            Err(error) => self.set_error(error),
+        }
     }
 
     pub fn sync_queries(&self, queries: Vec<BuiltQuery>) -> Result<(), String> {

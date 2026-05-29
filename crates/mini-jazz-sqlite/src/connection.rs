@@ -189,10 +189,21 @@ impl DownstreamConnectionManager {
         Ok(batch.into_client_messages())
     }
 
-    pub fn unsubscribe(&mut self, subscription: &DownstreamConnectionSubscription) {
+    pub fn unsubscribe(
+        &mut self,
+        subscription: &DownstreamConnectionSubscription,
+    ) -> Result<Vec<ClientMessage>> {
         self.pending_subscriptions.remove(subscription.id());
+        let was_active = self.session.has_active_subscription(subscription.id());
         self.session.drop_subscription(subscription.id());
         self.dropped_subscriptions.insert(subscription.id().clone());
+        if !was_active || !self.is_ready() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = DownstreamMessageBatch::empty();
+        self.session.replay(&mut batch)?;
+        Ok(batch.into_client_messages())
     }
 
     pub fn is_settled(

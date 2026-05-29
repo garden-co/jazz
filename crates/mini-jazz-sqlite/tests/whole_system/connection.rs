@@ -1759,16 +1759,22 @@ fn connection_manager_ignores_late_frames_for_locally_dropped_subscription() {
         .unwrap();
     let server_messages = upstream.receive(&mut worker, client_messages).unwrap();
 
-    downstream.unsubscribe(&subscription);
+    let unsubscribe_messages = downstream.unsubscribe(&subscription).unwrap();
     let client_messages = downstream.receive(&mut tab, server_messages).unwrap();
 
+    assert!(unsubscribe_messages.iter().any(|message| {
+        matches!(
+            message,
+            ClientMessage::Replay { subscriptions } if subscriptions.is_empty()
+        )
+    }));
     assert!(client_messages.is_empty());
     assert!(!downstream.is_closed());
     assert!(tab.query(query).unwrap().is_empty());
 }
 
 #[test]
-fn connection_manager_replay_excludes_locally_dropped_subscription() {
+fn connection_manager_unsubscribe_replays_remaining_interest_upstream() {
     let harness = Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();
     let mut worker = harness.memory("alice-worker", "alice").unwrap();
@@ -1807,8 +1813,7 @@ fn connection_manager_replay_excludes_locally_dropped_subscription() {
     upstream.receive(&mut worker, dropped_messages).unwrap();
     upstream.receive(&mut worker, kept_messages).unwrap();
 
-    downstream.unsubscribe(&dropped_subscription);
-    let replay_messages = downstream.replay().unwrap();
+    let replay_messages = downstream.unsubscribe(&dropped_subscription).unwrap();
 
     let [ClientMessage::Replay { subscriptions }] = replay_messages.as_slice() else {
         panic!("expected one replay message");
