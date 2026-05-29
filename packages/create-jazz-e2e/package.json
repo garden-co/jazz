@@ -7,8 +7,8 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "tsx src/cli.ts",
-    "test:all": "tsx src/cli.ts --all"
+    "e2e": "tsx src/cli.ts",
+    "e2e:all": "tsx src/cli.ts --all"
   },
   "dependencies": {
     "create-jazz": "workspace:*",
