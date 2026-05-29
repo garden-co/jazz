@@ -13,8 +13,8 @@ use crate::sync::{
 use crate::time::now_ms;
 use crate::transaction::{snapshot_result, StagedRowChange, TransactionSnapshot};
 use crate::types::{
-    ApplyBundleProfile, BranchInfo, QueryExportProfile, RejectionInfo, RowView, StorageStats,
-    TransactionInfo,
+    ApplyBundleProfile, BranchInfo, QueryExportProfile, ReadTier, RejectionInfo, RowView,
+    StorageStats, TransactionInfo,
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
@@ -1871,6 +1871,7 @@ impl Runtime {
             branch_num,
             user,
             bypass_policy,
+            read_tier: ReadTier::Local,
         };
         let mut scope_query = built_query.clone();
         scope_query.limit = None;
@@ -2692,6 +2693,10 @@ impl Runtime {
 
     pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
         self.query_context().read_rows(table_name)
+    }
+
+    pub fn read_rows_at_tier(&self, table_name: &str, tier: ReadTier) -> Result<Vec<RowView>> {
+        self.query_context_at_tier(tier).read_rows(table_name)
     }
 
     pub fn read_rows_require_ref(
@@ -4160,12 +4165,17 @@ impl Runtime {
     }
 
     fn query_context(&self) -> query::QueryContext<'_> {
+        self.query_context_at_tier(ReadTier::Local)
+    }
+
+    pub(crate) fn query_context_at_tier(&self, read_tier: ReadTier) -> query::QueryContext<'_> {
         query::QueryContext {
             conn: &self.conn,
             schema: &self.schema,
             branch_num: self.branch_num,
             user: self.policy_user(),
             bypass_policy: self.bypasses_policy(),
+            read_tier,
         }
     }
 
@@ -7011,6 +7021,7 @@ fn query_scope_repair_row_nums_for_built_query(
         branch_num,
         user,
         bypass_policy,
+        read_tier: ReadTier::Local,
     };
     context.repair_row_nums_for_built_query(built_query)
 }
@@ -7065,6 +7076,7 @@ fn query_scope_rejected_tx_ids_for_built_query(
         branch_num,
         user,
         bypass_policy,
+        read_tier: ReadTier::Local,
     };
     let row_nums = context.repair_row_nums_for_built_query(built_query)?;
     rejected_tx_ids_for_row_nums(conn, &built_query.table, &row_nums)

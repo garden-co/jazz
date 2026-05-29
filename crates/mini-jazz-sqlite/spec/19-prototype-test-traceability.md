@@ -538,7 +538,8 @@ The largest gaps between Appendix D and the current prototype tests are:
 - union semantics for merging overlapping query bundles with different scoped
   metadata fingerprints
 - catalogue observed facts
-- tier-gated query/subscription settlement semantics
+- tier-gated subscription settlement semantics beyond the current one-shot
+  table/built-query read-tier coverage
 - missing catalogue and missing permission fail-closed behavior
 - admin-controlled catalogue publication and separate catalogue sync lane
 - full authority predicate/range read-set validation beyond current row,

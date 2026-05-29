@@ -4,7 +4,7 @@ use crate::query_api::{
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
-use crate::types::RowView;
+use crate::types::{ReadTier, RowView};
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
@@ -19,6 +19,7 @@ pub(crate) struct QueryContext<'a> {
     pub(crate) branch_num: i64,
     pub(crate) user: &'a str,
     pub(crate) bypass_policy: bool,
+    pub(crate) read_tier: ReadTier,
 }
 
 struct LoweredCondition {
@@ -199,18 +200,18 @@ impl QueryContext<'_> {
              JOIN jazz_row_id ids ON ids.row_num = h.row_num
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.j_branch_num IN ({branch_placeholders})
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND {condition_sql}
                AND {policy_sql}
-             ORDER BY h.row_num",
+            ORDER BY h.row_num",
             crate::schema::history_table(&query.table),
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut query_params = branch_nums
             .iter()
             .copied()
             .map(SqlValue::Integer)
             .collect::<Vec<_>>();
-        query_params.push(SqlValue::Integer(tx::OUTCOME_REJECTED));
         query_params.extend(condition_params);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
@@ -309,18 +310,16 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num = ?
                AND current.is_deleted = 0
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND {condition_sql}
                AND {policy_sql}
              ORDER BY {order_sql}",
             select_columns.join(", "),
             crate::schema::current_table(&query.table),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
-        let mut query_params = vec![
-            SqlValue::Integer(self.branch_num),
-            SqlValue::Integer(tx::OUTCOME_REJECTED),
-        ];
+        let mut query_params = vec![SqlValue::Integer(self.branch_num)];
         query_params.append(&mut params);
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
@@ -397,7 +396,7 @@ impl QueryContext<'_> {
                    )
                  )
                )
-               AND tx.outcome != ?
+	               AND {tier_sql}
                AND NOT (
                  current.j_branch_num != ?
                  AND EXISTS (
@@ -413,6 +412,7 @@ impl QueryContext<'_> {
             crate::schema::current_table(&query.table),
             current_table = crate::schema::current_table(&query.table),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut params = scope_nums
             .iter()
@@ -425,7 +425,6 @@ impl QueryContext<'_> {
         ]);
         params.extend(scope_nums.iter().copied().map(SqlValue::Integer));
         params.extend([
-            SqlValue::Integer(tx::OUTCOME_REJECTED),
             SqlValue::Integer(self.branch_num),
             SqlValue::Integer(self.branch_num),
         ]);
@@ -997,7 +996,7 @@ impl QueryContext<'_> {
              JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
              WHERE current.j_branch_num = 1
                AND current.is_deleted = 0
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND current.{predicate_column} = ?
                AND {policy_sql}
              ORDER BY current.{order_column} DESC, ids.row_id
@@ -1005,17 +1004,15 @@ impl QueryContext<'_> {
             select_columns.join(", "),
             crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row_width = 2 + table.fields.len() + 1;
-        let rows = stmt.query_map(
-            params![tx::OUTCOME_REJECTED, predicate_value, limit as i64],
-            |row| {
-                (0..row_width)
-                    .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            },
-        )?;
+        let rows = stmt.query_map(params![predicate_value, limit as i64], |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
         rows.map(|row| row_to_view(self.conn, table_name, table, row?))
             .collect()
     }
@@ -1796,6 +1793,21 @@ impl QueryContext<'_> {
         self.visibility().current_policy_sql(table, "current")
     }
 
+    fn read_tier_sql(&self, tx_alias: &str) -> String {
+        match self.read_tier {
+            ReadTier::Local => format!("{tx_alias}.outcome != {}", tx::OUTCOME_REJECTED),
+            ReadTier::Edge => format!(
+                "{tx_alias}.outcome != {} AND ({tx_alias}.global_epoch IS NOT NULL OR EXISTS (SELECT 1 FROM jazz_tx_receipt tier_receipt WHERE tier_receipt.tx_num = {tx_alias}.tx_num AND tier_receipt.tier >= {}))",
+                tx::OUTCOME_REJECTED,
+                tx::TIER_EDGE
+            ),
+            ReadTier::Global => format!(
+                "{tx_alias}.outcome != {} AND {tx_alias}.global_epoch IS NOT NULL",
+                tx::OUTCOME_REJECTED
+            ),
+        }
+    }
+
     fn visibility(&self) -> ReadVisibility<'_> {
         ReadVisibility {
             conn: self.conn,
@@ -1991,7 +2003,7 @@ impl QueryContext<'_> {
                    )
                  )
                )
-               AND tx.outcome != ?
+               AND {tier_sql}
                AND NOT (
                  current.j_branch_num != ?
                  AND EXISTS (
@@ -2007,6 +2019,7 @@ impl QueryContext<'_> {
             crate::schema::current_table(table_name),
             current_table = crate::schema::current_table(table_name),
             policy_sql = self.read_policy_sql(table)?,
+            tier_sql = self.read_tier_sql("tx"),
         );
         let mut params = scope_nums
             .iter()
@@ -2023,7 +2036,6 @@ impl QueryContext<'_> {
                 .copied()
                 .map(rusqlite::types::Value::Integer),
         );
-        params.push(rusqlite::types::Value::Integer(tx::OUTCOME_REJECTED));
         params.extend([
             rusqlite::types::Value::Integer(self.branch_num),
             rusqlite::types::Value::Integer(self.branch_num),
@@ -2903,6 +2915,7 @@ mod tests {
             branch_num: 1,
             user: "alice",
             bypass_policy: false,
+            read_tier: ReadTier::Local,
         };
 
         let query = BuiltQuery::from_json_value(json!({

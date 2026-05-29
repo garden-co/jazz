@@ -2,7 +2,7 @@ use crate::runtime::Runtime;
 use crate::subscription::{RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::Bundle;
 use crate::types::{RowView, SubscriptionDelta};
-use crate::{Error, Result};
+use crate::{Error, ReadTier, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -155,6 +155,11 @@ pub(crate) fn predicate_query(
 impl Runtime {
     pub fn query(&self, query: BuiltQuery) -> Result<Vec<RowView>> {
         self.read_rows_for_built_query(&query)
+    }
+
+    pub fn query_at_tier(&self, query: BuiltQuery, tier: ReadTier) -> Result<Vec<RowView>> {
+        self.query_context_at_tier(tier)
+            .read_rows_for_built_query(&query)
     }
 
     pub fn query_branch(&mut self, branch_id: &str, query: BuiltQuery) -> Result<Vec<RowView>> {

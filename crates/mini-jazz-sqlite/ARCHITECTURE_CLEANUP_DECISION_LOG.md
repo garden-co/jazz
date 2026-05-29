@@ -129,3 +129,20 @@ even before full branch backing-row permission policies because it makes branch
 context an explicit query parameter instead of forcing tests to mutate checkout.
 Implementation should be generic over `BuiltQuery` and must restore the previous
 checkout even if the query fails.
+
+## 2026-05-28 23:05 PDT
+
+Start #947 integration through current architecture: introduce `ReadTier` as an
+explicit read/query parameter and lower tier predicates in the generic current
+query path. First scope is main-branch current table reads and built queries:
+local sees local optimistic mergeables, edge sees edge/global-settled rows, and
+global sees globally accepted rows. This creates the right seam for subscription
+tier gating later without copying old custom subscription SQL.
+
+## 2026-05-28 23:09 PDT
+
+Continue #947 tier reads after compaction. Keep the first implementation focused on generic current reads and built queries. Do not thread tier into `ReadVisibility` yet: policy visibility is orthogonal to settlement tier for this slice, and mixing them would make the new boundary less clear.
+
+## 2026-05-28 23:14 PDT
+
+#947 first slice is green: `ReadTier` now gates generic main-branch table reads and built queries. This deliberately models settlement as a query/read parameter, not as auth or policy state. Current limitation: subscription delivery and branch snapshot reads still need to reuse this same tier predicate in later slices; the spec now calls this out.

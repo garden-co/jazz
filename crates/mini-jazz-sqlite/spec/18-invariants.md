@@ -231,6 +231,8 @@ feature exists.
 
 - Subscription first delivery equals the corresponding one-shot query at the
   same tier.
+- One-shot tiered current reads use the same local/edge/global settlement
+  predicate for full table reads and built-query reads.
 - Subscription updates are semantic row diffs.
 - Ordered subscriptions emit deterministic moved diffs for order-only changes.
 - Subscription diff ordering is deterministic and follows the same effective

@@ -1,6 +1,132 @@
 use super::*;
 
 #[test]
+fn tiered_table_reads_filter_by_settlement_level() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-local",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Pending locally")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Edge)
+        .unwrap()
+        .is_empty());
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&tx).unwrap();
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Edge)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .read_rows_at_tier("notes", ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_global(&tx, 1).unwrap();
+    assert_eq!(
+        alice
+            .read_rows_at_tier("notes", ReadTier::Global)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn tiered_built_queries_filter_by_settlement_level() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let matching_tx = alice
+        .insert_row(
+            "notes",
+            "note-pinned",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Pinned and pending")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    let hidden_tx = alice
+        .insert_row(
+            "notes",
+            "note-unpinned",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Unpinned and global")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_global(&hidden_tx, 1).unwrap();
+
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+    assert_eq!(
+        alice
+            .query_at_tier(pinned.clone(), ReadTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Edge)
+        .unwrap()
+        .is_empty());
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&matching_tx).unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(pinned.clone(), ReadTier::Edge)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(alice
+        .query_at_tier(pinned.clone(), ReadTier::Global)
+        .unwrap()
+        .is_empty());
+
+    alice.accept_transaction_at_global(&matching_tx, 2).unwrap();
+    assert_eq!(
+        alice
+            .query_at_tier(pinned, ReadTier::Global)
+            .unwrap()
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-pinned"]
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {
