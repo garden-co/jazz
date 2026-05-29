@@ -73,3 +73,15 @@ Second cleanup target: remove stale "attempt3 fixture" naming from the core.
 The default todo app schema may still exist as a convenience/example while the
 tests are migrated, but names like `attempt3_fixture` invite test-specific
 thinking in core code. Rename to `todo_app_schema` as an incremental cleanup.
+
+## 2026-05-28 22:50 PDT
+
+Started incorporating #945 in the style we want: port the transaction isolation
+tests/semantics, not the throwaway runtime SQL. First target is
+`TransactionBuilder::read_rows`: snapshot semantic rows at transaction start and
+overlay the builder's own staged writes. This is deliberately generic and uses
+the existing row API instead of adding table-specific code paths.
+
+Known limitation for this slice: commit materialization still uses current
+write paths, not the transaction start snapshot. The #945 "writes applied to
+start snapshot" semantics remain a later red/green slice.

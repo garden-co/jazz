@@ -2419,10 +2419,20 @@ impl Runtime {
     }
 
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
+        let start_rows_by_table = self
+            .schema
+            .tables()
+            .map(|table| {
+                self.read_rows(&table.name)
+                    .map(|rows| (table.name.clone(), rows))
+                    .map_err(|error| error.to_string())
+            })
+            .collect();
         TransactionBuilder {
             runtime: self,
             mutations: Vec::new(),
             mode: TransactionMode::Mergeable,
+            start_rows_by_table,
         }
     }
 
@@ -5051,6 +5061,7 @@ pub struct TransactionBuilder<'a> {
     runtime: &'a mut Runtime,
     mutations: Vec<Mutation>,
     mode: TransactionMode,
+    start_rows_by_table: std::result::Result<BTreeMap<String, Vec<RowView>>, String>,
 }
 
 enum TransactionMode {
@@ -5116,6 +5127,45 @@ fn normalize_mutations(mutations: Vec<Mutation>) -> Vec<Mutation> {
 }
 
 impl<'a> TransactionBuilder<'a> {
+    pub fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        let start_rows = self
+            .start_rows_by_table
+            .as_ref()
+            .map_err(|error| crate::Error::new(error.clone()))?;
+        let mut rows_by_id = start_rows
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect::<BTreeMap<_, _>>();
+
+        for mutation in &self.mutations {
+            match mutation {
+                Mutation::Row {
+                    table, id, values, ..
+                } if table == table_name => {
+                    let row = rows_by_id.entry(id.clone()).or_insert_with(|| RowView {
+                        table: table.clone(),
+                        id: id.clone(),
+                        values: BTreeMap::new(),
+                        created_at: 0,
+                        created_by: self.runtime.attribution_user().to_owned(),
+                        tx_id: String::new(),
+                        conflict_count: 0,
+                    });
+                    row.values.extend(values.clone());
+                }
+                Mutation::DeleteRow { table, id } if table == table_name => {
+                    rows_by_id.remove(id);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(rows_by_id.into_values().collect())
+    }
+
     pub fn exclusive(mut self) -> Self {
         self.mode = TransactionMode::Exclusive { global_epoch: None };
         self

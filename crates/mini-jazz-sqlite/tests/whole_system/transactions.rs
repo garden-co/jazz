@@ -42,6 +42,109 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
 }
 
 #[test]
+fn transaction_reads_are_fixed_to_start_snapshot() {
+    let schema = support::notes_schema();
+    let harness = support::Harness::new();
+    let path = harness.path("tx-isolation.sqlite");
+    let mut alice = Runtime::open_with_schema(
+        Storage::File(path.clone()),
+        "alice-node",
+        "alice",
+        schema.clone(),
+    )
+    .unwrap();
+
+    alice
+        .insert_row(
+            "notes",
+            "note-before",
+            BTreeMap::from([
+                ("body".to_owned(), json!("before")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+    let tx = alice.transaction();
+    let mut bob =
+        Runtime::open_with_schema(Storage::File(path), "bob-node", "bob", schema).unwrap();
+    bob.insert_row(
+        "notes",
+        "note-after",
+        BTreeMap::from([
+            ("body".to_owned(), json!("after")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    )
+    .unwrap();
+
+    let rows = tx.read_rows("notes").unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["note-before"]
+    );
+}
+
+#[test]
+fn transaction_reads_include_own_staged_writes() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    alice
+        .insert_row(
+            "notes",
+            "note-existing",
+            BTreeMap::from([
+                ("body".to_owned(), json!("old")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let tx = alice
+        .transaction()
+        .update_row(
+            "notes",
+            "note-existing",
+            BTreeMap::from([("body".to_owned(), json!("new"))]),
+        )
+        .insert_row(
+            "notes",
+            "note-staged",
+            BTreeMap::from([
+                ("body".to_owned(), json!("staged")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .delete_row("notes", "note-existing");
+
+    let rows = tx.read_rows("notes").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "note-staged");
+    assert_eq!(rows[0].values["body"], json!("staged"));
+}
+
+#[test]
+fn transactions_do_not_see_each_others_staged_writes() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone()).unwrap();
+    let mut bob = Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+    let alice_tx = alice.transaction().insert_row(
+        "notes",
+        "note-alice",
+        BTreeMap::from([
+            ("body".to_owned(), json!("alice staged")),
+            ("pinned".to_owned(), json!(false)),
+        ]),
+    );
+    let bob_tx = bob.transaction();
+
+    assert_eq!(alice_tx.read_rows("notes").unwrap().len(), 1);
+    assert!(bob_tx.read_rows("notes").unwrap().is_empty());
+}
+
+#[test]
 fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 
