@@ -888,6 +888,12 @@ regress.
 - Ran `cargo test -p mini-jazz-sqlite` after moving `history_records_for_tx` to `history_export` and fixing the JS todo demo constructor call.
 - Result: 440 passed, 18 ignored placeholders, 0 failed.
 
+## 2026-05-29 04:13 PDT - Perf PR newest commits are deep-history shaped
+
+- Fetched PR #973 latest head for inspection.
+- The newest commits are mostly sealed-history/deep-text API and block-delta work (`Document deep text runtime API`, `Expose text delta watermark at runtime boundary`, `Hide raw text sidecar internals`, delta-block repair/filtering).
+- Nothing in the newest tail looks like a small architecture-boundary port for this PR; keep treating #973 as a separate feature/perf lane.
+
 ## 2026-05-29 04:03 PDT - Full validation passes after final boundary/name cleanup
 
 - Ran `cargo test -p mini-jazz-sqlite` after removing runtime-root helper re-export indirection and renaming the WASM todo constructors.
