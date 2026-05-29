@@ -1102,3 +1102,11 @@ Decision: `set_received_read_write_tuple_batch` now uses a narrower two-column u
 Why: after preserving implicit reads over native export, most receive tuple updates only need to set `writes_json` and leave `reads_json = NULL`. The old path still built a three-column incoming table and ran a CASE expression for reads on every row.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. Canonical timing is mostly neutral for text and improves canvas receive in the first sample, because canvas now imports many write-only tx tuples.
+
+## Fri May 29 00:56:25 PDT 2026 - Rejected Plain Local History Insert Mode
+
+Decision: do not split local history batches from receive history batches just to use plain `INSERT` locally.
+
+Why: local history rows are new by construction, so avoiding `OR REPLACE` looked like an easy write-path win. The canonical sample did not support it: append history-insert time got worse and the other scenarios were neutral. The shared `INSERT OR REPLACE` helper remains.
+
+Scope impact: the uncommitted plain-insert experiment was reverted.
