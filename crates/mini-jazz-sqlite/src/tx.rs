@@ -129,14 +129,24 @@ pub(crate) fn create_tx_at_local_epoch_with_single_row_read_write(
     op: i64,
     read_reason: i64,
     observed_tx_num: Option<i64>,
+    implicit_previous_read: bool,
 ) -> Result<(i64, String)> {
     let tx_id = format!("tx-{node_id}-{local_epoch}");
     let writes = encode_writes(&[PackedWrite(table_num, row_num, op)]);
-    let reads = encode_reads(&[PackedRead(table_num, row_num, read_reason, observed_tx_num)]);
+    let reads = if implicit_previous_read {
+        None
+    } else {
+        Some(encode_reads(&[PackedRead(
+            table_num,
+            row_num,
+            read_reason,
+            observed_tx_num,
+        )]))
+    };
     conn.prepare_cached(
         "INSERT INTO jazz_tx
           (node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata, writes_json, reads_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, jsonb(?), jsonb(?))",
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, jsonb(?), CASE WHEN ? IS NULL THEN NULL ELSE jsonb(?) END)",
     )?
     .execute(params![
         node_num,
@@ -147,6 +157,7 @@ pub(crate) fn create_tx_at_local_epoch_with_single_row_read_write(
         outcome,
         now,
         writes,
+        reads,
         reads
     ])?;
     let tx_num = conn.last_insert_rowid();

@@ -518,6 +518,7 @@ impl Runtime {
         };
         let mut tx_ids = Vec::with_capacity(edits.len());
         let last_edit_index = edits.len().saturating_sub(1);
+        let mut last_created_tx_num = None;
         for (index, edit) in edits.iter().enumerate() {
             root = apply_deep_text_edit(&db, root, edit, materialized_text.as_mut())?;
             let values = BTreeMap::from([(field_name.to_owned(), deep_text_root_value(root))]);
@@ -556,7 +557,9 @@ impl Runtime {
                         .entry(table_name.to_owned())
                         .or_insert_with(Vec::new),
                 ),
+                implicit_previous_read_tx_num: last_created_tx_num,
             })?;
+            last_created_tx_num = Some(outcome.tx_num);
             next_local_epoch += 1;
             if !outcome.allowed {
                 let reject_started = Instant::now();
@@ -748,6 +751,7 @@ impl Runtime {
         let mut next_local_epoch = tx::next_local_epoch(&db, self.node_num)?;
         add_write_phase(|stats| &mut stats.next_epoch_ms, next_epoch_started);
         let mut tx_ids = Vec::with_capacity(writes.len());
+        let mut last_created_tx_num = None;
         for (index, (id, values)) in writes.into_iter().enumerate() {
             let now = now_ms();
             let op = match mode {
@@ -801,7 +805,9 @@ impl Runtime {
                         .entry(table_name.to_owned())
                         .or_insert_with(Vec::new),
                 ),
+                implicit_previous_read_tx_num: last_created_tx_num,
             })?;
+            last_created_tx_num = Some(outcome.tx_num);
             next_local_epoch += 1;
             if !outcome.allowed {
                 let reject_started = Instant::now();
@@ -898,6 +904,7 @@ impl Runtime {
             effective_values_cache: None,
             write_current_projection: true,
             history_rows_batch: None,
+            implicit_previous_read_tx_num: None,
         })?;
         if !outcome.allowed {
             let reject_started = Instant::now();
@@ -6738,6 +6745,7 @@ struct InsertRowInTx<'a> {
     effective_values_cache: Option<&'a mut EffectiveValuesCache>,
     write_current_projection: bool,
     history_rows_batch: Option<&'a mut Vec<Vec<rusqlite::types::Value>>>,
+    implicit_previous_read_tx_num: Option<i64>,
 }
 
 type EffectiveValuesCache = BTreeMap<(String, i64), BTreeMap<String, JsonValue>>;
@@ -6972,6 +6980,9 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
         } else {
             (2, cached_current_visible_tx_num(&mut args, row_num)?)
         };
+        let implicit_previous_read = read_reason == 2
+            && observed_tx_num.is_some()
+            && observed_tx_num == args.implicit_previous_read_tx_num;
         if let Some(deferred_tx) = args.deferred_tx {
             add_write_phase(|stats| &mut stats.tx_tuple_ms, tx_tuple_started);
             let tx_create_started = Instant::now();
@@ -6989,6 +7000,7 @@ fn insert_row_in_tx(mut args: InsertRowInTx<'_>) -> Result<InsertRowOutcome> {
                 args.op,
                 read_reason,
                 observed_tx_num,
+                implicit_previous_read,
             )?;
             add_write_phase(|stats| &mut stats.tx_create_ms, tx_create_started);
             tx_num = created.0;
@@ -8181,6 +8193,7 @@ impl<'a> TransactionBuilder<'a> {
                         effective_values_cache: None,
                         write_current_projection: true,
                         history_rows_batch: None,
+                        implicit_previous_read_tx_num: None,
                     })?;
                     allowed &= outcome.allowed;
                 }

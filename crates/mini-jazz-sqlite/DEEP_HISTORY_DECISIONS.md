@@ -1078,3 +1078,11 @@ Decision: `read_row_at_node_epoch` and global point-in-time row reads now materi
 Why: current row reads had become text-shaped, but historical reads still leaked sidecar roots. That would make branch snapshots and point-in-time APIs behave differently from normal reads, exactly where the RFC cares about random-ish historical access.
 
 Scope impact: full `mini-jazz-sqlite` tests pass. Historical benchmark reads were already using `read_deep_text_at_node_epoch`, so the measured behavior remains materially the same while the public API boundary is cleaner.
+
+## Fri May 29 00:37:44 PDT 2026 - Use Implicit Previous-Local Reads In Write Batches
+
+Decision: when a batched local single-row write reads exactly the immediately previous local transaction, store `reads_json = NULL` and rely on the existing implicit-previous-read view instead of writing an explicit read tuple.
+
+Why: this is the compression rule we already designed for transaction metadata, but local write batches were not taking advantage of it. The guard is strict: it only fires when the observed tx is the last tx created in the same SQLite write batch, so interleaved row writes do not accidentally depend on the wrong previous epoch.
+
+Scope impact: full `mini-jazz-sqlite` tests pass. Canonical sampling shows storage improving across scenarios: append live DB/final about 24.24x to 23.62x, Automerge live DB/source gzip about 0.358x to 0.349x, and canvas live DB/position gzip about 5.48x to 5.27x. Timing is mostly neutral/noisy, with canvas slightly better in the first full run.
