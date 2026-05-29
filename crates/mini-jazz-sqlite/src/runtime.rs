@@ -1836,7 +1836,12 @@ impl Runtime {
                outcome = MAX(jazz_tx.outcome, excluded.outcome),
                global_epoch = COALESCE(excluded.global_epoch, jazz_tx.global_epoch),
                conflict_mode = MAX(jazz_tx.conflict_mode, excluded.conflict_mode),
-               metadata = COALESCE(excluded.metadata, jazz_tx.metadata)",
+               metadata = COALESCE(excluded.metadata, jazz_tx.metadata)
+             RETURNING tx_num, node_num, outcome, conflict_mode, global_epoch,
+               EXISTS(
+                 SELECT 1 FROM jazz_tx_awaiting_dependency awaiting
+                 WHERE awaiting.tx_num = jazz_tx.tx_num
+               )",
         )?;
         let mut upsert_rejection_stmt = db.prepare_cached(
             "INSERT OR REPLACE INTO jazz_tx_rejection (tx_num, code, detail)
@@ -1862,19 +1867,32 @@ impl Runtime {
             }
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
             let metadata = tx_metadata(tx_record.auth_user.as_deref())?;
-            upsert_tx_stmt.execute(params![
-                node_num,
-                tx_record.local_epoch,
-                tx_record.global_epoch,
-                tx::KIND_DATA,
-                tx_record.conflict_mode,
-                tx_record.outcome,
-                tx_record.created_at,
-                metadata
-            ])?;
-            let tx_num = tx::tx_num(&db, &tx_record.tx_id)?;
+            let (tx_num, info) = upsert_tx_stmt.query_row(
+                params![
+                    node_num,
+                    tx_record.local_epoch,
+                    tx_record.global_epoch,
+                    tx::KIND_DATA,
+                    tx_record.conflict_mode,
+                    tx_record.outcome,
+                    tx_record.created_at,
+                    metadata
+                ],
+                |row| {
+                    let tx_num = row.get(0)?;
+                    Ok((
+                        tx_num,
+                        ApplyTxInfo {
+                            node_num: row.get(1)?,
+                            outcome: row.get(2)?,
+                            conflict_mode: row.get(3)?,
+                            global_epoch: row.get(4)?,
+                            has_awaiting_dependency: row.get(5)?,
+                        },
+                    ))
+                },
+            )?;
             tx_nums_by_id.insert(tx_record.tx_id.clone(), tx_num);
-            let info = tx_apply_info(&db, tx_num)?;
             tx_info_by_num.insert(tx_num, info);
             if tx_ids_with_history.contains(tx_record.tx_id.as_str()) {
                 pending_applied_tx_cache
