@@ -431,3 +431,11 @@ regress.
 
 - A full crate test run after the subscription-tier slice exposed a broader refresh-planner invariant: batched refreshes must not let a page/top-query contraction run after broader predicate refreshes, because the contraction can delete rows that the broad refresh already proved should stay locally.
 - Individual refresh order happened to be more forgiving. The generic planner should make the safe ordering explicit: contraction-shaped refreshes first, broad predicate refreshes after, so broad reads can rehydrate rows still justified by active subscriptions.
+
+## 2026-05-29 01:06 PDT - Ported SQL-lowered built-query export scopes
+
+- Ported the central #972 idea without wholesale merging the PR: built-query exports can now pass a SQL-lowered row scope through export helpers instead of first materializing the visible result row numbers and then building large `IN (...)` lists.
+- `QueryContext::lower_built_query_row_scope` is the new boundary. It lowers the same query semantics used for local execution into a reusable row-number scope CTE, including windows, ordering, current-policy SQL, branch overlays, and tier visibility where relevant.
+- `Runtime::export_built_query_read_scope_sql` uses that scope for visible history export and policy dependency export, while keeping repair rows explicit because they represent previous observed rows and rows that left the result.
+- Kept the existing fallback when branch effective policy requires post-filter pagination. That is a real semantic edge where SQL-only lowering would be wrong until the policy/window boundary is made sharper.
+- Query matrix tests pass, including large built-query export, policy-filtered exports, and page refreshes.

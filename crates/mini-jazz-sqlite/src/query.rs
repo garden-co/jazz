@@ -27,6 +27,20 @@ struct LoweredCondition {
     params: Vec<SqlValue>,
 }
 
+pub(crate) struct LoweredQueryRowScope {
+    pub(crate) ctes: Vec<String>,
+    pub(crate) select_sql: String,
+    pub(crate) params: Vec<SqlValue>,
+}
+
+impl LoweredQueryRowScope {
+    pub(crate) fn with_scope_cte(&self, scope_name: &str) -> String {
+        let mut ctes = self.ctes.clone();
+        ctes.push(format!("{scope_name}(row_num) AS ({})", self.select_sql));
+        format!("WITH {}", ctes.join(",\n"))
+    }
+}
+
 enum QueryColumn<'a> {
     Id,
     CreatedBy,
@@ -182,6 +196,71 @@ impl QueryContext<'_> {
         row_nums.sort();
         row_nums.dedup();
         Ok(row_nums)
+    }
+
+    pub(crate) fn lower_built_query_row_scope(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<Option<LoweredQueryRowScope>> {
+        let table = self.schema.table_def(&query.table)?;
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
+        if self.defer_query_window_until_effective_branch_policy(table, query, base_epoch) {
+            return Ok(None);
+        }
+
+        if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
+            let (condition_sql, mut condition_params) =
+                self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
+            let order_sql =
+                self.lower_source_query_order(table, &query.order_by, "current", "ids")?;
+            let mut select_sql = format!(
+                "SELECT current.row_num AS row_num
+                 FROM {} current
+                 JOIN jazz_row_id ids ON ids.row_num = current.row_num
+                 JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                 WHERE current.j_branch_num = ?
+                   AND current.is_deleted = 0
+                   AND {tier_sql}
+                   AND {condition_sql}
+                   AND {policy_sql}
+                 ORDER BY {order_sql}",
+                crate::schema::current_table(&query.table),
+                policy_sql = self.read_policy_sql(table)?,
+                tier_sql = self.read_tier_sql("tx"),
+            );
+            let mut params = vec![SqlValue::Integer(self.branch_num)];
+            params.append(&mut condition_params);
+            append_query_window_sql(&mut select_sql, &mut params, query.limit, query.offset)?;
+            return Ok(Some(LoweredQueryRowScope {
+                ctes: Vec::new(),
+                select_sql,
+                params,
+            }));
+        }
+
+        let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
+        let order_sql = self.lower_query_order(table, &query.order_by)?;
+        let mut select_sql = format!(
+            "SELECT j_query_row_num AS row_num
+             FROM j_query_ranked
+             WHERE j_query_branch_depth = j_query_min_branch_depth
+             ORDER BY {order_sql}",
+        );
+        append_query_window_sql(&mut select_sql, &mut params, query.limit, query.offset)?;
+        Ok(Some(LoweredQueryRowScope {
+            ctes: vec![
+                format!("j_query_candidates AS ({candidates_sql})"),
+                "j_query_ranked AS (
+                   SELECT *,
+                          MIN(j_query_branch_depth) OVER (PARTITION BY j_query_row_id) AS j_query_min_branch_depth
+                   FROM j_query_candidates
+                 )"
+                .to_owned(),
+            ],
+            select_sql,
+            params,
+        }))
     }
 
     fn repair_current_row_nums_for_built_query(
