@@ -1326,3 +1326,11 @@ Decision: observed-query refresh delta APIs now have options-first variants usin
 Why: refresh sync is the closest thing this prototype has to real subscription continuation. It should use the same receiver-state object as direct table/query exports instead of growing parallel argument lists.
 
 Scope impact: no format change. The refresh watermark regression now exercises the options-first API directly.
+
+## Fri May 29 02:53:51 PDT 2026 - Add All-Table Receiver Export State
+
+Decision: add `Runtime::history_delta_export_options`, collecting sealed block manifests across all schema tables plus the current deep-text watermark.
+
+Why: table-specific receiver state is enough for table deltas, but export-all/bootstrap-style sync needs the same cursor-like object over the whole runtime. Callers should not need to know how to walk table manifests by hand.
+
+Scope impact: `export_all_history_delta_with_options` can now be driven by receiver-captured state. A regression verifies that after an initial block+text sync, a second all-history delta omits already-known blocks and carries only one new text op.

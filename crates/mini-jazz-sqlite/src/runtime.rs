@@ -644,6 +644,16 @@ impl Runtime {
             .with_text_ops_watermark(self.current_text_ops_watermark()?))
     }
 
+    pub fn history_delta_export_options(&self) -> Result<HistoryDeltaExportOptions> {
+        let mut manifests = Vec::new();
+        for table in self.schema.tables() {
+            manifests.extend(self.history_block_manifests(&table.name)?);
+        }
+        Ok(HistoryDeltaExportOptions::new()
+            .with_remote_block_manifests(manifests)
+            .with_text_ops_watermark(self.current_text_ops_watermark()?))
+    }
+
     fn export_text_ops_delta_for_bundle_since(
         &self,
         bundle: &Bundle,
@@ -14304,6 +14314,56 @@ mod tests {
             bob.read_deep_text("docs", "doc-1", "body").unwrap(),
             "hello again"
         );
+    }
+
+    #[test]
+    fn all_history_delta_options_capture_known_blocks_and_text_watermark() {
+        let schema = SchemaDef::new().table("docs", |table| {
+            table.deep_text("body");
+        });
+        let mut alice =
+            Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema.clone())
+                .unwrap();
+        let mut bob =
+            Runtime::open_with_schema(Storage::Memory, "bob-node", "bob", schema).unwrap();
+
+        alice
+            .insert_row("docs", "doc-1", BTreeMap::<String, JsonValue>::new())
+            .unwrap();
+        for _ in 0..8 {
+            alice
+                .append_deep_text("docs", "doc-1", "body", "x")
+                .unwrap();
+        }
+        alice.compact_all_history(0, 1).unwrap();
+        let first_delta = alice.export_all_history_delta(&[]).unwrap();
+        assert!(!first_delta.blocks.is_empty());
+        bob.apply_history_delta(&first_delta).unwrap();
+
+        alice
+            .append_deep_text("docs", "doc-1", "body", "y")
+            .unwrap();
+        let second_delta = alice
+            .export_all_history_delta_with_options(bob.history_delta_export_options().unwrap())
+            .unwrap();
+
+        assert!(second_delta.blocks.is_empty());
+        let text_conn = Connection::open_in_memory().unwrap();
+        crate::persisted_text_ops::install(&text_conn).unwrap();
+        let mut sidecar_watermark = crate::persisted_text_ops::DeltaWatermark::default();
+        crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &first_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        let stats = crate::persisted_text_ops::apply_delta(
+            &text_conn,
+            &second_delta.text_ops_delta,
+            &mut sidecar_watermark,
+        )
+        .unwrap();
+        assert_eq!(stats.ops, 1);
     }
 
     #[test]
