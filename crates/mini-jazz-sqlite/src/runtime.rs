@@ -2013,19 +2013,20 @@ impl Runtime {
             .copied()
             .collect::<BTreeSet<_>>();
         tuple_tx_nums.extend(reads_by_tx.keys().copied());
+        let mut tx_tuples = Vec::with_capacity(tuple_tx_nums.len());
         for tx_num in tuple_tx_nums {
             let writes = history_context
                 .writes_by_tx
                 .get(&tx_num)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            tx::set_received_read_write_tuples(
-                &db,
+                .cloned()
+                .unwrap_or_default();
+            tx_tuples.push(tx::ReceivedReadWriteTuple {
                 tx_num,
                 writes,
-                reads_by_tx.get(&tx_num).map(Vec::as_slice),
-            )?;
+                reads: reads_by_tx.get(&tx_num).cloned(),
+            });
         }
+        tx::set_received_read_write_tuple_batch(&db, &tx_tuples)?;
         for (table_name, row_num, branch_num) in &history_context.touched_current_rows {
             let key = (table_name.clone(), *row_num, *branch_num);
             if let Some(candidate) = history_context.current_candidates.get(&key) {

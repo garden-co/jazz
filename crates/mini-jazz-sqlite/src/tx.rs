@@ -195,22 +195,52 @@ pub(crate) fn set_single_row_read_write(
     Ok(())
 }
 
-pub(crate) fn set_received_read_write_tuples(
+pub(crate) fn set_received_read_write_tuple_batch(
     conn: &Connection,
-    tx_num: i64,
-    writes: &[PackedWrite],
-    reads: Option<&[PackedRead]>,
+    tuples: &[ReceivedReadWriteTuple],
 ) -> Result<()> {
-    let writes = encode_writes(writes);
-    let reads = reads.map(encode_reads);
-    conn.prepare_cached(
-        "UPDATE jazz_tx
-            SET writes_json = jsonb(?),
-                reads_json = CASE WHEN ? IS NULL THEN NULL ELSE jsonb(?) END
-          WHERE tx_num = ?",
-    )?
-    .execute(params![writes, reads, reads, tx_num])?;
+    for chunk in tuples.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = (0..chunk.len())
+            .map(|_| "(?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH incoming(tx_num, writes_json, reads_json) AS (VALUES {placeholders})
+             UPDATE jazz_tx
+                SET writes_json = jsonb(incoming.writes_json),
+                    reads_json = CASE
+                      WHEN incoming.reads_json IS NULL THEN NULL
+                      ELSE jsonb(incoming.reads_json)
+                    END
+               FROM incoming
+              WHERE jazz_tx.tx_num = incoming.tx_num"
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 3);
+        for tuple in chunk {
+            values.push(rusqlite::types::Value::Integer(tuple.tx_num));
+            values.push(rusqlite::types::Value::Text(encode_writes(&tuple.writes)));
+            values.push(
+                tuple
+                    .reads
+                    .as_deref()
+                    .map(encode_reads)
+                    .map(rusqlite::types::Value::Text)
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+        }
+        conn.prepare_cached(&sql)?
+            .execute(rusqlite::params_from_iter(values.iter()))?;
+    }
     Ok(())
+}
+
+pub(crate) struct ReceivedReadWriteTuple {
+    pub(crate) tx_num: i64,
+    pub(crate) writes: Vec<PackedWrite>,
+    pub(crate) reads: Option<Vec<PackedRead>>,
 }
 
 pub(crate) fn append_writes(

@@ -859,3 +859,11 @@ Decision: during bundle apply, collect received history rows per table and inser
 Why: the receive path still inserted one open-history row at a time. Since bundle apply already owns a SQLite transaction and current projection repair only needs history to be durable before repair, we can batch the history table writes without changing the one-history-row-per-update storage model.
 
 Scope impact: with the incremental live-export env flag enabled, apply `history_ms/update` moved from roughly `0.0193 -> 0.0164` ms for append, `0.0188 -> 0.0157` ms for Automerge, and `0.0182 -> 0.0147` ms for canvas. Total apply/update moved to roughly `0.0292`, `0.0284`, and `0.0275` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.
+
+## Thu May 28 21:56:00 PDT 2026 - Batch Received Tuple Updates
+
+Decision: update received `jazz_tx.writes_json` and `reads_json` with one CTE `VALUES` batch instead of one `UPDATE` per tx.
+
+Why: after batching history inserts, the remaining `history_ms` bucket still included a per-tx tuple-column update. The data is already grouped by receive bundle, so a CTE batch keeps the same JSONB tuple columns while reducing SQLite statement count.
+
+Scope impact: with the incremental live-export env flag enabled, apply `history_ms/update` moved from roughly `0.0164 -> 0.0133` ms for append, `0.0157 -> 0.0124` ms for Automerge, and `0.0147 -> 0.0120` ms for canvas. Total apply/update moved to roughly `0.0264`, `0.0251`, and `0.0245` ms respectively. `cargo test -q -p mini-jazz-sqlite` passes.
