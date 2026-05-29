@@ -740,3 +740,9 @@ regress.
 - Replaced the query-scope export wildcard runtime import with explicit dependencies.
 - This makes the boundary between semantic query reads, policy repair history, and sync bundle construction easier to review.
 - Focused query-scope tests pass.
+
+## 2026-05-29 03:15 PDT - Tightened sync-export imports
+
+- Replaced the sync-export wildcard runtime import with explicit dependencies.
+- This keeps table-history, recursive-query, and exclusive-forwarding export surfaces visible as sync boundaries rather than ambient runtime helpers.
+- Focused recursive and exclusive-forwarding tests pass.
