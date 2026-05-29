@@ -545,3 +545,9 @@ regress.
 - Moved observed query read listing, query-read refresh export, and forgotten observed-query reads into `runtime::query_refresh`.
 - This is a product-shaped boundary: durable intermediaries replay observed query descriptors to reconcile downstream clients. The code now has one obvious place for predicate/window/recursive refresh planning instead of burying that behavior in the sync/apply block.
 - Focused query-read refresh tests pass across predicate, in/contains/ne, top-created, top-field, recursive, branch, and durable-restart cases.
+
+## 2026-05-29 02:04 PDT - Sync export API moved behind a sync-export module
+
+- Moved table-history export, exclusive-transaction forwarding export, recursive query-scope export, and batched recursive refresh export into `runtime::sync_export`.
+- This keeps bundle production separate from bundle application. The remaining apply path has policy/fate/awaiting-dependency concerns and should move separately if it stays coherent.
+- Focused recursive-query export/sync tests pass, including branch snapshots, tombstones, recursive policy ancestors, and refresh repair.
