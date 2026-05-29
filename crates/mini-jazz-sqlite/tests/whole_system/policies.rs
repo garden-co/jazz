@@ -127,6 +127,93 @@ fn tiered_built_queries_filter_by_settlement_level() {
 }
 
 #[test]
+fn tiered_table_subscription_updates_only_after_requested_settlement() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+
+    let mut subscription = alice
+        .subscribe_rows_at_tier("notes", ReadTier::Global)
+        .unwrap();
+    assert!(subscription.initial_rows().is_empty());
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-global",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Not globally settled yet")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+    alice.accept_transaction_at_edge(&tx).unwrap();
+
+    let edge_delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert!(edge_delta.all.is_empty());
+    assert!(edge_delta.delta.is_empty());
+
+    alice.accept_transaction_at_global(&tx, 1).unwrap();
+    let global_delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        global_delta
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-global"]
+    );
+    assert!(global_delta.delta.iter().any(
+        |delta| matches!(delta, SubscriptionRowDelta::Added { id, .. } if id == "note-global")
+    ));
+}
+
+#[test]
+fn tiered_built_query_subscription_matches_requested_settlement() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    let pinned = support::eq_query("notes", "pinned", json!(true));
+
+    let mut subscription = alice
+        .subscribe_query_at_tier(pinned.clone(), ReadTier::Edge)
+        .unwrap();
+    assert!(subscription.initial_rows().is_empty());
+
+    let tx = alice
+        .insert_row(
+            "notes",
+            "note-edge",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Settles at edge")),
+                ("pinned".to_owned(), json!(true)),
+            ]),
+        )
+        .unwrap();
+
+    assert!(alice
+        .subscription_delta(&mut subscription)
+        .unwrap()
+        .all
+        .is_empty());
+
+    alice.accept_transaction_at_edge(&tx).unwrap();
+    let delta = alice.subscription_delta(&mut subscription).unwrap();
+    assert_eq!(
+        delta
+            .all
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["note-edge"]
+    );
+    assert_eq!(
+        alice.query_at_tier(pinned, ReadTier::Edge).unwrap(),
+        delta.all
+    );
+}
+
+#[test]
 fn policy_filters_reads_through_required_parent_ref() {
     let schema = SchemaDef::new()
         .table("projects", |table| {

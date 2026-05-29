@@ -166,3 +166,11 @@ Start #972 as a red/green test slice. The valuable behavior is not the exact imp
 ## 2026-05-28 23:24 PDT
 
 Architecture cleanup follow-up: extracted query observed-descriptor JSON helpers into `query_observation.rs`. This gives query refresh metadata a named boundary (`built_query_from_read`, `built_query_read_value`, `observed_ids`, support-window query) instead of adding more ad hoc runtime helpers.
+
+## 2026-05-28 23:25 PDT
+
+Next #947 slice: tiered one-shot reads are in place, but subscription semantics still implicitly use local reads. Add tier as subscription state so first delivery and later deltas can match `query_at_tier`/`read_rows_at_tier`. Keep it generic in `RowsSubscription`, not as bespoke test helpers.
+
+## 2026-05-28 23:27 PDT
+
+#947 second slice is green: tier now lives on subscription state for table and built-query subscriptions. First delivery and later deltas use the same `ReadTier` path as one-shot reads. Predicate convenience subscriptions still route through their existing APIs and should eventually be rebuilt on `BuiltQuery` or tier-aware predicates.

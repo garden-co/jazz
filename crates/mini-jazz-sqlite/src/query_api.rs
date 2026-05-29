@@ -174,6 +174,18 @@ impl Runtime {
         Ok(RowsSubscription::query(query.clone(), self.query(query)?))
     }
 
+    pub fn subscribe_query_at_tier(
+        &self,
+        query: BuiltQuery,
+        tier: ReadTier,
+    ) -> Result<RowsSubscription> {
+        Ok(RowsSubscription::query_at_tier(
+            query.clone(),
+            tier,
+            self.query_at_tier(query, tier)?,
+        ))
+    }
+
     pub fn export_query(&self, query: BuiltQuery) -> Result<Bundle> {
         self.export_query_with_ref_includes(query, &[])
     }
@@ -192,7 +204,7 @@ impl Runtime {
         subscription: &mut RowsSubscription,
     ) -> Result<SubscriptionDelta> {
         let rows = match &subscription.query {
-            RowsSubscriptionQuery::Table { table } => self.read_rows(table)?,
+            RowsSubscriptionQuery::Table { table, tier } => self.read_rows_at_tier(table, *tier)?,
             RowsSubscriptionQuery::Predicate(query) if query.op == "eq" => {
                 self.query(predicate_query(
                     &query.table,
@@ -251,7 +263,9 @@ impl Runtime {
                     query.op
                 )));
             }
-            RowsSubscriptionQuery::Built(query) => self.query(query.clone())?,
+            RowsSubscriptionQuery::Built { query, tier } => {
+                self.query_at_tier(query.clone(), *tier)?
+            }
         };
         Ok(subscription.replace_with_subscription_delta(rows))
     }

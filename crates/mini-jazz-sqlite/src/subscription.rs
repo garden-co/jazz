@@ -1,6 +1,8 @@
 use crate::query_api::BuiltQuery;
 use crate::sync::QueryPredicateRecord;
-use crate::types::{RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta};
+use crate::types::{
+    ReadTier, RejectionInfo, RowDiff, RowView, SubscriptionDelta, SubscriptionRowDelta,
+};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -17,16 +19,21 @@ pub struct RejectionSubscription {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RowsSubscriptionQuery {
-    Table { table: String },
+    Table { table: String, tier: ReadTier },
     Predicate(QueryPredicateRecord),
-    Built(BuiltQuery),
+    Built { query: BuiltQuery, tier: ReadTier },
 }
 
 impl RowsSubscription {
     pub(crate) fn new(table: &str, rows: Vec<RowView>) -> Self {
+        Self::new_at_tier(table, ReadTier::Local, rows)
+    }
+
+    pub(crate) fn new_at_tier(table: &str, tier: ReadTier, rows: Vec<RowView>) -> Self {
         Self {
             query: RowsSubscriptionQuery::Table {
                 table: table.to_owned(),
+                tier,
             },
             last_rows: rows,
         }
@@ -50,8 +57,12 @@ impl RowsSubscription {
     }
 
     pub(crate) fn query(query: BuiltQuery, rows: Vec<RowView>) -> Self {
+        Self::query_at_tier(query, ReadTier::Local, rows)
+    }
+
+    pub(crate) fn query_at_tier(query: BuiltQuery, tier: ReadTier, rows: Vec<RowView>) -> Self {
         Self {
-            query: RowsSubscriptionQuery::Built(query),
+            query: RowsSubscriptionQuery::Built { query, tier },
             last_rows: rows,
         }
     }
