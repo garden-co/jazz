@@ -136,18 +136,6 @@ pub(crate) fn plan_refreshes(
 
     let mut plans = Vec::new();
     plans.extend(
-        predicate_groups
-            .into_iter()
-            .map(
-                |((table, field, _branch, op), values)| QueryRefreshPlan::Predicate {
-                    table,
-                    field,
-                    op,
-                    values,
-                },
-            ),
-    );
-    plans.extend(
         recursive_groups
             .into_iter()
             .map(
@@ -175,6 +163,18 @@ pub(crate) fn plan_refreshes(
             limit,
         },
     ));
+    plans.extend(
+        predicate_groups
+            .into_iter()
+            .map(
+                |((table, field, _branch, op), values)| QueryRefreshPlan::Predicate {
+                    table,
+                    field,
+                    op,
+                    values,
+                },
+            ),
+    );
     plans.extend(singles);
     Ok(plans)
 }

@@ -216,7 +216,7 @@ fn refresh_planner_does_not_batch_across_descriptor_boundaries() {
         .iter()
         .map(|bundle| bundle.query_reads.len())
         .collect::<Vec<_>>();
-    assert_eq!(query_read_counts, vec![1, 1, 2, 1, 1]);
+    assert_eq!(query_read_counts, vec![2, 1, 1, 1, 1]);
 }
 
 #[test]

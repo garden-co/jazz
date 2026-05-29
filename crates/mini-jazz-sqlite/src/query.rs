@@ -8,7 +8,7 @@ use crate::types::{ReadTier, RowView};
 use crate::{branch, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const RECURSIVE_VISIBLE_ROWS_TABLE_SCAN_THRESHOLD: i64 = 50_000;
 const MAX_MULTI_VALUE_TOP_PAGE_VALUES: usize = 400;
@@ -37,6 +37,10 @@ enum QueryColumn<'a> {
 
 impl QueryContext<'_> {
     pub(crate) fn read_rows(&self, table_name: &str) -> Result<Vec<RowView>> {
+        if self.read_tier != ReadTier::Local {
+            let rows = self.read_rows_from_history_at_tier(table_name, self.read_tier)?;
+            return self.filter_rows_by_effective_branch_policy(table_name, rows);
+        }
         if self.branch_num != 1 {
             if let Some(base_epoch) = branch::base_global_epoch(self.conn, self.branch_num)? {
                 let mut rows = self.read_rows_from_current(table_name, false)?;
@@ -1794,18 +1798,149 @@ impl QueryContext<'_> {
     }
 
     fn read_tier_sql(&self, tx_alias: &str) -> String {
-        match self.read_tier {
-            ReadTier::Local => format!("{tx_alias}.outcome != {}", tx::OUTCOME_REJECTED),
-            ReadTier::Edge => format!(
-                "{tx_alias}.outcome != {} AND ({tx_alias}.global_epoch IS NOT NULL OR EXISTS (SELECT 1 FROM jazz_tx_receipt tier_receipt WHERE tier_receipt.tx_num = {tx_alias}.tx_num AND tier_receipt.tier >= {}))",
-                tx::OUTCOME_REJECTED,
-                tx::TIER_EDGE
-            ),
-            ReadTier::Global => format!(
-                "{tx_alias}.outcome != {} AND {tx_alias}.global_epoch IS NOT NULL",
-                tx::OUTCOME_REJECTED
-            ),
+        tier_visibility_sql(tx_alias, self.read_tier)
+    }
+
+    fn read_rows_from_history_at_tier(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+    ) -> Result<Vec<RowView>> {
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let shadowed_main_ids =
+            self.tier_visible_row_ids_for_branches(table_name, tier, &scope_nums)?;
+        let mut rows = self.read_history_rows_at_tier(table_name, tier, &scope_nums, None)?;
+
+        if self.branch_num != 1 && !scope_nums.contains(&1) {
+            let main_epoch_ceiling = branch::base_global_epoch(self.conn, self.branch_num)?;
+            rows.extend(
+                self.read_history_rows_at_tier(table_name, tier, &[1], main_epoch_ceiling)?
+                    .into_iter()
+                    .filter(|(_, row)| !shadowed_main_ids.contains(&row.id)),
+            );
         }
+
+        self.collapse_shadowed_current_rows(rows)
+    }
+
+    fn read_history_rows_at_tier(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+        branch_nums: &[i64],
+        max_global_epoch: Option<i64>,
+    ) -> Result<Vec<(i64, RowView)>> {
+        let table = self.schema.table_def(table_name)?;
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec![
+            "h.j_branch_num".to_owned(),
+            "ids.row_id".to_owned(),
+            "tx.tx_id".to_owned(),
+        ];
+        select_columns.extend(field_columns.iter().map(|column| format!("h.{column}")));
+        select_columns.push(format!(
+            "{} AS j_created_by",
+            users::user_id_expr("h", "j_created_by")
+        ));
+        let branch_placeholders = placeholders(branch_nums.len());
+        let tx_tier_sql = tier_visibility_sql("tx", tier);
+        let newer_tier_sql = tier_visibility_sql("newer_tx", tier);
+        let newer_order_sql = tier_newer_order_sql("newer_tx", "tx", tier);
+        let tx_epoch_sql = if max_global_epoch.is_some() {
+            "AND tx.global_epoch IS NOT NULL
+               AND tx.global_epoch <= ?"
+        } else {
+            ""
+        };
+        let newer_epoch_sql = if max_global_epoch.is_some() {
+            "AND newer_tx.global_epoch IS NOT NULL
+                   AND newer_tx.global_epoch <= ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {}
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num IN ({branch_placeholders})
+               AND {tx_tier_sql}
+               {tx_epoch_sql}
+               AND h.op != 3
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM {history_table} newer
+                 JOIN jazz_tx newer_tx ON newer_tx.tx_num = newer.tx_num
+                 WHERE newer.row_num = h.row_num
+                   AND newer.j_branch_num = h.j_branch_num
+                   AND {newer_tier_sql}
+                   {newer_epoch_sql}
+                   AND {newer_order_sql}
+               )
+             ORDER BY h.j_created_at DESC, ids.row_id",
+            select_columns.join(", "),
+            crate::schema::history_table(table_name),
+            history_table = crate::schema::history_table(table_name),
+        );
+        let mut params = branch_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        if let Some(max_global_epoch) = max_global_epoch {
+            params.push(rusqlite::types::Value::Integer(max_global_epoch));
+        }
+        if let Some(max_global_epoch) = max_global_epoch {
+            params.push(rusqlite::types::Value::Integer(max_global_epoch));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_width = 3 + table.fields.len() + 1;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            (0..row_width)
+                .map(|idx| row.get::<_, rusqlite::types::Value>(idx))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        rows.map(|row| {
+            let mut row = row?;
+            let branch_num = branch_num_from_row(&mut row)?;
+            Ok((branch_num, row_to_view(self.conn, table_name, table, row)?))
+        })
+        .collect()
+    }
+
+    fn tier_visible_row_ids_for_branches(
+        &self,
+        table_name: &str,
+        tier: ReadTier,
+        branch_nums: &[i64],
+    ) -> Result<BTreeSet<String>> {
+        let branch_placeholders = placeholders(branch_nums.len());
+        let tx_tier_sql = tier_visibility_sql("tx", tier);
+        let sql = format!(
+            "SELECT DISTINCT ids.row_id
+             FROM {} h
+             JOIN jazz_row_id ids ON ids.row_num = h.row_num
+             JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+             WHERE h.j_branch_num IN ({branch_placeholders})
+               AND {tx_tier_sql}
+             ORDER BY ids.row_id",
+            crate::schema::history_table(table_name),
+        );
+        let params = branch_nums
+            .iter()
+            .copied()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn visibility(&self) -> ReadVisibility<'_> {
@@ -2843,6 +2978,34 @@ fn current_created_at_by_row_id(
 
 fn placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
+fn tier_visibility_sql(tx_alias: &str, tier: ReadTier) -> String {
+    match tier {
+        ReadTier::Local => format!("{tx_alias}.outcome != {}", tx::OUTCOME_REJECTED),
+        ReadTier::Edge => format!(
+            "{tx_alias}.outcome != {} AND ({tx_alias}.global_epoch IS NOT NULL OR EXISTS (SELECT 1 FROM jazz_tx_receipt tier_receipt WHERE tier_receipt.tx_num = {tx_alias}.tx_num AND tier_receipt.tier >= {}))",
+            tx::OUTCOME_REJECTED,
+            tx::TIER_EDGE
+        ),
+        ReadTier::Global => format!(
+            "{tx_alias}.outcome != {} AND {tx_alias}.global_epoch IS NOT NULL",
+            tx::OUTCOME_REJECTED
+        ),
+    }
+}
+
+fn tier_newer_order_sql(newer_tx_alias: &str, current_tx_alias: &str, tier: ReadTier) -> String {
+    match tier {
+        ReadTier::Global => format!(
+            "({newer_tx_alias}.global_epoch > {current_tx_alias}.global_epoch
+              OR ({newer_tx_alias}.global_epoch = {current_tx_alias}.global_epoch
+                  AND {newer_tx_alias}.tx_num > {current_tx_alias}.tx_num))"
+        ),
+        ReadTier::Local | ReadTier::Edge => {
+            format!("{newer_tx_alias}.tx_num > {current_tx_alias}.tx_num")
+        }
+    }
 }
 
 fn in_predicate_sql(predicate_expr: &str, value_count: usize, includes_null: bool) -> String {

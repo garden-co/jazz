@@ -411,3 +411,23 @@ Porting another contained #972 cleanup: remove the temp-table fallback from
 state depending on input size. For the spike, the simpler scan-and-filter path
 is a better abstraction boundary; if it becomes too slow, we should replace it
 with a deliberate scoped-export representation rather than an implicit fallback.
+
+## 2026-05-29 00:49 PDT
+
+Found unported #947 value: the runtime has tier-aware reads/subscriptions, but
+the PR's subscription-tier invariants are missing locally. Adding the tests now
+with current `ReadTier` terminology so edge/global visibility cannot silently
+regress.
+
+## 2026-05-29 00:57 PDT - Ported subscription tier invariants and fixed tiered table reads
+
+- Ported the valuable #947 subscription tier tests into the current whole-system subscription suite.
+- The tests exposed a real generic bug: `ReadTier::Global`/`ReadTier::Edge` table reads were filtering the current projection by tier, so a newer local/pending current row could hide the latest row visible at the requested tier.
+- Changed non-local table reads to reconstruct the latest visible version from history at the requested tier, including branch-source shadowing and main-branch snapshot overlay behavior.
+- This keeps current projection as the local hot path while making tiered reads/subscriptions semantic snapshot reads instead of lossy current-row filters.
+- Focused subscription tests now pass.
+
+## 2026-05-29 00:59 PDT - Batched refresh ordering must apply contractions before broad refreshes
+
+- A full crate test run after the subscription-tier slice exposed a broader refresh-planner invariant: batched refreshes must not let a page/top-query contraction run after broader predicate refreshes, because the contraction can delete rows that the broad refresh already proved should stay locally.
+- Individual refresh order happened to be more forgiving. The generic planner should make the safe ordering explicit: contraction-shaped refreshes first, broad predicate refreshes after, so broad reads can rehydrate rows still justified by active subscriptions.
