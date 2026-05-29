@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, Storage};
+use mini_jazz_sqlite::{BuiltQuery, RowsSubscription, Runtime, SchemaDef, Storage};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
@@ -50,7 +50,7 @@ impl From<JsValue> for NotificationError {
 impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(node_id: &str, user: &str) -> Result<MiniJazzRuntime, JsValue> {
-        Runtime::open(Storage::Memory, node_id, user)
+        Runtime::open_with_schema(Storage::Memory, node_id, user, SchemaDef::todo_app_schema())
             .map(MiniJazzRuntime::new)
             .map_err(to_js_error)
     }
@@ -72,9 +72,14 @@ impl MiniJazzRuntime {
             .await
             .map_err(|error| JsValue::from_str(&format!("install OPFS SQLite VFS: {error}")))?;
 
-        Runtime::open(Storage::File(db_name.into()), node_id, user)
-            .map(MiniJazzRuntime::new)
-            .map_err(to_js_error)
+        Runtime::open_with_schema(
+            Storage::File(db_name.into()),
+            node_id,
+            user,
+            SchemaDef::todo_app_schema(),
+        )
+        .map(MiniJazzRuntime::new)
+        .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = insertRow)]

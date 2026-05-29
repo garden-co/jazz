@@ -45,7 +45,7 @@ fn direct_branch_query_matches_checkout_without_changing_current_branch() {
 
 #[test]
 fn branch_sources_reject_direct_and_indirect_cycles() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_branch("left", None).unwrap();
     assert!(alice.add_branch_source("left", "left").is_err());
@@ -66,8 +66,8 @@ fn branch_sources_reject_direct_and_indirect_cycles() {
 
 #[test]
 fn synced_branch_source_cycle_fails_without_partial_catalogue_apply() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
     let branches_before = peer.branches().unwrap();
 
     alice.create_branch("left", None).unwrap();
@@ -127,8 +127,8 @@ fn branch_local_write_is_invisible_on_main() {
 
 #[test]
 fn branch_absence_refresh_uses_branch_context_not_latest_main() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
-    let mut peer = Runtime::open(Storage::Memory, "peer-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut peer = support::open_todo_app(Storage::Memory, "peer-node", "alice").unwrap();
 
     alice.create_branch("draft", Some(0)).unwrap();
     alice.checkout_branch("draft").unwrap();
@@ -714,7 +714,7 @@ fn branch_reads_main_base_with_sparse_overlay() {
 
 #[test]
 fn fixture_open_todos_reads_pinned_base_with_sparse_overlay() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let project_tx = alice.create_project("project-1", "Base project").unwrap();
     alice.accept_transaction_at_global(&project_tx, 1).unwrap();

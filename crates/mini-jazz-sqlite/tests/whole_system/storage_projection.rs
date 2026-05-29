@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn memory_runtime_writes_through_sqlite_current_projection() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     assert_eq!(alice.storage_format_version().unwrap(), 7);
 
@@ -32,7 +32,7 @@ fn durable_storage_is_tagged_with_format_version() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("versioned.sqlite");
 
-    Runtime::open(Storage::File(path.clone()), "worker", "alice").unwrap();
+    support::open_todo_app(Storage::File(path.clone()), "worker", "alice").unwrap();
 
     let conn = rusqlite::Connection::open(path).unwrap();
     let version: i64 = conn
@@ -49,7 +49,7 @@ fn future_storage_format_versions_fail_before_opening_runtime() {
     conn.pragma_update(None, "user_version", 8).unwrap();
     drop(conn);
 
-    let err = match Runtime::open(Storage::File(path), "worker", "alice") {
+    let err = match support::open_todo_app(Storage::File(path), "worker", "alice") {
         Ok(_) => panic!("future storage format opened successfully"),
         Err(err) => err,
     };
@@ -138,7 +138,7 @@ fn previous_storage_format_versions_fail_fast() {
     conn.pragma_update(None, "user_version", 1).unwrap();
     drop(conn);
 
-    let err = match Runtime::open(Storage::File(path), "worker", "alice") {
+    let err = match support::open_todo_app(Storage::File(path), "worker", "alice") {
         Ok(_) => panic!("old storage format opened successfully"),
         Err(err) => err,
     };
@@ -154,30 +154,31 @@ fn durable_nodes_survive_reopen_but_memory_nodes_start_empty() {
     let path = dir.path().join("durable.sqlite");
 
     {
-        let mut durable = Runtime::open(Storage::File(path.clone()), "worker", "alice").unwrap();
+        let mut durable =
+            support::open_todo_app(Storage::File(path.clone()), "worker", "alice").unwrap();
         durable.create_project("project-1", "Durable").unwrap();
         durable
             .create_todo("todo-1", "Survives reopen", false, "project-1")
             .unwrap();
     }
 
-    let reopened = Runtime::open(Storage::File(path), "worker", "alice").unwrap();
+    let reopened = support::open_todo_app(Storage::File(path), "worker", "alice").unwrap();
     assert_eq!(reopened.open_todos().unwrap().len(), 1);
 
-    let mut memory = Runtime::open(Storage::Memory, "tab", "alice").unwrap();
+    let mut memory = support::open_todo_app(Storage::Memory, "tab", "alice").unwrap();
     memory.create_project("project-1", "Memory").unwrap();
     memory
         .create_todo("todo-1", "Lost on restart", false, "project-1")
         .unwrap();
     assert_eq!(memory.open_todos().unwrap().len(), 1);
 
-    let fresh_memory = Runtime::open(Storage::Memory, "tab", "alice").unwrap();
+    let fresh_memory = support::open_todo_app(Storage::Memory, "tab", "alice").unwrap();
     assert!(fresh_memory.open_todos().unwrap().is_empty());
 }
 
 #[test]
 fn rebuild_current_projection_from_history_matches_current_reads() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice
@@ -194,7 +195,7 @@ fn rebuild_current_projection_from_history_matches_current_reads() {
 
 #[test]
 fn delete_is_history_not_removal() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     alice

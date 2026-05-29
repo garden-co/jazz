@@ -93,11 +93,11 @@ impl Harness {
     }
 
     pub fn memory(&self, node_id: &str, user: &str) -> Result<Runtime> {
-        Runtime::open(Storage::Memory, node_id, user)
+        open_todo_app(Storage::Memory, node_id, user)
     }
 
     pub fn durable(&self, file_name: &str, node_id: &str, user: &str) -> Result<Runtime> {
-        Runtime::open(Storage::File(self.path(file_name)), node_id, user)
+        open_todo_app(Storage::File(self.path(file_name)), node_id, user)
     }
 
     pub fn memory_with_schema(
@@ -146,6 +146,10 @@ impl Harness {
             }
         }
     }
+}
+
+pub fn open_todo_app(storage: Storage, node_id: &str, user: &str) -> Result<Runtime> {
+    Runtime::open_with_schema(storage, node_id, user, SchemaDef::todo_app_schema())
 }
 
 pub fn run_as_user<T>(

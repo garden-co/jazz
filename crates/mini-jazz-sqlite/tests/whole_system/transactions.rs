@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn explicit_transaction_seals_multiple_mutations_atomically() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let tx = alice
         .transaction()
@@ -288,7 +288,7 @@ fn transaction_patch_updates_are_applied_to_start_snapshot() {
 
 #[test]
 fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     let tx = alice
         .transaction()
@@ -651,7 +651,7 @@ fn exclusive_forwarding_export_marks_only_selected_transaction() {
 
 #[test]
 fn authority_acceptance_enriches_existing_transaction() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let tx = alice
@@ -1343,7 +1343,7 @@ fn generic_transaction_delete_shadows_pinned_base_row() {
 
 #[test]
 fn global_epoch_can_accept_multiple_transactions() {
-    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    let mut alice = support::open_todo_app(Storage::Memory, "alice-node", "alice").unwrap();
 
     alice.create_project("project-1", "Spec work").unwrap();
     let first = alice

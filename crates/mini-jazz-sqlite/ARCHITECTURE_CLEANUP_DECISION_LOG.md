@@ -374,3 +374,10 @@ observed-query refreshes, but the batching decision for predicates, recursive
 reads, and windowed pages is pure planner logic. Moving it behind a
 `query_refresh` module should make later replacement of legacy query-read ops
 with built-query descriptors less invasive.
+
+## 2026-05-29 00:34 PDT
+
+Removing the public `Runtime::open(...)` todo-schema shortcut. Keeping a
+convenient todo app fixture in test support is fine, but the core runtime's
+entry point should require a schema so new agents don't infer that the runtime
+itself is a todo-shaped product.
