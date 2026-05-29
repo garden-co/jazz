@@ -4046,6 +4046,239 @@ impl BundleSummary {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct PostcardBundle {
+    protocol_version: i64,
+    schema_fingerprint: String,
+    policy_fingerprint: String,
+    branches: Vec<mini_jazz_sqlite::sync::BranchRecord>,
+    txs: Vec<PostcardTxRecord>,
+    reads: Vec<mini_jazz_sqlite::sync::ReadRecord>,
+    query_reads: Vec<PostcardQueryReadRecord>,
+    history: Vec<PostcardHistoryRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PostcardTxRecord {
+    tx_id: String,
+    node_id: String,
+    local_epoch: i64,
+    global_epoch: Option<i64>,
+    conflict_mode: i64,
+    outcome: i64,
+    auth_user: Option<String>,
+    rejection_code: Option<String>,
+    rejection_detail_json: Option<Vec<u8>>,
+    receipt_tiers: Vec<i64>,
+    created_at: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PostcardQueryReadRecord {
+    branch_id: String,
+    table: String,
+    field: String,
+    op: String,
+    value: PostcardValue,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PostcardHistoryRecord {
+    table: String,
+    row_id: String,
+    branch_id: String,
+    tx_id: String,
+    op: i64,
+    values: BTreeMap<String, PostcardValue>,
+    created_at: i64,
+    updated_at: i64,
+    created_by: String,
+    updated_by: String,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PostcardValue {
+    Json(Vec<u8>),
+    Bytes(Vec<u8>),
+}
+
+fn encode_postcard_bundle(bundle: &Bundle) -> BenchResult<Vec<u8>> {
+    Ok(postcard::to_allocvec(&PostcardBundle::from_bundle(
+        bundle,
+    )?)?)
+}
+
+fn decode_postcard_bundle(bytes: &[u8]) -> BenchResult<Bundle> {
+    let wire: PostcardBundle = postcard::from_bytes(bytes)?;
+    wire.into_bundle()
+}
+
+impl PostcardBundle {
+    fn from_bundle(bundle: &Bundle) -> BenchResult<Self> {
+        Ok(Self {
+            protocol_version: bundle.protocol_version,
+            schema_fingerprint: bundle.schema_fingerprint.clone(),
+            policy_fingerprint: bundle.policy_fingerprint.clone(),
+            branches: bundle.branches.clone(),
+            txs: bundle
+                .txs
+                .iter()
+                .map(|record| {
+                    Ok(PostcardTxRecord {
+                        tx_id: record.tx_id.clone(),
+                        node_id: record.node_id.clone(),
+                        local_epoch: record.local_epoch,
+                        global_epoch: record.global_epoch,
+                        conflict_mode: record.conflict_mode,
+                        outcome: record.outcome,
+                        auth_user: record.auth_user.clone(),
+                        rejection_code: record.rejection_code.clone(),
+                        rejection_detail_json: record
+                            .rejection_detail
+                            .as_ref()
+                            .map(serde_json::to_vec)
+                            .transpose()?,
+                        receipt_tiers: record.receipt_tiers.clone(),
+                        created_at: record.created_at,
+                    })
+                })
+                .collect::<BenchResult<Vec<_>>>()?,
+            reads: bundle.reads.clone(),
+            query_reads: bundle
+                .query_reads
+                .iter()
+                .map(|record| PostcardQueryReadRecord {
+                    branch_id: record.branch_id.clone(),
+                    table: record.table.clone(),
+                    field: record.field.clone(),
+                    op: record.op.clone(),
+                    value: PostcardValue::from_json(&record.value).unwrap_or_else(|| {
+                        PostcardValue::Json(serde_json::to_vec(&record.value).unwrap())
+                    }),
+                })
+                .collect(),
+            history: bundle
+                .history
+                .iter()
+                .map(|record| {
+                    let values = record
+                        .values
+                        .iter()
+                        .map(|(key, value)| {
+                            Ok((
+                                key.clone(),
+                                if key == "body_op" {
+                                    PostcardValue::Bytes(hex_to_bytes(
+                                        value.as_str().ok_or("body_op is not hex text")?,
+                                    )?)
+                                } else {
+                                    PostcardValue::Json(serde_json::to_vec(value)?)
+                                },
+                            ))
+                        })
+                        .collect::<BenchResult<BTreeMap<_, _>>>()?;
+                    Ok(PostcardHistoryRecord {
+                        table: record.table.clone(),
+                        row_id: record.row_id.clone(),
+                        branch_id: record.branch_id.clone(),
+                        tx_id: record.tx_id.clone(),
+                        op: record.op,
+                        values,
+                        created_at: record.created_at,
+                        updated_at: record.updated_at,
+                        created_by: record.created_by.clone(),
+                        updated_by: record.updated_by.clone(),
+                    })
+                })
+                .collect::<BenchResult<Vec<_>>>()?,
+        })
+    }
+
+    fn into_bundle(self) -> BenchResult<Bundle> {
+        Ok(Bundle {
+            protocol_version: self.protocol_version,
+            schema_fingerprint: self.schema_fingerprint,
+            policy_fingerprint: self.policy_fingerprint,
+            branches: self.branches,
+            txs: self
+                .txs
+                .into_iter()
+                .map(|record| {
+                    Ok(mini_jazz_sqlite::sync::TxRecord {
+                        tx_id: record.tx_id,
+                        node_id: record.node_id,
+                        local_epoch: record.local_epoch,
+                        global_epoch: record.global_epoch,
+                        conflict_mode: record.conflict_mode,
+                        outcome: record.outcome,
+                        auth_user: record.auth_user,
+                        rejection_code: record.rejection_code,
+                        rejection_detail: record
+                            .rejection_detail_json
+                            .map(|bytes| serde_json::from_slice(&bytes))
+                            .transpose()?,
+                        receipt_tiers: record.receipt_tiers,
+                        created_at: record.created_at,
+                    })
+                })
+                .collect::<BenchResult<Vec<_>>>()?,
+            reads: self.reads,
+            query_reads: self
+                .query_reads
+                .into_iter()
+                .map(|record| mini_jazz_sqlite::sync::QueryReadRecord {
+                    branch_id: record.branch_id,
+                    table: record.table,
+                    field: record.field,
+                    op: record.op,
+                    value: record.value.into_json(),
+                })
+                .collect(),
+            history: self
+                .history
+                .into_iter()
+                .map(|record| {
+                    let values = record
+                        .values
+                        .into_iter()
+                        .map(|(key, value)| (key, value.into_json()))
+                        .collect();
+                    mini_jazz_sqlite::sync::HistoryRecord {
+                        table: record.table,
+                        row_id: record.row_id,
+                        branch_id: record.branch_id,
+                        tx_id: record.tx_id,
+                        op: record.op,
+                        values,
+                        created_at: record.created_at,
+                        updated_at: record.updated_at,
+                        created_by: record.created_by,
+                        updated_by: record.updated_by,
+                    }
+                })
+                .collect(),
+        })
+    }
+}
+
+impl PostcardValue {
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        value
+            .as_object()
+            .and_then(|object| object.get("$bytes"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|hex| hex_to_bytes(hex).ok())
+            .map(Self::Bytes)
+    }
+
+    fn into_json(self) -> serde_json::Value {
+        match self {
+            Self::Json(value) => serde_json::from_slice(&value).unwrap_or(serde_json::Value::Null),
+            Self::Bytes(bytes) => json!(bytes_to_hex(&bytes)),
+        }
+    }
+}
+
 fn gzip_json_bytes(bundle: &Bundle) -> BenchResult<Option<usize>> {
     let mut child = match Command::new("gzip")
         .arg("-c")
@@ -4522,6 +4755,7 @@ type TextOpsEditFn = dyn FnMut(
 
 struct PendingTextOpWrite {
     root: persisted_text_ops::TextRoot,
+    op_bytes: Vec<u8>,
 }
 
 fn flush_text_op_writes(
@@ -4539,33 +4773,15 @@ fn flush_text_op_writes(
                 map1(
                     "body_root",
                     json!(write.root.unwrap_or_default().to_string()),
-                ),
+                )
+                .into_iter()
+                .chain(map1("body_op", json!(bytes_to_hex(&write.op_bytes))).into_iter())
+                .collect(),
             )
         })
         .collect();
     writer.update_rows_batched("documents", updates)?;
     Ok(())
-}
-
-fn copy_text_ops_incremental(
-    source: &Connection,
-    target: &Connection,
-    watermark: &mut persisted_text_ops::DeltaWatermark,
-) -> BenchResult<usize> {
-    let delta = persisted_text_ops::export_delta(source, *watermark)?;
-    persisted_text_ops::apply_delta(target, &delta.bytes, watermark)?;
-    Ok(delta.stats.compressed_bytes)
-}
-
-fn copy_text_ops_incremental_batched(
-    source: &Connection,
-    target: &mut Connection,
-    watermark: &mut persisted_text_ops::DeltaWatermark,
-) -> BenchResult<usize> {
-    let tx = target.transaction()?;
-    let bytes = copy_text_ops_incremental(source, &tx, watermark)?;
-    tx.commit()?;
-    Ok(bytes)
 }
 
 fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCaseReport> {
@@ -4576,6 +4792,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let cold_ops_path = tmp.path().join("cold-text-ops.sqlite");
     let schema = SchemaDef::new().table("documents", |table| {
         table.text("body_root");
+        table.bytes("body_op");
     });
     let mut writer = Runtime::open_with_schema(
         Storage::File(writer_db_path.clone()),
@@ -4589,19 +4806,33 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let mut receiver_ops = Connection::open(&receiver_ops_path)?;
     persisted_text_ops::install(&writer_ops)?;
     persisted_text_ops::install(&receiver_ops)?;
-    let mut receiver_watermark = persisted_text_ops::DeltaWatermark::default();
+    let mut receiver_inline_watermark = 0i64;
 
     let mut root = None;
     let (initial_root, mut final_payload_bytes) =
         (input.next_edit)(&writer_ops, root, 0, input.snapshot_every)?;
     root = initial_root;
+    let initial_op_bytes = persisted_text_ops::inline_op_bytes(&writer_ops, root)?;
     writer.insert_row(
         "documents",
         "doc",
-        map1("body_root", json!(root.unwrap_or_default().to_string())),
+        map2(
+            "body_root",
+            json!(root.unwrap_or_default().to_string()),
+            "body_op",
+            json!(bytes_to_hex(&initial_op_bytes)),
+        ),
     )?;
-    receiver.apply_bundle(&writer.export_table_history("documents")?)?;
-    copy_text_ops_incremental_batched(&writer_ops, &mut receiver_ops, &mut receiver_watermark)?;
+    let initial_bundle = writer.export_table_history("documents")?;
+    let initial_wire = encode_postcard_bundle(&initial_bundle)?;
+    let initial_bundle = decode_postcard_bundle(&initial_wire)?;
+    receiver.apply_bundle(&initial_bundle)?;
+    apply_inline_text_ops_from_bundle(
+        &initial_bundle,
+        &mut receiver_ops,
+        &mut receiver_inline_watermark,
+        input.snapshot_every,
+    )?;
     let mut subscription = receiver.subscribe_rows("documents")?;
 
     let started = Instant::now();
@@ -4625,7 +4856,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
                 (input.next_edit)(&sidecar_tx, root, index, input.snapshot_every)?;
             root = next_root;
             final_payload_bytes = payload_bytes;
-            pending_writes.push(PendingTextOpWrite { root });
+            let op_bytes = persisted_text_ops::inline_op_bytes(&sidecar_tx, root)?;
+            pending_writes.push(PendingTextOpWrite { root, op_bytes });
             should_sample = should_sample
                 || index == 1
                 || (index + 1).is_multiple_of(input.sample_every)
@@ -4645,11 +4877,14 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         if should_sample {
             let receive_started = Instant::now();
             let bundle = writer.export_table_history("documents")?;
+            let wire = encode_postcard_bundle(&bundle)?;
+            let bundle = decode_postcard_bundle(&wire)?;
             receiver.profile_apply_bundle(&bundle)?;
-            copy_text_ops_incremental_batched(
-                &writer_ops,
+            apply_inline_text_ops_from_bundle(
+                &bundle,
                 &mut receiver_ops,
-                &mut receiver_watermark,
+                &mut receiver_inline_watermark,
+                input.snapshot_every,
             )?;
             let diffs = receiver.poll_subscription(&mut subscription)?;
             if diffs.is_empty() {
@@ -4689,12 +4924,9 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         persisted_text_ops::snapshot(&writer_ops, root)?;
         let block_export_started = Instant::now();
         let delta = writer.export_table_history_delta("documents", &[])?;
-        let sidecar_delta = persisted_text_ops::export_delta(
-            &writer_ops,
-            persisted_text_ops::DeltaWatermark::default(),
-        )?;
+        let delta_wire = encode_postcard_bundle(&delta.bundle)?;
+        let delta_bundle = decode_postcard_bundle(&delta_wire)?;
         block_native_export_ms = Some(ms(block_export_started.elapsed()));
-        let delta_bundle_summary = BundleSummary::from(&delta.bundle)?;
         block_native_blocks = Some(delta.blocks.len());
         block_native_payload_bytes =
             Some(delta.blocks.iter().map(|block| block.payload.len()).sum());
@@ -4704,18 +4936,16 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         let block_peer_ops_path = tmp.path().join("block-peer-text-ops.sqlite");
         let mut block_peer_ops = Connection::open(&block_peer_ops_path)?;
         persisted_text_ops::install(&block_peer_ops)?;
-        let mut block_watermark = persisted_text_ops::DeltaWatermark::default();
+        let mut block_watermark = 0i64;
         let block_import_started = Instant::now();
-        block_peer.apply_history_delta(&delta.bundle, &delta.blocks)?;
-        {
-            let sidecar_tx = block_peer_ops.transaction()?;
-            persisted_text_ops::apply_delta(
-                &sidecar_tx,
-                &sidecar_delta.bytes,
-                &mut block_watermark,
-            )?;
-            sidecar_tx.commit()?;
-        }
+        block_peer.apply_history_delta(&delta_bundle, &delta.blocks)?;
+        let block_history = block_peer.export_table_history("documents")?;
+        apply_inline_text_ops_from_bundle(
+            &block_history,
+            &mut block_peer_ops,
+            &mut block_watermark,
+            input.snapshot_every,
+        )?;
         let block_rows = block_peer.read_rows("documents")?;
         let block_root = row_root_id(&block_rows, "body_root")?;
         let block_text = persisted_text_ops::materialize(&block_peer_ops, Some(block_root))?;
@@ -4724,11 +4954,7 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         }
         block_native_import_ms = Some(ms(block_import_started.elapsed()));
         native_import_ms = block_native_import_ms;
-        native_sync_bytes = Some(
-            delta_bundle_summary.bytes
-                + block_native_payload_bytes.unwrap_or(0)
-                + sidecar_delta.stats.compressed_bytes,
-        );
+        native_sync_bytes = Some(delta_wire.len() + block_native_payload_bytes.unwrap_or(0));
     }
 
     let current_started = Instant::now();
@@ -4742,28 +4968,23 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
 
     let final_bundle_export_started = Instant::now();
     let final_bundle = writer.export_table_history("documents")?;
-    let sidecar_full_delta = persisted_text_ops::export_delta(
-        &writer_ops,
-        persisted_text_ops::DeltaWatermark::default(),
-    )?;
+    let final_wire = encode_postcard_bundle(&final_bundle)?;
+    let final_bundle = decode_postcard_bundle(&final_wire)?;
     let final_bundle_export_ms = ms(final_bundle_export_started.elapsed());
-    let final_bundle_summary = BundleSummary::from(&final_bundle)?;
-    let sidecar_bundle_bytes = sidecar_full_delta.stats.compressed_bytes;
+    let final_bundle_bytes = final_wire.len();
+    let sidecar_bundle_bytes = 0;
     let mut cold = Runtime::open_with_schema(Storage::Memory, "cold-node", "bob", schema)?;
     let mut cold_ops = Connection::open(&cold_ops_path)?;
     persisted_text_ops::install(&cold_ops)?;
-    let mut cold_watermark = persisted_text_ops::DeltaWatermark::default();
+    let mut cold_watermark = 0i64;
     let cold_started = Instant::now();
     cold.profile_apply_bundle(&final_bundle)?;
-    {
-        let sidecar_tx = cold_ops.transaction()?;
-        persisted_text_ops::apply_delta(
-            &sidecar_tx,
-            &sidecar_full_delta.bytes,
-            &mut cold_watermark,
-        )?;
-        sidecar_tx.commit()?;
-    }
+    apply_inline_text_ops_from_bundle(
+        &final_bundle,
+        &mut cold_ops,
+        &mut cold_watermark,
+        input.snapshot_every,
+    )?;
     let cold_rows = cold.read_rows("documents")?;
     let cold_root = row_root_id(&cold_rows, "body_root")?;
     let cold_text = persisted_text_ops::materialize(&cold_ops, Some(cold_root))?;
@@ -4807,14 +5028,13 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
     let transaction_info_count = tx_info_ids.len();
     let writer_stats = writer.storage_stats()?;
     let sidecar_database_bytes = persisted_text_ops::database_bytes(&writer_ops)?;
-    let database_bytes = writer_stats.database_bytes + sidecar_database_bytes;
-    let live_database_bytes = writer_stats.live_database_bytes + sidecar_database_bytes;
-    let total_file_bytes =
-        writer_stats.total_file_bytes + sqlite_path_total_file_bytes(&writer_ops_path);
+    let database_bytes = writer_stats.database_bytes;
+    let live_database_bytes = writer_stats.live_database_bytes;
+    let total_file_bytes = writer_stats.total_file_bytes;
     let mut notes = input.notes;
     notes.push(format!(
-        "Text op sidecar bytes: database {}, bundle {}.",
-        sidecar_database_bytes, sidecar_bundle_bytes
+        "Text op local materialization cache bytes excluded from storage totals: database {}. Inline op payloads are stored in Jazz history/current rows.",
+        sidecar_database_bytes
     ));
 
     Ok(DeepHistoryCaseReport {
@@ -4853,9 +5073,8 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         final_payload_bytes,
         extrapolated_final_payload_bytes_for_target: Some(final_payload_bytes),
         reference_gzip_bytes: input.reference_gzip_bytes,
-        bundle_bytes: final_bundle_summary.bytes + sidecar_bundle_bytes,
-        native_sync_bytes: native_sync_bytes
-            .unwrap_or(final_bundle_summary.bytes + sidecar_bundle_bytes),
+        bundle_bytes: final_bundle_bytes + sidecar_bundle_bytes,
+        native_sync_bytes: native_sync_bytes.unwrap_or(final_bundle_bytes + sidecar_bundle_bytes),
         native_export_ms: native_export_ms.unwrap_or(final_bundle_export_ms),
         native_import_ms: native_import_ms.unwrap_or(cold_load_ms),
         block_native_export_ms,
@@ -4881,13 +5100,51 @@ fn run_text_ops_case(mut input: TextOpsCaseInput) -> BenchResult<DeepHistoryCase
         database_to_reference_gzip_ratio: input
             .reference_gzip_bytes
             .and_then(|bytes| ratio_i64_usize(database_bytes, bytes)),
-        bundle_to_reference_gzip_ratio: input.reference_gzip_bytes.and_then(|bytes| {
-            ratio_usize(final_bundle_summary.bytes + sidecar_bundle_bytes, bytes)
-        }),
+        bundle_to_reference_gzip_ratio: input
+            .reference_gzip_bytes
+            .and_then(|bytes| ratio_usize(final_bundle_bytes + sidecar_bundle_bytes, bytes)),
         extrapolated_write_ms_for_target: None,
         extrapolated_database_bytes_for_target: None,
         notes,
     })
+}
+
+fn apply_inline_text_ops_from_bundle(
+    bundle: &Bundle,
+    target: &mut Connection,
+    watermark: &mut i64,
+    snapshot_every: usize,
+) -> BenchResult<()> {
+    let mut ops = bundle
+        .history
+        .iter()
+        .filter(|record| record.table == "documents" && record.row_id == "doc")
+        .filter_map(|record| {
+            let root = record
+                .values
+                .get("body_root")
+                .and_then(serde_json::Value::as_str)?
+                .parse::<i64>()
+                .ok()?;
+            let op = record
+                .values
+                .get("body_op")
+                .and_then(serde_json::Value::as_str)?;
+            Some((root, op.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    ops.sort_by_key(|(root, _)| *root);
+    let tx = target.transaction()?;
+    for (root, op_hex) in ops {
+        if root <= *watermark {
+            continue;
+        }
+        let bytes = hex_to_bytes(&op_hex)?;
+        persisted_text_ops::apply_inline_op(&tx, &bytes, snapshot_every)?;
+        *watermark = root;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn run_naive_deep_history_case(
@@ -5354,6 +5611,51 @@ fn map1(key: &str, value: serde_json::Value) -> BTreeMap<String, serde_json::Val
     map
 }
 
+fn map2(
+    key1: &str,
+    value1: serde_json::Value,
+    key2: &str,
+    value2: serde_json::Value,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut map = BTreeMap::new();
+    map.insert(key1.to_owned(), value1);
+    map.insert(key2.to_owned(), value2);
+    map
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_to_bytes(value: &str) -> BenchResult<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return Err("hex bytes value has odd length".into());
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let raw = value.as_bytes();
+    for idx in (0..raw.len()).step_by(2) {
+        let high = hex_nibble(raw[idx])?;
+        let low = hex_nibble(raw[idx + 1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> BenchResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("invalid hex bytes value".into()),
+    }
+}
+
 fn average(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
@@ -5497,19 +5799,6 @@ fn sqlite_database_bytes(conn: &Connection) -> Result<i64> {
     let page_count: i64 = conn.pragma_query_value(None, "page_count", |row| row.get(0))?;
     let page_size: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
     Ok(page_count * page_size)
-}
-
-fn sqlite_path_total_file_bytes(path: &std::path::Path) -> i64 {
-    let main = std::fs::metadata(path)
-        .map(|metadata| metadata.len() as i64)
-        .unwrap_or(0);
-    let wal = std::fs::metadata(format!("{}-wal", path.display()))
-        .map(|metadata| metadata.len() as i64)
-        .unwrap_or(0);
-    let shm = std::fs::metadata(format!("{}-shm", path.display()))
-        .map(|metadata| metadata.len() as i64)
-        .unwrap_or(0);
-    main + wal + shm
 }
 
 fn process_rss_bytes() -> Option<i64> {

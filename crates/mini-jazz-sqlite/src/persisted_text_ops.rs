@@ -154,6 +154,61 @@ pub fn root_len(conn: &Connection, root: TextRoot) -> Result<i64> {
         .ok_or_else(|| Error::new("unknown text op root"))
 }
 
+pub fn inline_op_bytes(conn: &Connection, root: TextRoot) -> Result<Vec<u8>> {
+    let Some(op_id) = root else {
+        return Ok(Vec::new());
+    };
+    let op = conn
+        .prepare_cached(
+            "SELECT op_id, start_byte, delete_bytes, insert_text, resulting_len
+             FROM jazz_text_op
+             WHERE op_id = ?",
+        )?
+        .query_row(params![op_id], |row| {
+            Ok(TextOpRow {
+                op_id: row.get(0)?,
+                start_byte: row.get(1)?,
+                delete_bytes: row.get(2)?,
+                insert_text: row.get(3)?,
+                resulting_len: row.get(4)?,
+            })
+        })?;
+    let mut out = Vec::new();
+    write_varint(&mut out, op.start_byte as u64);
+    write_varint(&mut out, op.delete_bytes as u64);
+    write_bytes(&mut out, op.insert_text.as_bytes());
+    write_varint(&mut out, op.resulting_len as u64);
+    Ok(out)
+}
+
+pub fn apply_inline_op(conn: &Connection, bytes: &[u8], snapshot_every: usize) -> Result<TextRoot> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let mut cursor = ByteCursor::new(bytes);
+    let start_byte = cursor.read_varint()? as i64;
+    let delete_bytes = cursor.read_varint()? as i64;
+    let insert_text = String::from_utf8(cursor.read_bytes()?.to_vec())
+        .map_err(|err| Error::new(err.to_string()))?;
+    let resulting_len = cursor.read_varint()? as i64;
+    cursor.expect_end()?;
+    conn.prepare_cached(
+        "INSERT INTO jazz_text_op (start_byte, delete_bytes, insert_text, resulting_len)
+         VALUES (?, ?, ?, ?)",
+    )?
+    .execute(params![
+        start_byte,
+        delete_bytes,
+        insert_text,
+        resulting_len
+    ])?;
+    let op_id = conn.last_insert_rowid();
+    if snapshot_every > 0 && (op_id as usize).is_multiple_of(snapshot_every) {
+        snapshot(conn, Some(op_id))?;
+    }
+    Ok(Some(op_id))
+}
+
 pub fn database_bytes(conn: &Connection) -> Result<i64> {
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;

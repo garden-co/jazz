@@ -2077,6 +2077,9 @@ pub(crate) fn sql_value_to_json(
         (FieldKind::Text, rusqlite::types::Value::Text(value)) => {
             Ok(JsonValue::String(value.clone()))
         }
+        (FieldKind::Bytes, rusqlite::types::Value::Blob(value)) => {
+            Ok(JsonValue::String(bytes_to_hex(value)))
+        }
         (FieldKind::Bool, rusqlite::types::Value::Integer(value)) => {
             Ok(JsonValue::Bool(*value != 0))
         }
@@ -2088,6 +2091,16 @@ pub(crate) fn sql_value_to_json(
             field.name
         ))),
     }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 pub(crate) fn text_value(value: &rusqlite::types::Value, name: &str) -> Result<String> {

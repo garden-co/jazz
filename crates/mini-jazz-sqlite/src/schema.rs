@@ -110,6 +110,7 @@ pub(crate) struct FieldDef {
 #[derive(Clone, Debug)]
 pub(crate) enum FieldKind {
     Text,
+    Bytes,
     Bool,
     Ref { table: String },
 }
@@ -118,6 +119,7 @@ impl FieldKind {
     fn fingerprint(&self) -> String {
         match self {
             FieldKind::Text => "text".to_owned(),
+            FieldKind::Bytes => "bytes".to_owned(),
             FieldKind::Bool => "bool".to_owned(),
             FieldKind::Ref { table } => format!("ref:{table}"),
         }
@@ -180,6 +182,16 @@ impl TableBuilder {
             name: name.to_owned(),
             storage_name: user_storage_name(name),
             kind: FieldKind::Text,
+            nullable: false,
+            default_value: None,
+        });
+    }
+
+    pub fn bytes(&mut self, name: &str) {
+        self.table.fields.push(FieldDef {
+            name: name.to_owned(),
+            storage_name: user_storage_name(name),
+            kind: FieldKind::Bytes,
             nullable: false,
             default_value: None,
         });
@@ -690,6 +702,11 @@ pub(crate) fn field_sql_value(
                 .ok_or_else(|| crate::Error::new(format!("expected text for {}", field.name)))?
                 .to_owned(),
         ),
+        FieldKind::Bytes => rusqlite::types::Value::Blob(hex_to_bytes(
+            value
+                .as_str()
+                .ok_or_else(|| crate::Error::new(format!("expected bytes for {}", field.name)))?,
+        )?),
         FieldKind::Bool => rusqlite::types::Value::Integer(i64::from(
             value
                 .as_bool()
@@ -724,11 +741,35 @@ fn user_storage_name(name: &str) -> String {
 fn sql_type(kind: &FieldKind) -> &'static str {
     match kind {
         FieldKind::Text => "TEXT",
+        FieldKind::Bytes => "BLOB",
         FieldKind::Ref { table } => {
             let _ = table;
             "INTEGER"
         }
         FieldKind::Bool => "INTEGER",
+    }
+}
+
+fn hex_to_bytes(value: &str) -> crate::Result<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return Err(crate::Error::new("hex bytes value has odd length"));
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let raw = value.as_bytes();
+    for idx in (0..raw.len()).step_by(2) {
+        let high = hex_nibble(raw[idx])?;
+        let low = hex_nibble(raw[idx + 1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> crate::Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(crate::Error::new("invalid hex bytes value")),
     }
 }
 
