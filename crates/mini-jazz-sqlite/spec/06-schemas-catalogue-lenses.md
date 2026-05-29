@@ -17,7 +17,8 @@ migrations/
 
 - structural schema
 - relations
-- scalar types such as text, boolean, integer, real, timestamp, UUID, and bytes
+- scalar types such as text, deep-history text, boolean, integer, real,
+  timestamp, UUID, and bytes
 - enums, arrays, refs, JSON schemas, defaults, and nullability
 - merge strategies
 - explicit `indexOnly(...)` declarations
@@ -41,6 +42,13 @@ Explicit indexes and merge strategies are part of the schema hash. If two
 schema versions differ only by index declarations or merge strategy
 declarations, the system should derive automatic lens compatibility because row
 value shape did not change.
+
+Deep-history text is an opt-in text storage strategy for fields expected to
+accumulate long edit histories. Semantically it is still a text value in the row
+schema, but the physical current/history row stores an opaque text root while
+the runtime owns the append/edit op log, snapshots, sync delta, and historical
+materialization. Ordinary text remains the default for short or rarely edited
+fields.
 
 Physical storage layouts are not created for every catalogue/schema version.
 The engine should create a new physical layout only when structural storage

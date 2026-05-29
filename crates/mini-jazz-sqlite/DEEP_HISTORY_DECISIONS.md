@@ -78,6 +78,14 @@ Why: canvas/presence does not use the deep-text sidecar, but it still syncs seal
 
 Scope impact: the generic deep-history block path now round-trips `HistoryDelta` through `encode_history_delta` / `decode_history_delta` before import. Canvas native export timing is higher, but the measurement is now the same sync shape as append/document. `/tmp/deep_history_runtime_mjzd_all_block_ops.json` is the latest all-scenario run.
 
+## Thu May 28 23:13:18 PDT 2026
+
+Decision: document `deep_text` as an opt-in schema storage strategy in the local SQLite core spike spec.
+
+Why: the implementation now has a real `SchemaDef::deep_text` API, but without a spec note it reads like benchmark-only machinery. The intended product-level contract is semantic text with a different physical/runtime backing, not a new app-visible scalar value kind.
+
+Scope impact: the local mini-jazz-sqlite schema spec now describes deep-history text as opt-in and keeps ordinary text as the default.
+
 ## Thu May 28 04:12:19 PDT 2026
 
 Decision: rerun Block benchmarks after the tx-reference validation landed.
