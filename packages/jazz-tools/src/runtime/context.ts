@@ -30,6 +30,9 @@ export interface RuntimeSourcesConfig {
 
   /** Explicit compiled WASM module. Highest-precedence bootstrap input. */
   wasmModule?: WebAssembly.Module;
+
+  /** Explicit URL for the SharedWorker leader entry script. Overrides `baseUrl`. */
+  sharedWorkerLeaderUrl?: string;
 }
 
 /**
