@@ -205,34 +205,22 @@ async function packWorkspaceTarballs(
 }
 
 /**
- * pnpm 10 stopped reading the `pnpm` field in package.json — it emits
+ * pnpm 10+ stopped reading the `pnpm` field in package.json — it emits
  * `[WARN] The "pnpm" field in package.json is no longer read by pnpm` and
  * ignores anything underneath, including `overrides`. The canonical home is
  * `pnpm-workspace.yaml` (yes, even in a non-workspace single-project setup).
  *
- * We also pre-approve build scripts for known native/postinstall-using deps;
- * pnpm 10 exits non-zero from `pnpm install` if it sees a build script for a
- * package that isn't on the allowlist (`ERR_PNPM_IGNORED_BUILDS`). Listing
- * the common ones here keeps the harness's install reliable across starters.
+ * Build-script approval is handled at install time via `--ignore-scripts`
+ * rather than `onlyBuiltDependencies` here, because the allowlist mechanism
+ * has shifted between pnpm 10 and 11 and skipping postinstalls is safe for
+ * the e2e harness — the few packages affected ship working binaries via
+ * optionalDependencies.
  */
-const ONLY_BUILT_DEPENDENCIES = [
-  "@swc/core",
-  "better-sqlite3",
-  "blake3",
-  "bufferutil",
-  "esbuild",
-  "lefthook",
-  "protobufjs",
-  "sharp",
-  "utf-8-validate",
-];
-
 function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, string>): void {
   const overrideLines = Object.entries(tarballs)
     .map(([pkg, tgz]) => `  "${pkg}": "file:${tgz}"`)
     .join("\n");
-  const allowLines = ONLY_BUILT_DEPENDENCIES.map((p) => `  - "${p}"`).join("\n");
-  const yaml = `overrides:\n${overrideLines}\n\nonlyBuiltDependencies:\n${allowLines}\n`;
+  const yaml = `overrides:\n${overrideLines}\n`;
   fs.writeFileSync(path.join(appDir, "pnpm-workspace.yaml"), yaml, "utf-8");
 }
 
@@ -313,15 +301,27 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
 
     await recordPhase("install", () =>
       // No `--ignore-workspace` here: that would make pnpm skip the
-      // pnpm-workspace.yaml we just wrote (which is where pnpm 10 reads
-      // `overrides` and `onlyBuiltDependencies` from). The scaffolded folder
-      // lives in $TMPDIR, so there's no risk of pnpm walking up into the
-      // jazz monorepo's workspace by accident.
-      runChild("pnpm", ["install", "--no-frozen-lockfile", "--prefer-offline"], {
-        cwd: appDir,
-        verbose,
-        description: `pnpm install ${opts.starter}`,
-      }),
+      // pnpm-workspace.yaml we just wrote (which is where pnpm 10+ reads
+      // `overrides` from). The scaffolded folder lives in $TMPDIR, so there's
+      // no risk of pnpm walking up into the jazz monorepo's workspace by
+      // accident.
+      //
+      // `--ignore-scripts`: pnpm 10+ exits non-zero from `pnpm install` if it
+      // sees postinstall scripts for packages that aren't on the project's
+      // build allowlist (`ERR_PNPM_IGNORED_BUILDS`). The allowlist mechanism
+      // in pnpm-workspace.yaml isn't reliable across pnpm major versions —
+      // and the few build scripts we'd hit (esbuild, sharp, protobufjs) all
+      // ship their working binaries via optionalDependencies, so skipping
+      // their postinstalls is safe for the e2e purpose.
+      runChild(
+        "pnpm",
+        ["install", "--no-frozen-lockfile", "--prefer-offline", "--ignore-scripts"],
+        {
+          cwd: appDir,
+          verbose,
+          description: `pnpm install ${opts.starter}`,
+        },
+      ),
     );
 
     patchInstalledJazzNapi(appDir, opts.repoRoot);
