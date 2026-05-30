@@ -1,0 +1,28 @@
+{
+  "name": "todo-client-localfirst-solid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.browser.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "solid-js": "^1.9.13",
+    "solid-sonner": "^0.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-solid": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
