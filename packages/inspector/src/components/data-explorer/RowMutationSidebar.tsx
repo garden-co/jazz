@@ -1,13 +1,14 @@
 import type { ColumnDescriptor } from "jazz-tools";
 import { useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useParams } from "@tanstack/react-router";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import {
   buildMutationFormFields,
   formatMutationFieldValue,
   type MutationFormMode,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
-import { buildRelationFilterHref } from "./relation-navigation.js";
+import { buildRelationFilterSearch } from "#data-explorer/tableSearchParams.ts";
 import styles from "./RowMutationSidebar.module.css";
 
 interface FieldState {
@@ -96,6 +97,12 @@ export function RowMutationSidebar({
   onSave,
   onDelete,
 }: RowMutationSidebarProps) {
+  const routeParams = useParams({ from: appRoutes.tableData });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
     createInitialFields(rowValues, mode, schemaColumns),
   );
@@ -223,7 +230,12 @@ export function RowMutationSidebar({
                     <span className={styles.label}>{column.name}</span>
                     {relationTarget && column.references ? (
                       <Link
-                        to={buildRelationFilterHref(column.references, relationTarget)}
+                        to={appRoutes.tableData}
+                        params={{
+                          ...linkRouteParams,
+                          tableName: column.references,
+                        }}
+                        search={buildRelationFilterSearch(relationTarget)}
                         className={styles.showLink}
                         aria-label={`Show ${column.name} in ${column.references}`}
                       >

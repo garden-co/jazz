@@ -36,10 +36,17 @@ vi.mock("./contexts/devtools-context.js", () => ({
     devtoolsProviderMock(props);
     return children;
   },
+  useDevtoolsContext: () => ({
+    queryPropagation: "local-only",
+    runtime: "standalone",
+    setQueryPropagation: vi.fn(),
+    storedPermissions: null,
+    wasmSchema: {},
+  }),
 }));
 
-vi.mock("./routes.js", () => ({
-  InspectorRoutes: function MockInspectorRoutes() {
+vi.mock("#pages/data-explorer/index.tsx", () => ({
+  DataExplorer: function MockDataExplorer() {
     const standaloneContext = useStandaloneContext();
 
     return (
@@ -56,6 +63,7 @@ vi.mock("./routes.js", () => ({
 describe("App", () => {
   beforeEach(() => {
     localStorage.clear();
+    window.history.pushState(null, "", "/");
     window.location.hash = "";
     createJazzClientMock.mockReset();
     fetchSchemaHashesMock.mockReset();
@@ -193,6 +201,102 @@ describe("App", () => {
     };
     expect(stored.activeConnectionId).toBe("staging");
     expect(await screen.findByText("Inspector ready")).not.toBeNull();
+  });
+
+  it("uses full route params instead of the stored active connection for runtime setup", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+          {
+            id: "staging",
+            name: "Staging",
+            serverUrl: "https://staging.example.com",
+            appId: "staging-app-id",
+            adminSecret: "staging-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-b",
+          },
+        ],
+      }),
+    );
+    window.history.pushState(null, "", "/conn/staging/preview/hash-from-url/data-explorer");
+
+    render(<App />);
+
+    expect(await screen.findByText("Inspector ready")).not.toBeNull();
+    await waitFor(() => {
+      expect(createJazzClientMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          appId: "staging-app-id",
+          serverUrl: "https://staging.example.com",
+          adminSecret: "staging-admin-secret",
+          userBranch: "preview",
+        }),
+      );
+      expect(fetchStoredWasmSchemaMock).toHaveBeenLastCalledWith(
+        "https://staging.example.com",
+        expect.objectContaining({
+          appId: "staging-app-id",
+          adminSecret: "staging-admin-secret",
+          schemaHash: "hash-from-url",
+        }),
+      );
+    });
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
+      activeConnectionId?: string;
+    };
+    expect(stored.activeConnectionId).toBe("local");
+  });
+
+  it("resets table routes when switching schema", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+    window.history.pushState(
+      null,
+      "",
+      "/conn/local/main/hash-a/data-explorer/todos/data?sort=title&dir=DESC&page=2",
+    );
+
+    render(<App />);
+
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "hash-b" } });
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/conn/local/main/hash-b/data-explorer");
+      expect(window.location.search).toBe("");
+    });
   });
 
   it("adds a named connection from the connection manager", async () => {

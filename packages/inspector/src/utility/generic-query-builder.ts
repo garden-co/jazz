@@ -53,6 +53,14 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
     return clone;
   }
 
+  whereColumn(column: string, op: string, value: unknown): GenericQueryBuilder {
+    const clone = this._clone();
+    if (value !== undefined) {
+      clone._conditions.push({ column, op, value });
+    }
+    return clone;
+  }
+
   orderBy(column: string, direction: "asc" | "desc" = "asc"): GenericQueryBuilder {
     const clone = this._clone();
     clone._orderBys.push([column, direction]);

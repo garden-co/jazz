@@ -1,51 +1,118 @@
-import { NavLink, Outlet } from "react-router";
+import { createContext, useContext, useState } from "react";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
+import { appRoutes, type InspectorRouteParams } from "#lib/navigation/appRoutes.ts";
 import styles from "./index.module.css";
 
-export function InspectorLayout() {
+export interface InspectorLayoutProps {
+  children?: React.ReactNode;
+  routeParams: InspectorRouteParams;
+}
+
+interface InspectorLayoutContextValue {
+  isTablesPanelOpen: boolean;
+}
+
+const InspectorLayoutContext = createContext<InspectorLayoutContextValue | null>(null);
+
+export function useInspectorLayoutContext(): InspectorLayoutContextValue {
+  const context = useContext(InspectorLayoutContext);
+  if (context === null) {
+    throw new Error("useInspectorLayoutContext must be used inside InspectorLayout");
+  }
+  return context;
+}
+
+interface TablesPanelIconProps {
+  direction: "open" | "close";
+}
+
+function TablesPanelIcon({ direction }: TablesPanelIconProps) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+      <path d="M6 3v10" />
+      {direction === "close" ? <path d="M10 6l-2 2 2 2" /> : <path d="M8 6l2 2-2 2" />}
+    </svg>
+  );
+}
+
+export function InspectorLayout({ children, routeParams }: InspectorLayoutProps) {
   const standaloneContext = useStandaloneContext();
+  const location = useLocation();
+  const [isTablesPanelOpen, setIsTablesPanelOpen] = useState(true);
+  const isDataExplorerRoute = location.pathname.includes("/data-explorer");
+
+  const onToggleTablesPanel = () => {
+    setIsTablesPanelOpen((isOpen) => !isOpen);
+  };
 
   return (
     <main className={styles.root}>
       <header className={styles.topBar}>
         <nav className={styles.tabBar} aria-label="Inspector sections">
-          <NavLink
-            to="/data-explorer"
-            className={({ isActive }) =>
-              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
-            }
-          >
-            Data Explorer
-          </NavLink>
-          <NavLink
-            to="/live-query"
-            className={({ isActive }) =>
-              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
-            }
-          >
-            Live Query
-          </NavLink>
-        </nav>
-        {standaloneContext ? (
-          <div className={styles.topBarActions}>
-            <SchemaHashesSelect
-              schemaHashes={standaloneContext.schemaHashes}
-              selectedSchemaHash={standaloneContext.selectedSchemaHash}
-              onSelectSchema={standaloneContext.onSelectSchema}
-              isSwitchingSchema={standaloneContext.isSwitchingSchema}
-            />
+          {isDataExplorerRoute ? (
             <button
               type="button"
-              onClick={standaloneContext.onManageConnections}
-              className={styles.resetButton}
+              onClick={onToggleTablesPanel}
+              className={styles.iconButton}
+              aria-label={isTablesPanelOpen ? "Collapse tables panel" : "Expand tables panel"}
+              aria-pressed={isTablesPanelOpen}
             >
-              Connections
+              <TablesPanelIcon direction={isTablesPanelOpen ? "close" : "open"} />
             </button>
-          </div>
-        ) : null}
+          ) : null}
+          <Link
+            to={appRoutes.dataExplorer}
+            params={routeParams}
+            className={styles.tabLink}
+            activeProps={{ className: styles.tabLinkActive }}
+          >
+            Data Explorer
+          </Link>
+          <Link
+            to={appRoutes.liveQuery}
+            params={routeParams}
+            className={styles.tabLink}
+            activeProps={{ className: styles.tabLinkActive }}
+          >
+            Live Query
+          </Link>
+        </nav>
+        <div className={styles.topBarActions}>
+          {standaloneContext ? (
+            <>
+              <SchemaHashesSelect
+                schemaHashes={standaloneContext.schemaHashes}
+                selectedSchemaHash={standaloneContext.selectedSchemaHash}
+                onSelectSchema={standaloneContext.onSelectSchema}
+                isSwitchingSchema={standaloneContext.isSwitchingSchema}
+              />
+              <button
+                type="button"
+                onClick={standaloneContext.onManageConnections}
+                className={styles.resetButton}
+              >
+                Connections
+              </button>
+            </>
+          ) : null}
+        </div>
       </header>
       <section className={styles.content}>
-        <Outlet />
+        <InspectorLayoutContext.Provider value={{ isTablesPanelOpen }}>
+          {children ?? <Outlet />}
+        </InspectorLayoutContext.Provider>
       </section>
     </main>
   );

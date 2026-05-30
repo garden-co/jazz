@@ -17,7 +17,10 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useParams } from "@tanstack/react-router";
+import type { TableDataSearch } from "#data-explorer/tableSearchParams.ts";
+import type { TableFilterClause } from "#data-explorer/TableFilterBuilder.tsx";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
@@ -25,23 +28,16 @@ import styles from "./index.module.css";
 
 const SERVER_SUBSCRIPTIONS_POLL_MS = 20_000;
 
-const IR_OP_TO_FILTER_OP: Record<string, string> = {
+const IR_OP_TO_FILTER_OP = {
   Eq: "eq",
   Ne: "ne",
   Gt: "gt",
   Gte: "gte",
   Lt: "lt",
   Lte: "lte",
-};
+} satisfies Record<string, TableFilterClause["operator"]>;
 
-interface FilterClause {
-  id: string;
-  column: string;
-  operator: string;
-  value: unknown;
-}
-
-function extractFiltersFromIR(node: unknown): FilterClause[] {
+function extractFiltersFromIR(node: unknown): TableFilterClause[] {
   if (!node || typeof node !== "object") return [];
   const obj = node as Record<string, unknown>;
 
@@ -49,7 +45,7 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
     const cmp = obj.Cmp as Record<string, unknown>;
     const left = cmp.left as Record<string, unknown> | undefined;
     const right = cmp.right as Record<string, unknown> | undefined;
-    const op = IR_OP_TO_FILTER_OP[cmp.op as string];
+    const op = getFilterOperator(cmp.op);
     const column = left?.column as string | undefined;
     const literal = right?.Literal as Record<string, unknown> | undefined;
     if (op && column && literal && "value" in literal) {
@@ -62,7 +58,7 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
     return obj.And.flatMap((child: unknown) => extractFiltersFromIR(child));
   }
 
-  const filters: FilterClause[] = [];
+  const filters: TableFilterClause[] = [];
   for (const value of Object.values(obj)) {
     if (value && typeof value === "object") {
       filters.push(...extractFiltersFromIR(value));
@@ -71,20 +67,25 @@ function extractFiltersFromIR(node: unknown): FilterClause[] {
   return filters;
 }
 
-function buildExplorerUrl(table: string, queryJson: string): string {
-  const base = `/data-explorer/${table}/data`;
+function getFilterOperator(value: unknown): TableFilterClause["operator"] | undefined {
+  if (typeof value !== "string" || !(value in IR_OP_TO_FILTER_OP)) {
+    return undefined;
+  }
+
+  return IR_OP_TO_FILTER_OP[value as keyof typeof IR_OP_TO_FILTER_OP];
+}
+
+function buildExplorerSearch(queryJson: string): TableDataSearch {
   try {
     const parsed = JSON.parse(queryJson);
     const filters = extractFiltersFromIR(parsed.relation_ir);
     if (filters.length > 0) {
-      const params = new URLSearchParams();
-      params.set("filters", JSON.stringify(filters));
-      return `${base}?${params.toString()}`;
+      return { filters };
     }
   } catch {
     // ignore parse errors
   }
-  return base;
+  return {};
 }
 
 function getUserStackSummary(stack: string | undefined): string {
@@ -196,6 +197,12 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
 }
 
 function ExtensionLiveQuery() {
+  const routeParams = useParams({ from: appRoutes.liveQuery });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const { runtime, wasmSchema } = useDevtoolsContext();
   const subscriptions = useActiveSubscriptions(runtime);
   const [selectedTable, setSelectedTable] = useState("");
@@ -225,7 +232,12 @@ function ExtensionLiveQuery() {
         header: "Table",
         cell: ({ row }) => (
           <Link
-            to={buildExplorerUrl(row.original.table, row.original.query)}
+            to={appRoutes.tableData}
+            params={{
+              ...linkRouteParams,
+              tableName: row.original.table,
+            }}
+            search={buildExplorerSearch(row.original.query)}
             className={styles.tableLink}
           >
             {row.original.table}
@@ -276,7 +288,7 @@ function ExtensionLiveQuery() {
         ),
       },
     ],
-    [],
+    [linkRouteParams.branch, linkRouteParams.connectionId, linkRouteParams.schemaHash],
   );
 
   const table = useReactTable({
@@ -357,6 +369,12 @@ function ExtensionLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
+  const routeParams = useParams({ from: appRoutes.liveQuery });
+  const linkRouteParams = {
+    branch: routeParams.branch,
+    connectionId: routeParams.connectionId,
+    schemaHash: routeParams.schemaHash,
+  };
   const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
   const [selectedTable, setSelectedTable] = useState("");
 
@@ -425,7 +443,12 @@ function StandaloneLiveQuery() {
                   <td>{query.count}</td>
                   <td>
                     <Link
-                      to={buildExplorerUrl(query.table, query.query)}
+                      to={appRoutes.tableData}
+                      params={{
+                        ...linkRouteParams,
+                        tableName: query.table,
+                      }}
+                      search={buildExplorerSearch(query.query)}
                       className={styles.tableLink}
                     >
                       {query.table}

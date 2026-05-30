@@ -13,21 +13,22 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Link, Navigate, useParams, useSearchParams } from "react-router";
+import { Link, useParams } from "@tanstack/react-router";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
-import {
-  TableFilterBuilder,
-  type TableFilterBuilderHandle,
-  type TableFilterClause,
-} from "./TableFilterBuilder.js";
+import { TableFilterBuilder, type TableFilterBuilderHandle } from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,
   getFieldReadOnlyReason,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
-import { buildRelationFilterHref } from "./relation-navigation.js";
+import {
+  buildRelationFilterSearch,
+  PAGE_SIZE_OPTIONS,
+  useTableExplorerSearchParams,
+} from "#data-explorer/tableSearchParams.ts";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -50,8 +51,6 @@ const RELATION_LABEL_COLUMN_PRIORITY = [
   "email",
 ] as const;
 
-const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-const DEFAULT_PAGE_SIZE = 25;
 const EMPTY_ROWS: DynamicTableRow[] = [];
 const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
@@ -464,104 +463,26 @@ function useAnimatedGridRows(
 }
 
 export function TableDataGrid() {
-  const { table } = useParams();
-
-  if (!table) {
-    return <Navigate to="/data-explorer" replace />;
-  }
+  const params = useParams({ from: appRoutes.tableData });
+  const table = params.tableName;
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  const sorting = useMemo<readonly SortColumn[]>(() => {
-    const col = searchParams.get("sort");
-    const dir = searchParams.get("dir");
-    if (col) {
-      return [{ columnKey: col, direction: dir === "DESC" ? "DESC" : "ASC" }];
-    }
-    return [{ columnKey: "id", direction: "ASC" }];
-  }, [searchParams]);
-
-  const pageSize = useMemo(() => {
-    const raw = searchParams.get("pageSize");
-    if (raw) {
-      const n = Number(raw);
-      if (PAGE_SIZE_OPTIONS.includes(n as (typeof PAGE_SIZE_OPTIONS)[number])) return n;
-    }
-    return DEFAULT_PAGE_SIZE;
-  }, [searchParams]);
-
-  const pageIndex = useMemo(() => {
-    const raw = searchParams.get("page");
-    if (raw) {
-      const n = Number(raw);
-      if (Number.isInteger(n) && n >= 0) return n;
-    }
-    return 0;
-  }, [searchParams]);
-
-  const filters = useMemo<TableFilterClause[]>(() => {
-    const raw = searchParams.get("filters");
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      } catch {
-        // ignore malformed
-      }
-    }
-    return [];
-  }, [searchParams]);
-
-  const setPageSize = (next: number) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next !== DEFAULT_PAGE_SIZE) {
-          p.set("pageSize", String(next));
-        } else {
-          p.delete("pageSize");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
-  };
-
-  const setPageIndex = (next: number | ((current: number) => number)) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        const currentPage = Number(p.get("page") ?? 0);
-        const resolved = typeof next === "function" ? next(currentPage) : next;
-        if (resolved > 0) {
-          p.set("page", String(resolved));
-        } else {
-          p.delete("page");
-        }
-        return p;
-      },
-      { replace: true },
-    );
-  };
-
-  const setFilters = (next: TableFilterClause[]) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next.length > 0) {
-          p.set("filters", JSON.stringify(next));
-        } else {
-          p.delete("filters");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
-  };
+  const {
+    filters,
+    pageIndex,
+    pageSize,
+    setFilters,
+    setPageIndex,
+    setPageSize,
+    setSorting,
+    sorting,
+  } = useTableExplorerSearchParams();
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
@@ -583,15 +504,7 @@ export function TableDataGrid() {
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema);
     for (const filter of filters) {
-      if (filter.operator === "eq") {
-        builder = builder.where({ [filter.column]: filter.value });
-      } else {
-        builder = builder.where({
-          [filter.column]: {
-            [filter.operator]: filter.value,
-          },
-        });
-      }
+      builder = builder.whereColumn(filter.column, filter.operator, filter.value);
     }
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
@@ -680,27 +593,7 @@ export function TableDataGrid() {
   const endRow = startRow + visibleRows.length;
 
   const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
-    const nextSort =
-      nextSortColumns.length === 0
-        ? [{ columnKey: "id", direction: "ASC" as const }]
-        : [nextSortColumns.at(-1)!];
-
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        const col = nextSort[0];
-        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
-          p.set("sort", col.columnKey);
-          p.set("dir", col.direction);
-        } else {
-          p.delete("sort");
-          p.delete("dir");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
+    setSorting(nextSortColumns);
   };
   const handleSaveSelectedRow = async (updates: Record<string, unknown>): Promise<void> => {
     if (!selectedRowId) {
@@ -805,7 +698,14 @@ export function TableDataGrid() {
       <header className={styles.header}>
         <h2 className={styles.title}>{table}</h2>
         <div className={styles.headerActions}>
-          <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
+          <Link
+            to={appRoutes.tableSchema}
+            params={{
+              ...routeParams,
+              tableName: table,
+            }}
+            className={styles.secondaryButton}
+          >
             Schema
           </Link>
           <button
@@ -1178,6 +1078,12 @@ function RelationCell({
   relationId: string;
   queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
 }) {
+  const params = useParams({ from: appRoutes.tableData });
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
@@ -1192,13 +1098,17 @@ function RelationCell({
     relationRow && displayColumn
       ? formatCellValue(relationRow[displayColumn.name])
       : formatCellValue(relationId);
-  const href = buildRelationFilterHref(relationTable, relationId);
 
   return (
     <div className={styles.relationCell} title={`${relationTable}.${relationId}`}>
       <span className={styles.cellContent}>{displayValue}</span>
       <Link
-        to={href}
+        to={appRoutes.tableData}
+        params={{
+          ...routeParams,
+          tableName: relationTable,
+        }}
+        search={buildRelationFilterSearch(relationId)}
         className={styles.relationLink}
         aria-label={`Open ${displayValue} in ${relationTable}`}
         onClick={(event) => {

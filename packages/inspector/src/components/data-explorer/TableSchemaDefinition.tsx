@@ -1,15 +1,18 @@
 import { useMemo } from "react";
-import { Link, Navigate, useParams } from "react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import type { WasmSchema } from "jazz-tools";
+import { appRoutes } from "#lib/navigation/appRoutes.ts";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./TableSchemaSql.module.css";
 
 export function TableSchemaDefinition() {
-  const { table } = useParams();
-
-  if (!table) {
-    return <Navigate to="/data-explorer" replace />;
-  }
+  const params = useParams({ from: appRoutes.tableSchema });
+  const table = params.tableName;
+  const routeParams = {
+    branch: params.branch,
+    connectionId: params.connectionId,
+    schemaHash: params.schemaHash,
+  };
 
   const { runtime, storedPermissions, wasmSchema: schema } = useDevtoolsContext();
 
@@ -45,7 +48,11 @@ export function TableSchemaDefinition() {
     <section className={styles.container}>
       <header className={styles.header}>
         <Link
-          to={`/data-explorer/${table}/data`}
+          to={appRoutes.tableData}
+          params={{
+            ...routeParams,
+            tableName: table,
+          }}
           className={styles.backLink}
           aria-label="Back to data"
         >
