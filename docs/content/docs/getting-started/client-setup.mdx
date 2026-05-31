@@ -14,7 +14,7 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -40,6 +40,14 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
     </include>
 
     `LocalFirstAuth` from `jazz-tools/svelte` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
+    </include>
+
+    `useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
   <Tab value="Expo">
@@ -118,7 +126,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
 <Tabs
   groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js", "Expo"]}
   persist
   updateAnchor
 >
@@ -162,6 +170,20 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     ```
 
     Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`. Use `jazzSvelteKit` for both Vite+Svelte and SvelteKit projects.
+
+  </Tab>
+  <Tab value="Solid (Vite)">
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import solid from "vite-plugin-solid";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
+
+    export default defineConfig({
+      plugins: [solid(), jazzPlugin()],
+    });
+    ```
+
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
 
   </Tab>
   <Tab value="SvelteKit">
@@ -283,7 +305,7 @@ The config is the same across frameworks. Plain TypeScript uses `createDb(...)` 
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -300,6 +322,11 @@ The config is the same across frameworks. Plain TypeScript uses `createDb(...)` 
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/RuntimeConfigExample.svelte#context-setup-svelte-runtime-sources
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/RuntimeConfigExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

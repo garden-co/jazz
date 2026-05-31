@@ -25,7 +25,7 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -42,6 +42,11 @@ Every framework provides a hook to access the database handle. In plain TypeScri
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/GetDbExample.svelte#writing-get-db-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/GetDbExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
