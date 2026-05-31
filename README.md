@@ -19,7 +19,7 @@ npm create jazz
 
 Or follow one of the setup guides:
 
-- Local-first [React](https://jazz.tools/docs/install/client#jazz-framework-react) &middot; [Vue](https://jazz.tools/docs/install/client#jazz-framework-vue) &middot; [Svelte](https://jazz.tools/docs/install/client#jazz-framework-svelte) &middot; [Expo](https://jazz.tools/docs/install/client#jazz-framework-expo) &middot; [Plain TypeScript](https://jazz.tools/docs/install/client#jazz-framework-typescript)
+- Local-first [React](https://jazz.tools/docs/install/client#jazz-framework-react) &middot; [Vue](https://jazz.tools/docs/install/client#jazz-framework-vue) &middot; [Svelte](https://jazz.tools/docs/install/client#jazz-framework-svelte) &middot; [Solid](https://jazz.tools/docs/install/client#jazz-framework-solid) &middot; [Expo](https://jazz.tools/docs/install/client#jazz-framework-expo) &middot; [Plain TypeScript](https://jazz.tools/docs/install/client#jazz-framework-typescript)
 - Server-side [TypeScript](https://jazz.tools/docs/install/typescript-server)
 
 # Contributing
