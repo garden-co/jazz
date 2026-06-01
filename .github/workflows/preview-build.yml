@@ -1,0 +1,94 @@
+name: Preview build (pkg.pr.new)
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: preview-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
+jobs:
+  build:
+    if: github.event.label.name == 'preview-build'
+    uses: ./.github/workflows/build-jazz-packages.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  publish-pkg-pr-new:
+    name: Publish to pkg.pr.new
+    if: github.event.label.name == 'preview-build'
+    needs: [build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Ensure CLI binaries stay executable
+        run: |
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
+
+      - name: Publish to pkg.pr.new
+        run: |
+          pnpm exec pkg-pr-new publish \
+            --pnpm \
+            --comment=update \
+            --commentWithSha \
+            --packageManager=pnpm \
+            './packages/jazz-tools' \
+            './crates/jazz-wasm' \
+            './crates/jazz-napi' \
+            './crates/jazz-napi/npm/linux-x64-gnu' \
+            './crates/jazz-napi/npm/darwin-x64' \
+            './crates/jazz-napi/npm/darwin-arm64' \
+            './crates/jazz-napi/npm/win32-x64-msvc' \
+            './crates/jazz-rn' \
+            './packages/create-jazz'
