@@ -129,6 +129,12 @@ permission to modify the original row and that the result is also valid.
 If you only use `.whereOld(...)`, the same condition is applied to both the old and new row. The
 same applies if you only use `.whereNew(...)`. Use both when the old-row and new-row checks differ.
 
+`exists` runs before a write is applied, so it can be used to prevent some columns from being updated.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-update-protected-columns
+</include>
+
 ## Policy enforcement and request context
 
 Every policy is evaluated against a session. On the frontend, this is the authenticated user's session. In a backend handler, create a scoped session per request so queries run with the right identity.

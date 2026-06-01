@@ -35,6 +35,10 @@ fn title_document_values(title: &str) -> Vec<Value> {
     vec![title.into()]
 }
 
+fn chat_values(name: &str, created_by: &str, is_public: bool) -> Vec<Value> {
+    vec![name.into(), created_by.into(), is_public.into()]
+}
+
 fn complex_document_values(
     team_slug: &str,
     published: bool,
@@ -99,6 +103,35 @@ fn editor_document_update_policy() -> PolicyExpr {
                 value: outer_row_id_ref(),
             },
             PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+        ])),
+    }
+}
+
+fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
+    PolicyExpr::Exists {
+        table: "chats".into(),
+        condition: Box::new(PolicyExpr::and(vec![
+            PolicyExpr::Cmp {
+                column: "id".into(),
+                op: CmpOp::Eq,
+                value: outer_row_id_ref(),
+            },
+            PolicyExpr::Cmp {
+                column: "created_by".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    OUTER_ROW_SESSION_PREFIX.into(),
+                    "created_by".into(),
+                ]),
+            },
+            PolicyExpr::Cmp {
+                column: "is_public".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    OUTER_ROW_SESSION_PREFIX.into(),
+                    "is_public".into(),
+                ]),
+            },
         ])),
     }
 }
@@ -292,6 +325,21 @@ fn exists_update_policy_schema() -> Schema {
                 .column("document_id", ColumnType::Uuid)
                 .column("user_id", ColumnType::Text),
         )
+        .table(
+            TableSchema::builder("chats")
+                .column("name", ColumnType::Text)
+                .column("created_by", ColumnType::Text)
+                .column("is_public", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True)
+                        .with_update(
+                            Some(PolicyExpr::True),
+                            immutable_chat_metadata_update_check_policy(),
+                        ),
+                ),
+        )
         .build()
 }
 
@@ -300,6 +348,26 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
         .create("documents", row_input!("title" => title.to_string()))
         .await
         .expect("create title document")
+        .0
+}
+
+async fn create_chat(
+    client: &JazzClient,
+    name: &str,
+    created_by: &str,
+    is_public: bool,
+) -> ObjectId {
+    client
+        .create(
+            "chats",
+            row_input!(
+                "name" => name.to_string(),
+                "created_by" => created_by.to_string(),
+                "is_public" => is_public,
+            ),
+        )
+        .await
+        .expect("create chat")
         .0
 }
 
@@ -723,6 +791,120 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     admin.shutdown().await.expect("shutdown admin");
     alice_eng.shutdown().await.expect("shutdown alice eng");
     alice_sales.shutdown().await.expect("shutdown alice sales");
+    server.shutdown().await;
+}
+
+/// Verifies an update's `WITH CHECK` permission evaluates `EXISTS` policies
+/// before writing the update, thus allowing to implement per-field update policies.
+///
+/// Actors: admin creates the chat, alice submits the allowed and rejected
+/// updates, and observer reads the server-authoritative state.
+///
+/// ```text
+/// admin ──create chat(created_by=alice,is_public=false)──► server
+/// alice ──update name────────────────────────────────────► server ──✓ stored metadata still matches
+/// alice ──update is_public=true──────────────────────────► server ──✗ no stored row matches new metadata
+/// observer ──EdgeServer query────────────────────────────► sees renamed chat, protected fields unchanged
+/// ```
+#[tokio::test]
+async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
+    let schema = exists_update_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "chats", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "chats", READY_TIMEOUT).await;
+    let observer = connect_ready_user(&server, &schema, "observer", "chats", READY_TIMEOUT).await;
+
+    let query = QueryBuilder::new("chats").build();
+    let chat_id = create_chat(&admin, "General", "alice", false).await;
+
+    wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees the chat before updating it",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("General", "alice", false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "observer sees the initial chat",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("General", "alice", false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    alice
+        .update_persisted(
+            chat_id,
+            row_changes([("name", "Project Room".into())]),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("chat name update should satisfy same-table EXISTS with_check");
+
+    wait_for_rows(
+        &observer,
+        query.clone(),
+        "observer sees the accepted chat name update",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| {
+                    *id == chat_id && *values == chat_values("Project Room", "alice", false)
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+
+    let protected_update = alice
+        .update_persisted(
+            chat_id,
+            row_changes([("is_public", true.into())]),
+            DurabilityTier::EdgeServer,
+        )
+        .await;
+    assert!(
+        protected_update.is_err(),
+        "is_public change should be rejected by same-table EXISTS with_check"
+    );
+
+    let rows_after_rejection = wait_for_query(
+        &observer,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "observer sees unchanged protected fields after rejected update",
+        |rows| {
+            let protected_fields_unchanged = rows.iter().any(|(id, values)| {
+                *id == chat_id && *values == chat_values("Project Room", "alice", false)
+            });
+            let rejected_values_absent = rows.iter().all(|(id, values)| {
+                *id != chat_id || *values != chat_values("Project Room", "alice", true)
+            });
+
+            (protected_fields_unchanged && rejected_values_absent).then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows_after_rejection.len(), 1);
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
     server.shutdown().await;
 }
 
