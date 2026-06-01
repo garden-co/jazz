@@ -1,7 +1,7 @@
-import { createMemo, createSignal } from "solid-js";
+import { createMemo, createSignal, type ParentProps } from "solid-js";
 import { JazzProvider, createSolidJazzClient } from "jazz-tools/solid";
 
-export function AuthExternal(props: { children?: unknown }) {
+export function AuthExternal(props: ParentProps) {
   const appId = "my-app";
   const serverUrl = "http://127.0.0.1:4200";
   const providerJwt = "<provider-jwt>";
@@ -16,7 +16,7 @@ export function AuthExternal(props: { children?: unknown }) {
       <button type="button" onClick={() => setHasJwt(true)}>
         Sign in
       </button>
-      {props.children as any}
+      {props.children}
     </JazzProvider>
   );
 }
