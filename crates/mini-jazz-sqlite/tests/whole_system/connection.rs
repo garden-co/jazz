@@ -1919,6 +1919,186 @@ fn upstream_upload_tx_gets_ack_and_edge_status() {
 }
 
 #[test]
+fn upstream_upload_update_waits_when_row_is_missing_then_applies_after_sync() {
+    let harness = Harness::new();
+    let mut authority = harness.memory("authority", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    authority
+        .create_project("project-1", "Upload plan")
+        .unwrap();
+    authority
+        .create_todo("todo-missing-update", "Original", false, "project-1")
+        .unwrap();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new_authenticated_for_test(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+        "alice",
+    );
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    downstream.receive(&mut worker, server_messages).unwrap();
+
+    let tx_id = "tx-alice-tab-9101".to_owned();
+    let upload = ClientMessage::UploadTx {
+        tx: ClientTx {
+            tx_id: tx_id.clone(),
+            branch_id: None,
+            conflict_mode: TxConflictMode::Mergeable,
+            created_at: 1,
+            author: Some("alice".to_owned()),
+        },
+        data: vec![ClientDataRecord {
+            table: "todos".to_owned(),
+            row_id: "todo-missing-update".to_owned(),
+            op: DataOp::Update,
+            values: BTreeMap::from([("title".to_owned(), json!("Updated after sync"))]),
+        }],
+        reads: Vec::new(),
+    };
+
+    let server_messages = upstream.receive(&mut worker, vec![upload.clone()]).unwrap();
+
+    assert!(server_messages.iter().any(
+        |message| matches!(message, ServerMessage::UploadAck { tx_id: acked } if acked == &tx_id)
+    ));
+    assert!(!server_messages.iter().any(|message| {
+        matches!(
+            message,
+            ServerMessage::TxStatus {
+                tx_id: status_tx_id,
+                status: TxStatusKind::Rejected { .. }
+            } if status_tx_id == &tx_id
+        )
+    }));
+    assert!(worker.transaction_info(&tx_id).is_err());
+
+    worker
+        .apply_bundle(&authority.export_table_history("projects").unwrap())
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let server_messages = upstream.receive(&mut worker, vec![upload]).unwrap();
+
+    assert!(server_messages.iter().any(|message| {
+        matches!(
+            message,
+            ServerMessage::TxStatus {
+                tx_id: status_tx_id,
+                status: TxStatusKind::EdgeAccepted
+            } if status_tx_id == &tx_id
+        )
+    }));
+    let rows = worker.read_rows("todos").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "todo-missing-update");
+    assert_eq!(rows[0].values["title"], json!("Updated after sync"));
+}
+
+#[test]
+fn upstream_upload_delete_waits_when_row_is_missing_then_applies_after_sync() {
+    let harness = Harness::new();
+    let mut authority = harness.memory("authority", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    authority
+        .create_project("project-1", "Upload plan")
+        .unwrap();
+    authority
+        .create_todo(
+            "todo-missing-delete",
+            "Delete after sync",
+            false,
+            "project-1",
+        )
+        .unwrap();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new_authenticated_for_test(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+        "alice",
+    );
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    downstream.receive(&mut worker, server_messages).unwrap();
+
+    let tx_id = "tx-alice-tab-9102".to_owned();
+    let upload = ClientMessage::UploadTx {
+        tx: ClientTx {
+            tx_id: tx_id.clone(),
+            branch_id: None,
+            conflict_mode: TxConflictMode::Mergeable,
+            created_at: 1,
+            author: Some("alice".to_owned()),
+        },
+        data: vec![ClientDataRecord {
+            table: "todos".to_owned(),
+            row_id: "todo-missing-delete".to_owned(),
+            op: DataOp::Delete,
+            values: BTreeMap::new(),
+        }],
+        reads: Vec::new(),
+    };
+
+    let server_messages = upstream.receive(&mut worker, vec![upload.clone()]).unwrap();
+
+    assert!(server_messages.iter().any(
+        |message| matches!(message, ServerMessage::UploadAck { tx_id: acked } if acked == &tx_id)
+    ));
+    assert!(!server_messages.iter().any(|message| {
+        matches!(
+            message,
+            ServerMessage::TxStatus {
+                tx_id: status_tx_id,
+                status: TxStatusKind::Rejected { .. }
+            } if status_tx_id == &tx_id
+        )
+    }));
+    assert!(worker.transaction_info(&tx_id).is_err());
+
+    worker
+        .apply_bundle(&authority.export_table_history("projects").unwrap())
+        .unwrap();
+    worker
+        .apply_bundle(&authority.export_table_history("todos").unwrap())
+        .unwrap();
+
+    let server_messages = upstream.receive(&mut worker, vec![upload]).unwrap();
+
+    assert!(server_messages.iter().any(|message| {
+        matches!(
+            message,
+            ServerMessage::TxStatus {
+                tx_id: status_tx_id,
+                status: TxStatusKind::EdgeAccepted
+            } if status_tx_id == &tx_id
+        )
+    }));
+    assert!(worker.read_rows("todos").unwrap().is_empty());
+}
+
+#[test]
 fn upstream_upload_tx_rejects_existing_tx_id_from_another_node() {
     let harness = Harness::new();
     let mut worker = harness.memory("alice-worker", "alice").unwrap();

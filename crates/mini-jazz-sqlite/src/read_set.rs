@@ -141,7 +141,7 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
             .find(|branch| branch.branch_id == *branch_id)
             .and_then(|branch| branch.base_global_epoch);
         let branch_num = branch::ensure(conn, branch_id, base_global_epoch, now_ms())?;
-        let current_tx_num = existing_row_num(conn, &read.row_id)?
+        let current_tx_num = crate::rows::existing_row_num(conn, &read.row_id)?
             .map(|row_num| current_visible_tx_num(conn, &read.table, row_num, branch_num))
             .transpose()?
             .flatten();
@@ -159,16 +159,6 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
         }
     }
     Ok(stale)
-}
-
-fn existing_row_num(conn: &Connection, row_id: &str) -> Result<Option<i64>> {
-    conn.query_row(
-        "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
-        params![row_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
 }
 
 fn current_visible_tx_num(

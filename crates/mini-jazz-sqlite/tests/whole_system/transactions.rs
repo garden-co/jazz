@@ -364,6 +364,35 @@ fn rejected_upload_queue_completes_and_records_rejection_code() {
 }
 
 #[test]
+fn upload_queue_completes_when_global_receipt_arrives_in_bundle() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice
+        .create_project("project-1", "Bundle completion")
+        .unwrap();
+    let tx_id = alice
+        .create_todo(
+            "todo-bundle-complete",
+            "Complete from bundle",
+            false,
+            "project-1",
+        )
+        .unwrap();
+    let mut bundle = alice.export_table_history("todos").unwrap();
+    let tx = bundle.txs.iter_mut().find(|tx| tx.tx_id == tx_id).unwrap();
+    tx.global_epoch = Some(9);
+    tx.outcome = 2;
+    tx.receipt_tiers.push(3);
+
+    alice.apply_bundle(&bundle).unwrap();
+
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+}
+
+#[test]
 fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

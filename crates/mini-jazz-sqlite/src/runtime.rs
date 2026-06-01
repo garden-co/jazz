@@ -1,7 +1,9 @@
 use crate::protocol::{ClientDataRecord, ClientTx, DataOp, TxConflictMode, TxStatusKind};
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::read_visibility::ReadVisibility;
-use crate::rows::{ensure_row_id, ensure_row_id_with_status, public_row_id, row_num};
+use crate::rows::{
+    ensure_row_id, ensure_row_id_with_status, existing_row_num, public_row_id, row_num,
+};
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
@@ -434,15 +436,7 @@ impl Runtime {
             )?;
         }
         if allowed {
-            let branch_id = branch_id_for_num(&db, self.branch_num)?;
-            enqueue_upload_tx(
-                &db,
-                tx_num,
-                now,
-                Some(&branch_id),
-                Some(&user),
-                &upload_records,
-            )?;
+            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user, &upload_records)?;
         }
         db.commit()?;
         Ok(tx_id)
@@ -969,6 +963,30 @@ impl Runtime {
         }
         let query_scope_repair_ms = query_scope_repair_started.elapsed_ms();
 
+        for tx_record in &bundle.txs {
+            if tx_record.outcome == tx::OUTCOME_REJECTED {
+                Self::complete_upload_for_status(
+                    &db,
+                    &tx_record.tx_id,
+                    UploadCompletion::Rejected,
+                )?;
+            } else if tx_record.global_epoch.is_some()
+                || tx_record.receipt_tiers.contains(&tx::TIER_GLOBAL)
+            {
+                Self::complete_upload_for_status(
+                    &db,
+                    &tx_record.tx_id,
+                    UploadCompletion::GlobalAccepted,
+                )?;
+            } else if tx_record.receipt_tiers.contains(&tx::TIER_EDGE) {
+                Self::complete_upload_for_status(
+                    &db,
+                    &tx_record.tx_id,
+                    UploadCompletion::EdgeAccepted,
+                )?;
+            }
+        }
+
         let commit_started = ProfileTimer::start();
         db.commit()?;
         let commit_ms = commit_started.elapsed_ms();
@@ -1256,13 +1274,16 @@ impl Runtime {
             return self.upload_tx_status(&upload_tx.tx_id);
         }
 
-        let bundle = self.upload_tx_bundle(
+        let Some(bundle) = self.upload_tx_bundle(
             upload_tx,
             data,
             reads,
             connection_node_id,
             connection_auth_user,
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         self.apply_untrusted_bundle_as_user(&bundle, connection_auth_user)?;
 
         if let Some(status) = self.upload_tx_status(&upload_tx.tx_id)? {
@@ -1289,7 +1310,7 @@ impl Runtime {
         reads: &[ReadRecord],
         connection_node_id: &str,
         connection_auth_user: &str,
-    ) -> Result<Bundle> {
+    ) -> Result<Option<Bundle>> {
         if data.is_empty() {
             return Err(crate::Error::new("upload transaction contains no data"));
         }
@@ -1309,6 +1330,10 @@ impl Runtime {
             .clone()
             .unwrap_or_else(|| "main".to_owned());
         let branch_num = branch::checkout(&self.conn, &branch_id)?;
+        if upload_waits_for_missing_current_dependency(&self.conn, &self.schema, data, branch_num)?
+        {
+            return Ok(None);
+        }
         let history = upload_history_records(
             &self.conn,
             &self.schema,
@@ -1342,14 +1367,14 @@ impl Runtime {
             created_at: upload_tx.created_at,
         });
 
-        Ok(make_bundle(
+        Ok(Some(make_bundle(
             &self.schema,
             branches,
             txs,
             reads.to_vec(),
             Vec::new(),
             history,
-        ))
+        )))
     }
 
     fn upload_tx_status(&self, tx_id: &str) -> Result<Option<TxStatusKind>> {
@@ -1511,6 +1536,11 @@ impl Runtime {
             if !rejected.contains(&tx_id) && tx_outcome(&self.conn, tx_num)? == tx::OUTCOME_PENDING
             {
                 tx::accept_global(&self.conn, &tx_id, next_global_epoch(&self.conn)?)?;
+                Self::complete_upload_for_status(
+                    &self.conn,
+                    &tx_id,
+                    UploadCompletion::GlobalAccepted,
+                )?;
                 accepted_exclusive = true;
             }
         }
@@ -1572,6 +1602,11 @@ impl Runtime {
                     &serde_json::to_string(&detail)
                         .map_err(|err| crate::Error::new(err.to_string()))?,
                 )?;
+                Self::complete_upload_for_status(
+                    &self.conn,
+                    &awaiting.tx_id,
+                    UploadCompletion::Rejected,
+                )?;
                 changed = true;
             } else if let Some(detail) = still_waiting {
                 mark_transaction_awaiting_dependency(
@@ -1584,6 +1619,11 @@ impl Runtime {
                 clear_transaction_awaiting_dependency(&self.conn, awaiting.tx_num)?;
                 if tx_conflict_mode(&self.conn, awaiting.tx_num)? == tx::MODE_MERGEABLE {
                     tx::accept_edge(&self.conn, &awaiting.tx_id, now_ms())?;
+                    Self::complete_upload_for_status(
+                        &self.conn,
+                        &awaiting.tx_id,
+                        UploadCompletion::EdgeAccepted,
+                    )?;
                 }
                 changed = true;
             }
@@ -2357,6 +2397,7 @@ impl Runtime {
         let db = self.conn.transaction()?;
         let tx_num = tx::reject_with_detail_json(&db, tx_id, code, &detail_json)?;
         clear_transaction_awaiting_dependency(&db, tx_num)?;
+        Self::complete_upload_for_status(&db, tx_id, UploadCompletion::Rejected)?;
         for table in self.schema.tables() {
             db.execute(
                 &format!(
@@ -2374,6 +2415,7 @@ impl Runtime {
     pub fn accept_transaction_at_global(&mut self, tx_id: &str, global_epoch: i64) -> Result<()> {
         let tx_num = tx::accept_global(&self.conn, tx_id, global_epoch)?;
         clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
+        Self::complete_upload_for_status(&self.conn, tx_id, UploadCompletion::GlobalAccepted)?;
         projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
@@ -2385,6 +2427,7 @@ impl Runtime {
     fn accept_transaction_at_edge_observed(&mut self, tx_id: &str, observed_at: i64) -> Result<()> {
         let tx_num = tx::accept_edge(&self.conn, tx_id, observed_at)?;
         clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
+        Self::complete_upload_for_status(&self.conn, tx_id, UploadCompletion::EdgeAccepted)?;
         projection::rebuild(&self.conn, &self.schema, self.node_num)?;
         Ok(())
     }
@@ -2405,7 +2448,6 @@ impl Runtime {
         if tx::tx_num(&self.conn, tx_id).is_err() {
             return Ok(());
         }
-        let completion = UploadCompletion::from(&status);
         match status {
             crate::protocol::TxStatusKind::EdgeAccepted => {
                 self.accept_transaction_at_edge(tx_id)?;
@@ -2421,7 +2463,6 @@ impl Runtime {
                 }
             }
         }
-        self.complete_upload_for_status(tx_id, completion)?;
         Ok(())
     }
 
@@ -2820,11 +2861,11 @@ impl Runtime {
     }
 
     fn complete_upload_for_status(
-        &mut self,
+        conn: &Connection,
         tx_id: &str,
         completion: UploadCompletion,
     ) -> Result<()> {
-        let Some(fate) = self.upload_completion_fate(tx_id)? else {
+        let Some(fate) = Self::upload_completion_fate(conn, tx_id)? else {
             return Ok(());
         };
         let satisfied = match completion {
@@ -2836,7 +2877,7 @@ impl Runtime {
             UploadCompletion::Rejected => fate.rejected,
         };
         if satisfied {
-            self.conn.execute(
+            conn.execute(
                 "UPDATE jazz_tx_upload_queue
                  SET status = ?,
                      completed_at = ?
@@ -2853,10 +2894,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn upload_completion_fate(&self, tx_id: &str) -> Result<Option<UploadCompletionFate>> {
-        self.conn
-            .query_row(
-                "SELECT tx.tx_num,
+    fn upload_completion_fate(
+        conn: &Connection,
+        tx_id: &str,
+    ) -> Result<Option<UploadCompletionFate>> {
+        conn.query_row(
+            "SELECT tx.tx_num,
                         tx.conflict_mode,
                         rejection.tx_num IS NOT NULL,
                         EXISTS (
@@ -2874,19 +2917,19 @@ impl Runtime {
                 FROM jazz_tx tx
                 LEFT JOIN jazz_tx_rejection rejection ON rejection.tx_num = tx.tx_num
                 WHERE tx.tx_id = ?",
-                params![tx::TIER_EDGE, tx::TIER_GLOBAL, tx_id],
-                |row| {
-                    Ok(UploadCompletionFate {
-                        tx_num: row.get(0)?,
-                        conflict_mode: row.get(1)?,
-                        rejected: row.get(2)?,
-                        has_edge_receipt: row.get(3)?,
-                        has_global_receipt: row.get(4)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
+            params![tx::TIER_EDGE, tx::TIER_GLOBAL, tx_id],
+            |row| {
+                Ok(UploadCompletionFate {
+                    tx_num: row.get(0)?,
+                    conflict_mode: row.get(1)?,
+                    rejected: row.get(2)?,
+                    has_edge_receipt: row.get(3)?,
+                    has_global_receipt: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub(crate) fn active_uploads(
@@ -2907,7 +2950,7 @@ impl Runtime {
              ORDER BY queue.created_at, queue.sync_seq
              LIMIT ?",
         )?;
-        let scan_limit = limit.saturating_add(excluded_tx_ids.len()).max(limit) as i64;
+        let scan_limit = limit.saturating_add(excluded_tx_ids.len()) as i64;
         let rows = stmt.query_map(
             params![UPLOAD_STATUS_ACTIVE, tx::OUTCOME_REJECTED, scan_limit],
             |row| {
@@ -3121,15 +3164,7 @@ impl Runtime {
             projection::rebuild(&db, &self.schema, self.node_num)?;
         }
         if allowed {
-            let branch_id = branch_id_for_num(&db, self.branch_num)?;
-            enqueue_upload_tx(
-                &db,
-                tx_num,
-                now,
-                Some(&branch_id),
-                Some(&user),
-                &upload_records,
-            )?;
+            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user, &upload_records)?;
         }
         db.commit()?;
         Ok(tx_id)
@@ -5757,14 +5792,15 @@ fn enqueue_upload_tx(
     conn: &Connection,
     tx_num: i64,
     created_at: i64,
-    branch_id: Option<&str>,
-    author: Option<&str>,
+    branch_num: i64,
+    author: &str,
     records: &[ClientDataRecord],
 ) -> Result<()> {
+    let branch_id = branch_id_for_num(conn, branch_num)?;
     conn.execute(
         "INSERT INTO jazz_tx_upload_queue
-         (tx_num, status, created_at, branch_id, author, completed_at, last_upload_attempt_at, last_ack_at, attempt_count)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0)",
+         (tx_num, status, created_at, branch_id, author)
+         VALUES (?, ?, ?, ?, ?)",
         params![tx_num, UPLOAD_STATUS_ACTIVE, created_at, branch_id, author],
     )?;
     for (record_index, record) in records.iter().enumerate() {
@@ -5875,6 +5911,46 @@ fn upload_read_records(conn: &Connection, tx_num: i64) -> Result<Vec<ReadRecord>
         .map_err(Into::into)
 }
 
+fn upload_waits_for_missing_current_dependency(
+    conn: &Connection,
+    schema: &SchemaDef,
+    data: &[ClientDataRecord],
+    branch_num: i64,
+) -> Result<bool> {
+    let mut seen_rows = BTreeSet::new();
+    for record in data {
+        if !seen_rows.insert((record.table.as_str(), record.row_id.as_str())) {
+            return Err(crate::Error::new(format!(
+                "duplicate upload record {}:{}",
+                record.table, record.row_id
+            )));
+        }
+        let table = schema.table_def(&record.table)?;
+        if matches!(record.op, DataOp::Delete) && !record.values.is_empty() {
+            return Err(crate::Error::new("delete upload values must be empty"));
+        }
+        if record
+            .values
+            .keys()
+            .any(|field_name| field_name.starts_with("j_"))
+        {
+            return Err(crate::Error::new(
+                "upload data cannot include system fields",
+            ));
+        }
+        validate_write_fields(table, &record.values)?;
+        if !matches!(record.op, DataOp::Insert) {
+            let Some(row_num) = existing_row_num(conn, &record.row_id)? else {
+                return Ok(true);
+            };
+            if effective::row_values(conn, schema, &record.table, row_num, branch_num)?.is_none() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn upload_history_records(
     conn: &Connection,
     schema: &SchemaDef,
@@ -5951,16 +6027,6 @@ fn upload_history_records(
         });
     }
     Ok(records)
-}
-
-fn existing_row_num(conn: &Connection, row_id: &str) -> Result<Option<i64>> {
-    conn.query_row(
-        "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
-        params![row_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
 }
 
 fn validate_exclusive_upload_reads(data: &[ClientDataRecord], reads: &[ReadRecord]) -> Result<()> {
@@ -6427,13 +6493,12 @@ impl<'a> TransactionBuilder<'a> {
             projection::rebuild(&db, &self.runtime.schema, self.runtime.node_num)?;
         }
         if allowed {
-            let branch_id = branch_id_for_num(&db, self.runtime.branch_num)?;
             enqueue_upload_tx(
                 &db,
                 tx_num,
                 now,
-                Some(&branch_id),
-                Some(&user),
+                self.runtime.branch_num,
+                &user,
                 &upload_records,
             )?;
         }

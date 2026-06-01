@@ -19,14 +19,19 @@ pub(crate) fn ensure_row_id_with_status(conn: &Connection, row_id: &str) -> Resu
     .map(|row_num| (row_num, created))
 }
 
-pub(crate) fn row_num(conn: &Connection, row_id: &str) -> Result<i64> {
+pub(crate) fn existing_row_num(conn: &Connection, row_id: &str) -> Result<Option<i64>> {
     conn.query_row(
         "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
         params![row_id],
         |row| row.get(0),
     )
-    .optional()?
-    .ok_or_else(|| crate::Error::new(format!("unknown row {row_id}")))
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn row_num(conn: &Connection, row_id: &str) -> Result<i64> {
+    existing_row_num(conn, row_id)?
+        .ok_or_else(|| crate::Error::new(format!("unknown row {row_id}")))
 }
 
 pub(crate) fn public_row_id(conn: &Connection, row_num: i64) -> Result<String> {
