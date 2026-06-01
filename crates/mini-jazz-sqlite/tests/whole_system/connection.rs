@@ -1952,14 +1952,6 @@ fn upstream_upload_tx_gets_ack_and_edge_status() {
         .unwrap()
         .iter()
         .any(|upload| upload.tx.tx_id == tx_id));
-    let uploaded_tx = worker
-        .export_table_history("todos")
-        .unwrap()
-        .txs
-        .into_iter()
-        .find(|tx| tx.tx_id == tx_id)
-        .unwrap();
-    assert!(uploaded_tx.server_ingested_at.is_some());
 }
 
 #[test]
