@@ -121,7 +121,7 @@
       }
 
       .todo-form input,
-      .controls input,
+      .controls input:not([type="checkbox"]),
       .controls select,
       .field select {
         width: 100%;
@@ -168,9 +168,27 @@
 
       .controls {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 142px 142px;
+        grid-template-columns: minmax(0, 1fr) 142px 142px auto;
         gap: 10px;
         margin-top: 12px;
+      }
+
+      .debug-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 2.5rem;
+        color: #596760;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      .debug-toggle input {
+        width: 18px;
+        height: 18px;
+        accent-color: #687a40;
       }
 
       .label-filters {

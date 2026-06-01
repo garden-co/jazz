@@ -86,6 +86,7 @@ let nodeId;
 let activeUserId = USERS[0].id;
 let selectedProjectId = null;
 let labelsById = new Map();
+let showDebugInfo = false;
 let filters = {
   search: "",
   labelIds: [],
@@ -112,6 +113,8 @@ self.onmessage = async ({ data }) => {
       filters = sanitizeFilters(filters);
     } else if (data.type === "setProject") {
       selectedProjectId = data.projectId;
+    } else if (data.type === "setDebugInfo") {
+      showDebugInfo = Boolean(data.enabled);
     } else if (data.type === "add") {
       const scope = visibleScope();
       const projectId = visibleProjectId(data.projectId ?? selectedProjectId, scope);
@@ -416,6 +419,13 @@ function postState(generateMs) {
     txId: row.tx_id,
   }));
   const queryMs = performance.now() - todoStartedAt;
+  const debugInfo = showDebugInfo
+    ? {
+        currentRows: db.storageStats().current_rows,
+        visibilityMs: scope.visibilityMs,
+        queryMs,
+      }
+    : null;
 
   postMessage({
     type: "state",
@@ -427,9 +437,8 @@ function postState(generateMs) {
     filters,
     labels: sortedLabels(),
     todos,
-    visibilityMs: scope.visibilityMs,
-    queryMs,
-    currentRows: db.storageStats().current_rows,
+    showDebugInfo,
+    debugInfo,
     generateMs,
   });
 }
