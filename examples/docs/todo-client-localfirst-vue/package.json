@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vue-tsc --noEmit && vite build",
+    "check": "vue-tsc --noEmit",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && pnpm run check && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
