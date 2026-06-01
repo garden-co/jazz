@@ -1,8 +1,12 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 #[cfg(target_arch = "wasm32")]
+use crate::native_sync::{decode_server_frame, encode_client_frame};
+#[cfg(target_arch = "wasm32")]
 use crate::worker_bridge::WorkerResponder;
 use mini_jazz_sqlite::connection::UpstreamConnectionManager;
+#[cfg(target_arch = "wasm32")]
+use mini_jazz_sqlite::protocol::{ClientHello, SessionId, SUPPORTED_PROTOCOL_VERSION};
 use mini_jazz_sqlite::protocol::{ClientMessage, ServerMessage};
 #[cfg(target_arch = "wasm32")]
 use mini_jazz_sqlite::Storage;
@@ -13,7 +17,11 @@ use std::collections::BTreeMap;
 #[cfg(target_arch = "wasm32")]
 use std::{cell::RefCell, rc::Rc};
 #[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 
 pub type RuntimeRequestId = u64;
 
@@ -26,6 +34,7 @@ pub enum RuntimeWorkerInput {
         schema: SchemaDef,
         hydrate_queries: Vec<BuiltQuery>,
         client_messages: Vec<ClientMessage>,
+        native_sync_url: Option<String>,
     },
     ApplyBundles {
         request_id: RuntimeRequestId,
@@ -67,6 +76,10 @@ pub enum RuntimeWorkerOutput {
     },
     Protocol {
         request_id: RuntimeRequestId,
+        server_messages: Vec<ServerMessage>,
+        storage_stats: BrowserStorageStats,
+    },
+    Pushed {
         server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
     },
@@ -153,6 +166,26 @@ impl From<RowView> for BrowserRowView {
 pub struct BrowserRuntimeWorker {
     runtime: Option<Runtime>,
     upstream_connection_manager: Option<UpstreamConnectionManager>,
+    native_sync: Option<NativeSync>,
+}
+
+struct NativeSync {
+    node_id: String,
+    schema_fingerprint: String,
+    policy_fingerprint: String,
+    ready: bool,
+    sent_hello: bool,
+    pending_client_messages: Vec<ClientMessage>,
+    #[cfg(target_arch = "wasm32")]
+    socket: WebSocket,
+    #[cfg(target_arch = "wasm32")]
+    _onopen: Closure<dyn FnMut(Event)>,
+    #[cfg(target_arch = "wasm32")]
+    _onmessage: Closure<dyn FnMut(MessageEvent)>,
+    #[cfg(target_arch = "wasm32")]
+    _onerror: Closure<dyn FnMut(ErrorEvent)>,
+    #[cfg(target_arch = "wasm32")]
+    _onclose: Closure<dyn FnMut(CloseEvent)>,
 }
 
 impl BrowserRuntimeWorker {
@@ -160,6 +193,7 @@ impl BrowserRuntimeWorker {
         Self {
             runtime: None,
             upstream_connection_manager: None,
+            native_sync: None,
         }
     }
 
@@ -177,8 +211,10 @@ impl BrowserRuntimeWorker {
                 schema,
                 hydrate_queries,
                 client_messages,
+                native_sync_url,
             } => {
                 spawn_local(async move {
+                    let native_node_id = node_id.clone();
                     let output = match open_and_hydrate(
                         db_name,
                         node_id,
@@ -196,6 +232,30 @@ impl BrowserRuntimeWorker {
                             server_messages,
                             storage_stats,
                         )) => {
+                            let native_sync =
+                                native_sync_url.and_then(|url| {
+                                    match NativeSync::open(
+                                        worker.clone(),
+                                        responder.clone(),
+                                        url,
+                                        native_node_id.clone(),
+                                        runtime.local_schema_fingerprint(),
+                                        runtime.local_policy_fingerprint(),
+                                    ) {
+                                        Ok(sync) => Some(sync),
+                                        Err(message) => {
+                                            responder.send(RuntimeWorkerOutput::Error {
+                                                request_id: None,
+                                                message,
+                                            });
+                                            None
+                                        }
+                                    }
+                                });
+                            if let Some(mut sync) = native_sync {
+                                let _ = sync.flush_pending();
+                                worker.borrow_mut().native_sync = Some(sync);
+                            }
                             worker.borrow_mut().runtime = Some(runtime);
                             worker.borrow_mut().upstream_connection_manager =
                                 Some(upstream_connection_manager);
@@ -235,13 +295,21 @@ impl BrowserRuntimeWorker {
                 else {
                     return runtime_not_ready(request_id);
                 };
-                apply_bundles(
+                let native_client_messages = relayable_native_client_messages(&client_messages);
+                let output = apply_bundles(
                     runtime,
                     upstream_connection_manager,
                     request_id,
                     bundles,
                     client_messages,
-                )
+                );
+                if let Err(message) = self.send_native_client_messages(native_client_messages) {
+                    return RuntimeWorkerOutput::Error {
+                        request_id: Some(request_id),
+                        message,
+                    };
+                }
+                output
             }
             RuntimeWorkerInput::Protocol {
                 request_id,
@@ -254,12 +322,20 @@ impl BrowserRuntimeWorker {
                 else {
                     return runtime_not_ready(request_id);
                 };
-                protocol_messages(
+                let native_client_messages = relayable_native_client_messages(&client_messages);
+                let output = protocol_messages(
                     runtime,
                     upstream_connection_manager,
                     request_id,
                     client_messages,
-                )
+                );
+                if let Err(message) = self.send_native_client_messages(native_client_messages) {
+                    return RuntimeWorkerOutput::Error {
+                        request_id: Some(request_id),
+                        message,
+                    };
+                }
+                output
             }
             RuntimeWorkerInput::ExportQuery { request_id, query } => {
                 let Some(runtime) = self.runtime.as_ref() else {
@@ -298,6 +374,21 @@ impl Default for BrowserRuntimeWorker {
     }
 }
 
+impl BrowserRuntimeWorker {
+    fn send_native_client_messages(
+        &mut self,
+        client_messages: Vec<ClientMessage>,
+    ) -> Result<(), String> {
+        if client_messages.is_empty() {
+            return Ok(());
+        }
+        let Some(sync) = self.native_sync.as_mut() else {
+            return Ok(());
+        };
+        sync.send_or_buffer(client_messages)
+    }
+}
+
 fn runtime_not_ready(request_id: RuntimeRequestId) -> RuntimeWorkerOutput {
     RuntimeWorkerOutput::Error {
         request_id: Some(request_id),
@@ -323,11 +414,12 @@ async fn open_and_hydrate(
     String,
 > {
     let mut runtime = open_opfs_runtime(&db_name, &node_id, &user, schema).await?;
-    let mut upstream_connection_manager = UpstreamConnectionManager::new(
+    let mut upstream_connection_manager = UpstreamConnectionManager::new_authenticated(
         format!("{node_id}-session"),
         node_id.clone(),
         runtime.local_schema_fingerprint(),
         runtime.local_policy_fingerprint(),
+        user,
     );
     let bundles = hydrate_queries
         .into_iter()
@@ -494,6 +586,231 @@ fn storage_stats(runtime: &Runtime, request_id: RuntimeRequestId) -> RuntimeWork
     }
 }
 
+fn relayable_native_client_messages(client_messages: &[ClientMessage]) -> Vec<ClientMessage> {
+    client_messages
+        .iter()
+        .filter_map(|message| match message {
+            ClientMessage::Subscribe { .. }
+            | ClientMessage::Replay { .. }
+            | ClientMessage::UploadTx { .. }
+            | ClientMessage::Unsubscribe { .. } => Some(message.clone()),
+            ClientMessage::Hello(_) | ClientMessage::Ack { .. } | ClientMessage::Close(_) => None,
+        })
+        .collect()
+}
+
+fn apply_native_server_messages(
+    runtime: &mut Runtime,
+    upstream_connection_manager: &mut UpstreamConnectionManager,
+    server_messages: Vec<ServerMessage>,
+) -> Result<(Vec<ClientMessage>, Vec<ServerMessage>, BrowserStorageStats), String> {
+    let mut client_messages = Vec::new();
+    for message in server_messages {
+        match message {
+            ServerMessage::Hello(_) => {}
+            ServerMessage::Data {
+                message_id,
+                cursor,
+                bundle,
+                ..
+            } => {
+                runtime.apply_bundle(&bundle).map_err(error_message)?;
+                client_messages.push(ClientMessage::Ack {
+                    message_id,
+                    cursor: Some(cursor),
+                });
+            }
+            ServerMessage::TxStatus { tx_id, status } => {
+                runtime
+                    .apply_tx_status_from_server(&tx_id, status)
+                    .map_err(error_message)?;
+            }
+            ServerMessage::UploadAck { .. } | ServerMessage::Settled { .. } => {}
+            ServerMessage::Error(error) => {
+                return Err(format!(
+                    "native sync error {}: {}",
+                    error.code, error.message
+                ));
+            }
+            ServerMessage::Close(reason) => {
+                return Err(format!("native sync closed: {reason:?}"));
+            }
+        }
+    }
+    let main_server_messages = upstream_connection_manager
+        .refresh_active_subscriptions(runtime)
+        .map_err(error_message)?;
+    let storage_stats = runtime.storage_stats().map_err(error_message)?.into();
+    Ok((client_messages, main_server_messages, storage_stats))
+}
+
+impl NativeSync {
+    #[cfg(target_arch = "wasm32")]
+    fn open(
+        worker: Rc<RefCell<BrowserRuntimeWorker>>,
+        responder: WorkerResponder<RuntimeWorkerOutput>,
+        url: String,
+        node_id: String,
+        schema_fingerprint: String,
+        policy_fingerprint: String,
+    ) -> Result<Self, String> {
+        let socket =
+            WebSocket::new(&url).map_err(|error| format!("open native sync: {error:?}"))?;
+
+        let onopen = Closure::wrap(Box::new({
+            let worker = worker.clone();
+            move |_event: Event| {
+                if let Some(sync) = worker.borrow_mut().native_sync.as_mut() {
+                    sync.ready = true;
+                    if let Err(message) = sync.flush_pending() {
+                        web_sys::console::error_1(&JsValue::from_str(&message));
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(Event)>);
+
+        let onmessage = Closure::wrap(Box::new({
+            let worker = worker.clone();
+            let responder = responder.clone();
+            move |event: MessageEvent| {
+                let Some(encoded) = event.data().as_string() else {
+                    responder.send(RuntimeWorkerOutput::Error {
+                        request_id: None,
+                        message: "native sync sent a non-string frame".to_owned(),
+                    });
+                    return;
+                };
+                let frame = match decode_server_frame(&encoded) {
+                    Ok(frame) => frame,
+                    Err(message) => {
+                        responder.send(RuntimeWorkerOutput::Error {
+                            request_id: None,
+                            message,
+                        });
+                        return;
+                    }
+                };
+                let output = {
+                    let mut worker = worker.borrow_mut();
+                    let result = {
+                        let worker = &mut *worker;
+                        let (Some(runtime), Some(upstream_connection_manager)) = (
+                            worker.runtime.as_mut(),
+                            worker.upstream_connection_manager.as_mut(),
+                        ) else {
+                            return;
+                        };
+                        apply_native_server_messages(
+                            runtime,
+                            upstream_connection_manager,
+                            frame.server_messages,
+                        )
+                    };
+                    match result {
+                        Ok((client_messages, main_server_messages, storage_stats)) => {
+                            if let Some(sync) = worker.native_sync.as_mut() {
+                                if let Err(message) = sync.send_or_buffer(client_messages) {
+                                    return responder.send(RuntimeWorkerOutput::Error {
+                                        request_id: None,
+                                        message,
+                                    });
+                                }
+                            }
+                            if main_server_messages.is_empty() {
+                                return;
+                            }
+                            RuntimeWorkerOutput::Pushed {
+                                server_messages: main_server_messages,
+                                storage_stats,
+                            }
+                        }
+                        Err(message) => RuntimeWorkerOutput::Error {
+                            request_id: None,
+                            message,
+                        },
+                    }
+                };
+                responder.send(output);
+            }
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        let onerror = Closure::wrap(Box::new({
+            let responder = responder.clone();
+            move |_event: ErrorEvent| {
+                responder.send(RuntimeWorkerOutput::Error {
+                    request_id: None,
+                    message: "native sync websocket error".to_owned(),
+                });
+            }
+        }) as Box<dyn FnMut(ErrorEvent)>);
+
+        let onclose = Closure::wrap(Box::new({
+            let worker = worker.clone();
+            move |_event: CloseEvent| {
+                if let Some(sync) = worker.borrow_mut().native_sync.as_mut() {
+                    sync.ready = false;
+                }
+            }
+        }) as Box<dyn FnMut(CloseEvent)>);
+
+        socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+        socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
+        Ok(Self {
+            node_id,
+            schema_fingerprint,
+            policy_fingerprint,
+            ready: false,
+            sent_hello: false,
+            pending_client_messages: Vec::new(),
+            socket,
+            _onopen: onopen,
+            _onmessage: onmessage,
+            _onerror: onerror,
+            _onclose: onclose,
+        })
+    }
+
+    fn send_or_buffer(&mut self, client_messages: Vec<ClientMessage>) -> Result<(), String> {
+        if client_messages.is_empty() {
+            return Ok(());
+        }
+        self.pending_client_messages.extend(client_messages);
+        self.flush_pending()
+    }
+
+    fn flush_pending(&mut self) -> Result<(), String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.ready {
+                return Ok(());
+            }
+            let mut client_messages = Vec::new();
+            if !self.sent_hello {
+                client_messages.push(ClientMessage::Hello(ClientHello {
+                    protocol_version: SUPPORTED_PROTOCOL_VERSION,
+                    session_id: SessionId::new(format!("{}-native-session", self.node_id)),
+                    node_id: self.node_id.clone(),
+                    schema_fingerprint: self.schema_fingerprint.clone(),
+                    policy_fingerprint: self.policy_fingerprint.clone(),
+                }));
+                self.sent_hello = true;
+            }
+            client_messages.append(&mut self.pending_client_messages);
+            if client_messages.is_empty() {
+                return Ok(());
+            }
+            let encoded = encode_client_frame(client_messages)?;
+            self.socket
+                .send_with_str(&encoded)
+                .map_err(|error| format!("send native sync frame: {error:?}"))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 async fn open_opfs_runtime(
     db_name: &str,
@@ -569,6 +886,7 @@ mod tests {
                 offset: None,
             }],
             client_messages: Vec::new(),
+            native_sync_url: Some("ws://127.0.0.1:8787/sync".to_owned()),
         };
 
         let decoded: RuntimeWorkerInput = serde_round_trip(&message);
@@ -658,6 +976,73 @@ mod tests {
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(output).unwrap()
         );
+
+        let output = RuntimeWorkerOutput::Pushed {
+            server_messages: vec![mini_jazz_sqlite::protocol::ServerMessage::Close(
+                mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
+            )],
+            storage_stats: BrowserStorageStats::default(),
+        };
+        let decoded: RuntimeWorkerOutput = serde_round_trip(&output);
+
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(output).unwrap()
+        );
+    }
+
+    #[test]
+    fn worker_relays_subscriptions_and_uploads_to_native_sync() {
+        use mini_jazz_sqlite::protocol::{
+            ClientMessage, ClientTx, DataOp, SettlementTier, SubscriptionId, TxConflictMode,
+        };
+
+        let messages = vec![
+            ClientMessage::Hello(mini_jazz_sqlite::protocol::ClientHello {
+                protocol_version: mini_jazz_sqlite::protocol::ProtocolVersion(2),
+                session_id: mini_jazz_sqlite::protocol::SessionId::new("browser-session"),
+                node_id: "browser".to_owned(),
+                schema_fingerprint: "schema".to_owned(),
+                policy_fingerprint: "policy".to_owned(),
+            }),
+            ClientMessage::Subscribe {
+                subscription_id: SubscriptionId::new("todos"),
+                query: BuiltQuery {
+                    table: "todos".to_owned(),
+                    conditions: Vec::new(),
+                    order_by: Vec::new(),
+                    limit: Some(10),
+                    offset: None,
+                },
+                requested_tier: SettlementTier::Local,
+            },
+            ClientMessage::UploadTx {
+                tx: ClientTx {
+                    tx_id: "018f56e2-6e2b-7d4d-9f66-4a59421e8a8f".to_owned(),
+                    branch_id: None,
+                    conflict_mode: TxConflictMode::Mergeable,
+                    created_at: 1,
+                    author: Some("alice".to_owned()),
+                },
+                data: vec![mini_jazz_sqlite::protocol::ClientDataRecord {
+                    table: "projects".to_owned(),
+                    row_id: "project-1".to_owned(),
+                    op: DataOp::Insert,
+                    values: BTreeMap::new(),
+                }],
+                reads: Vec::new(),
+            },
+            ClientMessage::Ack {
+                message_id: mini_jazz_sqlite::protocol::MessageId(1),
+                cursor: None,
+            },
+        ];
+
+        let relayed = relayable_native_client_messages(&messages);
+
+        assert_eq!(relayed.len(), 2);
+        assert!(matches!(relayed[0], ClientMessage::Subscribe { .. }));
+        assert!(matches!(relayed[1], ClientMessage::UploadTx { .. }));
     }
 
     #[test]
@@ -689,8 +1074,8 @@ mod tests {
     #[test]
     fn worker_protocol_subscribe_exports_query_data_and_settlement() {
         use mini_jazz_sqlite::protocol::{
-            ClientHello, ClientMessage, ProtocolVersion, ServerMessage, SessionId, SettlementTier,
-            SubscriptionId,
+            ClientHello, ClientMessage, ServerMessage, SessionId, SettlementTier, SubscriptionId,
+            SUPPORTED_PROTOCOL_VERSION,
         };
 
         let mut runtime =
@@ -735,13 +1120,14 @@ mod tests {
                 schema_fingerprint.clone(),
                 policy_fingerprint.clone(),
             )),
+            native_sync: None,
         };
 
         let output = worker.handle_sync(RuntimeWorkerInput::Protocol {
             request_id: 7,
             client_messages: vec![
                 ClientMessage::Hello(ClientHello {
-                    protocol_version: ProtocolVersion(1),
+                    protocol_version: SUPPORTED_PROTOCOL_VERSION,
                     session_id: SessionId::new("browser-session"),
                     node_id: "browser".to_owned(),
                     schema_fingerprint,

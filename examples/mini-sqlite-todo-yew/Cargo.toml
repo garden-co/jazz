@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "worker"
 path = "src/bin/worker.rs"
 
+[[bin]]
+name = "mini-sqlite-todo-yew-server"
+path = "src/bin/server.rs"
+
 [dependencies]
 console_error_panic_hook = "0.1"
 mini-jazz-sqlite = { path = "../../crates/mini-jazz-sqlite" }
@@ -23,13 +27,16 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "console",
   "DedicatedWorkerGlobalScope",
+  "ErrorEvent",
   "Event",
   "HtmlInputElement",
   "HtmlSelectElement",
   "InputEvent",
   "MessageEvent",
   "SubmitEvent",
+  "CloseEvent",
   "Worker",
+  "WebSocket",
   "Window",
 ] }
 yew = { version = "0.23", features = ["csr"] }
@@ -37,3 +44,8 @@ yew = { version = "0.23", features = ["csr"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 sqlite-wasm-rs = "0.5"
 sqlite-wasm-vfs = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }

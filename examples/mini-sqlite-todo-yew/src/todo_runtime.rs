@@ -95,6 +95,7 @@ impl TodoRuntime {
                     project_query(),
                     TodoQueryState::default().page_hydration_query(),
                 ],
+                native_sync_url: native_sync_url(),
             },
             Callback::from({
                 let runtime_slot = runtime_slot.clone();
@@ -469,6 +470,10 @@ impl Inner {
             .query(self.state.query.next_page_probe_query())?
             .is_empty())
     }
+}
+
+fn native_sync_url() -> Option<String> {
+    Some("ws://127.0.0.1:8787/sync".to_owned())
 }
 
 fn project_query() -> BuiltQuery {
