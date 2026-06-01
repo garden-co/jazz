@@ -1,10 +1,11 @@
+import { type ParentProps } from "solid-js";
 import { JazzProvider, createSolidJazzClient } from "jazz-tools/solid";
 
-export function ProviderExample(props: { children?: unknown }) {
+export function ProviderExample(props: ParentProps) {
   const client = createSolidJazzClient(() => ({ appId: "my-app" }));
   return (
     <JazzProvider client={client} fallback={<p>Loading...</p>}>
-      {props.children as any}
+      {props.children}
     </JazzProvider>
   );
 }
