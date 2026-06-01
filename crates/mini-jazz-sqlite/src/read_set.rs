@@ -1,4 +1,3 @@
-use crate::rows::ensure_row_id;
 use crate::sync::Bundle;
 use crate::time::now_ms;
 use crate::{branch, schema, tx, Result};
@@ -142,8 +141,10 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
             .find(|branch| branch.branch_id == *branch_id)
             .and_then(|branch| branch.base_global_epoch);
         let branch_num = branch::ensure(conn, branch_id, base_global_epoch, now_ms())?;
-        let row_num = ensure_row_id(conn, &read.table, &read.row_id)?;
-        let current_tx_num = current_visible_tx_num(conn, &read.table, row_num, branch_num)?;
+        let current_tx_num = existing_row_num(conn, &read.row_id)?
+            .map(|row_num| current_visible_tx_num(conn, &read.table, row_num, branch_num))
+            .transpose()?
+            .flatten();
         if read.reason == REASON_ABSENT {
             if current_tx_num.is_some() {
                 stale.insert(read.tx_id.clone());
@@ -158,6 +159,16 @@ pub(crate) fn stale_exclusive_tx_ids_in_bundle(
         }
     }
     Ok(stale)
+}
+
+fn existing_row_num(conn: &Connection, row_id: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT row_num FROM jazz_row_id WHERE row_id = ?",
+        params![row_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn current_visible_tx_num(

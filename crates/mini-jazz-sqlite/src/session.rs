@@ -2,9 +2,10 @@ use crate::connection::{DownstreamEndpoint, UpstreamEndpoint};
 use crate::protocol::{
     ClientHello, ClientMessage, CloseReason, MessageId, ProtocolCapabilities, ProtocolError,
     ProtocolVersion, ReplayCursor, ReplaySubscription, RetryHint, ServerHello, ServerMessage,
-    SessionId, SettlementTier, SubscriptionId, SUPPORTED_PROTOCOL_VERSION,
+    SessionId, SettlementTier, SubscriptionId, TxStatusKind, SUPPORTED_PROTOCOL_VERSION,
 };
 use crate::{BuiltQuery, Error, Result, Runtime};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,7 @@ pub struct UpstreamSession {
     hello: ServerHello,
     schema_fingerprint: String,
     policy_fingerprint: String,
+    connection_auth_user: Option<String>,
     peer_hello: Option<ClientHello>,
     active_subscriptions: BTreeMap<SubscriptionId, ActiveSubscription>,
     pending_messages: BTreeMap<MessageId, (SubscriptionId, ReplayCursor)>,
@@ -228,6 +230,27 @@ impl DownstreamSession {
                         self.settled.insert((subscription_id, tier), cursor);
                     }
                 }
+                ServerMessage::UploadAck { .. } => {
+                    if self.upstream_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        return Err(Error::new("handshake is not established"));
+                    }
+                }
+                ServerMessage::TxStatus { tx_id, status } => {
+                    if self.upstream_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        return Err(Error::new("handshake is not established"));
+                    }
+                    runtime.apply_tx_status(&tx_id, status)?;
+                }
                 ServerMessage::Error(error) => {
                     let fatal = error.retry_hint == RetryHint::Fatal;
                     if !fatal {
@@ -307,6 +330,7 @@ impl DownstreamSession {
         if !hello.capabilities.replay
             || !hello.capabilities.acknowledgements
             || !hello.capabilities.query_settlement
+            || !hello.capabilities.tx_upload
         {
             self.close_with_error(
                 conn,
@@ -348,6 +372,7 @@ impl UpstreamSession {
             },
             schema_fingerprint: schema_fingerprint.into(),
             policy_fingerprint: policy_fingerprint.into(),
+            connection_auth_user: None,
             peer_hello: None,
             active_subscriptions: BTreeMap::new(),
             pending_messages: BTreeMap::new(),
@@ -357,6 +382,18 @@ impl UpstreamSession {
             next_cursor: 1,
             closed: false,
         }
+    }
+
+    pub fn new_authenticated_for_test(
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+        schema_fingerprint: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        connection_auth_user: impl Into<String>,
+    ) -> Self {
+        let mut session = Self::new(session_id, node_id, schema_fingerprint, policy_fingerprint);
+        session.connection_auth_user = Some(connection_auth_user.into());
+        session
     }
 
     pub fn pump(&mut self, runtime: &mut Runtime, conn: &mut impl UpstreamEndpoint) -> Result<()> {
@@ -487,6 +524,73 @@ impl UpstreamSession {
                         self.last_acknowledged
                             .insert(subscription_id, acknowledged_cursor);
                     }
+                }
+                ClientMessage::UploadTx { tx, data, reads } => {
+                    ensure_open(self.closed)?;
+                    if self.peer_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        continue;
+                    }
+                    conn.send_server_message(ServerMessage::UploadAck {
+                        tx_id: tx.tx_id.clone(),
+                    });
+                    let Some(connection_auth_user) = self.connection_auth_user.as_deref() else {
+                        self.close_with_error(
+                            conn,
+                            "auth_required",
+                            "transaction upload requires authenticated connection",
+                        );
+                        continue;
+                    };
+                    let peer_node_id = self
+                        .peer_hello
+                        .as_ref()
+                        .expect("handshake checked before upload")
+                        .node_id
+                        .clone();
+                    match runtime.apply_upload_tx_as_user(
+                        &tx,
+                        &data,
+                        &reads,
+                        &peer_node_id,
+                        connection_auth_user,
+                    ) {
+                        Ok(Some(status)) => conn.send_server_message(ServerMessage::TxStatus {
+                            tx_id: tx.tx_id,
+                            status,
+                        }),
+                        Ok(None) => {}
+                        Err(error) => conn.send_server_message(ServerMessage::TxStatus {
+                            tx_id: tx.tx_id,
+                            status: TxStatusKind::Rejected {
+                                code: "upload_rejected".to_owned(),
+                                detail: Some(json!({
+                                    "message": error.to_string(),
+                                })),
+                            },
+                        }),
+                    }
+                }
+                ClientMessage::Unsubscribe { subscription_id } => {
+                    ensure_open(self.closed)?;
+                    if self.peer_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        continue;
+                    }
+                    self.active_subscriptions.remove(&subscription_id);
+                    self.pending_messages
+                        .retain(|_, (pending_subscription_id, _)| {
+                            pending_subscription_id != &subscription_id
+                        });
+                    self.last_acknowledged.remove(&subscription_id);
                 }
                 ClientMessage::Close(_) => {
                     self.clear_session_state();

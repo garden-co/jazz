@@ -1,4 +1,5 @@
 use super::*;
+use mini_jazz_sqlite::protocol::{DataOp, TxStatusKind};
 
 #[test]
 fn explicit_transaction_seals_multiple_mutations_atomically() {
@@ -39,6 +40,327 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
     let stats = alice.storage_stats().unwrap();
     assert_eq!(stats.history_rows, 3);
     assert_eq!(stats.current_rows, 3);
+}
+
+#[test]
+fn committed_transaction_enters_upload_queue_with_delta_payload() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+
+    let tx_id = alice
+        .transaction()
+        .insert_row(
+            "todos",
+            "todo-upload-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Upload one tx")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    let queued = alice.active_uploads_for_test(10).unwrap();
+    assert!(queued.iter().any(|upload| upload.tx.tx_id == tx_id));
+    let upload = queued
+        .iter()
+        .find(|upload| upload.tx.tx_id == tx_id)
+        .expect("queued upload");
+    assert_eq!(upload.data.len(), 1);
+    assert_eq!(upload.data[0].table, "todos");
+    assert_eq!(upload.data[0].row_id, "todo-upload-1");
+    assert_eq!(upload.data[0].values["title"], json!("Upload one tx"));
+}
+
+#[test]
+fn update_upload_payload_keeps_only_delta_values() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+    alice
+        .create_todo("todo-upload-2", "Original", false, "project-1")
+        .unwrap();
+
+    let tx_id = alice
+        .transaction()
+        .update_row(
+            "todos",
+            "todo-upload-2",
+            BTreeMap::from([("title".to_owned(), json!("Changed"))]),
+        )
+        .commit()
+        .unwrap();
+
+    let upload = alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.tx.tx_id == tx_id)
+        .expect("queued update");
+    assert_eq!(
+        upload.data[0].values,
+        BTreeMap::from([("title".to_owned(), json!("Changed"))])
+    );
+}
+
+#[test]
+fn delete_upload_payload_is_empty_tombstone() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+    alice
+        .create_todo("todo-upload-delete", "Delete upload", false, "project-1")
+        .unwrap();
+
+    let tx_id = alice.delete_row("todos", "todo-upload-delete").unwrap();
+
+    let upload = alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.tx.tx_id == tx_id)
+        .expect("queued delete");
+    assert_eq!(upload.data.len(), 1);
+    assert_eq!(upload.data[0].table, "todos");
+    assert_eq!(upload.data[0].row_id, "todo-upload-delete");
+    assert_eq!(upload.data[0].op, DataOp::Delete);
+    assert!(upload.data[0].values.is_empty());
+}
+
+#[test]
+fn branch_upload_payload_records_non_default_branch() {
+    let schema = support::notes_schema();
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    alice.create_branch("draft", None).unwrap();
+    alice.checkout_branch("draft").unwrap();
+
+    let tx_id = alice
+        .insert_row(
+            "notes",
+            "note-upload-branch",
+            BTreeMap::from([
+                ("body".to_owned(), json!("Branch upload")),
+                ("pinned".to_owned(), json!(false)),
+            ]),
+        )
+        .unwrap();
+
+    let upload = alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.tx.tx_id == tx_id)
+        .expect("queued branch upload");
+    assert_eq!(upload.tx.branch_id.as_deref(), Some("draft"));
+    assert_eq!(upload.data[0].table, "notes");
+    assert_eq!(upload.data[0].row_id, "note-upload-branch");
+}
+
+#[test]
+fn upload_author_comes_from_transaction_not_current_session() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload author").unwrap();
+
+    let tx_id = alice
+        .create_todo(
+            "todo-upload-author",
+            "Authored by Alice",
+            false,
+            "project-1",
+        )
+        .unwrap();
+    alice.session_user_for_test("bob");
+
+    let upload = alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.tx.tx_id == tx_id)
+        .expect("queued authored upload");
+    assert_eq!(upload.tx.author.as_deref(), Some("alice"));
+}
+
+#[test]
+fn locally_rejected_transaction_is_not_active_upload() {
+    let schema = SchemaDef::new().table("docs", |table| {
+        table.text("title");
+        table.write_if_created_by_user();
+    });
+    let mut alice =
+        Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
+    alice
+        .insert_row(
+            "docs",
+            "doc-rejected-upload",
+            BTreeMap::from([("title".to_owned(), json!("Alice draft"))]),
+        )
+        .unwrap();
+    alice.session_user_for_test("bob");
+
+    let rejected_tx = alice
+        .update_row(
+            "docs",
+            "doc-rejected-upload",
+            BTreeMap::from([("title".to_owned(), json!("Bob rewrite"))]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        alice.transaction_info(&rejected_tx).unwrap().rejection_code,
+        Some("policy_denied".to_owned())
+    );
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == rejected_tx));
+}
+
+#[test]
+fn mergeable_upload_queue_completes_on_edge_status() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+    let tx_id = alice
+        .create_todo("todo-edge", "Edge completes", false, "project-1")
+        .unwrap();
+
+    alice
+        .apply_tx_status_for_test(&tx_id, TxStatusKind::EdgeAccepted)
+        .unwrap();
+
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+    assert!(alice
+        .transaction_info(&tx_id)
+        .unwrap()
+        .receipt_tiers
+        .contains(&"edge".to_owned()));
+}
+
+#[test]
+fn exclusive_upload_queue_ignores_edge_status_for_completion() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+    let tx_id = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "todos",
+            "todo-exclusive",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Exclusive")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    alice
+        .apply_tx_status_for_test(&tx_id, TxStatusKind::EdgeAccepted)
+        .unwrap();
+
+    assert!(alice
+        .transaction_info(&tx_id)
+        .unwrap()
+        .receipt_tiers
+        .contains(&"edge".to_owned()));
+    assert!(alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+}
+
+#[test]
+fn exclusive_upload_queue_completes_on_global_status() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload plan").unwrap();
+    let tx_id = alice
+        .transaction()
+        .exclusive_at_global(7)
+        .insert_row(
+            "todos",
+            "todo-exclusive-global",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Exclusive global")),
+                ("done".to_owned(), json!(false)),
+                ("project".to_owned(), json!("project-1")),
+            ]),
+        )
+        .commit()
+        .unwrap();
+
+    alice
+        .apply_tx_status_for_test(&tx_id, TxStatusKind::GlobalAccepted { global_epoch: 7 })
+        .unwrap();
+
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+}
+
+#[test]
+fn upload_queue_cleanup_prunes_only_completed_rows() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice.create_project("project-1", "Upload cleanup").unwrap();
+    let completed = alice
+        .create_todo("todo-clean-complete", "Complete", false, "project-1")
+        .unwrap();
+    let active = alice
+        .create_todo("todo-clean-active", "Active", false, "project-1")
+        .unwrap();
+
+    alice
+        .apply_tx_status_for_test(&completed, TxStatusKind::EdgeAccepted)
+        .unwrap();
+    assert_eq!(alice.upload_queue_counts_for_test().unwrap(), (3, 3));
+    alice.cleanup_completed_uploads_for_test(0, 10).unwrap();
+    assert_eq!(alice.upload_queue_counts_for_test().unwrap(), (2, 2));
+
+    let active_uploads = alice.active_uploads_for_test(10).unwrap();
+    assert!(!active_uploads
+        .iter()
+        .any(|upload| upload.tx.tx_id == completed));
+    assert!(active_uploads
+        .iter()
+        .any(|upload| upload.tx.tx_id == active));
+}
+
+#[test]
+fn rejected_upload_queue_completes_and_records_rejection_code() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice
+        .create_project("project-1", "Upload rejection")
+        .unwrap();
+    let tx_id = alice
+        .create_todo("todo-rejected-upload", "Rejected", false, "project-1")
+        .unwrap();
+
+    alice
+        .apply_tx_status_for_test(
+            &tx_id,
+            TxStatusKind::Rejected {
+                code: "server_rejected".to_owned(),
+                detail: None,
+            },
+        )
+        .unwrap();
+
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+    assert_eq!(
+        alice.transaction_info(&tx_id).unwrap().rejection_code,
+        Some("server_rejected".to_owned())
+    );
 }
 
 #[test]

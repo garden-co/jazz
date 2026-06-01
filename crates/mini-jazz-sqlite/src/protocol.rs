@@ -2,7 +2,7 @@ use crate::sync::Bundle;
 use crate::BuiltQuery;
 use serde::{Deserialize, Serialize};
 
-pub const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
+pub const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProtocolVersion(pub u32);
@@ -60,6 +60,7 @@ pub struct ProtocolCapabilities {
     pub replay: bool,
     pub acknowledgements: bool,
     pub query_settlement: bool,
+    pub tx_upload: bool,
 }
 
 impl Default for ProtocolCapabilities {
@@ -68,8 +69,51 @@ impl Default for ProtocolCapabilities {
             replay: true,
             acknowledgements: true,
             query_settlement: true,
+            tx_upload: true,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxConflictMode {
+    Mergeable,
+    Exclusive,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataOp {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientTx {
+    pub tx_id: String,
+    pub branch_id: Option<String>,
+    pub conflict_mode: TxConflictMode,
+    pub created_at: i64,
+    pub author: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientDataRecord {
+    pub table: String,
+    pub row_id: String,
+    pub op: DataOp,
+    pub values: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxStatusKind {
+    EdgeAccepted,
+    GlobalAccepted {
+        global_epoch: i64,
+    },
+    Rejected {
+        code: String,
+        detail: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +170,14 @@ pub enum ClientMessage {
     Replay {
         subscriptions: Vec<ReplaySubscription>,
     },
+    UploadTx {
+        tx: ClientTx,
+        data: Vec<ClientDataRecord>,
+        reads: Vec<crate::sync::ReadRecord>,
+    },
+    Unsubscribe {
+        subscription_id: SubscriptionId,
+    },
     Ack {
         message_id: MessageId,
         cursor: Option<ReplayCursor>,
@@ -141,6 +193,13 @@ pub enum ServerMessage {
         subscription_id: Option<SubscriptionId>,
         cursor: ReplayCursor,
         bundle: Bundle,
+    },
+    UploadAck {
+        tx_id: String,
+    },
+    TxStatus {
+        tx_id: String,
+        status: TxStatusKind,
     },
     Settled {
         subscription_id: SubscriptionId,
