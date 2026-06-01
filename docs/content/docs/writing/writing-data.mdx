@@ -216,7 +216,7 @@ afterEach(() => {
 });
 
 it("tasks have a title", () => {
-  const task = transaction.insert(todos, { title: "Test task", done: false });
+  const task = transaction.insert(app.todos, { title: "Test task", done: false });
   expect(task.title).toEqual("Test task");
 });
 ```
