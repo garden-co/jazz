@@ -50,10 +50,20 @@ export class MessagePortRuntimeTransport {
       if (data?.type !== "leader-sync") return;
       const payload = data.payload;
       if (!Array.isArray(payload)) return;
+      let applied = false;
       for (const entry of payload) {
         if (entry instanceof Uint8Array) {
           this.runtime.applyIncomingFollowerPayload(entry);
+          applied = true;
         }
+      }
+      // Applied sync messages are parked until a tick drives them — without
+      // this, follower queries never settle and subscriptions never fire until
+      // some unrelated event ticks the runtime. Mirrors WorkerBridge, which
+      // calls `batched_tick()` after each worker→main sync batch
+      // (worker_bridge.rs).
+      if (applied) {
+        this.runtime.batchedTick?.();
       }
     };
     this.port.start();
