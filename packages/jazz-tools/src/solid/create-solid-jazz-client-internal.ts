@@ -1,4 +1,4 @@
-import { createResource, createSignal, onCleanup, type Accessor } from "solid-js";
+import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
 import type { DbConfig } from "../runtime/db.js";
 import { type JazzClient } from "../web/create-jazz-client.js";
 
@@ -16,8 +16,12 @@ export function createSolidJazzClientInternal(
   const [activeRunId, setActiveRunId] = createSignal(0);
   const [connectedRunId, setConnectedRunId] = createSignal<number | undefined>(undefined);
 
+  const stableConfig = createMemo(config, undefined, {
+    equals: (prev, next) => JSON.stringify(prev) === JSON.stringify(next),
+  });
+
   const [res, { mutate, refetch }] = createResource(
-    config,
+    stableConfig,
     async (nextConfig): Promise<JazzClient> => {
       const runId = activeRunId() + 1;
       setActiveRunId(runId);
