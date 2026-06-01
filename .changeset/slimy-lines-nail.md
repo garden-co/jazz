@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-jazz-tools server now has OTEL feature enabled by default
+jazz-tools server now has built-in support for OTEL
