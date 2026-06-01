@@ -126,6 +126,16 @@ describe("createSnapshotBuilder", () => {
     expect(builder.dehydrate().principalId).toBeNull();
   });
 
+  it("accepts an App-like value (with .wasmSchema) and fingerprints the same as the raw schema", async () => {
+    const app = { wasmSchema: TEST_SCHEMA };
+    const { db } = makeFakeDb({ todos: [] });
+    const builder = createSnapshotBuilder({ appId: "app-shape", schema: app });
+
+    await builder.prefetch(db as any, makeQuery());
+
+    expect(builder.dehydrate().schemaFingerprint).toBe(computeSchemaFingerprint(TEST_SCHEMA));
+  });
+
   it("rejects prefetch if subscribeAll throws synchronously", async () => {
     const db: FakeDb = {
       subscribeAll() {

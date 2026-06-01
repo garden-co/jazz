@@ -1,5 +1,8 @@
-import type { WasmSchema } from "../drivers/types.js";
-import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
+import {
+  computeSchemaFingerprint,
+  resolveWasmSchema,
+  type WasmSchemaInput,
+} from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
@@ -25,8 +28,12 @@ export type DehydratedSnapshot = {
 export type SnapshotBuilderConfig = {
   /** Must match the client's `DbConfig.appId`. */
   appId: string;
-  /** Schema used to derive the envelope fingerprint. */
-  schema: WasmSchema;
+  /**
+   * Schema used to derive the envelope fingerprint. Accepts either the
+   * raw `WasmSchema` or your merged `app` (whose `wasmSchema` field is
+   * unwrapped automatically).
+   */
+  schema: WasmSchemaInput;
   /** Identifier for the authenticated principal whose queries are being prefetched, or `null` for unauthenticated renders. */
   principalId?: string | null;
 };
@@ -66,7 +73,7 @@ export type SnapshotBuilder = {
  */
 export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBuilder {
   const entries = new Map<string, SnapshotEntry>();
-  const schemaFingerprint = computeSchemaFingerprint(config.schema);
+  const schemaFingerprint = computeSchemaFingerprint(resolveWasmSchema(config.schema));
 
   return {
     async prefetch<T extends { id: string }>(

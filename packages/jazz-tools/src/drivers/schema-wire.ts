@@ -92,6 +92,26 @@ export function computeSchemaFingerprint(
   return fnv1a32Hex(serializeRuntimeSchema(schema, options));
 }
 
+/**
+ * Accepts either a raw {@link WasmSchema} or an App-like value carrying
+ * one in its `wasmSchema` field. Lets public API surfaces (the SSR snapshot
+ * builder, `JazzProvider.schema`) take whichever shape the caller has on
+ * hand without forcing them to drill into `.wasmSchema` themselves.
+ */
+export type WasmSchemaInput = WasmSchema | { readonly wasmSchema: WasmSchema };
+
+export function resolveWasmSchema(input: WasmSchemaInput): WasmSchema {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "wasmSchema" in input &&
+    isWasmSchema((input as { wasmSchema: unknown }).wasmSchema)
+  ) {
+    return (input as { wasmSchema: WasmSchema }).wasmSchema;
+  }
+  return input as WasmSchema;
+}
+
 function fnv1a32Hex(input: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {

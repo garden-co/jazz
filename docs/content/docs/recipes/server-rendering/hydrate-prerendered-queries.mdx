@@ -62,7 +62,7 @@ const context = createJazzContext({
 export function createServerSnapshot() {
   return createSnapshotBuilder({
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-    schema: app.wasmSchema,
+    schema: app,
   });
 }
 
@@ -162,7 +162,7 @@ Pass your `schema` prop too if you want the fingerprint check to run:
 ```tsx
 import { app } from "@/schema";
 
-<JazzProvider config={...} snapshot={snapshot} schema={app.wasmSchema}>
+<JazzProvider config={...} snapshot={snapshot} schema={app}>
 ```
 
 Without `schema`, the fingerprint check is skipped — you take responsibility for keeping server and client schemas in sync.

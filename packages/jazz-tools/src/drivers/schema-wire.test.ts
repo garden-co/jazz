@@ -3,6 +3,7 @@ import type { WasmSchema } from "./types.js";
 import {
   computeSchemaFingerprint,
   getRuntimeSchemaCacheKey,
+  resolveWasmSchema,
   serializeRuntimeSchema,
 } from "./schema-wire.js";
 
@@ -122,5 +123,22 @@ describe("computeSchemaFingerprint", () => {
     });
 
     expect(computeSchemaFingerprint(buildSchema())).toBe(computeSchemaFingerprint(buildSchema()));
+  });
+});
+
+describe("resolveWasmSchema", () => {
+  const schema: WasmSchema = {
+    todos: {
+      columns: [{ name: "id", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+
+  it("returns a raw WasmSchema unchanged", () => {
+    expect(resolveWasmSchema(schema)).toBe(schema);
+  });
+
+  it("unwraps an App-like value with a wasmSchema field", () => {
+    const app = { wasmSchema: schema, todos: { _table: "todos" } };
+    expect(resolveWasmSchema(app)).toBe(schema);
   });
 });

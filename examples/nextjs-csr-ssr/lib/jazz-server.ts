@@ -31,6 +31,6 @@ export const db = context.asBackend();
 export function createServerSnapshot() {
   return createSnapshotBuilder({
     appId,
-    schema: schemaApp.todos._schema,
+    schema: schemaApp,
   });
 }

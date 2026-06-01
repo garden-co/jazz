@@ -7,8 +7,11 @@ import React, {
   type ReactNode,
 } from "react";
 import type { DehydratedSnapshot } from "../backend/ssr.js";
-import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
-import type { WasmSchema } from "../drivers/types.js";
+import {
+  computeSchemaFingerprint,
+  resolveWasmSchema,
+  type WasmSchemaInput,
+} from "../drivers/schema-wire.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
@@ -49,21 +52,8 @@ export type JazzProviderProps = {
   children: ReactNode;
   createJazzClient: CreateJazzClient;
   onJWTExpired?: JwtRefreshFn;
-  /**
-   * Server-rendered snapshot produced by `createSnapshotBuilder().dehydrate()`.
-   * Seeded into the orchestrator before children render so the first paint
-   * after hydration isn't blocked on a sync fetch. Discarded if the
-   * envelope's `appId`, `principalId`, or `schemaFingerprint` doesn't
-   * match the live client.
-   */
   snapshot?: DehydratedSnapshot;
-  /**
-   * Optional schema, used only to validate the snapshot envelope's
-   * `schemaFingerprint`. When omitted the fingerprint check is skipped;
-   * the user is responsible for keeping server and client schemas in
-   * sync.
-   */
-  schema?: WasmSchema;
+  schema?: WasmSchemaInput;
 };
 
 type JazzContextValue = {
@@ -256,7 +246,7 @@ export function JazzProvider({
   schema,
 }: JazzProviderProps) {
   const expectedSchemaFingerprint = React.useMemo(
-    () => (schema ? computeSchemaFingerprint(schema) : undefined),
+    () => (schema ? computeSchemaFingerprint(resolveWasmSchema(schema)) : undefined),
     [schema],
   );
   // Stable per-provider identity; used as the Set key so the useState
