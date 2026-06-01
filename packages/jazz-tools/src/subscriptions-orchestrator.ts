@@ -395,7 +395,9 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
     return true;
   }
 
-  return JSON.stringify(a) === JSON.stringify(b);
+  // Key-order-insensitive, consistent with the query-key serialization, so two
+  // semantically-identical sessions don't trigger a full resubscribe.
+  return canonicalStringify(a) === canonicalStringify(b);
 }
 
 export function computeQueryKey<T extends { id: string }>(
