@@ -205,8 +205,18 @@ async fn main() {
             bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
+            let explicitly_allowed = allow_local_first_auth;
             let allow_local_first_auth =
                 resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
+            if allow_local_first_auth && !explicitly_allowed {
+                tracing::warn!(
+                    "Local-first auth is enabled automatically because NODE_ENV is not \
+                     set to \"production\". Any self-signed Jazz token will be accepted \
+                     with no additional configuration. Set NODE_ENV=production or pass \
+                     --allow-local-first-auth / JAZZ_ALLOW_LOCAL_FIRST_AUTH=true to \
+                     acknowledge this explicitly."
+                );
+            }
             let jwt_public_key = match jwt_public_key {
                 Some(value) => match resolve_jwt_public_key_input(value) {
                     Ok(value) => Some(value),
