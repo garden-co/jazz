@@ -195,4 +195,58 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     dispose();
     await flushMicrotasks();
   });
+
+  it("SD-LIFE-05: preserves client for equivalent config and recreates only on semantic config change", async () => {
+    const pendingByAppId = new Map<string, Deferred<any>>();
+
+    defaultClientFactory.mockImplementation((config: DbConfig) => {
+      const entry = deferred<any>();
+      pendingByAppId.set(config.appId, entry);
+      return entry.promise;
+    });
+
+    let setConfig!: (next: DbConfig) => void;
+    let dispose!: () => void;
+    let result!: ReturnType<typeof createSolidJazzClientInternal>;
+
+    createRoot((rootDispose) => {
+      dispose = rootDispose;
+      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      setConfig = _setConfig;
+      result = createSolidJazzClientInternal(config, defaultClientFactory);
+      return undefined;
+    });
+
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
+
+    const rawA = makeRawClient("A");
+    pendingByAppId.get("A")!.resolve(rawA);
+    await flushMicrotasks();
+
+    expect(result.client).toMatchObject({ id: "A" });
+
+    // Equivalent config object must not recreate the client.
+    setConfig({ appId: "A" });
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(1);
+    expect(rawA.shutdown).toHaveBeenCalledTimes(0);
+    expect(result.client).toMatchObject({ id: "A" });
+
+    // Semantically different config should recreate the client.
+    setConfig({ appId: "B" });
+    await flushMicrotasks();
+    expect(defaultClientFactory).toHaveBeenCalledTimes(2);
+    expect(rawA.shutdown).toHaveBeenCalledTimes(1);
+
+    const rawB = makeRawClient("B");
+    pendingByAppId.get("B")!.resolve(rawB);
+    await flushMicrotasks();
+
+    expect(result.client).toMatchObject({ id: "B" });
+
+    dispose();
+    await flushMicrotasks();
+    expect(rawB.shutdown).toHaveBeenCalledTimes(1);
+  });
 });
