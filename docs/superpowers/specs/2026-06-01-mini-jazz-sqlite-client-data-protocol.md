@@ -29,6 +29,10 @@ row mutations across multiple tables. Transport-level batching may coalesce many
 protocol messages into one WebSocket frame or `postMessage` delivery, but the protocol
 message remains one transaction.
 
+The implementation also changes locally generated public `tx_id` values from
+`tx-{node_id}-{local_epoch}` strings to UUIDv7 strings. The protocol treats `tx_id` as
+opaque and must not derive writer, epoch, ordering, or authority state from the string.
+
 The client keeps a durable upload queue. Every normal committed local transaction is
 inserted into that queue atomically with the transaction commit. After connection
 handshake, the client sends queued transactions ordered by `(created_at, sync_seq)`,
@@ -88,7 +92,7 @@ struct ClientTx {
 
 - `Some(branch_id)` applies the transaction to that branch.
 - `None` applies the transaction to the connection/session default branch.
-- If no default branch exists, the message is malformed for that session.
+- If no default branch exists, the transaction is invalid for that session.
 
 `author` semantics:
 
@@ -148,7 +152,7 @@ enum DataOp {
 authoritative state when the row might exist upstream. It is rejected only after
 authoritative absence is known.
 
-`Delete` with non-empty `values` is malformed for MVP.
+`Delete` with non-empty `values` is rejected for MVP.
 
 ### Conflict Mode
 
@@ -230,6 +234,8 @@ CREATE TABLE jazz_tx_upload_queue (
   tx_num INTEGER NOT NULL UNIQUE,
   status INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
+  branch_id TEXT,
+  author TEXT,
   completed_at INTEGER,
   last_upload_attempt_at INTEGER,
   last_ack_at INTEGER,
@@ -239,6 +245,16 @@ CREATE TABLE jazz_tx_upload_queue (
 CREATE INDEX jazz_tx_upload_queue_active_idx
 ON jazz_tx_upload_queue(status, created_at, sync_seq)
 WHERE status = 1;
+
+CREATE TABLE jazz_tx_upload_data (
+  tx_num INTEGER NOT NULL,
+  record_index INTEGER NOT NULL,
+  table_name TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  op INTEGER NOT NULL,
+  values_json TEXT NOT NULL,
+  PRIMARY KEY (tx_num, record_index)
+) WITHOUT ROWID;
 ```
 
 Status values:
@@ -256,6 +272,10 @@ ORDER BY created_at, sync_seq
 ```
 
 `sync_seq` is local-only and is not sent to the server.
+
+`jazz_tx_upload_data` stores the transaction's row deltas in transaction-local order.
+Cleanup removes completed queue/data rows only; it never deletes transaction records,
+history, receipts, or rejection details.
 
 Upload queue completion rule for mergeable transactions:
 
@@ -348,24 +368,25 @@ its queue quickly after reconnect.
 
 ## Validation And Rejection
 
-Malformed protocol shape is fatal and closes the session.
+Envelope, protocol-shape, and auth failures are fatal and close the session.
 
 Examples:
 
 - `UploadTx` before handshake
 - missing transaction header
 - invalid enum tag
-- `branch_id = None` when the session has no default branch
-- empty `data`
-- delete record with non-empty values
-- system fields in `values`
-- duplicate `(table, row_id)` records in one transaction
+- unauthenticated upload on a connection that requires auth
 
 Semantically invalid transactions produce `TxStatus::Rejected` and do not close the
 session.
 
 Examples:
 
+- `branch_id = None` when the session has no default branch
+- empty `data`
+- delete record with non-empty values
+- system fields in `values`
+- duplicate `(table, row_id)` data records
 - insert missing required fields
 - insert row that already exists
 - policy denied

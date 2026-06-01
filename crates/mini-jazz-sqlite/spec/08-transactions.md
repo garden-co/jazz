@@ -16,6 +16,14 @@ Every transaction has:
 - creation time
 - typed metadata containing write facts and persisted observed facts
 
+Public transaction ids are opaque. They are stable across replicas and across
+authority acceptance, but callers and protocol peers must not infer writer,
+local epoch, ordering, or authority state from their text. The current Rust
+prototype generates local transaction ids as UUIDv7 strings. Earlier
+`tx-{node_id}-{local_epoch}` ids are no longer the local-generation format.
+`node_id` and `local_epoch` remain stored transaction facts for writer identity,
+debugging, and local uniqueness, but they are not the public id encoding.
+
 Transaction kinds include:
 
 - data
@@ -52,14 +60,24 @@ resend the original write bundle.
 
 The local write path:
 
-1. allocates transaction id and local epoch
+1. allocates an opaque public transaction id and node-local epoch
 2. begins an embedded database transaction
 3. records the transaction
 4. appends all history rows
 5. records write facts and persisted observed facts
 6. updates or invalidates current projections
-7. commits the embedded database transaction
-8. publishes local subscription diffs
+7. records client-upload retry metadata for ordinary local transactions
+8. commits the embedded database transaction
+9. publishes local subscription diffs
+
+The transaction is the unit of upload and reconciliation. One transaction may
+contain multiple row mutations across multiple tables, but retry, acceptance,
+rejection, receipts, and upload status are all tracked for the transaction as a
+whole. Registry insertion for an ordinary local transaction is part of the same
+embedded-database transaction as the history append; if the registry insert
+fails, the local write fails rather than creating a durable write that cannot be
+reconciled upstream. A future true local-only transaction mode must opt out of
+this explicitly rather than relying on accidental queue omission.
 
 Patch updates preserve omitted fields from the effective visible row. The
 effective base may be a current branch row, a row inherited from branch sources,

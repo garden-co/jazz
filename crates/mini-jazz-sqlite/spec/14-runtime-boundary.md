@@ -105,11 +105,21 @@ physical browser/native storage backend.
 Transport should stay thin. It carries typed sync and catalogue messages; it
 does not implement a second query engine.
 
+The sync protocol version is bumped when the message contract changes. The
+client transaction upload protocol is version `2` and requires the server to
+advertise `ProtocolCapabilities { tx_upload: true, ... }`. Clients that need
+upload reject a server hello without that capability instead of silently
+falling back to download-only behavior.
+
 Reconnect should use replay-window recovery first and full scope/frontier
 snapshot fallback when the replay window is insufficient. Active subscriptions
 are desired state and should be replayed on reconnect. Query descriptors are
 not durable disk state: after a tab or worker restart, downstream live
 subscriptions replay to the worker/broker, then trickle upstream from there.
+Local transaction upload state is different: ordinary committed local
+transactions are durable retry state, so reconnect scans the upload registry and
+replays active transaction uploads even when there are no active
+subscriptions.
 
 Open issues:
 

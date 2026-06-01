@@ -10,6 +10,11 @@ feature exists.
 
 - Public row ids are stable across replicas.
 - Public transaction ids are stable across local-to-global acceptance.
+- Public transaction ids are opaque. Protocol peers and application code must
+  not derive writer node, local epoch, ordering, or authority state from the id
+  string.
+- Locally generated public transaction ids are UUIDv7 strings in the Rust
+  prototype.
 - Physical ids never cross API or sync boundaries.
 - Rehydrating the same public id on one replica returns the same physical id.
 - Different replicas may assign different physical ids to the same public id.
@@ -27,6 +32,12 @@ feature exists.
 - One simple write creates one sealed transaction.
 - One explicit transaction may contain multiple row mutations and still seals as
   one transaction.
+- One upload message contains exactly one sealed transaction; that transaction
+  may contain multiple row mutations across multiple tables.
+- Ordinary committed local transactions enter the durable upload registry
+  atomically with the transaction commit.
+- Failure to insert ordinary local transaction upload registry metadata fails
+  the local commit.
 - An explicit transaction with no staged mutations is a no-op and creates no
   transaction record.
 - Multiple staged mutations to the same row in one explicit transaction
@@ -219,6 +230,47 @@ feature exists.
 - Rows that leave scope because of update, delete, policy change, branch source
   change, outcome change, or catalogue/lens change eventually disappear from
   local query results after relevant repair data arrives.
+- Client upload sends transaction data, not authoritative history. The receiver
+  derives authoritative history/system fields from connection trust, auth,
+  policy, branch, and storage state.
+- Client upload data cannot forge receipts, global epochs, rejection state,
+  catalogue state, or semantic system fields.
+- Upload uses one `UploadTx` message per transaction. Protocol batching may
+  carry many upload messages, but one message is still one transaction.
+- Uploaded row data is delta-shaped: inserts carry proposed fields, updates
+  carry changed fields, and deletes carry empty values.
+- Mergeable upload transactions may omit reads; exclusive upload transactions
+  require the read facts needed for validation.
+- Uploads are sent from the durable registry ordered by `(created_at,
+sync_seq)`, where `sync_seq` is a local-only monotonic tie-breaker.
+- The client sends uploads in registry order but does not wait for one
+  transaction's ACK before sending the next transaction.
+- Upload transport must preserve message order, or provide an ordered stream
+  abstraction below the sync protocol.
+- `UploadAck` is connection-local flow control only and never completes the
+  durable upload registry entry.
+- Upload registry completion is derived from local authoritative transaction
+  fate, not from the ACK path.
+- `TxStatus` is non-cumulative. `GlobalAccepted` satisfies edge-level retry and
+  wait needs, `EdgeAccepted` records edge acceptance, and `Rejected` is
+  terminal for upload retry.
+- Mergeable upload registry entries complete on edge acceptance, global
+  acceptance, or rejection.
+- Exclusive upload registry entries complete only on global acceptance or
+  rejection; edge-only or downgrade-like statuses are ignored for exclusive
+  retry completion.
+- Unknown upload transaction statuses are ignored by the client.
+- Reconnect clears connection-local in-flight upload state and replays active
+  durable upload registry entries, even when no subscription is active.
+- Duplicate upload of an already known transaction is idempotent and does not
+  rewrite accepted history for the same public transaction id.
+- A server that lacks authoritative state needed to validate an uploaded update
+  or delete waits/fetches trusted upstream state when possible; missing local
+  state is not automatically a rejection.
+- Authenticated untrusted uploads use the authenticated connection/session user
+  for validation and provenance, not client-supplied author fields.
+- Trusted peer uploads may preserve peer-supplied author/provenance only within
+  the connection's trusted role.
 
 ### D.8 Subscription Invariants
 
@@ -236,6 +288,10 @@ feature exists.
 - Rejections that change visible results produce semantic diffs.
 - Rejected unawaited writes surface through the global rejection/error callback.
 - Ordered-page invalidation considers old and new order keys, not only row ids.
+- Targeted unsubscribe removes exactly the named subscription and pending
+  download/cursor state for that subscription.
+- Targeted unsubscribe does not touch upload registry state and does not rely
+  on replaying the remaining subscription set.
 
 ### D.9 Policy Invariants
 
@@ -376,6 +432,9 @@ feature exists.
 - Errors carry stable machine codes plus human-readable messages.
 - Transport/quota/upload capacity failures are transport/API errors.
 - Semantic database failures are transaction/query errors or rejections.
+- Upload envelope/auth failures may close the protocol session; semantically
+  invalid upload transactions reject the transaction without closing a healthy
+  session.
 - Recoverable catalogue/sync gaps are unsettled state before timeout, not
   immediate errors.
 - Developer diagnostics can be richer and less stable than public errors.
@@ -384,6 +443,13 @@ feature exists.
 
 - Hot paths use local integer surrogates for repeated public ids.
 - Hot enum fields use integer discriminants.
+- The upload registry stores retry metadata and row deltas only; transaction
+  fate, receipts, rejection detail, row history, and current projection remain
+  in their normal storage tables.
+- Upload registry cleanup deletes only completed registry/data rows and never
+  deletes transaction records, history, receipts, rejection detail, row identity
+  mappings, or current projection.
+- Upload registry cleanup never deletes active rows, regardless of age.
 - Runtime can install and use schemas that are not the todo fixture; fixture
   helpers do not define core semantics.
 - Composite-key hot tables use `WITHOUT ROWID` unless benchmarks show a

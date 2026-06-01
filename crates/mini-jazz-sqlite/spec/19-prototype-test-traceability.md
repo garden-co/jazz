@@ -16,28 +16,64 @@ Coverage labels:
 
 ### E.1 Coverage Summary By Invariant Group
 
-| Group                      | Current status        | Notes                                                                                                                                                                                                                                              |
-| -------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one user writing from multiple nodes are tested.                                                                                                                             |
-| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                    |
-| D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                               |
-| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                      |
-| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                     |
-| D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not. |
-| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, and reconnect-shaped repair are tested. Compact reconnect summaries and ephemeral observed interests are not.  |
-| D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                        |
-| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                    |
-| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                |
-| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, stale row/absence/policy/source read-set checks, exclusive same-row conflict, and repair are tested. Predicate/range validation is not.         |
-| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                    |
-| D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                      |
-| D.14 Storage/lowering      | partial               | SQLite current/history tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not asserted.                                                  |
-| D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                      |
-| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                           |
-| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                |
-| D.18 Tooling/admin         | untested              | Tooling, inspector, admin catalogue publication, and codegen workflows are not implemented in the prototype.                                                                                                                                       |
+| Group                      | Current status        | Notes                                                                                                                                                                                                                                                                                                           |
+| -------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D.1 Identity               | covered for prototype | Public row ids, physical id locality, replica-local physical ids, and one user writing from multiple nodes are tested.                                                                                                                                                                                          |
+| D.2 Transactions           | partial               | Sealing, explicit transactions, edge/global receipts, rejection, idempotence, non-unique global epochs, and monotonic fate are tested. Awaiting-dependencies semantics and audit-grade receipt history are not.                                                                                                 |
+| D.3 History/projection     | partial               | Append-only ordinary deletes, rebuild, rejection repair, global ordering, remote pending constraints, and broad repair are tested. Hard delete/truncate and full merge/conflict projection semantics remain partial.                                                                                            |
+| D.4 Visibility/snapshots   | partial               | Global epoch and pinned branch snapshot behavior is tested. Full vector snapshots are not implemented/tested.                                                                                                                                                                                                   |
+| D.5 Branches               | covered for prototype | Branch overlay/base reads, branch tombstones, rejected overlay fallback, provenance sync, multi-source conflict candidates, and branch policy contexts are tested. Full product branch backing rows and merge commits are not.                                                                                  |
+| D.6 Queries/observed facts | partial               | Equality, contains, IN, not-equal, null-present, selected system fields, ordered pages, absence facts, recursive query scopes, policy dependencies, query-scope repair, and predicate serialization are tested. Range and catalogue facts are not.                                                              |
+| D.7 Sync                   | partial               | Query-scoped sync, table-vs-query scope, idempotence, public id hydration, reordered fate, scope contraction, active query refresh, client upload, ACK/status split, reconnect upload replay, and targeted upload validation are tested. Compact reconnect summaries and server-durable upload inboxes are not. |
+| D.8 Subscriptions          | partial               | Rerun-and-diff, policy dependency diffs, branch checkout diffs, pinned branch stability, pagination, targeted unsubscribe, and reconnect-shaped observed subscription recovery are tested. Tier gating and settled state are not.                                                                               |
+| D.9 Policies               | covered for prototype | Read/write policies, ref-readable policies, recursive acyclic policies, cycle rejection, branch/pinned-base contexts, trusted bypass, and transitive policy read sets are tested. Full policy language and diagnostics are not.                                                                                 |
+| D.10 Catalogue/lenses      | partial               | Narrow storage-name rename lenses, ref lenses, system prefix escaping, and index-only compatibility are tested. Catalogue revision graph, migrations directory semantics, inverse lenses, and copy-forward are not.                                                                                             |
+| D.11 Authority validation  | partial               | Untrusted bundle rejection, atomic rejection, delete/update validation, branch-context validation, stale row/absence/policy/source read-set checks, exclusive same-row conflict, and repair are tested. Predicate/range validation is not.                                                                      |
+| D.12 Conflicts             | partial               | Side APIs expose multi-base and pinned-base conflict candidates and policy-filtered candidates; conflict-aware row reads and resolution transactions are tested. Product metadata shape is not.                                                                                                                 |
+| D.13 Errors/diagnostics    | partial               | Rejection codes, transaction info, rejection lists, rejection subscriptions, upload rejection status, and detail enrichment are tested. Public error object shape, redaction, and diagnostics are not.                                                                                                          |
+| D.14 Storage/lowering      | partial               | SQLite current/history tables, upload registry tables, physical ids, system prefix escaping, integer-like enum behavior, and rebuild are exercised. `WITHOUT ROWID`, generated indexes, and query plans are not broadly asserted.                                                                               |
+| D.15 Files/blobs           | untested              | No file/blob implementation in the prototype.                                                                                                                                                                                                                                                                   |
+| D.16 Privacy/encryption    | untested              | No E2EE/encrypted-index implementation in the prototype.                                                                                                                                                                                                                                                        |
+| D.17 Harness               | partial               | In-memory SQLite, file-backed durable nodes, multi-runtime local/edge/global tests, duplicate/reordered bundles, and durable reopen are tested. Drop/delay/reconnect protocol and deterministic clock APIs are not.                                                                                             |
+| D.18 Tooling/admin         | untested              | Tooling, inspector, admin catalogue publication, and codegen workflows are not implemented in the prototype.                                                                                                                                                                                                    |
 
 ### E.2 Test Module Mapping
+
+#### `connection.rs`
+
+- `downstream_rejects_server_without_tx_upload_capability`: D.7, D.13
+- `protocol_defaults_include_tx_upload_capability`: D.7
+- `connection_upstream_requires_auth_for_upload_tx_after_handshake`: D.7,
+  D.9, D.13
+- `connection_upstream_unsubscribe_removes_subscription_after_handshake`: D.8
+- `connection_manager_unsubscribe_sends_targeted_unsubscribe_upstream`: D.8
+- `connection_manager_flushes_uploads_after_handshake`: D.2, D.7, D.17
+- `connection_manager_flushes_new_local_upload_on_quiet_connection`: D.2,
+  D.7
+- `upstream_upload_tx_gets_ack_and_edge_status`: D.2, D.7
+- `upstream_upload_tx_accepts_opaque_tx_id`: D.1, D.7
+- `upstream_upload_update_waits_when_row_is_missing_then_applies_after_sync`:
+  D.7, D.11
+- `upstream_upload_delete_waits_when_row_is_missing_then_applies_after_sync`:
+  D.7, D.11
+- `upstream_upload_tx_dedupes_existing_tx_id_without_rewrite`: D.2, D.3,
+  D.7
+- `upstream_exclusive_upload_without_write_reads_is_rejected`: D.7, D.11,
+  D.13
+- `rejected_upload_tx_does_not_leave_branch_or_row_id_side_effects`: D.1,
+  D.5, D.7, D.13
+- `rejected_exclusive_upload_reads_do_not_leave_row_id_side_effects`: D.1,
+  D.7, D.11, D.13
+- `upload_delete_with_values_returns_rejection_status`: D.7, D.13
+- `upload_insert_missing_required_field_returns_rejection_status`: D.7,
+  D.13
+- `upload_system_field_returns_rejection_status`: D.7, D.9, D.13
+- `connection_manager_rejects_upload_ack_before_handshake_without_marking_ack`:
+  D.7, D.13
+- `connection_manager_ignores_upload_ack_for_not_in_flight_tx`: D.7
+- `connection_manager_ack_frees_slot_without_resending_acked_upload`: D.7
+- `connection_manager_replays_acked_incomplete_upload_after_reconnect`: D.7,
+  D.17
 
 #### `storage_projection.rs`
 
@@ -398,6 +434,34 @@ Coverage labels:
 The following behaviors are now represented in Appendix D because the tests made
 them concrete:
 
+- locally generated public transaction ids are opaque UUIDv7 strings rather
+  than `tx-{node_id}-{local_epoch}` strings
+- client upload is one protocol message per transaction, while the transaction
+  itself may carry multiple row mutations
+- ordinary committed local transactions enter a durable upload registry and are
+  flushed after handshake or on a quiet connection
+- upload ACK is connection-local flow control and does not complete retry state
+- ACKs before handshake or for non-in-flight transactions do not mark durable
+  upload state as accepted
+- upload in-flight slots are freed by ACKs without resending the acked
+  transaction on the same healthy connection
+- reconnect replays acked but incomplete active upload registry rows
+- upload status and ACK are distinct; edge/global/rejected transaction fate
+  drives registry completion
+- duplicate upload of an already accepted transaction id is idempotent and
+  cannot rewrite accepted history with forged data
+- upload updates and deletes wait for authoritative upstream state when the row
+  is locally missing but may exist upstream
+- untrusted upload validation uses the authenticated connection/session and
+  rejects unauthenticated uploads after handshake
+- system fields in uploaded data are rejected instead of being trusted from the
+  client
+- semantically invalid upload transactions return rejection status without
+  closing an otherwise healthy authenticated session
+- rejected upload attempts roll back branch, row-id, and read-side effects
+- `tx_upload` is an explicit protocol capability
+- unsubscribe is a targeted message that removes one subscription without
+  replaying the remaining subscription set
 - edge-accepted mergeables are accepted/visible without global epochs
 - global epochs are not unique per transaction
 - repeated global acceptance for one transaction cannot regress its global
@@ -529,6 +593,8 @@ The largest gaps between Appendix D and the current prototype tests are:
 - compact reconnect summaries and active query-descriptor replay protocol,
   including how to stop persisting observed descriptors without leaving stale
   local facts in current query results
+- negotiated upload capacity, unordered transport recovery, and any
+  server-durable uploaded-transaction inbox beyond client-side durable replay
 - union semantics for merging overlapping query bundles with different scoped
   metadata fingerprints
 - catalogue observed facts

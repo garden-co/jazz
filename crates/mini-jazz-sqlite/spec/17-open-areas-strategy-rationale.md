@@ -23,6 +23,13 @@ The following areas remain intentionally underspecified:
 - full schema lens semantics
 - reconnect summaries
 - subscription settlement and reconnection protocol
+- negotiated upload in-flight capacity below the initial `1000` default
+- server-durable uploaded-transaction inbox/interest state, if reconnect replay
+  from the client queue is not sufficient for a future topology
+- unordered transport recovery below the upload protocol; current intended
+  transports provide ordered delivery
+- final read-set wire shape for uploaded exclusive transactions
+- true local-only transaction mode that deliberately skips upstream upload
 - hot branch projection heuristics
 - audit-grade append-only receipt history
 - hard-delete/truncate authorization, sync, and retention semantics
