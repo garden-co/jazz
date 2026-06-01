@@ -788,7 +788,8 @@ impl Runtime {
         let mut tx_info_by_num = BTreeMap::new();
         for tx_record in &bundle.txs {
             let node_num = tx::ensure_node(&db, &tx_record.node_id)?;
-            let metadata_json = tx_metadata_json(tx_record.auth_user.as_deref())?;
+            let metadata_json =
+                tx_metadata_json(tx_record.auth_user.as_deref(), tx_record.server_ingested_at)?;
             db.execute(
                 "INSERT INTO jazz_tx
                  (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)
@@ -1365,6 +1366,7 @@ impl Runtime {
             rejection_detail: None,
             receipt_tiers: Vec::new(),
             created_at: upload_tx.created_at,
+            server_ingested_at: Some(now_ms()),
         });
 
         Ok(Some(make_bundle(
@@ -6721,6 +6723,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
     )?;
     let records = stmt.query_map([], |row| {
         let tx_id = row.get::<_, String>(0)?;
+        let metadata_json = row.get::<_, String>(9)?;
         let mut receipt_stmt = conn.prepare(
             "SELECT receipt.tier
              FROM jazz_tx_receipt receipt
@@ -6738,7 +6741,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            auth_user: parse_tx_auth_user_for_sqlite(&metadata_json, 9)?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -6747,6 +6750,7 @@ fn export_txs(conn: &Connection) -> Result<Vec<TxRecord>> {
                 .flatten(),
             receipt_tiers,
             created_at: row.get(8)?,
+            server_ingested_at: parse_tx_server_ingested_at_for_sqlite(&metadata_json, 9)?,
         })
     })?;
     records
@@ -6807,6 +6811,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
     )?;
     let records = stmt.query_map([], |row| {
         let tx_id = row.get::<_, String>(0)?;
+        let metadata_json = row.get::<_, String>(9)?;
         let receipt_tiers = receipt_tiers_by_tx.get(&tx_id).cloned().unwrap_or_default();
         Ok(TxRecord {
             tx_id,
@@ -6815,7 +6820,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
             global_epoch: row.get(3)?,
             conflict_mode: row.get(4)?,
             outcome: row.get(5)?,
-            auth_user: parse_tx_auth_user_for_sqlite(&row.get::<_, String>(9)?, 9)?,
+            auth_user: parse_tx_auth_user_for_sqlite(&metadata_json, 9)?,
             rejection_code: row.get(6)?,
             rejection_detail: row
                 .get::<_, Option<String>>(7)?
@@ -6824,6 +6829,7 @@ fn export_txs_by_ids(conn: &Connection, tx_ids: BTreeSet<&str>) -> Result<Vec<Tx
                 .flatten(),
             receipt_tiers,
             created_at: row.get(8)?,
+            server_ingested_at: parse_tx_server_ingested_at_for_sqlite(&metadata_json, 9)?,
         })
     })?;
     let mut tx_records = Vec::new();
@@ -6846,11 +6852,14 @@ fn parse_rejection_detail(detail_json: &str) -> Result<Option<JsonValue>> {
     }
 }
 
-fn tx_metadata_json(auth_user: Option<&str>) -> Result<String> {
-    let metadata = match auth_user {
-        Some(user) => json!({ "auth_user": user }),
-        None => json!({}),
-    };
+fn tx_metadata_json(auth_user: Option<&str>, server_ingested_at: Option<i64>) -> Result<String> {
+    let mut metadata = serde_json::Map::new();
+    if let Some(user) = auth_user {
+        metadata.insert("auth_user".to_owned(), json!(user));
+    }
+    if let Some(server_ingested_at) = server_ingested_at {
+        metadata.insert("server_ingested_at".to_owned(), json!(server_ingested_at));
+    }
     serde_json::to_string(&metadata).map_err(|err| crate::Error::new(err.to_string()))
 }
 
@@ -6869,6 +6878,22 @@ fn parse_tx_auth_user_for_sqlite(
         .get("auth_user")
         .and_then(JsonValue::as_str)
         .map(str::to_owned))
+}
+
+fn parse_tx_server_ingested_at_for_sqlite(
+    metadata_json: &str,
+    column: usize,
+) -> rusqlite::Result<Option<i64>> {
+    let metadata = serde_json::from_str::<JsonValue>(metadata_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
+    })?;
+    Ok(metadata
+        .get("server_ingested_at")
+        .and_then(JsonValue::as_i64))
 }
 
 fn parse_rejection_detail_for_sqlite(

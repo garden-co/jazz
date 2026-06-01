@@ -177,6 +177,20 @@ impl DownstreamConnectionManager {
         Ok(batch.into_client_messages())
     }
 
+    pub fn flush(&mut self, runtime: &mut Runtime) -> Result<Vec<ClientMessage>> {
+        if self.session.is_closed() {
+            return Err(Error::new("session is closed"));
+        }
+        if !self.is_ready() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = DownstreamMessageBatch::empty();
+        self.flush_pending_subscriptions(&mut batch)?;
+        self.flush_uploads(runtime, &mut batch)?;
+        Ok(batch.into_client_messages())
+    }
+
     pub fn receive(
         &mut self,
         runtime: &mut Runtime,
@@ -206,8 +220,7 @@ impl DownstreamConnectionManager {
             )));
         }
         if self.is_ready() {
-            self.flush_pending_subscriptions(&mut batch)?;
-            self.flush_uploads(runtime, &mut batch)?;
+            batch.extend_client_messages(self.flush(runtime)?);
         }
         Ok(batch.into_client_messages())
     }
@@ -422,6 +435,10 @@ impl DownstreamMessageBatch {
 
     pub fn into_client_messages(self) -> Vec<ClientMessage> {
         self.client_messages
+    }
+
+    fn extend_client_messages(&mut self, messages: Vec<ClientMessage>) {
+        self.client_messages.extend(messages);
     }
 }
 

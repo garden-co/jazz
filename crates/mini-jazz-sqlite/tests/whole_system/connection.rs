@@ -942,10 +942,9 @@ fn connection_upstream_requires_auth_for_upload_tx_after_handshake() {
     assert!(matches!(
         drain_server_messages(&mut downstream_conn).as_slice(),
         [
-            ServerMessage::UploadAck { tx_id },
             ServerMessage::Error(error),
             ServerMessage::Close(CloseReason::ProtocolError)
-        ] if tx_id == "tx-1" && error.code == "auth_required"
+        ] if error.code == "auth_required"
     ));
 }
 
@@ -1862,6 +1861,43 @@ fn connection_manager_flushes_uploads_after_handshake() {
 }
 
 #[test]
+fn connection_manager_flushes_new_local_upload_on_quiet_connection() {
+    let harness = Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        tab.local_schema_fingerprint(),
+        tab.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    assert!(downstream
+        .receive(&mut tab, server_messages)
+        .unwrap()
+        .is_empty());
+
+    let tx_id = tab
+        .create_project("project-quiet-upload", "Quiet upload")
+        .unwrap();
+    let client_messages = downstream.flush(&mut tab).unwrap();
+
+    assert!(client_messages.iter().any(|message| {
+        matches!(message, ClientMessage::UploadTx { tx, .. } if tx.tx_id == tx_id)
+    }));
+}
+
+#[test]
 fn upstream_upload_tx_gets_ack_and_edge_status() {
     let harness = Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();
@@ -1916,6 +1952,14 @@ fn upstream_upload_tx_gets_ack_and_edge_status() {
         .unwrap()
         .iter()
         .any(|upload| upload.tx.tx_id == tx_id));
+    let uploaded_tx = worker
+        .export_table_history("todos")
+        .unwrap()
+        .txs
+        .into_iter()
+        .find(|tx| tx.tx_id == tx_id)
+        .unwrap();
+    assert!(uploaded_tx.server_ingested_at.is_some());
 }
 
 #[test]

@@ -393,6 +393,38 @@ fn upload_queue_completes_when_global_receipt_arrives_in_bundle() {
 }
 
 #[test]
+fn upload_queue_completes_when_rejection_arrives_in_bundle() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+    alice
+        .create_project("project-1", "Bundle rejection")
+        .unwrap();
+    let tx_id = alice
+        .create_todo(
+            "todo-bundle-rejected",
+            "Rejected from bundle",
+            false,
+            "project-1",
+        )
+        .unwrap();
+    let mut bundle = alice.export_table_history("todos").unwrap();
+    let tx = bundle.txs.iter_mut().find(|tx| tx.tx_id == tx_id).unwrap();
+    tx.outcome = 3;
+    tx.rejection_code = Some("server_rejected".to_owned());
+
+    alice.apply_bundle(&bundle).unwrap();
+
+    assert!(!alice
+        .active_uploads_for_test(10)
+        .unwrap()
+        .iter()
+        .any(|upload| upload.tx.tx_id == tx_id));
+    assert_eq!(
+        alice.transaction_info(&tx_id).unwrap().rejection_code,
+        Some("server_rejected".to_owned())
+    );
+}
+
+#[test]
 fn rejecting_multi_row_transaction_hides_all_written_rows_but_keeps_history() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
 

@@ -535,9 +535,6 @@ impl UpstreamSession {
                         );
                         continue;
                     }
-                    conn.send_server_message(ServerMessage::UploadAck {
-                        tx_id: tx.tx_id.clone(),
-                    });
                     let Some(connection_auth_user) = self.connection_auth_user.as_deref() else {
                         self.close_with_error(
                             conn,
@@ -546,6 +543,9 @@ impl UpstreamSession {
                         );
                         continue;
                     };
+                    conn.send_server_message(ServerMessage::UploadAck {
+                        tx_id: tx.tx_id.clone(),
+                    });
                     let peer_node_id = self
                         .peer_hello
                         .as_ref()

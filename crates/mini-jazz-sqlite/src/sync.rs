@@ -114,6 +114,8 @@ pub struct TxRecord {
     pub rejection_detail: Option<JsonValue>,
     pub receipt_tiers: Vec<i64>,
     pub created_at: i64,
+    #[serde(default)]
+    pub server_ingested_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
