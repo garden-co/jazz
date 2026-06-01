@@ -381,8 +381,24 @@ impl UpstreamConnectionManager {
         policy_fingerprint: impl Into<String>,
         connection_auth_user: impl Into<String>,
     ) -> Self {
+        Self::new_authenticated(
+            session_id,
+            node_id,
+            schema_fingerprint,
+            policy_fingerprint,
+            connection_auth_user,
+        )
+    }
+
+    pub fn new_authenticated(
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+        schema_fingerprint: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        connection_auth_user: impl Into<String>,
+    ) -> Self {
         Self {
-            session: UpstreamSession::new_authenticated_for_test(
+            session: UpstreamSession::new_authenticated(
                 session_id,
                 node_id,
                 schema_fingerprint,
@@ -399,6 +415,16 @@ impl UpstreamConnectionManager {
     ) -> Result<Vec<ServerMessage>> {
         let mut batch = UpstreamMessageBatch::new(client_messages);
         self.session.pump(runtime, &mut batch)?;
+        Ok(batch.into_server_messages())
+    }
+
+    pub fn refresh_active_subscriptions(
+        &mut self,
+        runtime: &Runtime,
+    ) -> Result<Vec<ServerMessage>> {
+        let mut batch = UpstreamMessageBatch::new(Vec::new());
+        self.session
+            .refresh_active_subscriptions(runtime, &mut batch)?;
         Ok(batch.into_server_messages())
     }
 

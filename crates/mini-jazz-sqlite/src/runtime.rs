@@ -1269,7 +1269,6 @@ impl Runtime {
         connection_node_id: &str,
         connection_auth_user: &str,
     ) -> Result<Option<TxStatusKind>> {
-        upload_tx_local_epoch(connection_node_id, &upload_tx.tx_id)?;
         if tx::tx_num(&self.conn, &upload_tx.tx_id).is_ok() {
             return self.upload_tx_status(&upload_tx.tx_id);
         }
@@ -1355,7 +1354,7 @@ impl Runtime {
         txs.push(TxRecord {
             tx_id: upload_tx.tx_id.clone(),
             node_id: connection_node_id.to_owned(),
-            local_epoch: upload_tx_local_epoch(connection_node_id, &upload_tx.tx_id)?,
+            local_epoch: next_uploaded_tx_local_epoch(&self.conn, connection_node_id)?,
             global_epoch: None,
             conflict_mode: tx_conflict_mode_to_storage(&upload_tx.conflict_mode),
             outcome: tx::OUTCOME_PENDING,
@@ -2433,6 +2432,14 @@ impl Runtime {
     }
 
     pub fn apply_tx_status_for_test(
+        &mut self,
+        tx_id: &str,
+        status: crate::protocol::TxStatusKind,
+    ) -> Result<()> {
+        self.apply_tx_status(tx_id, status)
+    }
+
+    pub fn apply_tx_status_from_server(
         &mut self,
         tx_id: &str,
         status: crate::protocol::TxStatusKind,
@@ -6065,22 +6072,15 @@ fn validate_exclusive_upload_reads(data: &[ClientDataRecord], reads: &[ReadRecor
     Ok(())
 }
 
-fn upload_tx_local_epoch(node_id: &str, tx_id: &str) -> Result<i64> {
-    let prefix = format!("tx-{node_id}-");
-    let epoch_text = tx_id.strip_prefix(&prefix).ok_or_else(|| {
-        crate::Error::new(format!(
-            "upload transaction id {tx_id} does not belong to node {node_id}"
-        ))
-    })?;
-    let epoch = epoch_text
-        .parse::<i64>()
-        .map_err(|_| crate::Error::new(format!("invalid upload transaction id {tx_id}")))?;
-    if epoch <= 0 {
-        return Err(crate::Error::new(format!(
-            "invalid upload transaction id {tx_id}"
-        )));
-    }
-    Ok(epoch)
+fn next_uploaded_tx_local_epoch(conn: &Connection, node_id: &str) -> Result<i64> {
+    let node_num = tx::ensure_node(conn, node_id)?;
+    Ok(conn
+        .query_row(
+            "SELECT COALESCE(MAX(local_epoch), 0) + 1 FROM jazz_tx WHERE node_num = ?",
+            params![node_num],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(1))
 }
 
 pub struct TransactionBuilder<'a> {

@@ -42,7 +42,7 @@ pub(crate) fn create_tx(
 pub(crate) fn create_tx_with_options(
     conn: &Connection,
     node_num: i64,
-    node_id: &str,
+    _node_id: &str,
     now: i64,
     conflict_mode: i64,
     outcome: i64,
@@ -55,7 +55,7 @@ pub(crate) fn create_tx_with_options(
             |row| row.get::<_, i64>(0),
         )
         .unwrap_or(1);
-    let tx_id = format!("tx-{node_id}-{next_epoch}");
+    let tx_id = uuid::Uuid::now_v7().to_string();
     conn.execute(
         "INSERT INTO jazz_tx
           (tx_id, node_num, local_epoch, global_epoch, kind, conflict_mode, outcome, created_at, metadata_json)

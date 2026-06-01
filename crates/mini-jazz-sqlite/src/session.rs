@@ -391,6 +391,22 @@ impl UpstreamSession {
         policy_fingerprint: impl Into<String>,
         connection_auth_user: impl Into<String>,
     ) -> Self {
+        Self::new_authenticated(
+            session_id,
+            node_id,
+            schema_fingerprint,
+            policy_fingerprint,
+            connection_auth_user,
+        )
+    }
+
+    pub fn new_authenticated(
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+        schema_fingerprint: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        connection_auth_user: impl Into<String>,
+    ) -> Self {
         let mut session = Self::new(session_id, node_id, schema_fingerprint, policy_fingerprint);
         session.connection_auth_user = Some(connection_auth_user.into());
         session
@@ -607,6 +623,34 @@ impl UpstreamSession {
         subscription_id: &SubscriptionId,
     ) -> Option<ReplayCursor> {
         self.last_acknowledged.get(subscription_id).copied()
+    }
+
+    pub fn refresh_active_subscriptions(
+        &mut self,
+        runtime: &Runtime,
+        conn: &mut impl UpstreamEndpoint,
+    ) -> Result<()> {
+        ensure_open(self.closed)?;
+        if self.peer_hello.is_none() {
+            return Err(Error::new("handshake is not established"));
+        }
+
+        let subscriptions = self
+            .active_subscriptions
+            .iter()
+            .map(|(subscription_id, subscription)| {
+                (
+                    subscription_id.clone(),
+                    subscription.query.clone(),
+                    subscription.requested_tier,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (subscription_id, query, requested_tier) in subscriptions {
+            self.send_subscription_data(runtime, conn, subscription_id, query, requested_tier)?;
+        }
+        Ok(())
     }
 
     pub fn has_active_subscription(&self, subscription_id: &SubscriptionId) -> bool {

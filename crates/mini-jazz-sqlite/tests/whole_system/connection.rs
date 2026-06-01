@@ -1955,6 +1955,71 @@ fn upstream_upload_tx_gets_ack_and_edge_status() {
 }
 
 #[test]
+fn upstream_upload_tx_accepts_opaque_tx_id() {
+    let harness = Harness::new();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    let tx_id = "018f56e2-6e2b-7d4d-9f66-4a59421e8a8f".to_owned();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new_authenticated_for_test(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+        "alice",
+    );
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    downstream.receive(&mut worker, server_messages).unwrap();
+
+    let server_messages = upstream
+        .receive(
+            &mut worker,
+            vec![ClientMessage::UploadTx {
+                tx: ClientTx {
+                    tx_id: tx_id.clone(),
+                    branch_id: None,
+                    conflict_mode: TxConflictMode::Mergeable,
+                    created_at: 1,
+                    author: Some("alice".to_owned()),
+                },
+                data: vec![ClientDataRecord {
+                    table: "projects".to_owned(),
+                    row_id: "project-opaque-upload".to_owned(),
+                    op: DataOp::Insert,
+                    values: BTreeMap::from([("title".to_owned(), json!("Opaque upload"))]),
+                }],
+                reads: Vec::new(),
+            }],
+        )
+        .unwrap();
+
+    assert!(server_messages.iter().any(|message| {
+        matches!(message, ServerMessage::UploadAck { tx_id: acked } if acked == &tx_id)
+    }));
+    assert!(server_messages.iter().any(|message| {
+        matches!(
+            message,
+            ServerMessage::TxStatus {
+                tx_id: status_tx_id,
+                status: TxStatusKind::EdgeAccepted
+            } if status_tx_id == &tx_id
+        )
+    }));
+    assert_eq!(
+        row_ids(worker.read_rows("projects").unwrap()),
+        vec!["project-opaque-upload"]
+    );
+}
+
+#[test]
 fn upstream_upload_update_waits_when_row_is_missing_then_applies_after_sync() {
     let harness = Harness::new();
     let mut authority = harness.memory("authority", "alice").unwrap();
@@ -2135,12 +2200,13 @@ fn upstream_upload_delete_waits_when_row_is_missing_then_applies_after_sync() {
 }
 
 #[test]
-fn upstream_upload_tx_rejects_existing_tx_id_from_another_node() {
+fn upstream_upload_tx_dedupes_existing_tx_id_without_rewrite() {
     let harness = Harness::new();
     let mut worker = harness.memory("alice-worker", "alice").unwrap();
     let existing_tx = worker
         .create_project("project-existing", "Already here")
         .unwrap();
+    worker.accept_transaction_at_edge(&existing_tx).unwrap();
     let mut downstream = DownstreamConnectionManager::new(
         "tab-session",
         "alice-tab",
@@ -2190,10 +2256,14 @@ fn upstream_upload_tx_rejects_existing_tx_id_from_another_node() {
             message,
             ServerMessage::TxStatus {
                 tx_id,
-                status: TxStatusKind::Rejected { code, .. }
-            } if tx_id == &existing_tx && code == "upload_rejected"
+                status: TxStatusKind::EdgeAccepted
+            } if tx_id == &existing_tx
         )
     }));
+    assert_eq!(
+        row_ids(worker.read_rows("projects").unwrap()),
+        vec!["project-existing"]
+    );
 }
 
 #[test]
@@ -2744,6 +2814,64 @@ fn connection_manager_replays_acked_incomplete_upload_after_reconnect() {
     let replay_messages = downstream.receive(&mut tab, server_messages).unwrap();
 
     assert_eq!(upload_tx_ids(&replay_messages), vec![tx_id]);
+}
+
+#[test]
+fn upstream_connection_manager_can_refresh_active_subscriptions() {
+    let harness = Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Refresh data").unwrap();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        tab.local_schema_fingerprint(),
+        tab.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    let query = open_todos_query();
+    let (subscription, subscribe_messages) = downstream
+        .subscribe(query.clone(), SettlementTier::Local)
+        .unwrap();
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    let client_messages = downstream.receive(&mut tab, server_messages).unwrap();
+    let server_messages = upstream
+        .receive(&mut worker, [client_messages, subscribe_messages].concat())
+        .unwrap();
+    downstream.receive(&mut tab, server_messages).unwrap();
+
+    worker
+        .create_todo(
+            "todo-refresh",
+            "Refresh active subscription",
+            false,
+            "project-1",
+        )
+        .unwrap();
+
+    let server_messages = upstream.refresh_active_subscriptions(&worker).unwrap();
+    let client_messages = downstream.receive(&mut tab, server_messages).unwrap();
+
+    assert!(client_messages.iter().any(|message| {
+        matches!(
+            message,
+            ClientMessage::Ack {
+                cursor: Some(_),
+                ..
+            }
+        )
+    }));
+    assert!(downstream.is_settled(&subscription, SettlementTier::Local));
+    assert_eq!(row_ids(tab.query(query).unwrap()), vec!["todo-refresh"]);
 }
 
 #[test]

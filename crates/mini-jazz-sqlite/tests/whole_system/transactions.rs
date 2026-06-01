@@ -43,6 +43,19 @@ fn explicit_transaction_seals_multiple_mutations_atomically() {
 }
 
 #[test]
+fn committed_transaction_uses_opaque_uuid_tx_id() {
+    let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+
+    let tx_id = alice
+        .create_project("project-opaque-tx-id", "Opaque tx id")
+        .unwrap();
+
+    assert_eq!(tx_id.len(), 36);
+    assert_eq!(tx_id.chars().filter(|ch| *ch == '-').count(), 4);
+    assert!(!tx_id.starts_with("tx-alice-node-"));
+}
+
+#[test]
 fn committed_transaction_enters_upload_queue_with_delta_payload() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     alice.create_project("project-1", "Upload plan").unwrap();
@@ -579,7 +592,7 @@ fn generic_update_records_previous_row_read_set() {
     let mut alice =
         Runtime::open_with_schema(Storage::Memory, "alice-node", "alice", schema).unwrap();
 
-    alice
+    let original_tx = alice
         .insert_row(
             "notes",
             "note-1",
@@ -606,11 +619,7 @@ fn generic_update_records_previous_row_read_set() {
     );
     assert_eq!(
         alice.transaction_observed_read_rows(&tx).unwrap(),
-        vec![(
-            "notes".to_owned(),
-            "note-1".to_owned(),
-            Some("tx-alice-node-1".to_owned())
-        )]
+        vec![("notes".to_owned(), "note-1".to_owned(), Some(original_tx))]
     );
 }
 

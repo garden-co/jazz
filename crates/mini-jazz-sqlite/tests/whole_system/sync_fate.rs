@@ -1157,8 +1157,9 @@ fn same_user_on_two_nodes_preserves_authorship_and_distinct_node_epochs() {
         )
         .unwrap();
 
-    assert_eq!(phone_tx, "tx-alice-phone-1");
-    assert_eq!(laptop_tx, "tx-alice-laptop-1");
+    assert_ne!(phone_tx, laptop_tx);
+    assert_eq!(phone_tx.len(), 36);
+    assert_eq!(laptop_tx.len(), 36);
 
     peer.apply_bundle(&alice_phone.export_table_history("notes").unwrap())
         .unwrap();
