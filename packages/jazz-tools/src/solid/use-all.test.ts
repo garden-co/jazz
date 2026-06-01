@@ -94,7 +94,7 @@ describe("solid/useAll", () => {
       expect(mocks.makeQueryKey).not.toHaveBeenCalled();
       expect(mocks.subscribe).not.toHaveBeenCalled();
       expect(result.data).toBeUndefined();
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBeNull();
     } finally {
       dispose?.();
@@ -119,7 +119,7 @@ describe("solid/useAll", () => {
       await flushMicrotasks();
 
       expect(result.data).toBeUndefined();
-      expect(result.loading).toBe(true);
+      expect(result.isLoading).toBe(true);
       expect(result.error).toBeNull();
     } finally {
       dispose?.();
@@ -144,7 +144,7 @@ describe("solid/useAll", () => {
       await flushMicrotasks();
 
       expect(result.data).toBeUndefined();
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBeInstanceOf(Error);
       expect(result.error?.message).toBe("boom");
     } finally {
@@ -171,7 +171,7 @@ describe("solid/useAll", () => {
       await flushMicrotasks();
 
       expect(result.data).toEqual([alice]);
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBeNull();
     } finally {
       dispose?.();
@@ -252,7 +252,7 @@ describe("solid/useAll", () => {
       expect(result.data).toHaveLength(1);
       expect(result.data![0]).toBe(originalRef);
       expect(result.data![0]?.role).toBe("editor");
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBeNull();
     } finally {
       dispose?.();
@@ -287,7 +287,7 @@ describe("solid/useAll", () => {
       capturedOnError!("boom");
 
       expect(result.data).toBeUndefined();
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBeInstanceOf(Error);
       expect(result.error?.message).toBe("boom");
     } finally {
@@ -313,7 +313,7 @@ describe("solid/useAll", () => {
       await flushMicrotasks();
 
       expect(result.data).toBeUndefined();
-      expect(result.loading).toBe(false);
+      expect(result.isLoading).toBe(false);
       expect(result.error).toBe(syncFailure);
     } finally {
       dispose?.();

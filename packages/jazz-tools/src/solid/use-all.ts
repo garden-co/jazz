@@ -7,7 +7,7 @@ import { useJazzClient } from "./provider.js";
 
 export type UseAllResult<T extends { id: string }> = {
   data: T[] | undefined;
-  loading: boolean;
+  isLoading: boolean;
   error: Error | null;
 };
 
@@ -20,7 +20,7 @@ export function useAll<T extends { id: string }>(
   const client = useJazzClient();
   const [state, setState] = createStore<UseAllResult<T>>({
     data: undefined,
-    loading: false,
+    isLoading: false,
     error: null,
   });
 
@@ -29,7 +29,7 @@ export function useAll<T extends { id: string }>(
     if (!query) {
       setState({
         data: undefined,
-        loading: false,
+        isLoading: false,
         error: null,
       });
       return;
@@ -41,7 +41,7 @@ export function useAll<T extends { id: string }>(
 
       setState({
         data: entry.state.data,
-        loading: entry.state.status === "pending",
+        isLoading: entry.state.status === "pending",
         error: entry.state.error ? normalizeError(entry.state.error) : null,
       });
 
@@ -49,13 +49,13 @@ export function useAll<T extends { id: string }>(
         onError: (error: unknown) =>
           setState({
             data: undefined,
-            loading: false,
+            isLoading: false,
             error: normalizeError(error),
           }),
         onfulfilled: (nextData) =>
           setState({
             data: nextData,
-            loading: false,
+            isLoading: false,
             error: null,
           }),
         onDelta: (delta: SubscriptionDelta<T>) =>
@@ -71,7 +71,7 @@ export function useAll<T extends { id: string }>(
             } else {
               setState("data", reconcile(delta.all));
             }
-            setState("loading", false);
+            setState("isLoading", false);
             setState("error", null);
           }),
       });
@@ -80,7 +80,7 @@ export function useAll<T extends { id: string }>(
     } catch (error) {
       setState({
         data: undefined,
-        loading: false,
+        isLoading: false,
         error: normalizeError(error),
       });
     }
