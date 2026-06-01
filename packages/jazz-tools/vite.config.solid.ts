@@ -6,7 +6,7 @@ const solidRoot = path.resolve(__dirname, "src/solid");
 const entryFile = path.resolve(solidRoot, "index.ts");
 
 function shouldExternalizeModule(moduleId: string, parentModuleId: string | undefined): boolean {
-  if (moduleId === "solid-js" || moduleId === "solid-js/web") {
+  if (moduleId === "solid-js" || moduleId.startsWith("solid-js/")) {
     return true;
   }
   if (!parentModuleId) {
