@@ -681,4 +681,30 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it("SO-U22b setSession is invariant under session property order", async () => {
+    const session: Session = {
+      user_id: "alice",
+      claims: { role: "reader", org: "acme" },
+      authMode: "external",
+    };
+    const harness = createUnitHarness("orchestrator-unit-session-order", session);
+
+    try {
+      harness.makeEntry();
+      expect(harness.calls).toHaveLength(1);
+
+      // Same session, with top-level and nested keys in a different order.
+      harness.manager.setSession({
+        authMode: "external",
+        claims: { org: "acme", role: "reader" },
+        user_id: "alice",
+      });
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
 });
