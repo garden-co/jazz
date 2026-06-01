@@ -34,10 +34,6 @@ env:
   # The scaffolded starter pins its own pnpm via `packageManager`; without
   # this, Corepack prompts on first download and the non-TTY CI run aborts.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-  # actions/upload-artifact and friends still ship a Node 20 entrypoint;
-  # GitHub started warning about that. Force the runner to execute JS actions
-  # under Node 24 so the warning goes away without bumping every action SHA.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   prepare:
@@ -97,7 +93,7 @@ jobs:
         run: pnpm exec playwright install chromium --with-deps
 
       - name: Upload prebuilt artifacts
-        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: starters-e2e-build-state
           # Tarballs feed `--tarball-dir`. jazz-tools/dist and jazz-napi's JS +
@@ -144,7 +140,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Restore prebuilt artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: starters-e2e-build-state
           path: .
@@ -178,7 +174,7 @@ jobs:
 
       - name: Upload Playwright traces on failure
         if: failure() && steps.filter.outputs.skip != '1'
-        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-traces-${{ matrix.starter }}
           path: /tmp/cje2e-${{ matrix.starter }}-*/test-app/test-results/**
