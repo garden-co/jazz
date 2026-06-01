@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && svelte-check --tsconfig ./tsconfig.json && vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && pnpm run check && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
