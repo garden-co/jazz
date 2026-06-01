@@ -62,5 +62,6 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 
 export type Profile = s.RowOf<typeof app.profiles>;
+export type Chat = s.RowOf<typeof app.chats>;
 export type Message = s.RowOf<typeof app.messages>;
 export type Attachment = s.RowOf<typeof app.attachments>;

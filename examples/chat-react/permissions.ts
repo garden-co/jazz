@@ -1,21 +1,27 @@
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./schema.js";
+import { definePermissions, RowContext } from "jazz-tools/permissions";
+import { app, Chat } from "./schema.js";
 
-export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) => {
+export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedTo }) => {
   policy.profiles.allowRead.where({});
   policy.profiles.allowInsert.where({ userId: session.user_id });
   policy.profiles.allowUpdate.where({ userId: session.user_id });
 
+  const userIsChatMember = (chat: RowContext<Chat>) =>
+    policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id });
   policy.chats.allowRead.where((chat) =>
-    anyOf([
-      { isPublic: true },
-      policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
-      { joinCode: session["claims.join_code"] },
-    ]),
+    anyOf([{ isPublic: true }, userIsChatMember(chat), { joinCode: session["claims.join_code"] }]),
   );
   policy.chats.allowInsert.where({ createdBy: session.user_id });
-  policy.chats.allowUpdate.where((chat) =>
-    policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
+  policy.chats.allowUpdate.whereOld(userIsChatMember).whereNew((chat) =>
+    allOf([
+      userIsChatMember(chat),
+      // Users may update only non-protected fields. `createdBy` and `isPublic` cannot be updated.
+      policy.chats.exists.where({
+        id: chat.id,
+        createdBy: chat.createdBy,
+        isPublic: chat.isPublic,
+      }),
+    ]),
   );
 
   policy.chatMembers.allowRead.where((member) =>
