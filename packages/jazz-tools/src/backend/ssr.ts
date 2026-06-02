@@ -34,7 +34,12 @@ export type SnapshotBuilderConfig = {
    * unwrapped automatically).
    */
   schema: WasmSchemaInput;
-  /** Identifier for the authenticated principal whose queries are being prefetched, or `null` for unauthenticated renders. */
+  /**
+   * Optional. The snapshot's principal is normally derived from the `Db` you
+   * prefetch with, so it can't drift from the data's scope. Pass this only to
+   * set it explicitly (e.g. for a minimal `Db` that doesn't expose its session);
+   * if it disagrees with the prefetched Db's principal, `dehydrate()` throws.
+   */
   principalId?: string | null;
 };
 
@@ -51,6 +56,12 @@ export type PrefetchableDb = {
     options?: QueryOptions,
     session?: Session,
   ): () => void;
+  /**
+   * The principal this `Db` reads as. When present, the snapshot's `principalId`
+   * is derived from it so it can't drift from the data's scope. Optional so a
+   * minimal `Db` (e.g. a test double) still satisfies the type.
+   */
+  getAuthState?(): { session: Session | null };
 };
 
 export type SnapshotBuilder = {
@@ -67,6 +78,11 @@ export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBu
   const entries = new Map<string, SnapshotEntry>();
   const schemaFingerprint = computeSchemaFingerprint(resolveWasmSchema(config.schema));
 
+  // The snapshot's principal is derived from the Db each prefetch runs against,
+  // so it can't drift from the data's actual scope. Stays `undefined` until a Db
+  // that exposes its session is prefetched (minimal Dbs fall back to config).
+  let derivedPrincipalId: string | null | undefined;
+
   return {
     async prefetch<T extends { id: string }>(
       db: PrefetchableDb,
@@ -77,17 +93,64 @@ export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBu
       const result = await prefetchOnce<T>(db, query, options, session);
       const key = computeQueryKey(config.appId, query, options);
       entries.set(key, { key, result });
+
+      const principal = readPrefetchPrincipal(db, session);
+      if (principal !== undefined) {
+        if (derivedPrincipalId !== undefined && derivedPrincipalId !== principal) {
+          throw new Error(
+            `[jazz] this snapshot builder prefetched as more than one principal (${JSON.stringify(
+              derivedPrincipalId,
+            )} and ${JSON.stringify(principal)}); a snapshot must be scoped to a single principal.`,
+          );
+        }
+        derivedPrincipalId = principal;
+      }
+
       return result;
     },
     dehydrate(): DehydratedSnapshot {
       return {
         appId: config.appId,
-        principalId: config.principalId ?? null,
+        principalId: resolvePrincipalId(derivedPrincipalId, config.principalId),
         schemaFingerprint,
         entries: Array.from(entries.values()),
       };
     },
   };
+}
+
+/**
+ * The principal a prefetch ran as: the explicit `session` if one was passed,
+ * else the Db's own session. `undefined` when the Db can't be introspected.
+ */
+function readPrefetchPrincipal(db: PrefetchableDb, session?: Session): string | null | undefined {
+  if (session) {
+    return session.user_id ?? null;
+  }
+  if (typeof db.getAuthState !== "function") {
+    return undefined;
+  }
+  return db.getAuthState().session?.user_id ?? null;
+}
+
+function resolvePrincipalId(
+  derived: string | null | undefined,
+  configured: string | null | undefined,
+): string | null {
+  if (derived === undefined) {
+    // No introspectable Db was prefetched; fall back to the configured value.
+    return configured ?? null;
+  }
+  if (configured !== undefined && (configured ?? null) !== derived) {
+    throw new Error(
+      `[jazz] snapshot principalId ${JSON.stringify(
+        configured,
+      )} disagrees with the principal the prefetch ran as (${JSON.stringify(
+        derived,
+      )}). Omit principalId — it is derived from the Db you prefetch with.`,
+    );
+  }
+  return derived;
 }
 
 function prefetchOnce<T extends { id: string }>(
