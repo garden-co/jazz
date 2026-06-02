@@ -38,13 +38,22 @@ export function applySnapshot({
   }
 
   // A null principalId marks a public snapshot — prefetched without user
-  // scoping — so it seeds into any session. Only user-scoped (non-null)
-  // snapshots must match the live principal.
+  // scoping — so it seeds into any session. A user-scoped (non-null) snapshot
+  // may only seed into a session for the *same* principal. Seeding it into a
+  // *different* live principal would expose one user's rows to another, so that
+  // is a hard error, not a warning. When there is no live principal yet (the
+  // pre-session seed), we defer instead — the live client re-checks the
+  // principal once its session resolves.
   if (snapshot.principalId !== null && snapshot.principalId !== expected.principalId) {
-    warnDiscard(
-      "principalId",
-      `expected ${JSON.stringify(expected.principalId)} but envelope had ${JSON.stringify(snapshot.principalId)}`,
-    );
+    if (expected.principalId !== null) {
+      throw new Error(
+        `[jazz] refusing to seed SSR snapshot: it is scoped to principal ${JSON.stringify(
+          snapshot.principalId,
+        )} but the live session is ${JSON.stringify(
+          expected.principalId,
+        )} — seeding it would expose another principal's rows.`,
+      );
+    }
     return "principal-mismatch";
   }
 
