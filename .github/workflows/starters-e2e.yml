@@ -1,0 +1,182 @@
+name: Starters E2E
+
+# Runs the create-jazz-e2e harness against every starter, blocking the
+# changesets release PR if any starter fails to scaffold, install, build, or
+# pass its Playwright suite against the production build.
+#
+# Trigger: any push to the changesets-managed release branch
+# (`changeset-release/main`), plus manual dispatch for ad-hoc runs.
+#
+# Shape: the `prepare` job builds the workspace once and packs the three
+# workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
+# artifacts the harness needs (jazz-tools/dist, jazz-napi index + .node).
+# The `e2e` matrix then downloads those and runs the harness per starter,
+# skipping the ~10-minute `build:core` step entirely. Playwright browsers
+# and the pnpm store are cached between jobs so the matrix doesn't repeat
+# the 280 MB chromium download or the lockfile resolution per runner.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      starter:
+        description: "Single starter to run (omit for all twelve)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAZZ_SKIP_RN_DEPS: "1"
+  # The scaffolded starter pins its own pnpm via `packageManager`; without
+  # this, Corepack prompts on first download and the non-TTY CI run aborts.
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  prepare:
+    # On PR events, only fire on the changesets release PR. Manual dispatch is
+    # always allowed (handy for testing a starter in isolation).
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Rust prerequisites
+        run: pnpm run ensure:rust-toolchain
+
+      - name: Build core workspace
+        run: pnpm run build:core
+
+      - name: Pack workspace tarballs
+        # Mirrors PACKAGES_TO_PACK in run-starter.ts. The harness picks these up
+        # via `--tarball-dir` and pins them as `pnpm.overrides` in each
+        # scaffolded app, exactly the same as running `pnpm pack` in-process.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+          for pkg in jazz-tools jazz-napi jazz-wasm; do
+            dir="packages/$pkg"
+            if [ ! -d "$dir" ]; then dir="crates/$pkg"; fi
+            (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/_e2e-state/tarballs")
+          done
+          ls -la "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+
+      - name: Cache Playwright browsers
+        # Same key in the matrix below — prepare populates, matrix restores.
+        # The cache is per-OS; we don't key on lockfile because the harness
+        # installs Playwright from inside the scaffolded folder anyway, which
+        # pins its own version. The install command below is idempotent on a
+        # cache hit (Playwright skips re-downloading already-present browsers).
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Upload prebuilt artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: starters-e2e-build-state
+          # Tarballs feed `--tarball-dir`. jazz-tools/dist and jazz-napi's JS +
+          # native binary are needed at *harness* runtime (the harness imports
+          # `jazz-tools/dev`, which in turn requires jazz-napi).
+          path: |
+            _e2e-state/tarballs/**
+            packages/jazz-tools/dist/**
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+            crates/jazz-napi/*.node
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    needs: prepare
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        starter:
+          - next-betterauth
+          - next-localfirst
+          - next-hybrid
+          - sveltekit-betterauth
+          - sveltekit-localfirst
+          - sveltekit-hybrid
+          - react-betterauth
+          - react-localfirst
+          - react-hybrid
+          - ts-betterauth
+          - ts-localfirst
+          - ts-hybrid
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Restore prebuilt artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: starters-e2e-build-state
+          path: .
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        # On a cache hit this is effectively just the apt step (~30s); the
+        # browser binaries are restored from cache. --with-deps still runs each
+        # job because the system libs aren't part of the cache.
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Skip if starter doesn't match dispatch filter
+        id: filter
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.starter != '' && github.event.inputs.starter != matrix.starter
+        run: echo "skip=1" >> "$GITHUB_OUTPUT"
+
+      - name: Run create-jazz-e2e harness
+        if: steps.filter.outputs.skip != '1'
+        # `--tarball-dir` makes the harness reuse the prebuilt tarballs from
+        # `prepare` instead of running `pnpm pack` (which would need build:core
+        # to have run in this job). `--keep` retains the scaffolded project so
+        # the artifact-upload step below can grab Playwright traces on failure.
+        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose --keep
+
+      - name: Upload Playwright traces on failure
+        if: failure() && steps.filter.outputs.skip != '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: playwright-traces-${{ matrix.starter }}
+          path: /tmp/cje2e-${{ matrix.starter }}-*/test-app/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7
