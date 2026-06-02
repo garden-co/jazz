@@ -186,11 +186,12 @@ On the client, create the live client in the browser only — on the server the 
 
   let { data } = $props();
 
-  // No live client during SSR; the snapshot drives the server render. The
-  // browser creates the real client, which then takes over.
+  // No live client during SSR; the snapshot drives the server render (the
+  // provider's `client` prop is optional). In the browser the real client is
+  // created and takes over.
   const client = browser
     ? createJazzClient({ appId: PUBLIC_JAZZ_APP_ID, serverUrl: PUBLIC_JAZZ_SERVER_URL })
-    : new Promise<never>(() => {});
+    : undefined;
 </script>
 
 <JazzSvelteProvider {client} snapshot={data.snapshot} schema={app}>
@@ -228,12 +229,16 @@ The hardest part of server-rendering with a sync engine is "as whom does the ser
 
 The snapshot the client hydrates from is only as well-scoped as the `Db` the server prefetched against. Pick the one whose visibility matches what the client will see post-hydration, otherwise the hydrated render and the post-sync render disagree, which the user reads as a flicker.
 
+The snapshot's `principalId` is **derived from the `Db` you prefetch with** — a `forSession`/`forRequest` snapshot is stamped with that user, an `asBackend()` one is public (`null`). You don't set it by hand; passing a `principalId` to `createSnapshotBuilder` that disagrees with the prefetch `Db` makes `dehydrate()` throw.
+
 <Callout type="warn">
   Getting this wrong is a data-exposure bug, not just a flicker. If you prefetch with a `Db` that
   can see more than the viewing user — `asBackend()` for a per-user page, or a session scoped to the
   wrong principal — those rows are dehydrated into the envelope and shipped to the browser,
-  delivering data the user may have no right to read. Match the prefetch scope to the viewer, and
-  see [access control](/docs/recipes/access-control/user-owned-data) for per-user visibility.
+  delivering data the user may have no right to read. The envelope carries the **whole** prefetched
+  result set, not just the rows your components render — so scope the _query_, not just the markup.
+  Match the prefetch scope to the viewer, and see [access
+  control](/docs/recipes/access-control/user-owned-data) for per-user visibility.
 </Callout>
 
 ## The envelope
@@ -245,14 +250,14 @@ import type { DehydratedSnapshot } from "jazz-tools/backend";
 
 // DehydratedSnapshot = {
 //   appId: string;             // must match the client config's appId
-//   principalId: string | null; // who the prefetch ran as — server-side
-//                               // provenance; the client doesn't gate display on it
+//   principalId: string | null; // derived from the prefetch Db; the client
+//                               // doesn't gate display on it (see below)
 //   schemaFingerprint: string;  // must match the client's schema (when `schema` is set)
 //   entries: { key: string; result: unknown }[];
 // };
 ```
 
-`<JazzProvider>` validates the envelope. If `appId` or `schemaFingerprint` mismatch it **silently discards the snapshot (with a dev-mode console warning) and falls back to a normal fetch** — nothing breaks, the optimisation just doesn't kick in. The principal, though, is **not** a display gate: the client trusts the snapshot and renders its rows on the first paint, user-scoped or not. Keeping the snapshot matched to the viewer — prefetching with the right `Db`, and not caching or serving one principal's render to another — is the server's responsibility (the rendered HTML carries that data regardless of what the client does with the envelope). The one principal check the client _does_ make is a loud backstop: if it has a **confirmed** live principal that contradicts the snapshot's — a snapshot scoped to one user reaching a different logged-in client — it **throws** rather than silently swapping in another user's rows.
+`<JazzProvider>` validates the envelope. If `appId` or `schemaFingerprint` mismatch it **silently discards the snapshot (with a dev-mode console warning) and falls back to a normal fetch** — nothing breaks, the optimisation just doesn't kick in. The principal, though, is **not** a display gate: the client trusts the snapshot and renders its rows on the first paint, user-scoped or not. Keeping the snapshot matched to the viewer — prefetching with the right `Db`, and not caching or serving one principal's render to another — is the server's responsibility (the rendered HTML carries that data regardless of what the client does with the envelope). The one principal check the client _does_ make is a loud backstop: if it has a **confirmed** live principal that contradicts the snapshot's — a snapshot scoped to one user reaching a different logged-in client — it **throws once the live principal resolves**. Treat that as a misconfiguration alarm, not containment: the seeded rows have already painted by the time it fires, so the real defence for per-user pages is keeping the response private (see below), not the throw.
 
 Pass your `schema` prop too if you want the fingerprint check to run:
 

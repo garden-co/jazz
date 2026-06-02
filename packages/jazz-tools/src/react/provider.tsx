@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { DehydratedSnapshot } from "../backend/ssr.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import {
@@ -34,7 +34,7 @@ export type JazzProviderProps = {
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
   snapshot?: DehydratedSnapshot;
-  schema?: WasmSchema;
+  schema?: WasmSchemaInput;
 };
 
 export function JazzProvider({

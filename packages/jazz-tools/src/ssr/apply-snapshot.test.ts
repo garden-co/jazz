@@ -215,6 +215,7 @@ describe("applySnapshot", () => {
 
     expect(outcome).toBe("schema-mismatch");
     expect((manager as any).queryDefinitions.size).toBe(0);
+    expect(warn).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 

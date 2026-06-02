@@ -22,10 +22,10 @@ export type SeedExpected = {
  * prefetched rows on the first paint — on the server and the client — before
  * the live client connects.
  *
- * The seed runs with a `null` live principal: only public (null-principal)
- * snapshots seed synchronously. A user-scoped snapshot waits for the live
- * client, where the principal can be checked, so private rows are never seeded
- * into an unauthenticated server render.
+ * The seed runs with a `null` live principal, which under the trust-the-server
+ * model in {@link applySnapshot} seeds the snapshot's rows regardless of their
+ * principal — the client trusts what the server rendered. Keeping the snapshot
+ * scoped to the right viewer is the server's responsibility.
  */
 export function createSeedOrchestrator(
   snapshot: DehydratedSnapshot,
