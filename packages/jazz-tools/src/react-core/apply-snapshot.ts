@@ -37,7 +37,10 @@ export function applySnapshot({
     return "appId-mismatch";
   }
 
-  if (snapshot.principalId !== expected.principalId) {
+  // A null principalId marks a public snapshot — prefetched without user
+  // scoping — so it seeds into any session. Only user-scoped (non-null)
+  // snapshots must match the live principal.
+  if (snapshot.principalId !== null && snapshot.principalId !== expected.principalId) {
     warnDiscard(
       "principalId",
       `expected ${JSON.stringify(expected.principalId)} but envelope had ${JSON.stringify(snapshot.principalId)}`,

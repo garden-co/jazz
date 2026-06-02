@@ -134,7 +134,7 @@ The matching client-side `useAll(app.todos)` derives the same orchestrator key a
 
 The hardest part of server-rendering with a sync engine is "as whom does the server read?". Jazz exposes three options on `JazzContext`:
 
-- **`context.asBackend()`** — reads as the backend principal. Use for shared data with public-ish visibility (marketing pages, leaderboards). Writes are attributed to `jazz:system`.
+- **`context.asBackend()`** — reads as the backend principal, which can see everything. The snapshot it produces has a `null` `principalId` and seeds into **any** session, so only prefetch genuinely public data this way (marketing pages, leaderboards). Writes are attributed to `jazz:system`.
 - **`await context.forRequest(req)`** — reads as the authenticated user behind the request, taking bearer tokens straight from HTTP headers. Permission policies apply as if the user themselves were reading. Use for per-user app shells.
 - **`context.forSession(session)`** — same as `forRequest`, but for when you already hold a resolved `Session` (e.g. after running your own JWT middleware).
 
@@ -149,13 +149,14 @@ import type { DehydratedSnapshot } from "jazz-tools/backend";
 
 // DehydratedSnapshot = {
 //   appId: string;             // must match the client config's appId
-//   principalId: string | null; // must match the client's authenticated user
+//   principalId: string | null; // non-null must match the client's user;
+//                               // null = public snapshot, seeds any session
 //   schemaFingerprint: string;  // must match the client's schema (when `schema` is set)
 //   entries: { key: string; result: unknown }[];
 // };
 ```
 
-`<JazzProvider>` validates the envelope and **silently discards it (with a dev-mode console warning) if any of `appId`, `principalId`, or `schemaFingerprint` mismatch**. On discard the client falls back to a normal fetch — nothing breaks, the optimisation just doesn't kick in.
+`<JazzProvider>` validates the envelope and **silently discards it (with a dev-mode console warning) if `appId` or `schemaFingerprint` mismatch, or if a user-scoped (non-null `principalId`) snapshot doesn't match the live principal**. A `null` `principalId` marks a public snapshot that seeds into any session. On discard the client falls back to a normal fetch — nothing breaks, the optimisation just doesn't kick in.
 
 Pass your `schema` prop too if you want the fingerprint check to run:
 
