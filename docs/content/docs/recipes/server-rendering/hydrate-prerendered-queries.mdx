@@ -163,8 +163,8 @@ import { context, createServerSnapshot } from "$lib/jazz-server";
 import type { PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async (event) => {
-  // Public data: reads as the backend principal, so the snapshot seeds into
-  // any session. For per-user pages, scope the read to the request instead:
+  // Public data, read as the backend principal. For per-user pages, scope the
+  // read to the request instead — the rows still render in the SSR HTML:
   //   const db = await context.forRequest(event.request);
   const db = context.asBackend();
 
@@ -222,7 +222,7 @@ On the client, create the live client in the browser only — on the server the 
 
 The hardest part of server-rendering with a sync engine is "as whom does the server read?". Jazz exposes three options on `JazzContext`:
 
-- **`context.asBackend()`** — reads as the backend principal, which can see everything. The snapshot it produces has a `null` `principalId` and seeds into **any** session, so only prefetch genuinely public data this way (marketing pages, leaderboards). Writes are attributed to `jazz:system`.
+- **`context.asBackend()`** — reads as the backend principal, which can see everything, so only prefetch genuinely public data this way (marketing pages, leaderboards). Its snapshot carries a `null` `principalId` (no viewer scoping). Writes are attributed to `jazz:system`.
 - **`await context.forRequest(req)`** — reads as the authenticated user behind the request, taking bearer tokens straight from HTTP headers. [Permission policies](/docs/auth/permissions) apply as if the user themselves were reading. Use for per-user app shells.
 - **`context.forSession(session)`** — same as `forRequest`, but for when you already hold a resolved [`Session`](/docs/auth/sessions) (e.g. after running your own JWT middleware).
 
@@ -245,14 +245,14 @@ import type { DehydratedSnapshot } from "jazz-tools/backend";
 
 // DehydratedSnapshot = {
 //   appId: string;             // must match the client config's appId
-//   principalId: string | null; // non-null must match the client's user;
-//                               // null = public snapshot, seeds any session
+//   principalId: string | null; // who the prefetch ran as — server-side
+//                               // provenance; the client doesn't gate display on it
 //   schemaFingerprint: string;  // must match the client's schema (when `schema` is set)
 //   entries: { key: string; result: unknown }[];
 // };
 ```
 
-`<JazzProvider>` validates the envelope. If `appId` or `schemaFingerprint` mismatch it **silently discards the snapshot (with a dev-mode console warning) and falls back to a normal fetch** — nothing breaks, the optimisation just doesn't kick in. A `null` `principalId` marks a public snapshot that seeds into any session. A user-scoped (non-null `principalId`) snapshot only seeds into a session for the **same** principal; before a session resolves it simply waits. But a snapshot scoped to one principal arriving in a session for a **different** principal is a hard **error** — it throws rather than silently discarding, because seeding it would expose one user's rows to another.
+`<JazzProvider>` validates the envelope. If `appId` or `schemaFingerprint` mismatch it **silently discards the snapshot (with a dev-mode console warning) and falls back to a normal fetch** — nothing breaks, the optimisation just doesn't kick in. The principal, though, is **not** a display gate: the client trusts the snapshot and renders its rows on the first paint, user-scoped or not. Keeping the snapshot matched to the viewer — prefetching with the right `Db`, and not caching or serving one principal's render to another — is the server's responsibility (the rendered HTML carries that data regardless of what the client does with the envelope). The one principal check the client _does_ make is a loud backstop: if it has a **confirmed** live principal that contradicts the snapshot's — a snapshot scoped to one user reaching a different logged-in client — it **throws** rather than silently swapping in another user's rows.
 
 Pass your `schema` prop too if you want the fingerprint check to run:
 
