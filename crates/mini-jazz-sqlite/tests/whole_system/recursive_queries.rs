@@ -808,7 +808,7 @@ fn recursive_query_scope_sync_exports_deleted_descendant_tombstone() {
     assert!(delete_bundle
         .history
         .iter()
-        .any(|record| record.row_id == "child" && record.op == 3));
+        .any(|record| record.row_id == "child" && record.op == history_op::DELETE));
 
     peer.apply_bundle(&delete_bundle).unwrap();
     let ids = peer
@@ -880,11 +880,11 @@ fn recursive_query_scope_sync_exports_deleted_descendant_subtree_tombstones() {
     assert!(delete_bundle
         .history
         .iter()
-        .any(|record| record.row_id == "child" && record.op == 3));
+        .any(|record| record.row_id == "child" && record.op == history_op::DELETE));
     assert!(delete_bundle
         .history
         .iter()
-        .any(|record| record.row_id == "grandchild" && record.op == 3));
+        .any(|record| record.row_id == "grandchild" && record.op == history_op::DELETE));
 
     peer.apply_bundle(&delete_bundle).unwrap();
     let ids = peer
@@ -1240,7 +1240,7 @@ fn recursive_branch_query_export_includes_tombstone_for_deleted_base_descendant(
         .iter()
         .any(|record| record.branch_id == "draft"
             && record.row_id == "base-child"
-            && record.op == 3));
+            && record.op == history_op::DELETE));
 
     peer.apply_bundle(&bundle).unwrap();
     let ids = peer

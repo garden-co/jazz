@@ -2071,7 +2071,7 @@ fn evaluate_simple_recursive(
         }),
 
         PolicyExpr::Exists { table, condition } => {
-            let bound = match bind_outer_row_refs(condition, content, descriptor, None) {
+            let bound = match bind_outer_row_refs(condition, content, descriptor, row_id) {
                 Some(expr) => expr,
                 None => return SimpleEvalResult::fail(),
             };
@@ -2082,7 +2082,7 @@ fn evaluate_simple_recursive(
             })
         }
         PolicyExpr::ExistsRel { rel } => {
-            let bound = match bind_relation_refs(rel, content, descriptor, session, None) {
+            let bound = match bind_relation_refs(rel, content, descriptor, session, row_id) {
                 Some(expr) => expr,
                 None => return SimpleEvalResult::fail(),
             };
@@ -2317,6 +2317,39 @@ mod tests {
             "expected @session.__jazz_outer_row.id to resolve to Value::Uuid(row_id), got {:?}",
             bound
         );
+    }
+
+    #[test]
+    fn test_exists_outer_row_id_binds_to_row_object_id_when_evaluating_for_row() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
+        let content = encode_row(&descriptor, &[Value::Text("Members only".into())]).unwrap();
+        let row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(
+            0xdead_beef_cafe_0000_0000_0000_0000_0002,
+        ));
+        let session = Session::new("alice");
+
+        let expr = PolicyExpr::Exists {
+            table: "chat_members".into(),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "chat_id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.into(), "id".into()]),
+            }),
+        };
+
+        let result = evaluate_simple_parts_for_row(&expr, &content, &descriptor, &session, row_id);
+        assert!(result.passed);
+        let ComplexClause::Exists { condition, .. } = &result.complex_clauses[0] else {
+            panic!("expected EXISTS complex clause");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            PolicyExpr::Cmp {
+                column,
+                op: CmpOp::Eq,
+                value: PolicyValue::Literal(Value::Uuid(id)),
+            } if column == "chat_id" && *id == row_id
+        ));
     }
 
     #[test]

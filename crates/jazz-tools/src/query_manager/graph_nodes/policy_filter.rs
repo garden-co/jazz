@@ -12,7 +12,7 @@ use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, evaluate_expr_recursive, normalize_recursive_max_depth,
+    Operation, PolicyExpr, evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
@@ -420,12 +420,13 @@ impl PolicyFilterNode {
             PolicyExpr::Not(inner) => !self.evaluate_expr(inner, row, depth),
 
             // All other expressions delegate to shared evaluation
-            _ => evaluate_expr_recursive(
+            _ => evaluate_expr_recursive_with_row_id(
                 expr,
                 &row.data,
                 &row.provenance,
                 &self.descriptor,
                 &self.session,
+                Some(row.id),
                 depth,
             ),
         }
@@ -587,6 +588,7 @@ mod tests {
     use super::*;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::policy::{CmpOp, PolicyValue};
     use crate::query_manager::relation_ir::RelExpr;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, Value};
     use serde_json::json;
@@ -655,6 +657,44 @@ mod tests {
 
         let row = make_row("user1", "eng", "Doc 1");
         assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn test_policy_id_column_resolves_to_row_object_id() {
+        let row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(
+            0xdead_beef_cafe_0000_0000_0000_0000_0003,
+        ));
+        let session = Session::new("user1");
+        let node = PolicyFilterNode::new(
+            test_descriptor(),
+            PolicyExpr::Cmp {
+                column: "id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::Literal(Value::Uuid(row_id)),
+            },
+            session,
+            test_schema(),
+            "documents",
+        );
+
+        let desc = test_descriptor();
+        let data = encode_row(
+            &desc,
+            &[
+                Value::Text("user1".into()),
+                Value::Text("eng".into()),
+                Value::Text("Doc 1".into()),
+            ],
+        )
+        .unwrap();
+        let row = Row::new(
+            row_id,
+            data,
+            crate::row_histories::BatchId([0; 16]),
+            crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+        );
+
+        assert!(node.evaluate(&row));
     }
 
     #[test]

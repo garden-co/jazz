@@ -55,7 +55,7 @@
       }
 
       #app {
-        width: min(720px, calc(100vw - 32px));
+        width: min(760px, calc(100vw - 32px));
         margin: 48px auto;
       }
 
@@ -90,6 +90,29 @@
         line-height: 1;
       }
 
+      .scope-controls {
+        display: grid;
+        grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1fr) minmax(180px, 1.2fr);
+        gap: 12px;
+        align-items: end;
+        margin-top: 22px;
+      }
+
+      .field,
+      .controls label {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .field span,
+      .controls label span {
+        color: #596760;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
       .todo-form {
         display: grid;
         grid-template-columns: minmax(0, 1.3fr) minmax(180px, 0.7fr) auto;
@@ -98,8 +121,9 @@
       }
 
       .todo-form input,
-      .controls input,
-      .controls select {
+      .controls input:not([type="checkbox"]),
+      .controls select,
+      .field select {
         width: 100%;
         min-height: 2.5rem;
         border: 1px solid #b7c1ba;
@@ -109,20 +133,62 @@
         padding: 0 0.85rem;
       }
 
+      .field select {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .group-list {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        min-width: 0;
+        min-height: 2.5rem;
+        align-content: end;
+      }
+
+      .group-chip,
+      .todo-tags span {
+        border: 1px solid #c5cdbf;
+        border-radius: 999px;
+        background: #ffffff;
+        color: #24352f;
+        font-size: 0.86rem;
+        line-height: 1.8rem;
+        max-width: 100%;
+        overflow: hidden;
+        padding: 0 0.7rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .group-chip.muted {
+        color: #6b756f;
+      }
+
       .controls {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 142px 142px;
+        grid-template-columns: minmax(0, 1fr) 142px 142px auto;
         gap: 10px;
         margin-top: 12px;
       }
 
-      .controls label {
-        display: grid;
-        gap: 4px;
+      .table-stats-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 2.5rem;
         color: #596760;
-        font-size: 0.8rem;
+        font-size: 0.82rem;
         font-weight: 700;
         text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      .table-stats-toggle input {
+        width: 18px;
+        height: 18px;
+        accent-color: #687a40;
       }
 
       .label-filters {
@@ -134,16 +200,13 @@
       }
 
       .chip {
-        border-radius: 999px;
-        font-size: 0.82rem;
-        line-height: 1;
-      }
-
-      .chip {
         min-height: 2rem;
         border-color: #b7c1ba;
+        border-radius: 999px;
         background: #ffffff;
         color: #24352f;
+        font-size: 0.82rem;
+        line-height: 1;
         padding: 0 0.75rem;
       }
 
@@ -191,10 +254,48 @@
       }
 
       .todo-label span {
+        display: grid;
+        gap: 2px;
         overflow-wrap: anywhere;
       }
 
-      .todo-label input {
+      .todo-label strong {
+        font-weight: 700;
+      }
+
+      .todo-title {
+        cursor: text;
+      }
+
+      .todo-title-editor {
+        width: min(100%, 28rem);
+        min-height: 2rem;
+        border: 1px solid #90a096;
+        border-radius: 6px;
+        background: #ffffff;
+        color: #18211f;
+        padding: 0 0.6rem;
+      }
+
+      .todo-label small {
+        color: #687a40;
+        font-size: 0.82rem;
+      }
+
+      .todo-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 3px;
+      }
+
+      .todo-tags span {
+        font-size: 0.74rem;
+        line-height: 1.35rem;
+        padding: 0 0.55rem;
+      }
+
+      .todo-label input[type="checkbox"] {
         width: 18px;
         height: 18px;
         accent-color: #687a40;
@@ -226,6 +327,7 @@
         }
 
         .app-header,
+        .scope-controls,
         .todo-form,
         .controls,
         .todo-item {

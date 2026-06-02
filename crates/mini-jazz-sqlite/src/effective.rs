@@ -1,4 +1,5 @@
 use crate::schema::{current_table, history_table, quote_ident, storage_column, SchemaDef};
+use crate::sync::history_op;
 use crate::{branch, query, tx, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value as JsonValue;
@@ -85,13 +86,14 @@ fn snapshot_row_values(
         .iter()
         .map(|field| format!("h.{}", quote_ident(&storage_column(field))))
         .collect::<Vec<_>>();
+    let delete_op = history_op::DELETE;
     let sql = format!(
         "SELECT {}
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          WHERE h.row_num = ?
            AND h.j_branch_num = 1
-           AND h.op != 3
+           AND h.op != {delete_op}
            AND tx.outcome != ?
            AND tx.global_epoch IS NOT NULL
            AND tx.global_epoch <= ?

@@ -1,5 +1,5 @@
 use crate::rows::ensure_row_id;
-use crate::sync::Bundle;
+use crate::sync::{history_op, Bundle};
 use crate::time::now_ms;
 use crate::{branch, schema, tx, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -214,6 +214,7 @@ fn snapshot_visible_tx_num(
     row_num: i64,
     base_epoch: i64,
 ) -> Result<Option<i64>> {
+    let delete_op = history_op::DELETE;
     conn.query_row(
         &format!(
             "SELECT h.tx_num
@@ -221,7 +222,7 @@ fn snapshot_visible_tx_num(
              JOIN jazz_tx tx ON tx.tx_num = h.tx_num
              WHERE h.row_num = ?
                AND h.j_branch_num = 1
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?

@@ -1,4 +1,5 @@
 use crate::schema::{current_table, history_table, quote_ident, storage_column, SchemaDef};
+use crate::sync::history_op;
 use crate::{tx, Result};
 use rusqlite::{params, params_from_iter, Connection};
 
@@ -87,7 +88,7 @@ fn rebuild_table(
         let tx_num = integer_value(&values[1], "tx_num")?;
         let branch_num = integer_value(&values[2], "j_branch_num")?;
         let op = integer_value(&values[3], "op")?;
-        if op == 3 {
+        if op == history_op::DELETE {
             conn.execute(
                 &format!(
                     "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",

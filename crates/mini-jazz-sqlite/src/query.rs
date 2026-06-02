@@ -3,10 +3,12 @@ use crate::query_api::{
 };
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{public_row_id, row_num};
-use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
+use crate::schema::{FieldDef, FieldKind, Operation, PolicyDef, SchemaDef};
+use crate::sync::history_op;
 use crate::types::RowView;
-use crate::{branch, tx, users, Result};
+use crate::{branch, policy, tx, users, Result};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -26,6 +28,27 @@ struct LoweredCondition {
     params: Vec<SqlValue>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SqliteQueryDebug {
+    pub sql: String,
+    pub params: Vec<JsonValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SqliteQueryPlan {
+    pub sql: String,
+    pub params: Vec<JsonValue>,
+    pub plan: Vec<SqliteQueryPlanRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SqliteQueryPlanRow {
+    pub id: i64,
+    pub parent: i64,
+    pub notused: i64,
+    pub detail: String,
+}
+
 pub(crate) struct LoweredQueryRowScope {
     pub(crate) ctes: Vec<String>,
     pub(crate) select_sql: String,
@@ -37,6 +60,43 @@ impl LoweredQueryRowScope {
         let mut ctes = self.ctes.clone();
         ctes.push(format!("{scope_name}(row_num) AS ({})", self.select_sql));
         format!("WITH {}", ctes.join(",\n"))
+    }
+}
+
+struct LoweredBuiltQuery {
+    sql: String,
+    params: Vec<SqlValue>,
+    filter_effective_branch_policy: bool,
+    defer_window_until_effective_policy: bool,
+}
+
+impl LoweredBuiltQuery {
+    fn debug(&self) -> SqliteQueryDebug {
+        SqliteQueryDebug {
+            sql: self.sql.clone(),
+            params: self.params.iter().map(sqlite_param_to_json).collect(),
+        }
+    }
+
+    fn explain_query_plan(&self, conn: &Connection) -> Result<SqliteQueryPlan> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", self.sql))?;
+        let rows = stmt.query_map(params_from_iter(self.params.iter()), |row| {
+            Ok(SqliteQueryPlanRow {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                notused: row.get(2)?,
+                detail: row.get(3)?,
+            })
+        })?;
+        let plan = rows
+            .map(|row| row.map_err(crate::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(SqliteQueryPlan {
+            sql: self.sql.clone(),
+            params: self.params.iter().map(sqlite_param_to_json).collect(),
+            plan,
+        })
     }
 }
 
@@ -111,46 +171,11 @@ impl QueryContext<'_> {
 
     pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         let table = self.schema.table_def(&query.table)?;
-        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
-        let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
-        if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
-            return self.read_current_built_query(query, table);
-        }
-        let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
-        let order_sql = self.lower_query_order(table, &query.order_by)?;
-        let defer_window_until_effective_policy =
-            self.defer_query_window_until_effective_branch_policy(table, query, base_epoch);
-        let field_columns = table
-            .fields
-            .iter()
-            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
-            .collect::<Vec<_>>();
-        let mut select_columns = vec!["j_query_row_id".to_owned(), "j_query_tx_id".to_owned()];
-        select_columns.extend(field_columns.iter().cloned());
-        select_columns.push("j_query_created_by".to_owned());
-        select_columns.push("j_query_created_at".to_owned());
-        let mut sql = format!(
-            "WITH candidates AS (
-               {candidates_sql}
-             ),
-             ranked AS (
-               SELECT *,
-                      MIN(j_query_branch_depth) OVER (PARTITION BY j_query_row_id) AS j_query_min_branch_depth
-               FROM candidates
-             )
-             SELECT {}
-             FROM ranked
-             WHERE j_query_branch_depth = j_query_min_branch_depth
-             ORDER BY {order_sql}",
-            select_columns.join(", "),
-        );
-        if !defer_window_until_effective_policy {
-            append_query_window_sql(&mut sql, &mut params, query.limit, query.offset)?;
-        }
+        let lowered = self.lower_built_query(query, table)?;
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&lowered.sql)?;
         let row_width = 2 + table.fields.len() + 2;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+        let rows = stmt.query_map(params_from_iter(lowered.params.iter()), |row| {
             (0..row_width)
                 .map(|idx| row.get::<_, SqlValue>(idx))
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -158,13 +183,24 @@ impl QueryContext<'_> {
         let mut rows = rows
             .map(|row| row_to_view(self.conn, &query.table, table, row?))
             .collect::<Result<Vec<_>>>()?;
-        if self.branch_num != 1 && base_epoch.is_some() {
+        if lowered.filter_effective_branch_policy {
             rows = self.filter_rows_by_effective_branch_policy(&query.table, rows)?;
         }
-        if defer_window_until_effective_policy {
+        if lowered.defer_window_until_effective_policy {
             rows = apply_query_window(rows, query.limit, query.offset);
         }
         Ok(rows)
+    }
+
+    pub(crate) fn debug_sql_for_built_query(&self, query: &BuiltQuery) -> Result<SqliteQueryDebug> {
+        let table = self.schema.table_def(&query.table)?;
+        Ok(self.lower_built_query(query, table)?.debug())
+    }
+
+    pub(crate) fn explain_built_query(&self, query: &BuiltQuery) -> Result<SqliteQueryPlan> {
+        let table = self.schema.table_def(&query.table)?;
+        self.lower_built_query(query, table)?
+            .explain_query_plan(self.conn)
     }
 
     pub(crate) fn repair_row_nums_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<i64>> {
@@ -315,6 +351,7 @@ impl QueryContext<'_> {
             self.visibility()
                 .snapshot_policy_sql(table, "h", base_epoch)?
         };
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT DISTINCT h.row_num
              FROM {} h
@@ -324,7 +361,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {condition_sql}
                AND {policy_sql}
                AND NOT EXISTS (
@@ -359,11 +396,24 @@ impl QueryContext<'_> {
             .map_err(Into::into)
     }
 
-    fn read_current_built_query(
+    fn lower_built_query(
         &self,
         query: &BuiltQuery,
         table: &crate::schema::TableDef,
-    ) -> Result<Vec<RowView>> {
+    ) -> Result<LoweredBuiltQuery> {
+        let scope_nums = branch::scope_nums(self.conn, self.branch_num)?;
+        let base_epoch = branch::base_global_epoch(self.conn, self.branch_num)?;
+        if self.branch_num == 1 && scope_nums == [self.branch_num] && base_epoch.is_none() {
+            return self.lower_current_built_query(query, table);
+        }
+        self.lower_branch_aware_built_query(query, table, base_epoch)
+    }
+
+    fn lower_current_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+    ) -> Result<LoweredBuiltQuery> {
         let (condition_sql, mut params) =
             self.lower_query_conditions(table, &query.conditions, "current", "ids")?;
         let order_sql = self.lower_source_query_order(table, &query.order_by, "current", "ids")?;
@@ -405,15 +455,58 @@ impl QueryContext<'_> {
         query_params.append(&mut params);
         append_query_window_sql(&mut sql, &mut query_params, query.limit, query.offset)?;
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let row_width = 2 + table.fields.len() + 2;
-        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
-            (0..row_width)
-                .map(|idx| row.get::<_, SqlValue>(idx))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })?;
-        rows.map(|row| row_to_view(self.conn, &query.table, table, row?))
-            .collect()
+        Ok(LoweredBuiltQuery {
+            sql,
+            params: query_params,
+            filter_effective_branch_policy: false,
+            defer_window_until_effective_policy: false,
+        })
+    }
+
+    fn lower_branch_aware_built_query(
+        &self,
+        query: &BuiltQuery,
+        table: &crate::schema::TableDef,
+        base_epoch: Option<i64>,
+    ) -> Result<LoweredBuiltQuery> {
+        let (candidates_sql, mut params) = self.lower_query_candidates(query, table)?;
+        let order_sql = self.lower_query_order(table, &query.order_by)?;
+        let defer_window_until_effective_policy =
+            self.defer_query_window_until_effective_branch_policy(table, query, base_epoch);
+        let field_columns = table
+            .fields
+            .iter()
+            .map(|field| crate::schema::quote_ident(&crate::schema::storage_column(field)))
+            .collect::<Vec<_>>();
+        let mut select_columns = vec!["j_query_row_id".to_owned(), "j_query_tx_id".to_owned()];
+        select_columns.extend(field_columns.iter().cloned());
+        select_columns.push("j_query_created_by".to_owned());
+        select_columns.push("j_query_created_at".to_owned());
+        let mut sql = format!(
+            "WITH candidates AS (
+               {candidates_sql}
+             ),
+             ranked AS (
+               SELECT *,
+                      MIN(j_query_branch_depth) OVER (PARTITION BY j_query_row_id) AS j_query_min_branch_depth
+               FROM candidates
+             )
+             SELECT {}
+             FROM ranked
+             WHERE j_query_branch_depth = j_query_min_branch_depth
+             ORDER BY {order_sql}",
+            select_columns.join(", "),
+        );
+        if !defer_window_until_effective_policy {
+            append_query_window_sql(&mut sql, &mut params, query.limit, query.offset)?;
+        }
+
+        Ok(LoweredBuiltQuery {
+            sql,
+            params,
+            filter_effective_branch_policy: self.branch_num != 1 && base_epoch.is_some(),
+            defer_window_until_effective_policy,
+        })
     }
 
     fn lower_query_candidates(
@@ -532,6 +625,7 @@ impl QueryContext<'_> {
         };
         let select_columns =
             query_candidate_select_columns(table, "h", "ids", "tx", &(i64::MAX / 4).to_string());
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT {}
              FROM {} h
@@ -541,7 +635,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {policy_sql}
                AND NOT EXISTS (
                  SELECT 1
@@ -1322,6 +1416,7 @@ impl QueryContext<'_> {
             self.visibility()
                 .snapshot_policy_sql(table, "h", base_epoch)?
         };
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "WITH
              overlay_rows AS (
@@ -1346,7 +1441,7 @@ impl QueryContext<'_> {
                  AND tx.outcome != ?
                  AND tx.global_epoch IS NOT NULL
                  AND tx.global_epoch <= ?
-                 AND h.op != 3
+                 AND h.op != {delete_op}
                  AND h.{predicate_column} = ?
                  AND NOT EXISTS (
                    SELECT 1
@@ -1896,7 +1991,12 @@ impl QueryContext<'_> {
             return Ok(rows);
         }
         let table = self.schema.table_def(table_name)?;
-        let PolicyDef::RefReadable { field } = &table.read_policy else {
+        let PolicyDef::Inherits {
+            operation: Operation::Select,
+            via_column: field,
+            ..
+        } = &table.read_policy
+        else {
             return Ok(rows);
         };
         let field = table
@@ -1936,7 +2036,7 @@ impl QueryContext<'_> {
             && self.branch_num != 1
             && base_epoch.is_some()
             && (query.limit.is_some() || query.offset.is_some())
-            && matches!(table.read_policy, PolicyDef::RefReadable { .. })
+            && matches!(table.read_policy, PolicyDef::Inherits { .. })
     }
 
     fn row_view_visible_in_branch(
@@ -1950,9 +2050,56 @@ impl QueryContext<'_> {
         }
         let table = self.schema.table_def(table_name)?;
         match &table.read_policy {
-            PolicyDef::AllowAll => Ok(true),
-            PolicyDef::CreatedByUser => Ok(row.created_by == self.user),
-            PolicyDef::RefReadable { field } => {
+            PolicyDef::True => Ok(true),
+            PolicyDef::False => Ok(false),
+            PolicyDef::Cmp { .. }
+            | PolicyDef::SessionCmp { .. }
+            | PolicyDef::IsNull { .. }
+            | PolicyDef::SessionIsNull { .. }
+            | PolicyDef::IsNotNull { .. }
+            | PolicyDef::SessionIsNotNull { .. }
+            | PolicyDef::Contains { .. }
+            | PolicyDef::SessionContains { .. }
+            | PolicyDef::In { .. }
+            | PolicyDef::InList { .. }
+            | PolicyDef::SessionInList { .. }
+            | PolicyDef::Exists { .. }
+            | PolicyDef::ExistsRel { .. }
+            | PolicyDef::InheritsReferencing { .. }
+            | PolicyDef::And(_)
+            | PolicyDef::Or(_)
+            | PolicyDef::Not(_) => {
+                let row_num = row_num(self.conn, &row.id)?;
+                let policy_sql = policy::branch_read_policy_sql_for_alias(
+                    self.schema,
+                    table,
+                    "current",
+                    self.user,
+                    branch_num,
+                )?;
+                let count: i64 = self.conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*)
+                         FROM {} current
+                         JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                         WHERE current.row_num = ?
+                           AND current.j_branch_num = ?
+                           AND current.is_deleted = 0
+                           AND tx.outcome != {}
+                           AND {policy_sql}",
+                        crate::schema::current_table(table_name),
+                        tx::OUTCOME_REJECTED,
+                    ),
+                    params![row_num, branch_num],
+                    |row| row.get(0),
+                )?;
+                Ok(count > 0)
+            }
+            PolicyDef::Inherits {
+                operation: Operation::Select,
+                via_column: field,
+                ..
+            } => {
                 let field = table
                     .fields
                     .iter()
@@ -1977,6 +2124,7 @@ impl QueryContext<'_> {
                     None => Ok(false),
                 }
             }
+            PolicyDef::Inherits { .. } => Ok(false),
         }
     }
 
@@ -2618,6 +2766,7 @@ impl QueryContext<'_> {
             "{} AS j_created_by",
             users::user_id_expr("h", "j_created_by")
         ));
+        let delete_op = history_op::DELETE;
         let sql = format!(
             "SELECT {}
              FROM {} h
@@ -2627,7 +2776,7 @@ impl QueryContext<'_> {
                AND tx.outcome != ?
                AND tx.global_epoch IS NOT NULL
                AND tx.global_epoch <= ?
-               AND h.op != 3
+               AND h.op != {delete_op}
                AND {policy_sql}
                AND NOT EXISTS (
                  SELECT 1
@@ -2927,6 +3076,18 @@ fn in_predicate_sql(predicate_expr: &str, value_count: usize, includes_null: boo
     format!("({})", clauses.join(" OR "))
 }
 
+fn sqlite_param_to_json(value: &rusqlite::types::Value) -> JsonValue {
+    match value {
+        rusqlite::types::Value::Null => JsonValue::Null,
+        rusqlite::types::Value::Integer(value) => JsonValue::from(*value),
+        rusqlite::types::Value::Real(value) => JsonValue::from(*value),
+        rusqlite::types::Value::Text(value) => JsonValue::String(value.clone()),
+        rusqlite::types::Value::Blob(value) => {
+            JsonValue::Array(value.iter().map(|byte| JsonValue::from(*byte)).collect())
+        }
+    }
+}
+
 pub(crate) fn sql_value_to_json(
     conn: &Connection,
     field: &FieldDef,
@@ -2997,6 +3158,38 @@ mod tests {
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0].id, "todo-100");
         assert_eq!(rows[9].id, "todo-91");
+        Ok(())
+    }
+
+    #[test]
+    fn debug_sql_for_built_query_returns_final_sql_and_params() -> Result<()> {
+        let schema = SchemaDef::attempt3_fixture();
+        let conn = storage::open(Storage::Memory)?;
+        schema::install(&conn, &schema)?;
+        seed_todos(&conn, 1)?;
+
+        let context = QueryContext {
+            conn: &conn,
+            schema: &schema,
+            branch_num: 1,
+            user: "alice",
+            bypass_policy: false,
+        };
+
+        let query = BuiltQuery::from_json_value(json!({
+            "table": "todos",
+            "conditions": [{"column": "done", "op": "eq", "value": false}],
+            "orderBy": [["$createdAt", "desc"]],
+            "limit": 10,
+        }))?;
+        let debug = context.debug_sql_for_built_query(&query)?;
+
+        assert!(debug
+            .sql
+            .contains("FROM \"todos__schema_v1_current\" current"));
+        assert!(debug.sql.contains("ORDER BY current.j_created_at DESC"));
+        assert!(debug.sql.contains("LIMIT ?"));
+        assert_eq!(debug.params.last(), Some(&json!(10)));
         Ok(())
     }
 

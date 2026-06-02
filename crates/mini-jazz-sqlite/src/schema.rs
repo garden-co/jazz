@@ -18,8 +18,24 @@ impl SchemaDef {
 
     pub fn attempt3_fixture() -> Self {
         Self::new()
+            .table("users", |table| {
+                table.text("name");
+            })
+            .table("groups", |table| {
+                table.text("name");
+            })
+            .table("group_members", |table| {
+                table.text("member");
+                table.ref_("group", "groups");
+                table.index("by_member", ["member", "group"]);
+            })
             .table("projects", |table| {
                 table.text("title");
+            })
+            .table("project_members", |table| {
+                table.ref_("project", "projects");
+                table.text("member");
+                table.index("by_member", ["member", "project"]);
             })
             .table("todos", |table| {
                 table.text("title");
@@ -28,6 +44,7 @@ impl SchemaDef {
                 table.index("open_created", ["done", "$createdAt"]);
                 table.index("created", ["$createdAt"]);
                 table.index("by_title", ["title"]);
+                table.index("open_visible", ["done", "project", "$createdAt"]);
             })
             .table("labels", |table| {
                 table.text("name");
@@ -38,6 +55,65 @@ impl SchemaDef {
                 table.ref_("label", "labels");
                 table.index("by_todo", ["todo"]);
                 table.index("by_label", ["label"]);
+            })
+    }
+
+    pub fn mini_sqlite_todo_fixture() -> Self {
+        Self::new()
+            .table("users", |table| {
+                table.text("name");
+                table.read_if_row_id_equals_user();
+            })
+            .table("groups", |table| {
+                table.text("name");
+                table.read_if_inherits_referencing("group_members", "group");
+            })
+            .table("group_members", |table| {
+                table.optional_ref("user", "users");
+                table.optional_ref("member_group", "groups");
+                table.ref_("group", "groups");
+                table.index("by_user", ["user", "group"]);
+                table.index("by_member_group", ["member_group", "group"]);
+                table.read_if_user_or_ref_readable("user", "member_group");
+            })
+            .table("projects", |table| {
+                table.text("title");
+                table.read_if_inherits_referencing("project_members", "project");
+            })
+            .table("project_members", |table| {
+                table.ref_("project", "projects");
+                table.optional_ref("user", "users");
+                table.optional_ref("group", "groups");
+                table.index("by_user", ["user", "project"]);
+                table.index("by_group", ["group", "project"]);
+                table.index("by_project_user", ["project", "user"]);
+                table.index("by_project_group", ["project", "group"]);
+                table.read_if_user_or_ref_readable("user", "group");
+            })
+            .table("todos", |table| {
+                table.text("title");
+                table.bool("done");
+                table.ref_("project", "projects");
+                table.index("open_created", ["done", "$createdAt"]);
+                table.index("created", ["$createdAt"]);
+                table.index("by_title", ["title"]);
+                table.index("open_visible", ["done", "project", "$createdAt"]);
+                table.read_if_inherits("project");
+                table.write_if_ref_readable("project");
+                table.update_protected_fields_if_created_by_user(["title", "project"]);
+                table.delete_if_created_by_user();
+            })
+            .table("labels", |table| {
+                table.text("name");
+                table.index("by_name", ["name"]);
+            })
+            .table("todo_labels", |table| {
+                table.ref_("todo", "todos");
+                table.ref_("label", "labels");
+                table.index("by_todo", ["todo"]);
+                table.index("by_todo_created", ["todo", "$createdAt"]);
+                table.index("by_label", ["label"]);
+                table.read_if_inherits("todo");
             })
     }
 
@@ -87,9 +163,19 @@ impl SchemaDef {
                 continue;
             };
             parts.push(format!(
-                "{}:write:{}",
+                "{}:insert:{}",
                 table.name,
-                table.write_policy.fingerprint_for_table(table)
+                table.insert_policy.fingerprint_for_table(table)
+            ));
+            parts.push(format!(
+                "{}:update:{}",
+                table.name,
+                table.update_policy.fingerprint_for_table(table)
+            ));
+            parts.push(format!(
+                "{}:delete:{}",
+                table.name,
+                table.delete_policy.fingerprint_for_table(table)
             ));
         }
         parts.join("|")
@@ -108,7 +194,18 @@ pub(crate) struct TableDef {
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) indexes: Vec<IndexDef>,
     pub(crate) read_policy: PolicyDef,
-    pub(crate) write_policy: PolicyDef,
+    pub(crate) insert_policy: OperationPolicy,
+    pub(crate) update_policy: OperationPolicy,
+    pub(crate) delete_policy: OperationPolicy,
+}
+
+impl TableDef {
+    pub(crate) fn effective_delete_using(&self) -> Option<&PolicyDef> {
+        self.delete_policy
+            .using
+            .as_ref()
+            .or(self.update_policy.using.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,32 +241,314 @@ pub(crate) struct IndexDef {
     pub(crate) columns: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) enum PolicyDef {
-    #[default]
-    AllowAll,
-    CreatedByUser,
-    RefReadable {
-        field: String,
-    },
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
-impl PolicyDef {
-    fn fingerprint_for_table(&self, table: &TableDef) -> String {
-        match self {
-            PolicyDef::AllowAll => "allow_all".to_owned(),
-            PolicyDef::CreatedByUser => "created_by_user".to_owned(),
-            PolicyDef::RefReadable { field } => {
-                let storage_field = table
-                    .fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|field| field.storage_name.as_str())
-                    .unwrap_or(field);
-                format!("ref_readable:{storage_field}")
-            }
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PolicyValue {
+    Literal(JsonValue),
+    SessionRef(Vec<String>),
+}
+
+pub(crate) const OUTER_ROW_SESSION_PREFIX: &str = "__jazz_outer_row";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Operation {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OperationPolicy {
+    pub(crate) using: Option<PolicyDef>,
+    pub(crate) with_check: Option<PolicyDef>,
+}
+
+impl OperationPolicy {
+    fn using(policy: PolicyDef) -> Self {
+        Self {
+            using: Some(policy),
+            with_check: None,
         }
     }
+
+    fn with_check(policy: PolicyDef) -> Self {
+        Self {
+            using: None,
+            with_check: Some(policy),
+        }
+    }
+
+    fn using_and_check(using: PolicyDef, with_check: PolicyDef) -> Self {
+        Self {
+            using: Some(using),
+            with_check: Some(with_check),
+        }
+    }
+
+    fn fingerprint_for_table(&self, table: &TableDef) -> String {
+        format!(
+            "using:{}|check:{}",
+            self.using
+                .as_ref()
+                .map(|policy| policy.fingerprint_for_table(table))
+                .unwrap_or_else(|| "none".to_owned()),
+            self.with_check
+                .as_ref()
+                .map(|policy| policy.fingerprint_for_table(table))
+                .unwrap_or_else(|| "none".to_owned())
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum PolicyExpr {
+    Cmp {
+        column: String,
+        op: CmpOp,
+        value: PolicyValue,
+    },
+    SessionCmp {
+        path: Vec<String>,
+        op: CmpOp,
+        value: JsonValue,
+    },
+    IsNull {
+        column: String,
+    },
+    SessionIsNull {
+        path: Vec<String>,
+    },
+    IsNotNull {
+        column: String,
+    },
+    SessionIsNotNull {
+        path: Vec<String>,
+    },
+    Contains {
+        column: String,
+        value: PolicyValue,
+    },
+    SessionContains {
+        path: Vec<String>,
+        value: JsonValue,
+    },
+    In {
+        column: String,
+        session_path: Vec<String>,
+    },
+    InList {
+        column: String,
+        values: Vec<PolicyValue>,
+    },
+    SessionInList {
+        path: Vec<String>,
+        values: Vec<JsonValue>,
+    },
+    Exists {
+        table: String,
+        condition: Box<PolicyExpr>,
+    },
+    ExistsRel {
+        rel: JsonValue,
+    },
+    Inherits {
+        operation: Operation,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
+    InheritsReferencing {
+        operation: Operation,
+        source_table: String,
+        via_column: String,
+        max_depth: Option<usize>,
+    },
+    And(Vec<PolicyExpr>),
+    Or(Vec<PolicyExpr>),
+    Not(Box<PolicyExpr>),
+    #[default]
+    True,
+    False,
+}
+
+pub(crate) type PolicyDef = PolicyExpr;
+
+impl PolicyExpr {
+    fn fingerprint_for_table(&self, table: &TableDef) -> String {
+        match self {
+            PolicyDef::Cmp { column, op, value } => {
+                format!(
+                    "cmp:{}:{op:?}:{}",
+                    policy_column_fingerprint(table, column),
+                    policy_value_fingerprint(value)
+                )
+            }
+            PolicyDef::SessionCmp { path, op, value } => {
+                format!("session_cmp:{}:{op:?}:{value}", path.join("."))
+            }
+            PolicyDef::IsNull { column } => {
+                format!("is_null:{}", policy_column_fingerprint(table, column))
+            }
+            PolicyDef::SessionIsNull { path } => format!("session_is_null:{}", path.join(".")),
+            PolicyDef::IsNotNull { column } => {
+                format!("is_not_null:{}", policy_column_fingerprint(table, column))
+            }
+            PolicyDef::SessionIsNotNull { path } => {
+                format!("session_is_not_null:{}", path.join("."))
+            }
+            PolicyDef::Contains { column, value } => {
+                format!(
+                    "contains:{}:{}",
+                    policy_column_fingerprint(table, column),
+                    policy_value_fingerprint(value)
+                )
+            }
+            PolicyDef::SessionContains { path, value } => {
+                format!("session_contains:{}:{value}", path.join("."))
+            }
+            PolicyDef::In {
+                column,
+                session_path,
+            } => format!(
+                "in:{}:{}",
+                policy_column_fingerprint(table, column),
+                session_path.join(".")
+            ),
+            PolicyDef::InList { column, values } => format!(
+                "in_list:{}:{}",
+                policy_column_fingerprint(table, column),
+                values
+                    .iter()
+                    .map(policy_value_fingerprint)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PolicyDef::SessionInList { path, values } => format!(
+                "session_in_list:{}:{}",
+                path.join("."),
+                values
+                    .iter()
+                    .map(JsonValue::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PolicyDef::Exists {
+                table: exists_table,
+                condition,
+            } => {
+                format!(
+                    "exists:{exists_table}:{}",
+                    condition.fingerprint_for_table(table)
+                )
+            }
+            PolicyDef::ExistsRel { rel } => format!("exists_rel:{rel}"),
+            PolicyDef::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            } => {
+                format!(
+                    "inherits:{operation:?}:{}:{max_depth:?}",
+                    policy_column_fingerprint(table, via_column)
+                )
+            }
+            PolicyDef::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => {
+                format!(
+                    "inherits_referencing:{operation:?}:{source_table}:{via_column}:{max_depth:?}"
+                )
+            }
+            PolicyDef::And(children) => format!(
+                "and({})",
+                children
+                    .iter()
+                    .map(|policy| policy.fingerprint_for_table(table))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PolicyDef::Or(children) => format!(
+                "or({})",
+                children
+                    .iter()
+                    .map(|policy| policy.fingerprint_for_table(table))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PolicyDef::Not(child) => {
+                format!("not({})", child.fingerprint_for_table(table))
+            }
+            PolicyDef::True => "true".to_owned(),
+            PolicyDef::False => "false".to_owned(),
+        }
+    }
+
+    pub(crate) fn is_user_or_ref_readable(&self, user_field: &str, ref_field: &str) -> bool {
+        let PolicyDef::Or(children) = self else {
+            return false;
+        };
+        if children.len() != 2 {
+            return false;
+        }
+        let has_session = children.iter().any(|child| {
+            matches!(
+                child,
+                PolicyDef::Cmp {
+                    column,
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(path),
+                } if column == user_field && path == &["user_id".to_owned()]
+            )
+        });
+        let has_ref = children.iter().any(|child| {
+            matches!(
+                child,
+                PolicyDef::Inherits {
+                    operation: Operation::Select,
+                    via_column,
+                    ..
+                } if via_column == ref_field
+            )
+        });
+        has_session && has_ref
+    }
+}
+
+fn policy_value_fingerprint(value: &PolicyValue) -> String {
+    match value {
+        PolicyValue::Literal(value) => format!("literal:{value}"),
+        PolicyValue::SessionRef(path) => format!("session:{}", path.join(".")),
+    }
+}
+
+fn policy_column_fingerprint(table: &TableDef, column: &str) -> String {
+    if column.starts_with('$') {
+        column.to_owned()
+    } else {
+        storage_field_name(table, column).to_owned()
+    }
+}
+
+fn storage_field_name<'a>(table: &'a TableDef, field: &'a str) -> &'a str {
+    table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field)
+        .map(|field| field.storage_name.as_str())
+        .unwrap_or(field)
 }
 
 pub struct TableBuilder {
@@ -183,8 +562,10 @@ impl TableBuilder {
                 name: name.to_owned(),
                 fields: Vec::new(),
                 indexes: Vec::new(),
-                read_policy: PolicyDef::AllowAll,
-                write_policy: PolicyDef::AllowAll,
+                read_policy: PolicyDef::True,
+                insert_policy: OperationPolicy::with_check(PolicyDef::True),
+                update_policy: OperationPolicy::using_and_check(PolicyDef::True, PolicyDef::True),
+                delete_policy: OperationPolicy::default(),
             },
         }
     }
@@ -293,28 +674,179 @@ impl TableBuilder {
     }
 
     pub fn read_if_created_by_user(&mut self) {
-        self.table.read_policy = PolicyDef::CreatedByUser;
+        self.table.read_policy = created_by_user_policy();
+    }
+
+    pub fn read_if_row_id_equals_user(&mut self) {
+        self.table.read_policy = row_id_equals_user_policy();
+    }
+
+    pub fn read_if_user_ref_equals_session(&mut self, field: &str) {
+        self.table.read_policy = user_ref_equals_session_policy(field);
+    }
+
+    pub fn read_if_inherits(&mut self, field: &str) {
+        self.table.read_policy = inherits_policy(field);
+    }
+
+    pub fn read_if_inherits_referencing(&mut self, source_table: &str, field: &str) {
+        self.table.read_policy = inherits_referencing_policy(source_table, field);
+    }
+
+    pub fn read_if_user_or_ref_readable(&mut self, user_field: &str, ref_field: &str) {
+        self.table.read_policy = PolicyDef::Or(vec![
+            PolicyDef::Cmp {
+                column: user_field.to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+            },
+            PolicyDef::Inherits {
+                operation: Operation::Select,
+                via_column: ref_field.to_owned(),
+                max_depth: None,
+            },
+        ]);
     }
 
     pub fn write_if_created_by_user(&mut self) {
-        self.table.write_policy = PolicyDef::CreatedByUser;
+        self.insert_if_created_by_user();
+        self.update_if_created_by_user();
     }
 
     pub fn write_if_ref_readable(&mut self, field: &str) {
-        self.table.write_policy = PolicyDef::RefReadable {
-            field: field.to_owned(),
-        };
+        self.insert_if_ref_readable(field);
+        self.update_if_ref_readable(field);
+    }
+
+    pub fn insert_if_created_by_user(&mut self) {
+        self.table.insert_policy = OperationPolicy::with_check(created_by_user_policy());
+    }
+
+    pub fn insert_if_ref_readable(&mut self, field: &str) {
+        self.table.insert_policy = OperationPolicy::with_check(inherits_policy(field));
+    }
+
+    pub fn update_if_created_by_user(&mut self) {
+        self.table.update_policy =
+            OperationPolicy::using_and_check(created_by_user_policy(), created_by_user_policy());
+    }
+
+    pub fn update_using_created_by_user(&mut self) {
+        self.table.update_policy.using = Some(created_by_user_policy());
+    }
+
+    pub fn update_check_created_by_user(&mut self) {
+        self.table.update_policy.with_check = Some(created_by_user_policy());
+    }
+
+    pub fn update_if_ref_readable(&mut self, field: &str) {
+        self.table.update_policy =
+            OperationPolicy::using_and_check(inherits_policy(field), inherits_policy(field));
+    }
+
+    pub fn update_using_ref_readable(&mut self, field: &str) {
+        self.table.update_policy.using = Some(inherits_policy(field));
+    }
+
+    pub fn update_check_ref_readable(&mut self, field: &str) {
+        self.table.update_policy.with_check = Some(inherits_policy(field));
+    }
+
+    pub fn update_protected_fields_if_created_by_user<const N: usize>(
+        &mut self,
+        fields: [&str; N],
+    ) {
+        let guard = protected_fields_unchanged_or_created_by_user_policy(&self.table.name, fields);
+        self.and_update_check(guard);
+    }
+
+    pub fn delete_if_created_by_user(&mut self) {
+        self.table.delete_policy = OperationPolicy::using(created_by_user_policy());
     }
 
     pub fn read_if_ref_readable(&mut self, field: &str) {
-        self.table.read_policy = PolicyDef::RefReadable {
-            field: field.to_owned(),
-        };
+        self.table.read_policy = inherits_policy(field);
     }
 
     fn finish(self) -> TableDef {
         self.table
     }
+
+    fn and_update_check(&mut self, guard: PolicyDef) {
+        self.table.update_policy.with_check =
+            Some(match self.table.update_policy.with_check.take() {
+                None | Some(PolicyDef::True) => guard,
+                Some(existing) => PolicyDef::And(vec![existing, guard]),
+            });
+    }
+}
+
+fn created_by_user_policy() -> PolicyDef {
+    PolicyDef::Cmp {
+        column: "$createdBy".to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+    }
+}
+
+fn row_id_equals_user_policy() -> PolicyDef {
+    PolicyDef::Cmp {
+        column: "$id".to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+    }
+}
+
+fn user_ref_equals_session_policy(field: &str) -> PolicyDef {
+    PolicyDef::Cmp {
+        column: field.to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+    }
+}
+
+fn inherits_policy(field: &str) -> PolicyDef {
+    PolicyDef::Inherits {
+        operation: Operation::Select,
+        via_column: field.to_owned(),
+        max_depth: None,
+    }
+}
+
+fn inherits_referencing_policy(source_table: &str, field: &str) -> PolicyDef {
+    PolicyDef::InheritsReferencing {
+        operation: Operation::Select,
+        source_table: source_table.to_owned(),
+        via_column: field.to_owned(),
+        max_depth: None,
+    }
+}
+
+fn protected_fields_unchanged_or_created_by_user_policy<const N: usize>(
+    table_name: &str,
+    fields: [&str; N],
+) -> PolicyDef {
+    let mut unchanged = vec![PolicyDef::Cmp {
+        column: "$id".to_owned(),
+        op: CmpOp::Eq,
+        value: outer_row_value("$id"),
+    }];
+    unchanged.extend(fields.into_iter().map(|field| PolicyDef::Cmp {
+        column: field.to_owned(),
+        op: CmpOp::Eq,
+        value: outer_row_value(field),
+    }));
+    PolicyDef::Or(vec![
+        created_by_user_policy(),
+        PolicyDef::Exists {
+            table: table_name.to_owned(),
+            condition: Box::new(PolicyDef::And(unchanged)),
+        },
+    ])
+}
+
+fn outer_row_value(column: &str) -> PolicyValue {
+    PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.to_owned(), column.to_owned()])
 }
 
 pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
@@ -487,7 +1019,18 @@ fn validate_schema_shape(schema: &SchemaDef) -> Result<()> {
 fn validate_policy_cycles(schema: &SchemaDef) -> Result<()> {
     for table in schema.tables() {
         validate_policy_cycle(schema, table, &table.read_policy, &mut BTreeSet::new())?;
-        validate_policy_cycle(schema, table, &table.write_policy, &mut BTreeSet::new())?;
+        if let Some(policy) = &table.insert_policy.with_check {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(policy) = &table.update_policy.using {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(policy) = &table.update_policy.with_check {
+            validate_policy_cycle(schema, table, policy, &mut BTreeSet::new())?;
+        }
+        if let Some(delete_policy) = &table.delete_policy.using {
+            validate_policy_cycle(schema, table, delete_policy, &mut BTreeSet::new())?;
+        }
     }
     Ok(())
 }
@@ -498,8 +1041,61 @@ fn validate_policy_cycle(
     policy: &PolicyDef,
     seen: &mut BTreeSet<String>,
 ) -> Result<()> {
-    let PolicyDef::RefReadable { field } = policy else {
-        return Ok(());
+    let field = match policy {
+        PolicyDef::Inherits {
+            operation,
+            via_column,
+            ..
+        } => {
+            validate_select_operation(*operation)?;
+            via_column
+        }
+        PolicyDef::InheritsReferencing {
+            source_table,
+            via_column,
+            operation,
+            ..
+        } => {
+            validate_select_operation(*operation)?;
+            validate_inherits_referencing_policy(schema, table, source_table, via_column)?;
+            return Ok(());
+        }
+        PolicyDef::Cmp { column, .. }
+        | PolicyDef::IsNull { column }
+        | PolicyDef::IsNotNull { column }
+        | PolicyDef::Contains { column, .. }
+        | PolicyDef::In { column, .. }
+        | PolicyDef::InList { column, .. } => {
+            validate_policy_column(table, column)?;
+            return Ok(());
+        }
+        PolicyDef::SessionCmp { .. }
+        | PolicyDef::SessionIsNull { .. }
+        | PolicyDef::SessionIsNotNull { .. }
+        | PolicyDef::SessionContains { .. }
+        | PolicyDef::SessionInList { .. } => return Ok(()),
+        PolicyDef::Exists {
+            table: exists_table,
+            condition,
+        } => {
+            let exists_table = schema.table_def(exists_table)?;
+            validate_policy_cycle(schema, exists_table, condition, seen)?;
+            return Ok(());
+        }
+        PolicyDef::ExistsRel { .. } => {
+            return Ok(());
+        }
+        PolicyDef::And(children) | PolicyDef::Or(children) => {
+            for child in children {
+                validate_policy_cycle(schema, table, child, seen)?;
+            }
+            return Ok(());
+        }
+        PolicyDef::Not(child) => {
+            validate_policy_cycle(schema, table, child, seen)?;
+            return Ok(());
+        }
+        PolicyDef::True | PolicyDef::False => return Ok(()),
     };
     if !seen.insert(table.name.clone()) {
         return Err(crate::Error::new(format!(
@@ -529,6 +1125,60 @@ fn validate_policy_cycle(
     let result = validate_policy_cycle(schema, parent_table, &parent_table.read_policy, seen);
     seen.remove(&table.name);
     result
+}
+
+fn validate_select_operation(operation: Operation) -> Result<()> {
+    if operation != Operation::Select {
+        return Err(crate::Error::new(
+            "mini-sqlite policies only lower SELECT inheritance today",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_policy_column(table: &TableDef, column: &str) -> Result<()> {
+    if matches!(column, "$id" | "$createdBy") {
+        return Ok(());
+    }
+    if table.fields.iter().any(|field| field.name == column) {
+        return Ok(());
+    }
+    Err(crate::Error::new(format!(
+        "policy on {} references unknown column {}",
+        table.name, column
+    )))
+}
+
+fn validate_inherits_referencing_policy(
+    schema: &SchemaDef,
+    table: &TableDef,
+    source_table_name: &str,
+    field_name: &str,
+) -> Result<()> {
+    let source_table = schema.table_def(source_table_name)?;
+    let Some(field) = source_table
+        .fields
+        .iter()
+        .find(|candidate| candidate.name == field_name)
+    else {
+        return Err(crate::Error::new(format!(
+            "policy on {} references unknown field {}.{}",
+            table.name, source_table_name, field_name
+        )));
+    };
+    let FieldKind::Ref { table: parent } = &field.kind else {
+        return Err(crate::Error::new(format!(
+            "policy on {} references non-ref field {}.{}",
+            table.name, source_table_name, field.name
+        )));
+    };
+    if parent != &table.name {
+        return Err(crate::Error::new(format!(
+            "policy on {} expected {}.{} to reference {}",
+            table.name, source_table_name, field.name, table.name
+        )));
+    }
+    Ok(())
 }
 
 fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
@@ -582,7 +1232,7 @@ fn install_table(conn: &Connection, table: &TableDef) -> Result<()> {
             index
                 .columns
                 .iter()
-                .map(|column| index_storage_column_name(column)),
+                .map(|column| index_storage_column_name(table, column)),
         );
         columns.push("row_num".to_owned());
         conn.execute_batch(&format!(
@@ -671,10 +1321,16 @@ pub(crate) fn storage_column_name(column: &str) -> String {
     quote_ident(&storage)
 }
 
-fn index_storage_column_name(column: &str) -> String {
+fn index_storage_column_name(table: &TableDef, column: &str) -> String {
     match column {
         "$createdAt" => format!("{} DESC", quote_ident("j_created_at")),
-        other => storage_column_name(other),
+        "$updatedAt" => quote_ident("j_updated_at"),
+        other => table
+            .fields
+            .iter()
+            .find(|field| field.name == other)
+            .map(|field| quote_ident(&storage_column(field)))
+            .unwrap_or_else(|| storage_column_name(other)),
     }
 }
 
