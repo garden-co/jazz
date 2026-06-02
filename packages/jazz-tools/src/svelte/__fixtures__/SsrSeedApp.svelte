@@ -15,7 +15,7 @@ $effect).
     snapshot,
     query,
   }: {
-    client: JazzClient | Promise<JazzClient>;
+    client?: JazzClient | Promise<JazzClient>;
     snapshot: DehydratedSnapshot;
     query: QueryBuilder<{ id: string; title: string }>;
   } = $props();
