@@ -283,7 +283,7 @@ function FieldPill({
   renaming: boolean;
 }) {
   return (
-    <div className="lens-pill flex items-center justify-between gap-2 rounded-md border border-fd-border bg-fd-card px-2 py-1.5">
+    <div className="lens-pill flex items-center justify-between gap-2 px-2 py-1.5">
       <span
         className={cn(
           "lens-pill-key font-mono text-[10px] leading-4 text-fd-muted-foreground tracking-wide",
@@ -345,7 +345,7 @@ function ClientDevice({
             <div className="text-xs uppercase tracking-wide text-[#146aff] font-semibold mb-2">
               My To Dos
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col rounded-md border border-fd-border bg-fd-card divide-y divide-fd-border">
               {fields.map((field) => (
                 <FieldPill
                   key={field}
