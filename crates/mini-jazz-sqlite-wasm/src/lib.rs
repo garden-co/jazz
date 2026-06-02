@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const SLOW_QUERY_LOG_THRESHOLD_MS: f64 = 10.0;
+const SQLITE_TIMING_LOGS_FLAG: &str = "sqliteTimingLogs";
 
 #[wasm_bindgen(start)]
 pub fn install_panic_hook() {
@@ -18,10 +19,16 @@ pub fn install_panic_hook() {
 #[wasm_bindgen]
 pub struct MiniJazzRuntime {
     runtime: Runtime,
+    flags: MiniJazzFlags,
     subscriptions: BTreeMap<u32, WasmRowsSubscription>,
     next_subscription_id: u32,
     notifying_subscriptions: bool,
     notify_subscriptions_again: bool,
+}
+
+#[derive(Default)]
+struct MiniJazzFlags {
+    sqlite_timing_logs: bool,
 }
 
 struct WasmRowsSubscription {
@@ -201,10 +208,33 @@ impl MiniJazzRuntime {
         Ok(tx_id)
     }
 
+    #[wasm_bindgen(js_name = setMiniJazzFlag)]
+    pub fn set_mini_jazz_flag(&mut self, flag: &str, enabled: bool) -> Result<(), JsValue> {
+        match flag {
+            SQLITE_TIMING_LOGS_FLAG => {
+                self.flags.sqlite_timing_logs = enabled;
+                Ok(())
+            }
+            _ => Err(JsValue::from_str(&format!(
+                "unknown mini-jazz flag: {flag}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = getMiniJazzFlag)]
+    pub fn get_mini_jazz_flag(&self, flag: &str) -> Result<bool, JsValue> {
+        match flag {
+            SQLITE_TIMING_LOGS_FLAG => Ok(self.flags.sqlite_timing_logs),
+            _ => Err(JsValue::from_str(&format!(
+                "unknown mini-jazz flag: {flag}"
+            ))),
+        }
+    }
+
     #[wasm_bindgen(js_name = query)]
     pub fn query(&self, query: JsValue) -> Result<JsValue, JsValue> {
         let query = parse_built_query(query)?;
-        let debug = self.runtime.debug_query_sql(&query).ok();
+        let debug = self.debug_query_sql_for_log(&query);
         let table = query.table.clone();
         let started_at = js_sys::Date::now();
         match self.runtime.query(query.clone()) {
@@ -212,7 +242,7 @@ impl MiniJazzRuntime {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let row_count = rows.len();
                 let value = to_js_value(rows)?;
-                if should_log_sqlite_timing(duration_ms, false) {
+                if self.should_log_sqlite_timing(duration_ms, false) {
                     let plan = explain_query_for_log(&self.runtime, &query);
                     log_sqlite_query(
                         "query",
@@ -229,7 +259,7 @@ impl MiniJazzRuntime {
             Err(error) => {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let message = error.to_string();
-                if should_log_sqlite_timing(duration_ms, true) {
+                if self.should_log_sqlite_timing(duration_ms, true) {
                     let plan = explain_query_for_log(&self.runtime, &query);
                     log_sqlite_query(
                         "query",
@@ -249,7 +279,7 @@ impl MiniJazzRuntime {
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: JsValue) -> Result<JsValue, JsValue> {
         let query = parse_built_query(query)?;
-        let debug = self.runtime.debug_query_sql(&query).ok();
+        let debug = self.debug_query_sql_for_log(&query);
         let table = query.table.clone();
         let started_at = js_sys::Date::now();
         match self.runtime.one(query.clone()) {
@@ -257,7 +287,7 @@ impl MiniJazzRuntime {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let row_count = usize::from(row.is_some());
                 let value = to_js_value(row)?;
-                if should_log_sqlite_timing(duration_ms, false) {
+                if self.should_log_sqlite_timing(duration_ms, false) {
                     let plan = explain_query_for_log(&self.runtime, &query);
                     log_sqlite_query(
                         "one",
@@ -274,7 +304,7 @@ impl MiniJazzRuntime {
             Err(error) => {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let message = error.to_string();
-                if should_log_sqlite_timing(duration_ms, true) {
+                if self.should_log_sqlite_timing(duration_ms, true) {
                     let plan = explain_query_for_log(&self.runtime, &query);
                     log_sqlite_query("one", table, debug, plan, duration_ms, None, Some(message));
                 }
@@ -293,7 +323,7 @@ impl MiniJazzRuntime {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let plan_rows = plan.plan.len();
                 let value = to_js_value(plan)?;
-                if should_log_sqlite_timing(duration_ms, false) {
+                if self.should_log_sqlite_timing(duration_ms, false) {
                     log_sqlite_operation("explainQuery", table, duration_ms, Some(plan_rows), None);
                 }
                 Ok(value)
@@ -301,7 +331,7 @@ impl MiniJazzRuntime {
             Err(error) => {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let message = error.to_string();
-                if should_log_sqlite_timing(duration_ms, true) {
+                if self.should_log_sqlite_timing(duration_ms, true) {
                     log_sqlite_operation("explainQuery", table, duration_ms, None, Some(message));
                 }
                 Err(to_js_error(error))
@@ -316,7 +346,7 @@ impl MiniJazzRuntime {
         callback: js_sys::Function,
     ) -> Result<u32, JsValue> {
         let query = parse_built_query(query)?;
-        let debug = self.runtime.debug_query_sql(&query).ok();
+        let debug = self.debug_query_sql_for_log(&query);
         let table = query.table.clone();
         let started_at = js_sys::Date::now();
         let subscription = match self.runtime.subscribe_query(query.clone()) {
@@ -324,7 +354,7 @@ impl MiniJazzRuntime {
             Err(error) => {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let message = error.to_string();
-                if should_log_sqlite_timing(duration_ms, true) {
+                if self.should_log_sqlite_timing(duration_ms, true) {
                     let plan = explain_query_for_log(&self.runtime, &query);
                     log_sqlite_query(
                         "subscribe",
@@ -340,7 +370,7 @@ impl MiniJazzRuntime {
             }
         };
         let duration_ms = js_sys::Date::now() - started_at;
-        if should_log_sqlite_timing(duration_ms, false) {
+        if self.should_log_sqlite_timing(duration_ms, false) {
             let plan = explain_query_for_log(&self.runtime, &query);
             log_sqlite_query(
                 "subscribe",
@@ -391,7 +421,7 @@ impl MiniJazzRuntime {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let row_count = rows.len();
                 let value = to_js_value(rows)?;
-                if should_log_sqlite_timing(duration_ms, false) {
+                if self.should_log_sqlite_timing(duration_ms, false) {
                     log_sqlite_operation(
                         "readRows",
                         table_name.to_owned(),
@@ -405,7 +435,7 @@ impl MiniJazzRuntime {
             Err(error) => {
                 let duration_ms = js_sys::Date::now() - started_at;
                 let message = error.to_string();
-                if should_log_sqlite_timing(duration_ms, true) {
+                if self.should_log_sqlite_timing(duration_ms, true) {
                     log_sqlite_operation(
                         "readRows",
                         table_name.to_owned(),
@@ -434,10 +464,26 @@ impl MiniJazzRuntime {
     fn new(runtime: Runtime) -> Self {
         Self {
             runtime,
+            flags: MiniJazzFlags::default(),
             subscriptions: BTreeMap::new(),
             next_subscription_id: 0,
             notifying_subscriptions: false,
             notify_subscriptions_again: false,
+        }
+    }
+
+    fn should_log_sqlite_timing(&self, duration_ms: f64, is_error: bool) -> bool {
+        self.flags.sqlite_timing_logs && (is_error || duration_ms >= SLOW_QUERY_LOG_THRESHOLD_MS)
+    }
+
+    fn debug_query_sql_for_log(
+        &self,
+        query: &BuiltQuery,
+    ) -> Option<mini_jazz_sqlite::SqliteQueryDebug> {
+        if self.flags.sqlite_timing_logs {
+            self.runtime.debug_query_sql(query).ok()
+        } else {
+            None
         }
     }
 
@@ -593,10 +639,6 @@ fn explain_query_for_log(runtime: &Runtime, query: &BuiltQuery) -> Option<Sqlite
     runtime.explain_query_plan(query).ok()
 }
 
-fn should_log_sqlite_timing(duration_ms: f64, is_error: bool) -> bool {
-    is_error || duration_ms >= SLOW_QUERY_LOG_THRESHOLD_MS
-}
-
 fn format_sqlite_query_plan(rows: &[SqliteQueryPlanRow]) -> String {
     let mut children_by_parent = BTreeMap::<i64, Vec<&SqliteQueryPlanRow>>::new();
     let mut ids = BTreeSet::new();
@@ -680,6 +722,30 @@ fn to_js_value<T: Serialize>(value: T) -> Result<JsValue, JsValue> {
 
 fn to_js_error(error: mini_jazz_sqlite::Error) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_timing_logs_require_explicit_flag() {
+        let runtime = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
+        let mut runtime = MiniJazzRuntime::new(runtime);
+
+        assert!(!runtime.should_log_sqlite_timing(SLOW_QUERY_LOG_THRESHOLD_MS, false));
+        assert!(!runtime.should_log_sqlite_timing(0.0, true));
+        assert!(!runtime.get_mini_jazz_flag(SQLITE_TIMING_LOGS_FLAG).unwrap());
+
+        runtime
+            .set_mini_jazz_flag(SQLITE_TIMING_LOGS_FLAG, true)
+            .unwrap();
+
+        assert!(runtime.get_mini_jazz_flag(SQLITE_TIMING_LOGS_FLAG).unwrap());
+        assert!(!runtime.should_log_sqlite_timing(SLOW_QUERY_LOG_THRESHOLD_MS - 1.0, false));
+        assert!(runtime.should_log_sqlite_timing(SLOW_QUERY_LOG_THRESHOLD_MS, false));
+        assert!(runtime.should_log_sqlite_timing(0.0, true));
+    }
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
