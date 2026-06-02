@@ -5,6 +5,10 @@ import type { AppContext, Session } from "./context.js";
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
+  const restoreCalls: Array<[string, string, Record<string, unknown>]> = [];
+  const restoreWithSessionCalls: Array<
+    [string, string, Record<string, unknown>, string | undefined]
+  > = [];
   const updateWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
   const deleteWithSessionCalls: Array<[string, string | undefined]> = [];
@@ -30,6 +34,27 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
         id: "00000000-0000-0000-0000-000000000001",
         values: [],
         batchId: "insert-with-session-batch-id",
+      };
+    },
+    restore: (table: string, objectId: string, values: Record<string, unknown>) => {
+      restoreCalls.push([table, objectId, values]);
+      return {
+        id: objectId,
+        values: [],
+        batchId: "restore-batch-id",
+      };
+    },
+    restoreWithSession: (
+      table: string,
+      objectId: string,
+      values: Record<string, unknown>,
+      writeContextJson?: string | null,
+    ) => {
+      restoreWithSessionCalls.push([table, objectId, values, writeContextJson ?? undefined]);
+      return {
+        id: objectId,
+        values: [],
+        batchId: "restore-with-session-batch-id",
       };
     },
     update: (objectId: string, updates: Record<string, unknown>) => {
@@ -89,6 +114,8 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     runtime,
     insertCalls,
     insertWithSessionCalls,
+    restoreCalls,
+    restoreWithSessionCalls,
     updateCalls,
     updateWithSessionCalls,
     deleteCalls,

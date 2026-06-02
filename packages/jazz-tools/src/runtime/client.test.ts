@@ -26,6 +26,17 @@ function makeFakeRuntime() {
         batchId: writeContext.batch_id ?? "batch-query",
       };
     }),
+    restore: vi.fn(),
+    restoreWithSession: vi.fn(
+      (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
+        const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+        return {
+          id: objectId,
+          values: [],
+          batchId: writeContext.batch_id ?? "batch-query",
+        };
+      },
+    ),
     update: vi.fn(),
     delete: vi.fn(),
     query:

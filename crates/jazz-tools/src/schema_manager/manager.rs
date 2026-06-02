@@ -1762,36 +1762,58 @@ impl SchemaManager {
             .into_iter()
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
-        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            write_context
-                .and_then(WriteContext::batch_id)
-                .and_then(|batch_id| {
-                    self.query_manager
-                        .load_latest_transactional_staged_row_on_branch(
-                            storage,
-                            object_id,
-                            &target_branch,
-                            batch_id,
+        let (
+            table,
+            source_branch,
+            old_current_data,
+            _source_commit_id,
+            old_current_provenance,
+            current_row_is_deleted,
+        ) = write_context
+            .and_then(WriteContext::batch_id)
+            .and_then(|batch_id| {
+                self.query_manager
+                    .load_latest_transactional_staged_row_on_branch(
+                        storage,
+                        object_id,
+                        &target_branch,
+                        batch_id,
+                    )
+                    .map(|(table, row)| {
+                        (
+                            table,
+                            target_branch.clone(),
+                            row.data.to_vec(),
+                            row.batch_id(),
+                            row.row_provenance(),
+                            row.is_soft_deleted() || row.is_hard_deleted(),
                         )
-                        .map(|(table, row)| {
-                            (
-                                table,
-                                target_branch.clone(),
-                                row.data.to_vec(),
-                                row.batch_id(),
-                                row.row_provenance(),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    self.query_manager.load_row_for_schema_update_in_context(
+                    })
+            })
+            .or_else(|| {
+                self.query_manager
+                    .load_row_for_schema_update_in_context(
                         storage,
                         object_id,
                         &branches,
                         &target_context,
                     )
-                })
-                .ok_or(QueryError::ObjectNotFound(object_id))?;
+                    .map(|(table, source_branch, data, batch_id, provenance)| {
+                        (table, source_branch, data, batch_id, provenance, false)
+                    })
+            })
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if current_row_is_deleted
+            || self.query_manager().row_is_deleted_on_branch(
+                storage,
+                &table,
+                &source_branch,
+                object_id,
+            )
+        {
+            return Err(QueryError::RowAlreadyDeleted(object_id));
+        }
 
         let table_name = TableName::new(&table);
         let descriptor = target_schema
@@ -1900,6 +1922,54 @@ impl SchemaManager {
                 write_context,
                 false,
             )
+    }
+
+    /// Restore a soft-deleted row, performing copy-on-write when targeting a
+    /// specific schema branch.
+    pub fn restore<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let actual_table = self
+            .query_manager
+            .load_row_table_name(storage, object_id)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if actual_table != table {
+            return Err(QueryError::EncodingError(format!(
+                "object {object_id} belongs to table {actual_table}, cannot restore into {table}"
+            )));
+        }
+
+        let table_name = TableName::new(table);
+        let context = &self.context;
+        let insert_alignment_cache = &mut self.insert_alignment_cache;
+        let query_manager = &mut self.query_manager;
+        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?;
+        let plan = Self::insert_alignment_plan_for_schema(
+            insert_alignment_cache,
+            target_hash,
+            table_name,
+            target_schema,
+        )?;
+        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
+
+        query_manager.restore_on_branch_with_schema_and_write_context(
+            storage,
+            table,
+            &target_branch,
+            object_id,
+            &aligned_values,
+            target_schema,
+            write_context,
+        )
     }
 
     /// Process pending operations (drives SyncManager).

@@ -41,6 +41,13 @@ export interface JazzRnRuntimeBinding {
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
+  restore(table: string, objectId: string, valuesJson: string): string;
+  restoreWithSession?(
+    table: string,
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
   loadBatchFate(batchId: string): string | null | undefined;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
@@ -173,7 +180,11 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   private requireWriteContextMethod<
-    T extends "insertWithSession" | "updateWithSession" | "deleteWithSession",
+    T extends
+      | "insertWithSession"
+      | "restoreWithSession"
+      | "updateWithSession"
+      | "deleteWithSession",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
     const runtimeMethod = this.binding[method];
     if (!runtimeMethod) {
@@ -207,6 +218,34 @@ export class JazzRnRuntimeAdapter implements Runtime {
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
         object_id ?? undefined,
+      );
+      return JSON.parse(rowJson) as DirectInsertResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  restore(table: string, object_id: string, values: InsertValues): DirectInsertResult {
+    try {
+      const rowJson = this.binding.restore(table, object_id, encodeFFIRecordToJson(values));
+      return JSON.parse(rowJson) as DirectInsertResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  restoreWithSession(
+    table: string,
+    object_id: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectInsertResult {
+    try {
+      const rowJson = this.requireWriteContextMethod("restoreWithSession")(
+        table,
+        object_id,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
       );
       return JSON.parse(rowJson) as DirectInsertResult;
     } catch (error) {

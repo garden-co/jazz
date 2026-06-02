@@ -21,6 +21,7 @@ export {
   type RequestLike,
   type Row,
   type Runtime,
+  type RestoreOptions,
   type SubscriptionCallback,
   type UpdateOptions,
   type UpsertOptions,

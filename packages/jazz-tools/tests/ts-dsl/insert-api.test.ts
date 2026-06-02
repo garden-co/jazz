@@ -75,6 +75,30 @@ describe("TS Insert API", () => {
     });
   });
 
+  it("can provide an id on insert", async () => {
+    const id = "00000000-0000-0000-0000-000000000000";
+    const { value: project } = db.insert(app.projects, { name: "Test Project" }, { id });
+    expect(project.id).toEqual(id);
+  });
+
+  it("cannot insert two rows with the same id", async () => {
+    const id = "00000000-0000-0000-0000-000000000000";
+    const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
+    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
+      `Insert failed: WriteError("encoding error: object already exists: ${project.id}")`,
+    );
+  });
+
+  it("keeps caller-supplied ids reserved after the row is deleted", async () => {
+    const id = "00000000-0000-0000-0000-000000000000";
+    const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
+    db.delete(app.projects, project.id);
+
+    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
+      `Insert failed: WriteError("row already deleted: ${project.id}")`,
+    );
+  });
+
   it("uses default values missing from the insert data", async () => {
     const project = insertProject(db);
     const owner = insertUser(db);
