@@ -508,6 +508,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(batch_id)
     }
 
+    /// Restore a soft-deleted row.
+    pub fn restore(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<DirectInsertResult, RuntimeError> {
+        let _span = debug_span!("restore", table, %object_id).entered();
+        self.ensure_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .restore(&mut self.storage, table, object_id, values, write_context)
+            .map_err(crate::runtime_core::write_error_from_query)?;
+        let row_id = result.row_id;
+        let row_values = result.row_values;
+        let batch_id = result.batch_id;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode)?;
+        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
+            self.seal_batch(batch_id)?;
+        }
+        debug!(object_id = %row_id, "restored");
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(((row_id, row_values), batch_id))
+    }
+
     /// Load one replayable local batch record by logical batch id.
     pub fn local_batch_record(
         &self,

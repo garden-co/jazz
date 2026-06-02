@@ -13,6 +13,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert,
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -98,6 +99,7 @@ describe("JazzClient schema order", () => {
         ],
         batchId: "batch-id",
       }),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -154,6 +156,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -238,6 +241,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -346,6 +350,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -494,6 +499,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),
@@ -645,6 +651,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
+      restore: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
       }),

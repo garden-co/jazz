@@ -247,6 +247,21 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 }
 // #endregion writing-crud-ts
 
+// #region writing-restore-ts
+export function restoreDeletedTodo(db: Db, todoId: string) {
+  db.delete(app.todos, todoId);
+
+  const { value: restored } = db.restore(app.todos, todoId, {
+    title: "Restored task",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  return restored;
+}
+// #endregion writing-restore-ts
+
 // #region writing-nullable-update-ts
 export function clearNullableTodoFields(db: Db, todoId: string) {
   db.update(app.todos, todoId, { owner_id: null }); // clears the nullable FK
