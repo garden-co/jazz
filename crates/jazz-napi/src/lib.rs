@@ -735,7 +735,7 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let batch_id = core
             .update(oid, updates, None)
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?;
+            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
 
         Ok(serde_json::json!({
             "batchId": batch_id.to_string(),

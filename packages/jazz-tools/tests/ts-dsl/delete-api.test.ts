@@ -65,7 +65,7 @@ describe("TS Delete API", () => {
     db.delete(app.projects, project.id);
 
     expect(() => db.delete(app.projects, project.id)).toThrow(
-      `Delete failed: WriteError("row already deleted: ObjectId(${project.id})")`,
+      `Delete failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
 });

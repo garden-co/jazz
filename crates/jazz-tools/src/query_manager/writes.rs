@@ -144,6 +144,15 @@ impl QueryManager {
                 .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
                 .is_some()
             {
+                if let Some(table) = self.load_row_table_name(storage, object_id) {
+                    let branch = self.current_branch();
+                    if self.row_is_deleted_on_branch(storage, &table, &branch, object_id)
+                        || self.visible_row_is_hard_deleted(storage, object_id, &branch)
+                    {
+                        return Err(QueryError::RowAlreadyDeleted(object_id));
+                    }
+                }
+
                 return Err(QueryError::EncodingError(format!(
                     "object already exists: {object_id}"
                 )));
@@ -1752,6 +1761,12 @@ impl QueryManager {
                     .map(|(_, row)| row)
             })
             .ok_or(QueryError::ObjectNotFound(id))?;
+        if current_row.is_soft_deleted()
+            || current_row.is_hard_deleted()
+            || self.row_is_deleted_on_branch(storage, &table, branch.as_str(), id)
+        {
+            return Err(QueryError::RowAlreadyDeleted(id));
+        }
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
         let write_schema = self.schema.clone();
