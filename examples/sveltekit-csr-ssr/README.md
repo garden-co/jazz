@@ -10,8 +10,12 @@ The SvelteKit counterpart to `examples/nextjs-csr-ssr`: three columns reading an
 
 ```sh
 pnpm install
+pnpm build:core   # builds jazz-tools + the native package the server Db needs
 pnpm --filter sveltekit-csr-ssr dev
 ```
+
+On a fresh checkout, `pnpm build:core` must run first — the server-side `Db`
+(`jazz-tools/backend`) loads the native `jazz-napi` package.
 
 The `jazzSvelteKit()` Vite plugin's managed runtime provisions a local Jazz app, a sync server, and the `PUBLIC_JAZZ_APP_ID` / `PUBLIC_JAZZ_SERVER_URL` / `BACKEND_SECRET` env vars, so no `.env` is needed for local dev.
 

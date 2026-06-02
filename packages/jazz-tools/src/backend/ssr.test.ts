@@ -147,4 +147,21 @@ describe("createSnapshotBuilder", () => {
     await expect(builder.prefetch(db as any, makeQuery())).rejects.toThrow("boom");
     expect(builder.dehydrate().entries).toHaveLength(0);
   });
+
+  it("rejects a prefetch whose query never delivers a result, after the timeout", async () => {
+    const neverDb: FakeDb = {
+      subscribeAll() {
+        // Subscribes but never invokes the callback.
+        return vi.fn();
+      },
+    };
+    const builder = createSnapshotBuilder({
+      appId: "slow",
+      schema: TEST_SCHEMA,
+      prefetchTimeoutMs: 30,
+    });
+
+    await expect(builder.prefetch(neverDb as any, makeQuery())).rejects.toThrow(/timed out/);
+    expect(builder.dehydrate().entries).toHaveLength(0);
+  });
 });

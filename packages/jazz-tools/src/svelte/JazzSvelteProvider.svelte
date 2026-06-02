@@ -131,6 +131,10 @@
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
 {:else if ctx.db || ctx.manager}
+	<!-- During the seed-only phase `ctx.db` is null; the cast keeps the snippet's
+	     `db` type non-null for the common (live) case. Children read data via
+	     QuerySubscription, or via getDb(), which throws clearly until the live
+	     client connects. -->
 	{@render children({ db: ctx.db as Db })}
 {:else if fallback}
 	{@render fallback()}

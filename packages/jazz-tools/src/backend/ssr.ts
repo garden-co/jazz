@@ -41,6 +41,12 @@ export type SnapshotBuilderConfig = {
    * if it disagrees with the prefetched Db's principal, `dehydrate()` throws.
    */
   principalId?: string | null;
+  /**
+   * Milliseconds to wait for each prefetched query's first result before
+   * rejecting, so a query that never delivers can't hang the server render.
+   * Defaults to 30000; set to 0 to disable.
+   */
+  prefetchTimeoutMs?: number;
 };
 
 /**
@@ -74,9 +80,12 @@ export type SnapshotBuilder = {
   dehydrate(): DehydratedSnapshot;
 };
 
+const DEFAULT_PREFETCH_TIMEOUT_MS = 30_000;
+
 export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBuilder {
   const entries = new Map<string, SnapshotEntry>();
   const schemaFingerprint = computeSchemaFingerprint(resolveWasmSchema(config.schema));
+  const timeoutMs = config.prefetchTimeoutMs ?? DEFAULT_PREFETCH_TIMEOUT_MS;
 
   // The snapshot's principal is derived from the Db each prefetch runs against,
   // so it can't drift from the data's actual scope. Stays `undefined` until a Db
@@ -90,7 +99,7 @@ export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBu
       options?: QueryOptions,
       session?: Session,
     ): Promise<T[]> {
-      const result = await prefetchOnce<T>(db, query, options, session);
+      const result = await prefetchOnce<T>(db, query, options, session, timeoutMs);
       const key = computeQueryKey(config.appId, query, options);
       entries.set(key, { key, result });
 
@@ -158,17 +167,37 @@ function prefetchOnce<T extends { id: string }>(
   query: QueryBuilder<T>,
   options?: QueryOptions,
   session?: Session,
+  timeoutMs = DEFAULT_PREFETCH_TIMEOUT_MS,
 ): Promise<T[]> {
   return new Promise<T[]>((resolve, reject) => {
     let unsubscribe: (() => void) | null = null;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const settle = () => {
+      settled = true;
+      if (timer) clearTimeout(timer);
+    };
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settle();
+        unsubscribe?.();
+        reject(
+          new Error(
+            `[jazz] prefetch timed out after ${timeoutMs}ms waiting for the query's first result.`,
+          ),
+        );
+      }, timeoutMs);
+    }
 
     try {
       unsubscribe = db.subscribeAll<T>(
         query,
         (delta) => {
           if (settled) return;
-          settled = true;
+          settle();
           resolve(delta.all);
           queueMicrotask(() => {
             unsubscribe?.();
@@ -178,7 +207,7 @@ function prefetchOnce<T extends { id: string }>(
         session,
       );
     } catch (error) {
-      settled = true;
+      settle();
       reject(error);
     }
   });
