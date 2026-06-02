@@ -28,6 +28,24 @@ const realisticBrowserLimitOverrides =
 const abstractBench = process.env.JAZZ_ABSTRACT_BENCH ?? "";
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
+const supportedTestBrowsers = ["chromium", "firefox", "webkit"] as const;
+type TestBrowser = (typeof supportedTestBrowsers)[number];
+
+function getTestBrowser(): TestBrowser {
+  const browser = process.env.JAZZ_TEST_BROWSER ?? "chromium";
+
+  if (supportedTestBrowsers.includes(browser as TestBrowser)) {
+    return browser as TestBrowser;
+  }
+
+  throw new Error(
+    `Unsupported JAZZ_TEST_BROWSER="${browser}". Expected one of: ${supportedTestBrowsers.join(
+      ", ",
+    )}.`,
+  );
+}
+
+const testBrowser = getTestBrowser();
 
 export default defineConfig({
   define: {
@@ -63,7 +81,7 @@ export default defineConfig({
     browser: {
       enabled: true,
       provider: playwright(),
-      instances: [{ browser: "chromium", headless: true }],
+      instances: [{ browser: testBrowser, headless: true }],
       commands: {
         testingServerInfo: async (_context, appId) => testingServerInfo(appId),
         testingServerBlockNetwork: async ({ context }, serverUrl) =>
