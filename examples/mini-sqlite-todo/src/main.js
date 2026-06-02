@@ -20,8 +20,8 @@ const state = {
   generated: 0,
   totalToGenerate: 100000,
   generateMs: 0,
-  showDebugInfo: false,
-  debugInfo: null,
+  showTableStats: false,
+  tableStats: null,
 };
 let searchTimer = 0;
 let editingTodoId = null;
@@ -67,9 +67,9 @@ app.innerHTML = `
           <option value="asc">Asc</option>
         </select>
       </label>
-      <label class="debug-toggle">
-        <input id="debug-info" type="checkbox" />
-        <span>Debug</span>
+      <label class="table-stats-toggle">
+        <input id="table-stats" type="checkbox" />
+        <span>Table stats</span>
       </label>
     </div>
     <div id="label-filters" class="label-filters" aria-label="Label filters"></div>
@@ -87,7 +87,7 @@ const labelsInput = app.querySelector("#todo-labels");
 const searchInput = app.querySelector("#search");
 const sortField = app.querySelector("#sort-field");
 const sortDir = app.querySelector("#sort-dir");
-const debugInfo = app.querySelector("#debug-info");
+const tableStats = app.querySelector("#table-stats");
 const labelFilters = app.querySelector("#label-filters");
 const list = app.querySelector("#todo-list");
 const generate = app.querySelector("#generate");
@@ -132,10 +132,10 @@ sortDir.addEventListener("change", () => {
   setFilters({ sortDir: sortDir.value });
 });
 
-debugInfo.addEventListener("change", () => {
-  state.showDebugInfo = debugInfo.checked;
-  state.debugInfo = null;
-  worker.postMessage({ type: "setDebugInfo", enabled: state.showDebugInfo });
+tableStats.addEventListener("change", () => {
+  state.showTableStats = tableStats.checked;
+  state.tableStats = null;
+  worker.postMessage({ type: "setTableStats", enabled: state.showTableStats });
   render();
 });
 
@@ -211,8 +211,8 @@ worker.onmessage = ({ data }) => {
     state.todos = data.todos;
     state.labels = data.labels;
     state.filters = data.filters;
-    state.showDebugInfo = data.showDebugInfo;
-    state.debugInfo = data.debugInfo;
+    state.showTableStats = data.showTableStats;
+    state.tableStats = data.tableStats;
     state.generateMs = data.generateMs ?? state.generateMs;
     state.generating = false;
     state.error = "";
@@ -248,7 +248,7 @@ function render() {
   app.querySelector("#status").textContent =
     state.generating || state.ready ? statusText() : "Opening OPFS worker...";
 
-  for (const control of [titleInput, labelsInput, searchInput, sortField, sortDir, debugInfo]) {
+  for (const control of [titleInput, labelsInput, searchInput, sortField, sortDir, tableStats]) {
     control.disabled =
       !state.ready || state.generating || (control === titleInput && !state.selectedProjectId);
   }
@@ -269,7 +269,7 @@ function render() {
   searchInput.value = state.filters.search;
   sortField.value = state.filters.sortField;
   sortDir.value = state.filters.sortDir;
-  debugInfo.checked = state.showDebugInfo;
+  tableStats.checked = state.showTableStats;
 
   const error = app.querySelector("#error-message");
   error.hidden = !state.error;
@@ -291,7 +291,7 @@ function render() {
     `${state.todos.length} open todos shown.`,
     `${state.projects.length.toLocaleString()} visible projects.`,
     filterSummary(),
-    debugSummary(),
+    tableStatsSummary(),
   ]
     .filter(Boolean)
     .join(" ");
@@ -311,18 +311,18 @@ function filterSummary() {
   return `Filters: ${parts.join(", ")}.`;
 }
 
-function debugSummary() {
-  if (!state.showDebugInfo) return "";
-  if (!state.debugInfo) return "Debug: loading...";
+function tableStatsSummary() {
+  if (!state.showTableStats) return "";
+  if (!state.tableStats) return "Table stats: loading...";
   const parts = [
-    `${state.debugInfo.currentRows.toLocaleString()} current rows`,
-    `access ${state.debugInfo.visibilityMs.toFixed(2)} ms`,
-    `top-10 ${state.debugInfo.queryMs.toFixed(2)} ms`,
+    `${state.tableStats.currentRows.toLocaleString()} current rows`,
+    `access ${state.tableStats.visibilityMs.toFixed(2)} ms`,
+    `top-10 ${state.tableStats.queryMs.toFixed(2)} ms`,
   ];
   if (state.generateMs) {
     parts.push(`generate ${(state.generateMs / 1000).toFixed(2)} s`);
   }
-  return `Debug: ${parts.join(", ")}.`;
+  return `Table stats: ${parts.join(", ")}.`;
 }
 
 function userOptionHtml(user) {
