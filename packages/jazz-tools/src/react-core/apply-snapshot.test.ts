@@ -104,7 +104,7 @@ describe("applySnapshot", () => {
     warn.mockRestore();
   });
 
-  it("discards the snapshot when principalId mismatches", () => {
+  it("throws when a user-scoped snapshot targets a different live principal", () => {
     const manager = makeOrchestrator("app-y");
     const snapshot: DehydratedSnapshot = {
       appId: "app-y",
@@ -113,20 +113,41 @@ describe("applySnapshot", () => {
       entries: [{ key: "app-y:{}:x", result: [] }],
     };
 
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
+      applySnapshot({
+        manager,
+        snapshot,
+        expected: {
+          appId: "app-y",
+          principalId: "user-new",
+          schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+        },
+      }),
+    ).toThrow(/refusing to seed/);
+    expect((manager as any).queryDefinitions.size).toBe(0);
+  });
+
+  it("defers (no throw, no seed) when a user-scoped snapshot has no live principal yet", () => {
+    const manager = makeOrchestrator("app-defer");
+    const snapshot: DehydratedSnapshot = {
+      appId: "app-defer",
+      principalId: "user-old",
+      schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      entries: [{ key: "app-defer:{}:x", result: [] }],
+    };
+
     const outcome = applySnapshot({
       manager,
       snapshot,
       expected: {
-        appId: "app-y",
-        principalId: "user-new",
+        appId: "app-defer",
+        principalId: null,
         schemaFingerprint: computeSchemaFingerprint(SCHEMA),
       },
     });
 
     expect(outcome).toBe("principal-mismatch");
     expect((manager as any).queryDefinitions.size).toBe(0);
-    warn.mockRestore();
   });
 
   it("seeds a null-principal (public) snapshot into an authenticated session", () => {
