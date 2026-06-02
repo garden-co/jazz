@@ -16,7 +16,8 @@ import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
-import { applySnapshot } from "./apply-snapshot.js";
+import { applySnapshot } from "../ssr/apply-snapshot.js";
+import { createSeedOrchestrator } from "../ssr/seed-orchestrator.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -67,15 +68,6 @@ type JazzContextValue = {
 };
 
 const JazzContext = createContext<JazzContextValue | null>(null);
-
-// A db that never delivers, for the seed-only orchestrator: seeded entries are
-// already fulfilled from the snapshot, and there's no live connection to stream
-// updates until the real client swaps in.
-const NOOP_SEED_DB = {
-  subscribeAll(): () => void {
-    return () => {};
-  },
-};
 
 type CachedClientEntry = {
   configKey: string;
@@ -271,25 +263,12 @@ function SeededJazzClientProvider({
   fallback,
   children,
 }: JazzClientProviderProps & { snapshot: DehydratedSnapshot; fallback?: ReactNode }) {
-  const [seedManager] = useState(() => {
-    const manager = new SubscriptionsOrchestrator(
-      { appId: expectedAppId ?? snapshot.appId },
-      NOOP_SEED_DB as ConstructorParameters<typeof SubscriptionsOrchestrator>[1],
-    );
-    applySnapshot({
-      manager,
-      snapshot,
-      expected: {
-        appId: expectedAppId ?? snapshot.appId,
-        // No live session yet, so only public (null-principal) snapshots seed
-        // synchronously. User-scoped snapshots wait for the live client, where
-        // the principal can be checked.
-        principalId: null,
-        schemaFingerprint: expectedSchemaFingerprint ?? snapshot.schemaFingerprint,
-      },
-    });
-    return manager;
-  });
+  const [seedManager] = useState(() =>
+    createSeedOrchestrator(snapshot, {
+      appId: expectedAppId ?? snapshot.appId,
+      schemaFingerprint: expectedSchemaFingerprint ?? snapshot.schemaFingerprint,
+    }),
+  );
 
   useEffect(() => {
     return () => {
