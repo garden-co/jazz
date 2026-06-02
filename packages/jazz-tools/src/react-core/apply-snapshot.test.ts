@@ -129,6 +129,39 @@ describe("applySnapshot", () => {
     warn.mockRestore();
   });
 
+  it("seeds a null-principal (public) snapshot into an authenticated session", () => {
+    const manager = makeOrchestrator("app-pub");
+    const query = makeQuery();
+    const key = computeQueryKey("app-pub", query);
+    const snapshot: DehydratedSnapshot = {
+      appId: "app-pub",
+      principalId: null,
+      schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      entries: [{ key, result: [{ id: "1", title: "public" }] }],
+    };
+
+    const outcome = applySnapshot({
+      manager,
+      snapshot,
+      expected: {
+        appId: "app-pub",
+        principalId: "user-abc",
+        schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      },
+    });
+
+    expect(outcome).toBe("applied");
+
+    manager.makeQueryKey(query);
+    const entry = manager.getCacheEntry<Todo>(key);
+    expect(entry.status).toBe("fulfilled");
+    expect(entry.state).toEqual({
+      status: "fulfilled",
+      data: [{ id: "1", title: "public" }],
+      error: null,
+    });
+  });
+
   it("discards the snapshot when schemaFingerprint mismatches", () => {
     const manager = makeOrchestrator("app-z");
     const snapshot: DehydratedSnapshot = {
