@@ -28,6 +28,12 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
     ),
+    restore: vi.fn((_table, _objectId, _valuesJson) =>
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-restore-1" }),
+    ),
+    restoreWithSession: vi.fn((_table, _objectId, _valuesJson, _writeContextJson) =>
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-restore-2" }),
+    ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
@@ -68,6 +74,14 @@ describe("JazzRnRuntimeAdapter", () => {
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
       undefined,
+    );
+
+    const restored = adapter.restore("todos", "row-1", { title: { type: "Text", value: "eggs" } });
+    expect(restored).toEqual({ id: "row-1", values: [], batchId: "batch-restore-1" });
+    expect(binding.restore).toHaveBeenCalledWith(
+      "todos",
+      "row-1",
+      JSON.stringify({ title: { type: "Text", value: "eggs" } }),
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });

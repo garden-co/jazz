@@ -67,6 +67,11 @@ export function makeClient() {
       values: [],
       batchId: "plain-insert-batch",
     }),
+    restore: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-restore-batch",
+    }),
     update: () => ({
       batchId: "batch-id",
     }),
@@ -147,6 +152,11 @@ export function makeClientWithContext(context: AppContext): JazzClient {
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
       batchId: "plain-insert-batch",
+    }),
+    restore: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-restore-batch",
     }),
     update: () => ({
       batchId: "batch-id",

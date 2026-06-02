@@ -44,6 +44,13 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
+  restore(table: string, object_id: string, values: InsertValues): DirectInsertResult;
+  restoreWithSession?(
+    table: string,
+    object_id: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectInsertResult;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
@@ -232,6 +239,8 @@ export interface UpsertOptions extends TimestampOverrideOptions {
 }
 
 export interface UpdateOptions extends TimestampOverrideOptions {}
+
+export interface RestoreOptions extends TimestampOverrideOptions {}
 
 /**
  * A mutation error event emitted by {@link JazzClient.onMutationError}.
@@ -843,6 +852,21 @@ abstract class BatchHandleBase {
     return row;
   }
 
+  restore(table: string, objectId: string, values: InsertValues, options?: RestoreOptions): Row {
+    this.ensureActive();
+    const row = this.client.restoreInternal(
+      table,
+      objectId,
+      values,
+      this.session,
+      this.attribution,
+      options,
+      this.batchContext,
+    );
+    this.markTouchedRow(row.id);
+    return row;
+  }
+
   upsert(table: string, values: InsertValues, options: UpsertOptions): void {
     this.ensureActive();
     this.client.upsertInternal(
@@ -1246,7 +1270,10 @@ export class JazzClient {
   }
 
   private requireSessionWriteMethod<
-    T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
+    T extends keyof Pick<
+      Runtime,
+      "insertWithSession" | "restoreWithSession" | "updateWithSession" | "deleteWithSession"
+    >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
@@ -1469,6 +1496,42 @@ export class JazzClient {
   }
 
   /**
+   * Restore a soft-deleted row with a caller-supplied id without waiting for durability.
+   */
+  restore(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    options?: RestoreOptions,
+  ): WriteResult<Row> {
+    return this.restoreHandleInternal(table, objectId, values, undefined, undefined, options);
+  }
+
+  restoreHandleInternal(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: RestoreOptions,
+    batchContext?: BatchWriteContext,
+  ): WriteResult<Row> {
+    const row = this.restoreInternal(
+      table,
+      objectId,
+      values,
+      session,
+      attribution,
+      options,
+      batchContext,
+    );
+    if (!batchContext) {
+      this.sealBatch(row.batchId);
+    }
+    return new WriteResult(row, row.batchId, this);
+  }
+
+  /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
   upsert(table: string, values: InsertValues, options: UpsertOptions): WriteHandle {
@@ -1549,6 +1612,47 @@ export class JazzClient {
         : options?.id
           ? this.runtime.insert(table, values, options.id)
           : this.runtime.insert(table, values);
+    return {
+      ...row,
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.context.schema,
+      ),
+    };
+  }
+
+  /**
+   * Restore a soft-deleted row with an optional session for policy checks.
+   * @internal
+   */
+  restoreInternal(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: RestoreOptions,
+    batchContext?: BatchWriteContext,
+  ): DirectInsertResult {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const row =
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      options?.updatedAt !== undefined
+        ? this.requireSessionWriteMethod("restoreWithSession")(
+            table,
+            objectId,
+            values,
+            this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              batchContext,
+              options?.updatedAt,
+            ),
+          )
+        : this.runtime.restore(table, objectId, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(

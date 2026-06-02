@@ -27,6 +27,7 @@ import {
   Transaction as RuntimeTransaction,
   WriteHandle,
   type CreateOptions,
+  type RestoreOptions,
   type UpdateOptions,
   type UpsertOptions,
   type DurabilityTier,
@@ -606,6 +607,26 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeHandle = this.requireRuntimeHandle("insert");
     const row = runtimeHandle.create(table._table, values, options);
+    return transformOutputRow(table, transformRow(row, table._schema, table._table));
+  }
+
+  /**
+   * Restore a soft-deleted row.
+   *
+   * The restore is scoped to this batch, and will only be globally visible
+   * once it's committed.
+   */
+  restore<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Init,
+    options?: RestoreOptions,
+  ): T {
+    this.bindTable(table, this.bindingName);
+    const transformedData = transformInputColumns(table, data);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const runtimeHandle = this.requireRuntimeHandle("restore");
+    const row = runtimeHandle.restore(table._table, id, values, options);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -1667,6 +1688,36 @@ export class Db {
         )
       : client.create(table._table, values, options);
     return inserted.mapValue((row) =>
+      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    );
+  }
+
+  /**
+   * Restore a soft-deleted row without waiting for durability.
+   *
+   * Use {@link WriteResult.wait} to wait for durable confirmation.
+   */
+  restore<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Init,
+    options?: RestoreOptions,
+  ): WriteResult<T> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const context = this.getRuntimeOperationContext();
+    const restored = context
+      ? client.restoreHandleInternal(
+          table._table,
+          id,
+          values,
+          context.session,
+          context.attribution,
+          options,
+        )
+      : client.restore(table._table, id, values, options);
+    return restored.mapValue((row) =>
       transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
   }

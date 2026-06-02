@@ -53,7 +53,7 @@ pub enum QueryError {
         max_key_bytes: usize,
     },
     IndexError(String),
-    /// Cannot undelete or truncate a row that is not soft-deleted.
+    /// Cannot restore or truncate a row that is not soft-deleted.
     RowNotDeleted(ObjectId),
     /// Cannot write to an already-deleted row.
     RowAlreadyDeleted(ObjectId),
@@ -98,7 +98,7 @@ impl std::fmt::Display for QueryError {
                 "indexed value too large for {table}.{column} on branch {branch}: index key would be {key_bytes} bytes (max {max_key_bytes})"
             ),
             QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
-            QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
+            QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {id}"),
             QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {id}"),
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
             QueryError::PolicyDenied { table, operation } => {
@@ -1929,7 +1929,7 @@ impl QueryManager {
 
         if was_soft_deleted {
             if apply_index_mutations
-                && let Err(error) = Self::update_indices_for_undelete_on_branch(
+                && let Err(error) = Self::update_indices_for_restore_on_branch(
                     storage,
                     &branch_table,
                     branch,
@@ -1944,7 +1944,7 @@ impl QueryManager {
                     branch,
                     object_id = %update.object_id,
                     %error,
-                    "failed to update indices for synced undelete"
+                    "failed to update indices for synced restore"
                 );
             }
             return Some(SubscriptionVisibilityEffect {

@@ -181,6 +181,11 @@ describe("JazzClient runtime helpers", () => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
+      restore: () => mockRow("00000000-0000-0000-0000-000000000001"),
+      restoreWithSession: (_table, _objectId, _values, contextJson) => {
+        writeContextJson = contextJson;
+        return mockRow("00000000-0000-0000-0000-000000000001");
+      },
       update: () => mockMutation(),
       updateWithSession: () => mockMutation(),
       delete: () => mockMutation(),
