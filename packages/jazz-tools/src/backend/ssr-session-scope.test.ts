@@ -60,4 +60,21 @@ describe("SSR snapshot — session scoping", () => {
     expect(titles).not.toContain("bob-note");
     expect(snapshot.principalId).toBe("alice");
   });
+
+  it("derives the snapshot principalId from the prefetch Db when none is configured", async () => {
+    const { context, appId } = await createScopedContext();
+
+    const seed = context.db(app);
+    seed.insert(app.notes, { title: "alice-note", owner: "alice" });
+
+    const aliceDb = context.forSession({ user_id: "alice", claims: {}, authMode: "external" }, app);
+
+    // No `principalId` passed — it must be derived from `aliceDb`'s session so it
+    // can't drift from the data's actual scope.
+    const builder = createSnapshotBuilder({ appId, schema: app });
+    await builder.prefetch(aliceDb, app.notes);
+    const snapshot = builder.dehydrate();
+
+    expect(snapshot.principalId).toBe("alice");
+  });
 });
