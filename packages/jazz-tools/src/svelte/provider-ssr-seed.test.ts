@@ -47,4 +47,22 @@ describe("JazzSvelteProvider — SSR seed", () => {
 
     expect(body).toContain("seeded-row");
   });
+
+  it("server-renders a user-scoped snapshot without gating display on the principal", () => {
+    const query = makeQuery();
+    const key = computeQueryKey("ssr-app", query);
+    const snapshot: DehydratedSnapshot = {
+      appId: "ssr-app",
+      principalId: "alice",
+      schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      entries: [{ key, result: [{ id: "1", title: "alice-row" }] }],
+    };
+    const neverResolves = new Promise<never>(() => {});
+
+    const { body } = render(SsrSeedApp, {
+      props: { client: neverResolves as never, snapshot, query },
+    });
+
+    expect(body).toContain("alice-row");
+  });
 });

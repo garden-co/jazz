@@ -127,27 +127,37 @@ describe("applySnapshot", () => {
     expect((manager as any).queryDefinitions.size).toBe(0);
   });
 
-  it("defers (no throw, no seed) when a user-scoped snapshot has no live principal yet", () => {
-    const manager = makeOrchestrator("app-defer");
+  it("seeds a user-scoped snapshot even when no live principal is known yet (display is not gated)", () => {
+    const manager = makeOrchestrator("app-seed");
+    const query = makeQuery();
+    const key = computeQueryKey("app-seed", query);
     const snapshot: DehydratedSnapshot = {
-      appId: "app-defer",
+      appId: "app-seed",
       principalId: "user-old",
       schemaFingerprint: computeSchemaFingerprint(SCHEMA),
-      entries: [{ key: "app-defer:{}:x", result: [] }],
+      entries: [{ key, result: [{ id: "1", title: "scoped" }] }],
     };
 
     const outcome = applySnapshot({
       manager,
       snapshot,
       expected: {
-        appId: "app-defer",
+        appId: "app-seed",
         principalId: null,
         schemaFingerprint: computeSchemaFingerprint(SCHEMA),
       },
     });
 
-    expect(outcome).toBe("principal-mismatch");
-    expect((manager as any).queryDefinitions.size).toBe(0);
+    expect(outcome).toBe("applied");
+
+    manager.makeQueryKey(query);
+    const entry = manager.getCacheEntry<Todo>(key);
+    expect(entry.status).toBe("fulfilled");
+    expect(entry.state).toEqual({
+      status: "fulfilled",
+      data: [{ id: "1", title: "scoped" }],
+      error: null,
+    });
   });
 
   it("seeds a null-principal (public) snapshot into an authenticated session", () => {

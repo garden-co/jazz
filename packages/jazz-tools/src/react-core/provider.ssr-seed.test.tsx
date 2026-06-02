@@ -68,4 +68,28 @@ describe("JazzProvider — SSR seed", () => {
 
     expect(html).toContain("seeded-row");
   });
+
+  it("server-renders a user-scoped snapshot without gating display on the principal", () => {
+    const neverResolves = () => new Promise<never>(() => {});
+    const key = computeQueryKey("ssr-app", query);
+    const snapshot: DehydratedSnapshot = {
+      appId: "ssr-app",
+      principalId: "alice",
+      schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      entries: [{ key, result: [{ id: "1", title: "alice-row" }] }],
+    };
+
+    const html = renderToString(
+      <JazzProvider
+        config={{ appId: "ssr-app", serverUrl: "https://example.test" }}
+        createJazzClient={neverResolves as never}
+        snapshot={snapshot}
+        fallback={<span>loading</span>}
+      >
+        <TodoList />
+      </JazzProvider>,
+    );
+
+    expect(html).toContain("alice-row");
+  });
 });
