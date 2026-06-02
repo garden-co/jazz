@@ -54,7 +54,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-	{#snippet children({ db })}
+	{#snippet children()}
 		<h1>Todos</h1>
 		<TodoList />
 		<Toaster />

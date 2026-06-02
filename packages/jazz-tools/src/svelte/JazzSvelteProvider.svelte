@@ -6,7 +6,6 @@
 		resolveWasmSchema,
 		type WasmSchemaInput
 	} from '../drivers/schema-wire.js';
-	import type { Db } from '../runtime/db.js';
 	import { applySnapshot } from '../ssr/apply-snapshot.js';
 	import { createSeedOrchestrator } from '../ssr/seed-orchestrator.js';
 	import { initJazzContext } from './context.svelte.js';
@@ -17,7 +16,7 @@
 		 * provider renders the seeded rows until a client is supplied (e.g. during
 		 * SSR, or before the browser connects). */
 		client?: JazzClient | Promise<JazzClient>;
-		children: import('svelte').Snippet<[{ db: Db }]>;
+		children: import('svelte').Snippet;
 		fallback?: import('svelte').Snippet;
 		/** Server-rendered query results to seed the first paint with. */
 		snapshot?: DehydratedSnapshot;
@@ -131,11 +130,7 @@
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
 {:else if ctx.db || ctx.manager}
-	<!-- During the seed-only phase `ctx.db` is null; the cast keeps the snippet's
-	     `db` type non-null for the common (live) case. Children read data via
-	     QuerySubscription, or via getDb(), which throws clearly until the live
-	     client connects. -->
-	{@render children({ db: ctx.db as Db })}
+	{@render children()}
 {:else if fallback}
 	{@render fallback()}
 {/if}

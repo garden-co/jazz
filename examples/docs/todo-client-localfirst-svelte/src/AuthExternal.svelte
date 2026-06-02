@@ -25,7 +25,7 @@
 
 {#key jwtToken}
   <JazzSvelteProvider {client}>
-    {#snippet children({ db })}
+    {#snippet children()}
       <button onclick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
       <!-- Your app content here -->
     {/snippet}
