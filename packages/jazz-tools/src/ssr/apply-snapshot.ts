@@ -13,12 +13,7 @@ export type ApplySnapshotInput = {
   expected: ApplySnapshotExpected;
 };
 
-export type ApplySnapshotOutcome =
-  | "applied"
-  | "no-snapshot"
-  | "appId-mismatch"
-  | "principal-mismatch"
-  | "schema-mismatch";
+export type ApplySnapshotOutcome = "applied" | "no-snapshot" | "appId-mismatch" | "schema-mismatch";
 
 export function applySnapshot({
   manager,
@@ -37,24 +32,29 @@ export function applySnapshot({
     return "appId-mismatch";
   }
 
-  // A null principalId marks a public snapshot — prefetched without user
-  // scoping — so it seeds into any session. A user-scoped (non-null) snapshot
-  // may only seed into a session for the *same* principal. Seeding it into a
-  // *different* live principal would expose one user's rows to another, so that
-  // is a hard error, not a warning. When there is no live principal yet (the
-  // pre-session seed), we defer instead — the live client re-checks the
-  // principal once its session resolves.
-  if (snapshot.principalId !== null && snapshot.principalId !== expected.principalId) {
-    if (expected.principalId !== null) {
-      throw new Error(
-        `[jazz] refusing to seed SSR snapshot: it is scoped to principal ${JSON.stringify(
-          snapshot.principalId,
-        )} but the live session is ${JSON.stringify(
-          expected.principalId,
-        )} — seeding it would expose another principal's rows.`,
-      );
-    }
-    return "principal-mismatch";
+  // The client trusts a server-rendered snapshot and displays it: seeding is
+  // never gated on the principal. A snapshot with no live principal yet (the
+  // synchronous SSR seed) still seeds, so its rows render on the first paint.
+  // Keeping the snapshot scoped to the right viewer is the server's job —
+  // prefetch with the right Db, and don't serve one principal's render to
+  // another; the rendered HTML already carries that data regardless.
+  //
+  // We do still throw when *both* principals are known and disagree: a snapshot
+  // scoped to one principal reaching a confirmed different live principal (the
+  // live-swap, once the client's session resolves) is a misconfiguration worth
+  // surfacing loudly rather than silently swapping in another user's rows.
+  if (
+    snapshot.principalId !== null &&
+    expected.principalId !== null &&
+    snapshot.principalId !== expected.principalId
+  ) {
+    throw new Error(
+      `[jazz] refusing to seed SSR snapshot: it is scoped to principal ${JSON.stringify(
+        snapshot.principalId,
+      )} but the live session is ${JSON.stringify(
+        expected.principalId,
+      )} — seeding it would expose another principal's rows.`,
+    );
   }
 
   // SSR snapshot seeding currently requires the client to be on the *same*
