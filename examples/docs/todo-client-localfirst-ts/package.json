@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "check": "tsc --noEmit",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && pnpm run check && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts"
   },
