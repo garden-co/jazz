@@ -57,10 +57,25 @@ export type JazzProviderProps = {
 };
 
 type JazzContextValue = {
-  client: CoreJazzClient;
+  // `client` is null only during the synchronous seed phase, before the live
+  // client has connected. `manager` is always present (the seeded read-only
+  // orchestrator, swapped for the live one once connected). `clientPromise`
+  // lets hooks that need the live client suspend until it resolves.
+  client: CoreJazzClient | null;
+  manager: SubscriptionsOrchestrator;
+  clientPromise: Promise<CoreJazzClient>;
 };
 
 const JazzContext = createContext<JazzContextValue | null>(null);
+
+// A db that never delivers, for the seed-only orchestrator: seeded entries are
+// already fulfilled from the snapshot, and there's no live connection to stream
+// updates until the real client swaps in.
+const NOOP_SEED_DB = {
+  subscribeAll(): () => void {
+    return () => {};
+  },
+};
 
 type CachedClientEntry = {
   configKey: string;
@@ -127,7 +142,7 @@ function releaseClient(configKey: string, holder: object): void {
 }
 
 function useAuthSubscription(
-  client: CoreJazzClient,
+  client: CoreJazzClient | null,
   onJWTExpired: JwtRefreshFn | undefined,
 ): number {
   // Latch serializes concurrent "expired" rejections into one refresh call.
@@ -143,6 +158,7 @@ function useAuthSubscription(
   const [authRev, setAuthRev] = useState(0);
 
   useEffect(() => {
+    if (!client) return;
     return client.db.onAuthChanged((state) => {
       setAuthRev((n) => n + 1);
 
@@ -225,9 +241,117 @@ export function JazzClientProvider({
 
   const authRev = useAuthSubscription(client, onJWTExpired);
 
-  const value = React.useMemo(() => ({ client }), [client, authRev]);
+  const value = React.useMemo<JazzContextValue>(
+    () => ({
+      client,
+      manager: client.manager,
+      clientPromise: Promise.resolve(clientPromise),
+    }),
+    [client, clientPromise, authRev],
+  );
 
   return <JazzContext.Provider value={value}>{children}</JazzContext.Provider>;
+}
+
+/**
+ * Snapshot-seeded provider. Renders the prefetched rows synchronously — on the
+ * server and on the client's first render — from a read-only orchestrator
+ * seeded by the snapshot, without waiting on the async client. So the SSR HTML
+ * already contains the data and matches the client's first paint (no hydration
+ * re-render). Once the live client connects, the context swaps to it; the live
+ * orchestrator is seeded with the same rows first, so the swap is
+ * data-identical and live updates stream in from there.
+ */
+function SeededJazzClientProvider({
+  client: clientPromise,
+  onJWTExpired,
+  snapshot,
+  expectedAppId,
+  expectedSchemaFingerprint,
+  fallback,
+  children,
+}: JazzClientProviderProps & { snapshot: DehydratedSnapshot; fallback?: ReactNode }) {
+  const [seedManager] = useState(() => {
+    const manager = new SubscriptionsOrchestrator(
+      { appId: expectedAppId ?? snapshot.appId },
+      NOOP_SEED_DB as ConstructorParameters<typeof SubscriptionsOrchestrator>[1],
+    );
+    applySnapshot({
+      manager,
+      snapshot,
+      expected: {
+        appId: expectedAppId ?? snapshot.appId,
+        // No live session yet, so only public (null-principal) snapshots seed
+        // synchronously. User-scoped snapshots wait for the live client, where
+        // the principal can be checked.
+        principalId: null,
+        schemaFingerprint: expectedSchemaFingerprint ?? snapshot.schemaFingerprint,
+      },
+    });
+    return manager;
+  });
+
+  useEffect(() => {
+    return () => {
+      void seedManager.shutdown();
+    };
+  }, [seedManager]);
+
+  const normalizedPromise = React.useMemo(
+    () => Promise.resolve(clientPromise) as Promise<CoreJazzClient>,
+    [clientPromise],
+  );
+
+  const [liveClient, setLiveClient] = useState<CoreJazzClient | null>(() => {
+    const tracked = trackPromise(normalizedPromise);
+    return tracked.status === "fulfilled" ? (tracked.value as CoreJazzClient) : null;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    normalizedPromise
+      .then((resolved) => {
+        if (!cancelled) setLiveClient(resolved);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [normalizedPromise]);
+
+  // Seed the live orchestrator the instant it connects — synchronously during
+  // render, before it becomes the context manager — so swapping to it is
+  // data-identical and useAll never flashes empty.
+  const seededLiveRef = useRef<CoreJazzClient | null>(null);
+  if (liveClient && seededLiveRef.current !== liveClient) {
+    seededLiveRef.current = liveClient;
+    applySnapshot({
+      manager: liveClient.manager,
+      snapshot,
+      expected: {
+        appId: expectedAppId ?? snapshot.appId,
+        principalId: liveClient.session?.user_id ?? null,
+        schemaFingerprint: expectedSchemaFingerprint ?? snapshot.schemaFingerprint,
+      },
+    });
+  }
+
+  const authRev = useAuthSubscription(liveClient, onJWTExpired);
+
+  const value = React.useMemo<JazzContextValue>(
+    () => ({
+      client: liveClient,
+      manager: liveClient?.manager ?? seedManager,
+      clientPromise: normalizedPromise,
+    }),
+    [liveClient, seedManager, normalizedPromise, authRev],
+  );
+
+  return (
+    <JazzContext.Provider value={value}>
+      <React.Suspense fallback={fallback}>{children}</React.Suspense>
+    </JazzContext.Provider>
+  );
 }
 
 /**
@@ -274,12 +398,29 @@ export function JazzProvider({
     };
   }, [configKey, createJazzClient, holder]);
 
+  // With a snapshot, render the seeded rows synchronously (server + first
+  // client paint) instead of suspending on the async client. Without one,
+  // keep the original behaviour: suspend until the client connects.
+  if (snapshot) {
+    return (
+      <SeededJazzClientProvider
+        client={clientPromise}
+        onJWTExpired={onJWTExpired}
+        snapshot={snapshot}
+        expectedAppId={config.appId}
+        expectedSchemaFingerprint={expectedSchemaFingerprint}
+        fallback={fallback}
+      >
+        {children}
+      </SeededJazzClientProvider>
+    );
+  }
+
   return (
     <React.Suspense fallback={fallback}>
       <JazzClientProvider
         client={clientPromise}
         onJWTExpired={onJWTExpired}
-        snapshot={snapshot}
         expectedAppId={config.appId}
         expectedSchemaFingerprint={expectedSchemaFingerprint}
       >
@@ -289,10 +430,26 @@ export function JazzProvider({
   );
 }
 
-export function useJazzClient(): CoreJazzClient {
+function useJazzContext(): JazzContextValue {
   const ctx = useContext(JazzContext);
   if (!ctx) throw new Error("useDb must be used within <JazzProvider>");
-  return ctx.client;
+  return ctx;
+}
+
+export function useJazzClient(): CoreJazzClient {
+  const ctx = useJazzContext();
+  // During the seed phase the live client isn't ready; suspend on it for hooks
+  // that need the real db/session (useDb, useSession, useAuthState).
+  return ctx.client ?? usePromise(ctx.clientPromise);
+}
+
+/**
+ * Get the active subscriptions orchestrator: the seeded read-only one during
+ * the seed phase, the live one once connected. Never suspends, so reads can
+ * render synchronously from the snapshot.
+ */
+export function useManager(): SubscriptionsOrchestrator {
+  return useJazzContext().manager;
 }
 
 /**

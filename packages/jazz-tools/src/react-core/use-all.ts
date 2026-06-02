@@ -1,7 +1,7 @@
 import * as React from "react";
 import { type Usable, use } from "react";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
-import { useJazzClient } from "./provider.js";
+import { useManager } from "./provider.js";
 
 type UseAllOptions = {
   suspense?: boolean;
@@ -15,7 +15,7 @@ function useAllBase<T extends { id: string }>(
   options?: UseAllOptions,
 ): T[] | undefined {
   const { suspense = false } = options ?? {};
-  const { manager } = useJazzClient();
+  const manager = useManager();
   const entry = React.useMemo(() => {
     if (!query) return null;
     const key = manager.makeQueryKey(query, queryOptions);
