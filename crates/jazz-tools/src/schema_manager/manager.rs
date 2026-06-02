@@ -1356,13 +1356,16 @@ impl SchemaManager {
             parent_bundle_object_id,
             bundle_object_id,
         };
-        self.query_manager.require_authorization_schema();
         if let Some(current_head) = self.current_permissions_head
             && current_head.version > head.version
         {
             return Ok(());
         }
         self.current_permissions_head = Some(head);
+        // Defer flipping row_policy_mode to Enforcing until apply succeeds —
+        // apply_permissions_head calls set_authorization_schema which sets it.
+        // Flipping earlier denies writes against tables whose explicit policy
+        // lives in the not-yet-arrived bundle.
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;
         } else {
@@ -2587,6 +2590,111 @@ mod tests {
                 .get(&bundle_object_id)
                 .map(|state| state.permissions.clone()),
             Some(permissions)
+        );
+    }
+
+    #[test]
+    fn permissions_head_without_bundle_does_not_deny_local_writes() {
+        use crate::query_manager::session::{Session, WriteContext};
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        // `users` has a select policy but no insert policy. Pre-bundle the gap
+        // is permissive so the insert below succeeds; post-bundle the missing
+        // insert policy must deny it under Enforcing mode.
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let bundle = PermissionsBundleState {
+            schema_hash,
+            version: 1,
+            parent_bundle_object_id: None,
+            permissions: permissions.clone(),
+        };
+        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
+
+        manager
+            .process_catalogue_update(
+                manager.permissions_head_object_id(),
+                &manager.permissions_head_metadata(),
+                &encode_permissions_head(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    bundle_object_id,
+                ),
+            )
+            .expect("head should process");
+
+        assert!(
+            manager.pending_permissions_head.is_some(),
+            "bundle should be pending while only the head has arrived",
+        );
+
+        let write_context = WriteContext::from_session(Session::new("test-user"));
+        let pre_bundle_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(ObjectId::new())),
+            ("name".to_string(), Value::Text("Alice".into())),
+            ("email".to_string(), Value::Text("alice@example.com".into())),
+        ]);
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                pre_bundle_values,
+                None,
+                Some(&write_context),
+            )
+            .expect(
+                "writes in the head-before-bundle gap should not be denied by a missing policy",
+            );
+
+        manager
+            .process_catalogue_update(
+                bundle_object_id,
+                &manager.permissions_bundle_metadata(),
+                &encode_permissions_bundle(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    &permissions,
+                ),
+            )
+            .expect("bundle should process");
+
+        assert!(
+            manager.pending_permissions_head.is_none(),
+            "pending head should clear once the bundle has been applied",
+        );
+
+        let post_bundle_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(ObjectId::new())),
+            ("name".to_string(), Value::Text("Bob".into())),
+            ("email".to_string(), Value::Text("bob@example.com".into())),
+        ]);
+
+        let post_bundle_result = manager.insert(
+            &mut storage,
+            "users",
+            post_bundle_values,
+            None,
+            Some(&write_context),
+        );
+
+        assert!(
+            matches!(
+                post_bundle_result,
+                Err(crate::query_manager::manager::QueryError::PolicyDenied { .. }),
+            ),
+            "after bundle applies, Enforcing mode must deny a write that lacks an explicit \
+             insert policy; got {post_bundle_result:?}",
         );
     }
 
