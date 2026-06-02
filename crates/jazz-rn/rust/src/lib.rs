@@ -576,6 +576,79 @@ impl RnRuntime {
         })
     }
 
+    pub fn restore(
+        &self,
+        table: String,
+        object_id: String,
+        values_json: String,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("restore", || {
+            let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
+                message: e.to_string(),
+            })?;
+            let oid = ObjectId::from_uuid(uuid);
+            let named_values = convert_insert_values(&values_json)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let ((id, row_values), batch_id) = core
+                .restore(&table, oid, named_values, None)
+                .map_err(runtime_err)?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            serde_json::to_string(&serde_json::json!({
+                "id": id.uuid().to_string(),
+                "values": row_values,
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("restore serialization failed: {e}"),
+            })
+        })
+    }
+
+    #[uniffi::method(name = "restoreWithSession")]
+    pub fn restore_with_session(
+        &self,
+        table: String,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("restore_with_session", || {
+            let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
+                message: e.to_string(),
+            })?;
+            let oid = ObjectId::from_uuid(uuid);
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let ((id, row_values), batch_id) = core
+                .restore(&table, oid, named_values, write_context.as_ref())
+                .map_err(runtime_err)?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            serde_json::to_string(&serde_json::json!({
+                "id": id.uuid().to_string(),
+                "values": row_values,
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("restore serialization failed: {e}"),
+            })
+        })
+    }
+
     pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
         with_panic_boundary("update", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {

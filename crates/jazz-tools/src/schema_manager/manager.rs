@@ -1924,6 +1924,54 @@ impl SchemaManager {
             )
     }
 
+    /// Restore a soft-deleted row, performing copy-on-write when targeting a
+    /// specific schema branch.
+    pub fn restore<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let actual_table = self
+            .query_manager
+            .load_row_table_name(storage, object_id)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if actual_table != table {
+            return Err(QueryError::EncodingError(format!(
+                "object {object_id} belongs to table {actual_table}, cannot restore into {table}"
+            )));
+        }
+
+        let table_name = TableName::new(table);
+        let context = &self.context;
+        let insert_alignment_cache = &mut self.insert_alignment_cache;
+        let query_manager = &mut self.query_manager;
+        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?;
+        let plan = Self::insert_alignment_plan_for_schema(
+            insert_alignment_cache,
+            target_hash,
+            table_name,
+            target_schema,
+        )?;
+        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
+
+        query_manager.restore_on_branch_with_schema_and_write_context(
+            storage,
+            table,
+            &target_branch,
+            object_id,
+            &aligned_values,
+            target_schema,
+            write_context,
+        )
+    }
+
     /// Process pending operations (drives SyncManager).
     ///
     /// This also processes any pending catalogue updates (schemas/lenses) that

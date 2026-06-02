@@ -1580,6 +1580,75 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    /// Restore a soft-deleted row by ObjectId.
+    #[wasm_bindgen]
+    pub fn restore(
+        &self,
+        table: &str,
+        object_id: &str,
+        values: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let _span =
+            debug_span!("wasm::restore", tier = self.tier_label, table, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+
+        let mut core = self.core.borrow_mut();
+        let ((object_id, row_values), batch_id) = core
+            .restore(table, oid, named_values, None)
+            .map_err(|e| JsError::new(&format!("Restore failed: {:?}", e)))?;
+
+        let row = WasmInsertResult {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+            batch_id: batch_id.to_string(),
+        };
+        tracing::debug!(object_id = %row.id, "restored");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        row.serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
+    /// Restore a soft-deleted row by ObjectId as an explicit session principal.
+    #[wasm_bindgen(js_name = restoreWithSession)]
+    pub fn restore_with_session(
+        &self,
+        table: &str,
+        object_id: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!(
+            "wasm::restoreWithSession",
+            tier = self.tier_label,
+            table,
+            object_id
+        )
+        .entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut core = self.core.borrow_mut();
+        let ((object_id, row_values), batch_id) = core
+            .restore(table, oid, named_values, write_context.as_ref())
+            .map_err(|e| JsError::new(&format!("Restore failed: {:?}", e)))?;
+
+        let row = WasmInsertResult {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+            batch_id: batch_id.to_string(),
+        };
+        tracing::debug!(object_id = %row.id, "restored_with_session");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        row.serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
     /// Wait for a batch to settle at the requested durability tier.
     #[wasm_bindgen(js_name = waitForBatch)]
     pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
