@@ -115,4 +115,13 @@ describe("TS Update API", () => {
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(updated!.done).toBe(true);
   });
+
+  it("trying to update an already-deleted row fails", async () => {
+    const project = insertProject(db);
+    db.delete(app.projects, project.id);
+
+    expect(() => db.update(app.projects, project.id, { name: "Restored Project" })).toThrow(
+      `Update failed: Write error: object not found: ObjectId(${project.id})`,
+    );
+  });
 });
