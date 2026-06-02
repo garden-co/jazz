@@ -1482,7 +1482,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         let batch_id = core
             .update(oid, updates, None)
-            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "updated");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -1519,7 +1519,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         let batch_id = core
             .update(oid, updates, write_context.as_ref())
-            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "updated_with_session");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);

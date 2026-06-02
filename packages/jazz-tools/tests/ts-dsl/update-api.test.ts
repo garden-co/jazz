@@ -121,7 +121,7 @@ describe("TS Update API", () => {
     db.delete(app.projects, project.id);
 
     expect(() => db.update(app.projects, project.id, { name: "Restored Project" })).toThrow(
-      `Update failed: Write error: object not found: ObjectId(${project.id})`,
+      `Update failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
 });

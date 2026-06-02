@@ -83,9 +83,9 @@ describe("TS Insert API", () => {
 
   it("cannot insert two rows with the same id", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    db.insert(app.projects, { name: "Test Project 1" }, { id });
-    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id })).toThrow(
-      'Insert failed: WriteError("encoding error: object already exists: 00000000-0000-0000-0000-000000000000")',
+    const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
+    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
+      `Insert failed: WriteError("encoding error: object already exists: ${project.id}")`,
     );
   });
 
@@ -95,7 +95,7 @@ describe("TS Insert API", () => {
     db.delete(app.projects, project.id);
 
     expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
-      'Insert failed: WriteError("encoding error: object already exists: 00000000-0000-0000-0000-000000000000")',
+      `Insert failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
 

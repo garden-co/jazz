@@ -55,7 +55,7 @@ pub enum QueryError {
     IndexError(String),
     /// Cannot undelete or truncate a row that is not soft-deleted.
     RowNotDeleted(ObjectId),
-    /// Cannot delete an already-deleted row.
+    /// Cannot write to an already-deleted row.
     RowAlreadyDeleted(ObjectId),
     /// Cannot operate on a hard-deleted row (it no longer exists).
     RowHardDeleted(ObjectId),
@@ -99,7 +99,7 @@ impl std::fmt::Display for QueryError {
             ),
             QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
             QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
-            QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {:?}", id),
+            QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {id}"),
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)

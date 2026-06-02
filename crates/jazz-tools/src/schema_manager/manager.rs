@@ -1762,36 +1762,58 @@ impl SchemaManager {
             .into_iter()
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
-        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            write_context
-                .and_then(WriteContext::batch_id)
-                .and_then(|batch_id| {
-                    self.query_manager
-                        .load_latest_transactional_staged_row_on_branch(
-                            storage,
-                            object_id,
-                            &target_branch,
-                            batch_id,
+        let (
+            table,
+            source_branch,
+            old_current_data,
+            _source_commit_id,
+            old_current_provenance,
+            current_row_is_deleted,
+        ) = write_context
+            .and_then(WriteContext::batch_id)
+            .and_then(|batch_id| {
+                self.query_manager
+                    .load_latest_transactional_staged_row_on_branch(
+                        storage,
+                        object_id,
+                        &target_branch,
+                        batch_id,
+                    )
+                    .map(|(table, row)| {
+                        (
+                            table,
+                            target_branch.clone(),
+                            row.data.to_vec(),
+                            row.batch_id(),
+                            row.row_provenance(),
+                            row.is_soft_deleted() || row.is_hard_deleted(),
                         )
-                        .map(|(table, row)| {
-                            (
-                                table,
-                                target_branch.clone(),
-                                row.data.to_vec(),
-                                row.batch_id(),
-                                row.row_provenance(),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    self.query_manager.load_row_for_schema_update_in_context(
+                    })
+            })
+            .or_else(|| {
+                self.query_manager
+                    .load_row_for_schema_update_in_context(
                         storage,
                         object_id,
                         &branches,
                         &target_context,
                     )
-                })
-                .ok_or(QueryError::ObjectNotFound(object_id))?;
+                    .map(|(table, source_branch, data, batch_id, provenance)| {
+                        (table, source_branch, data, batch_id, provenance, false)
+                    })
+            })
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if current_row_is_deleted
+            || self.query_manager().row_is_deleted_on_branch(
+                storage,
+                &table,
+                &source_branch,
+                object_id,
+            )
+        {
+            return Err(QueryError::RowAlreadyDeleted(object_id));
+        }
 
         let table_name = TableName::new(&table);
         let descriptor = target_schema

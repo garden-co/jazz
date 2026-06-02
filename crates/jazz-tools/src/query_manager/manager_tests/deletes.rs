@@ -114,6 +114,36 @@ fn delete_already_deleted_row_fails() {
 }
 
 #[test]
+fn update_deleted_row_fails() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    qm.delete(&mut storage, handle.row_id).unwrap();
+
+    let result = qm.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alice Updated".into()), Value::Integer(200)],
+    );
+
+    match result {
+        Err(QueryError::RowAlreadyDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowAlreadyDeleted for deleted row update, got {other:?}"),
+    }
+    assert!(qm.row_is_deleted(&storage, "users", handle.row_id));
+    assert!(!qm.row_is_indexed(&storage, "users", handle.row_id));
+}
+
+#[test]
 fn soft_delete_with_concurrent_tips_merges_preserved_content() {
     // Test that soft deleting an object with two concurrent tips results
     // in a soft delete commit with merged content from both field updates.
