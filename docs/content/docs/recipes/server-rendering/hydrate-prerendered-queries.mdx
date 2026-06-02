@@ -131,6 +131,93 @@ function List() {
 
 The matching client-side `useAll(app.todos)` derives the same orchestrator key as the server's `prefetch(db, app.todos)`, finds the seeded entry, and returns the data synchronously. Sync still runs in the background and replaces the seeded data with live state once it arrives.
 
+## SvelteKit
+
+The same flow works in SvelteKit. Prefetch in a server `load`, return the envelope as page data, and pass it to `JazzSvelteProvider`.
+
+```ts title="src/lib/jazz-server.ts"
+import { createJazzContext, createSnapshotBuilder } from "jazz-tools/backend";
+import { PUBLIC_JAZZ_APP_ID, PUBLIC_JAZZ_SERVER_URL } from "$env/static/public";
+import { BACKEND_SECRET } from "$env/static/private";
+import { app } from "$lib/schema";
+import permissions from "$lib/permissions";
+
+export const context = createJazzContext({
+  appId: PUBLIC_JAZZ_APP_ID,
+  app,
+  permissions,
+  driver: { type: "memory" },
+  serverUrl: PUBLIC_JAZZ_SERVER_URL,
+  backendSecret: BACKEND_SECRET,
+});
+
+// A fresh builder per request so prefetches don't bleed between renders.
+export function createServerSnapshot() {
+  return createSnapshotBuilder({ appId: PUBLIC_JAZZ_APP_ID, schema: app });
+}
+```
+
+```ts title="src/routes/+page.server.ts"
+import { app } from "$lib/schema";
+import { context, createServerSnapshot } from "$lib/jazz-server";
+import type { PageServerLoad } from "./$types";
+
+export const load: PageServerLoad = async (event) => {
+  // Public data: reads as the backend principal, so the snapshot seeds into
+  // any session. For per-user pages, scope the read to the request instead:
+  //   const db = await context.forRequest(event.request);
+  const db = context.asBackend();
+
+  const builder = createServerSnapshot();
+  await builder.prefetch(db, app.todos);
+  return { snapshot: builder.dehydrate() };
+};
+```
+
+On the client, create the live client in the browser only — on the server the provider renders from the snapshot alone — and pass `snapshot` (plus `schema`, for envelope validation) to the provider:
+
+```svelte title="src/routes/+page.svelte"
+<script lang="ts">
+  import { browser } from "$app/environment";
+  import { createJazzClient, JazzSvelteProvider } from "jazz-tools/svelte";
+  import { PUBLIC_JAZZ_APP_ID, PUBLIC_JAZZ_SERVER_URL } from "$env/static/public";
+  import { app } from "$lib/schema";
+  import TodoList from "$lib/TodoList.svelte";
+
+  let { data } = $props();
+
+  // No live client during SSR; the snapshot drives the server render. The
+  // browser creates the real client, which then takes over.
+  const client = browser
+    ? createJazzClient({ appId: PUBLIC_JAZZ_APP_ID, serverUrl: PUBLIC_JAZZ_SERVER_URL })
+    : new Promise<never>(() => {});
+</script>
+
+<JazzSvelteProvider {client} snapshot={data.snapshot} schema={app}>
+  {#snippet children()}
+    <TodoList />
+  {/snippet}
+</JazzSvelteProvider>
+```
+
+```svelte title="src/lib/TodoList.svelte"
+<script lang="ts">
+  import { QuerySubscription } from "jazz-tools/svelte";
+  import { app } from "$lib/schema";
+
+  // Hits the seeded entry synchronously — the rows are already in the SSR HTML.
+  const todos = new QuerySubscription(app.todos);
+</script>
+
+<ul>
+  {#each todos.current ?? [] as todo (todo.id)}
+    <li>{todo.title}</li>
+  {/each}
+</ul>
+```
+
+`QuerySubscription(app.todos)` derives the same orchestrator key as the server's `prefetch(db, app.todos)`, reads the seeded entry synchronously on the server and on the first client render, then swaps to live sync once the browser client connects.
+
 ## Session delegation: who runs the query
 
 The hardest part of server-rendering with a sync engine is "as whom does the server read?". Jazz exposes three options on `JazzContext`:
