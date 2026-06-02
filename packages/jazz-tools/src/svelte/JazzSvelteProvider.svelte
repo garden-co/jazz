@@ -1,14 +1,3 @@
-<!--
-Makes a Jazz client available to descendant Svelte components through context.
-Pass a pre-created client or a promise that resolves to one.
-
-When a `snapshot` (server-prefetched query results) is supplied, the provider
-seeds a read-only orchestrator synchronously — on the server and on the
-client's first render — so the SSR HTML and first paint already contain the
-prefetched rows. Once the live client connects, its orchestrator is seeded with
-the same rows and swapped in, so the swap is data-identical and live updates
-stream from there.
--->
 <script lang="ts">
 	import { onDestroy } from 'svelte';
 	import type { DehydratedSnapshot } from '../backend/ssr.js';
@@ -24,7 +13,10 @@ stream from there.
 	import type { JazzClient } from './create-jazz-client.js';
 
 	interface Props {
-		client: JazzClient | Promise<JazzClient>;
+		/** The live client, or a promise of one. Optional: with a `snapshot`, the
+		 * provider renders the seeded rows until a client is supplied (e.g. during
+		 * SSR, or before the browser connects). */
+		client?: JazzClient | Promise<JazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
 		/** Server-rendered query results to seed the first paint with. */
@@ -78,6 +70,12 @@ stream from there.
 		// Fall back to the seed manager (not null) so seeded rows stay visible
 		// until the live client connects — no empty flash after hydration.
 		ctx.manager = seedManager;
+
+		// No live client yet (during SSR, or before the browser connects): render
+		// from the seed alone until one is supplied.
+		if (!client) {
+			return;
+		}
 
 		Promise.resolve(client)
 			.then((resolved) => {
