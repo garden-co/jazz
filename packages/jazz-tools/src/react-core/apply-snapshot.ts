@@ -57,6 +57,13 @@ export function applySnapshot({
     return "principal-mismatch";
   }
 
+  // SSR snapshot seeding currently requires the client to be on the *same*
+  // schema as the server that produced the snapshot. On any schema difference
+  // we discard and fall back to a live fetch — so a client on a different build
+  // than the server gets no first-paint seeding. Cross-version reinterpretation
+  // (apply the client's lenses to the snapshot, delegated to the core, falling
+  // back to live only when the lens chain is unavailable) is future work:
+  // specs/todo/ideas/3_later/ssr-snapshot-cross-version-lensing.md
   if (snapshot.schemaFingerprint !== expected.schemaFingerprint) {
     warnDiscard(
       "schemaFingerprint",

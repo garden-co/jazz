@@ -63,14 +63,6 @@ export type SnapshotBuilder = {
   dehydrate(): DehydratedSnapshot;
 };
 
-/**
- * Build a server-rendered snapshot of one or more Jazz queries.
- *
- * Each `prefetch` runs the query through the supplied backend `Db` and
- * captures the first emitted result. `dehydrate` returns an envelope
- * the client passes to `<JazzProvider snapshot={...}>` to seed its
- * cache, so the first paint after hydration is not blocked on sync.
- */
 export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBuilder {
   const entries = new Map<string, SnapshotEntry>();
   const schemaFingerprint = computeSchemaFingerprint(resolveWasmSchema(config.schema));
@@ -115,7 +107,6 @@ function prefetchOnce<T extends { id: string }>(
           if (settled) return;
           settled = true;
           resolve(delta.all);
-          // Defer the unsubscribe so it doesn't race the callback's own bookkeeping.
           queueMicrotask(() => {
             unsubscribe?.();
           });

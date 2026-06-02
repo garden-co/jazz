@@ -319,9 +319,6 @@ function SeededJazzClientProvider({
     };
   }, [normalizedPromise]);
 
-  // Seed the live orchestrator the instant it connects — synchronously during
-  // render, before it becomes the context manager — so swapping to it is
-  // data-identical and useAll never flashes empty.
   const seededLiveRef = useRef<CoreJazzClient | null>(null);
   if (liveClient && seededLiveRef.current !== liveClient) {
     seededLiveRef.current = liveClient;
@@ -398,9 +395,6 @@ export function JazzProvider({
     };
   }, [configKey, createJazzClient, holder]);
 
-  // With a snapshot, render the seeded rows synchronously (server + first
-  // client paint) instead of suspending on the async client. Without one,
-  // keep the original behaviour: suspend until the client connects.
   if (snapshot) {
     return (
       <SeededJazzClientProvider

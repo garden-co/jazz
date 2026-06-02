@@ -89,14 +89,17 @@ export function computeSchemaFingerprint(
   schema: WasmSchema,
   options?: SerializeRuntimeSchemaOptions,
 ): string {
+  // We only need a fast, stable hash to detect when two schemas differ — not a
+  // cryptographically secure one — so FNV-1a (32-bit) is fine here.
   return fnv1a32Hex(serializeRuntimeSchema(schema, options));
 }
 
 /**
- * Accepts either a raw {@link WasmSchema} or an App-like value carrying
- * one in its `wasmSchema` field. Lets public API surfaces (the SSR snapshot
- * builder, `JazzProvider.schema`) take whichever shape the caller has on
- * hand without forcing them to drill into `.wasmSchema` themselves.
+ * Accepts either a raw {@link WasmSchema} or an App-like value carrying one in
+ * its `wasmSchema` field. Public API surfaces (the SSR snapshot builder,
+ * `JazzProvider.schema`) take whichever shape the caller has on hand, so more
+ * casual users can get this right by passing their `app` directly — without
+ * needing to plumb through the less-documented `.wasmSchema` API themselves.
  */
 export type WasmSchemaInput = WasmSchema | { readonly wasmSchema: WasmSchema };
 

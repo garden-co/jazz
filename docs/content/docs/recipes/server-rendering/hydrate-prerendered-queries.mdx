@@ -18,7 +18,7 @@ Server-render a page that already contains your Jazz data, then let the client t
 
 Read these before you reach for the API:
 
-- **Catching the client up to the latest CRDT state at hydrate time.** The snapshot is a point-in-time read of resolved values; sync delivers fresher state after mount.
+- **Catching the client up to the latest state at hydrate time.** The snapshot is a point-in-time read of resolved values; sync delivers fresher state after mount.
 - **Server mutations.** This path is read-only — write through normal client APIs.
 - **Streaming Suspense snapshots.** One envelope per render, captured before the response is sent.
 - **Multi-principal pages.** One authenticated principal per snapshot.
@@ -26,20 +26,21 @@ Read these before you reach for the API:
 
 ## The flow
 
-```
-Server                                    Client
-──────                                    ──────
-forSession(s)        ──►  Db
-  │
-prefetch(db, query)  ──►  result
-  │
-dehydrate()          ──►  envelope  ──►  <JazzProvider snapshot={envelope}>
-                                              │
-                                          orchestrator.seedSnapshot(key, result)
-                                              │
-                                          useAll(query) → hits a fulfilled
-                                                          entry on first render
-```
+<Sequence
+  eyebrow="Prefetch → hydrate"
+  description="The server resolves the query and dehydrates the result into a JSON envelope; the client seeds its cache from that envelope before the first render."
+  participants={[
+    { id: "server", label: "Server" },
+    { id: "client", label: "Client" },
+  ]}
+  steps={[
+    { kind: "note", over: "server", text: "forSession(s) → Db" },
+    { kind: "note", over: "server", text: "prefetch(db, query) → result" },
+    { kind: "message", from: "server", to: "client", text: "dehydrate() → envelope" },
+    { kind: "note", over: "client", text: "JazzProvider → seedSnapshot(key, result)" },
+    { kind: "note", over: "client", text: "useAll(query) → fulfilled on first render" },
+  ]}
+/>
 
 ## Server: prefetch a query
 
@@ -135,10 +136,18 @@ The matching client-side `useAll(app.todos)` derives the same orchestrator key a
 The hardest part of server-rendering with a sync engine is "as whom does the server read?". Jazz exposes three options on `JazzContext`:
 
 - **`context.asBackend()`** — reads as the backend principal, which can see everything. The snapshot it produces has a `null` `principalId` and seeds into **any** session, so only prefetch genuinely public data this way (marketing pages, leaderboards). Writes are attributed to `jazz:system`.
-- **`await context.forRequest(req)`** — reads as the authenticated user behind the request, taking bearer tokens straight from HTTP headers. Permission policies apply as if the user themselves were reading. Use for per-user app shells.
-- **`context.forSession(session)`** — same as `forRequest`, but for when you already hold a resolved `Session` (e.g. after running your own JWT middleware).
+- **`await context.forRequest(req)`** — reads as the authenticated user behind the request, taking bearer tokens straight from HTTP headers. [Permission policies](/docs/auth/permissions) apply as if the user themselves were reading. Use for per-user app shells.
+- **`context.forSession(session)`** — same as `forRequest`, but for when you already hold a resolved [`Session`](/docs/auth/sessions) (e.g. after running your own JWT middleware).
 
 The snapshot the client hydrates from is only as well-scoped as the `Db` the server prefetched against. Pick the one whose visibility matches what the client will see post-hydration, otherwise the hydrated render and the post-sync render disagree, which the user reads as a flicker.
+
+<Callout type="warn">
+  Getting this wrong is a data-exposure bug, not just a flicker. If you prefetch with a `Db` that
+  can see more than the viewing user — `asBackend()` for a per-user page, or a session scoped to the
+  wrong principal — those rows are dehydrated into the envelope and shipped to the browser,
+  delivering data the user may have no right to read. Match the prefetch scope to the viewer, and
+  see [access control](/docs/recipes/access-control/user-owned-data) for per-user visibility.
+</Callout>
 
 ## The envelope
 
@@ -156,7 +165,7 @@ import type { DehydratedSnapshot } from "jazz-tools/backend";
 // };
 ```
 
-`<JazzProvider>` validates the envelope and **silently discards it (with a dev-mode console warning) if `appId` or `schemaFingerprint` mismatch, or if a user-scoped (non-null `principalId`) snapshot doesn't match the live principal**. A `null` `principalId` marks a public snapshot that seeds into any session. On discard the client falls back to a normal fetch — nothing breaks, the optimisation just doesn't kick in.
+`<JazzProvider>` validates the envelope. If `appId` or `schemaFingerprint` mismatch it **silently discards the snapshot (with a dev-mode console warning) and falls back to a normal fetch** — nothing breaks, the optimisation just doesn't kick in. A `null` `principalId` marks a public snapshot that seeds into any session. A user-scoped (non-null `principalId`) snapshot only seeds into a session for the **same** principal; before a session resolves it simply waits. But a snapshot scoped to one principal arriving in a session for a **different** principal is a hard **error** — it throws rather than silently discarding, because seeding it would expose one user's rows to another.
 
 Pass your `schema` prop too if you want the fingerprint check to run:
 
@@ -170,13 +179,21 @@ Without `schema`, the fingerprint check is skipped — you take responsibility f
 
 ## Constraint: matching `QueryBuilder` expressions
 
-The cache key the server computes is derived from `query._build()` + the serialised query options + your `appId`. Identical expressions on both sides produce identical keys. **The expressions must match.** A server-side `app.todos.where({done: true})` and a client-side `app.todos` are different keys; the seeded entry won't be found.
+The cache key is derived from the query, its serialised options, and your `appId`. (`query._build()` is part of the internals — not a public API you call, and not something you set directly.) Identical query expressions and options on both sides produce identical keys. **The expressions must match.** A server-side `app.todos.where({done: true})` and a client-side `app.todos` are different keys; the seeded entry won't be found.
 
-If you find yourself wanting "any matching subset" semantics — return the seeded data even when keys don't exactly align — that's not what this gives you. Use the same query expression both places, or accept the cache miss.
+If you find yourself wanting "any matching subset" semantics (return the seeded data even when keys don't exactly align), that's not what this gives you. Use the same query expression both places, or accept the cache miss.
 
 ## ISR and long-lived caching
 
 If the page is statically rendered or sits behind a long CDN TTL, the snapshot embedded in the HTML is older than what sync will deliver. The client will briefly render the stale snapshot, then sync corrects it. Acceptable for most pages; not acceptable for pages that display adversarially-stale state (live scores, stock prices). For those, render dynamically or skip the snapshot entirely.
+
+<Callout type="warn">
+  Caching cuts the other way for **scoped** data. A snapshot prefetched as a specific user bakes
+  that user's rows into the page's HTML, so if that page is statically rendered, held in the
+  full-route cache, or sits behind a shared CDN, another user can be served the first user's data.
+  Only publicly cache pages whose snapshot is public (`null` `principalId`). For per-user pages,
+  render dynamically and keep the response private (e.g. `Cache-Control: private, no-store`).
+</Callout>
 
 <Callout type="info">
   The snapshot is JSON crossing the RSC boundary. Session secrets, backend secrets, and other
