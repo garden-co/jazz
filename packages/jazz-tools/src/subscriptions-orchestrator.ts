@@ -435,31 +435,12 @@ export class SubscriptionsOrchestrator {
   }
 }
 
-/**
- * JSON serialization with object keys sorted recursively, so that two values
- * that differ only in key order produce the same string. Arrays keep their
- * order; primitives pass through.
- */
-function canonicalStringify(value: unknown): string {
-  return JSON.stringify(value, (_key, val) => {
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      const source = val as Record<string, unknown>;
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(source).sort()) {
-        sorted[k] = source[k];
-      }
-      return sorted;
-    }
-    return val;
-  });
-}
-
 function sessionsEqual(a: Session | null, b: Session | null): boolean {
   if (a === b) {
     return true;
   }
 
-  return canonicalStringify(a) === canonicalStringify(b);
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
@@ -467,5 +448,5 @@ function serializeQueryOptions(options?: QueryOptions): string {
     return "{}";
   }
 
-  return canonicalStringify(options);
+  return JSON.stringify(options);
 }
