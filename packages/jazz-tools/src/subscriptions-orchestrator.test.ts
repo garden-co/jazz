@@ -653,4 +653,33 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
+    const sessionA: Session = { user_id: "a", claims: { role: "reader" }, authMode: "external" };
+    const sessionB: Session = { user_id: "b", claims: { role: "reader" }, authMode: "external" };
+    const harness = createUnitHarness("app-so-u29", sessionA);
+
+    try {
+      const { entry } = harness.makeEntry();
+      const onfulfilled = vi.fn();
+      const onReset = vi.fn();
+      entry.subscribe({ onfulfilled, onReset });
+
+      harness.emit(0, makeDelta([makeTodo("1", "from-A")]));
+      expect(entry.status).toBe("fulfilled");
+      onfulfilled.mockClear();
+
+      harness.manager.setSession(sessionB);
+
+      expect(entry.status).toBe("pending");
+      expect(onReset).toHaveBeenCalledTimes(1);
+      expect(harness.calls).toHaveLength(2);
+
+      harness.emit(1, makeDelta([makeTodo("2", "from-B")]));
+      expect(entry.status).toBe("fulfilled");
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("2", "from-B")]);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
 });
