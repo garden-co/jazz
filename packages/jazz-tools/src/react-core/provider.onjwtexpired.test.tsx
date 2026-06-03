@@ -49,6 +49,30 @@ describe("JazzClientProvider — onJWTExpired", () => {
     });
   });
 
+  it("dedups the refresh across two providers sharing one client", async () => {
+    const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
+    const onJWTExpired = vi.fn().mockResolvedValue("fresh.jwt.token");
+
+    render(
+      <>
+        <JazzClientProvider client={client} onJWTExpired={onJWTExpired}>
+          <div />
+        </JazzClientProvider>
+        <JazzClientProvider client={client} onJWTExpired={onJWTExpired}>
+          <div />
+        </JazzClientProvider>
+      </>,
+    );
+
+    await act(async () => {
+      client.__markUnauthenticated("expired");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onJWTExpired).toHaveBeenCalledTimes(1);
+  });
+
   it("does not fire for non-expired errors", async () => {
     const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
     const onJWTExpired = vi.fn();
