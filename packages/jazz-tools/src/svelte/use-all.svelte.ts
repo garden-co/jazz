@@ -96,6 +96,11 @@ export class QuerySubscription<T extends { id: string }> {
             this.current = undefined;
             this.loading = false;
           },
+          onReset: () => {
+            this.current = undefined;
+            this.error = null;
+            this.loading = true;
+          },
         });
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));
