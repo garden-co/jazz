@@ -75,7 +75,57 @@ to re-run authority policy validation after missing facts arrive.
 authority epoch. Indexes should support lookup/order by `(global_epoch, tx_num)`
 or equivalent stable tie-breaker.
 
-### 26.2 History And Current Tables
+### 26.2 Client Upload Registry
+
+The client upload registry is durable retry metadata for ordinary local
+transactions that still need upstream reconciliation. It is not authoritative
+transaction fate storage; transaction outcome, receipts, rejection detail,
+history, and row data live in their normal tables.
+
+Prototype schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS jazz_tx_upload_queue (
+  sync_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  tx_num INTEGER NOT NULL UNIQUE,
+  status INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  branch_id TEXT,
+  author TEXT,
+  completed_at INTEGER,
+  last_upload_attempt_at INTEGER,
+  last_ack_at INTEGER,
+  attempt_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS jazz_tx_upload_queue_active_idx
+ON jazz_tx_upload_queue(status, created_at, sync_seq)
+WHERE status = 1;
+
+```
+
+`jazz_tx_upload_queue` owns retry, in-flight bookkeeping, and completion
+metadata. Upload data is reconstructed from transaction write metadata and
+committed history rows. The registry joins to `jazz_tx` through `tx_num`; the
+public `tx_id` is read from `jazz_tx` when constructing an upload message.
+
+Active upload scans use:
+
+```sql
+WHERE status = 1
+ORDER BY created_at, sync_seq
+```
+
+The partial index keeps this scan small even when many completed rows are
+retained for diagnostics or delayed cleanup. `sync_seq` is a local-only
+monotonic tie-breaker and never crosses the protocol boundary.
+
+Cleanup deletes completed rows from `jazz_tx_upload_queue` only. It must never
+delete `jazz_tx`, transaction receipts, rejection details, history, current
+projection, or row identity metadata. Active rows are never eligible for cleanup
+by age.
+
+### 26.3 History And Current Tables
 
 Sketch:
 
@@ -139,7 +189,7 @@ redundant append-only history can compress well. Custom VFS/page compression is
 a serious storage research target despite portability cost across browser,
 native, and server runtimes.
 
-### 26.3 Branch View Tables
+### 26.4 Branch View Tables
 
 Sketch:
 
@@ -171,7 +221,7 @@ CREATE TABLE jazz_branch_source (
 ) WITHOUT ROWID;
 ```
 
-### 26.4 Identity Mapping
+### 26.5 Identity Mapping
 
 Logical mappings:
 
@@ -207,7 +257,7 @@ that can later hydrate the same public identity to two different physical
 identities or attach branch provenance to the wrong branch. SQLite transactions
 should be used as the atomicity boundary for all such mapping updates.
 
-### 26.5 Indexes
+### 26.6 Indexes
 
 Indexes are part of the lowering plan, not handwritten per feature.
 

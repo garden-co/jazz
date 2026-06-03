@@ -91,7 +91,178 @@ Open issues:
 - cache eviction policy and authorization revalidation for retained
   out-of-scope data
 
-## 17. Subscriptions
+## 17. Client Transaction Upload
+
+Client upload is transaction-scoped. One `ClientMessage::UploadTx` carries one
+transaction:
+
+```rust
+ClientMessage::UploadTx {
+    tx: ClientTx,
+    data: Vec<ClientDataRecord>,
+    reads: Vec<ReadRecord>,
+}
+```
+
+That transaction may contain multiple row changes across multiple tables.
+Protocol-level batching may group many messages in one transport frame, but the
+message-level unit remains one transaction.
+
+Upload sends transaction data, not authoritative history. The receiver expands
+the client delta into local storage/history only after applying connection
+trust, auth, policy, conflict-mode, branch, and current-state validation. A
+client cannot forge receipts, global epochs, rejection state, catalogue state,
+or system fields.
+
+`ClientTx` carries:
+
+```rust
+struct ClientTx {
+  tx_id: String,
+  branch_id: Option<String>,
+  conflict_mode: TxConflictMode,
+  created_at: i64,
+  author: Option<String>,
+}
+```
+
+`tx_id` is opaque. Locally generated ids are UUIDv7 in the Rust prototype, but
+upload handling accepts opaque public ids and does not derive behavior from the
+text format. `branch_id = Some(id)` targets that branch. `branch_id = None`
+uses the authenticated session's default branch; if no default branch exists
+for that session, the upload is invalid for that session.
+
+For untrusted client connections, the receiver ignores `author` and derives
+write provenance from the authenticated connection/session. For trusted peer or
+server connections, the peer may be authoritative for author/provenance subject
+to the connection role.
+
+`ClientDataRecord` carries row data:
+
+```rust
+struct ClientDataRecord {
+  table: String,
+  row_id: String,
+  op: DataOp,
+  values: BTreeMap<String, JsonValue>,
+}
+```
+
+`values` is row-image-shaped:
+
+- `Insert`: effective fields for the new row
+- `Update`: effective fields after the update
+- `Delete`: empty values
+
+System fields such as `j_created_at`, `j_updated_at`, `j_created_by`, and
+`j_updated_by` are rejected from client data. They are derived by the receiver.
+One upload transaction must not contain duplicate `(table, row_id)` records;
+the client normalizes repeated same-row mutations before upload.
+
+Mergeable transactions may send `reads: []`. Exclusive or conflict-sensitive
+transactions send the read facts needed for validation. This spec keeps the
+existing `ReadRecord` shape for now; redesigning the read-set protocol is a
+separate change.
+
+The server sends a receipt ACK when it has received the upload message on this
+connection:
+
+```rust
+ServerMessage::UploadAck {
+    tx_id: String,
+}
+```
+
+`UploadAck` is flow control only. It frees one in-flight upload slot. It does
+not mean the transaction was durably accepted, edge-filed, globally accepted,
+or rejected, and it never completes the durable upload queue.
+
+Transaction fate is reported separately:
+
+```rust
+ServerMessage::TxStatus {
+    tx_id: String,
+    status: TxStatusKind,
+}
+
+enum TxStatusKind {
+    EdgeAccepted,
+    GlobalAccepted { global_epoch: i64 },
+    Rejected { code: String, detail: Option<JsonValue> },
+}
+```
+
+The server sends `TxStatus` only when the transaction reaches edge, reaches
+global, or is rejected. It does not send pending or awaiting-dependency
+statuses. `TxStatus` is non-cumulative: `EdgeAccepted` means edge acceptance
+happened, `GlobalAccepted` means global acceptance happened and satisfies
+edge-level retry/wait needs, and `Rejected` is terminal for upload retry.
+Clients ignore unknown statuses. Clients also ignore invalid downgrade-like
+statuses; for example, an exclusive transaction that sees only edge acceptance
+keeps waiting/replaying until global acceptance or rejection.
+
+The client durable upload queue is scanned after handshake and reconnect. It
+sends active rows ordered by:
+
+```sql
+ORDER BY created_at, sync_seq
+```
+
+`created_at` is the transaction timestamp. `sync_seq` is a local monotonic
+registry tie-breaker and is never sent over the wire. The client sends in this
+order, but it does not wait for `tx A` to be acked before sending `tx B`.
+WebSocket and `postMessage` provide ordered delivery for the intended
+transports; any future unordered transport must provide an ordered stream below
+this protocol.
+
+The default max in-flight upload count is `1000`. Negotiation may be added
+later if servers need to advertise lower capacity.
+
+Reconnect has no special upload replay message. Connection-local in-flight
+state is cleared, the durable upload queue is scanned again, and active
+transactions are replayed even when no subscription is active.
+
+Server handling is:
+
+```text
+UploadTx
+   |
+   v
+handshake + auth checks
+   |
+   +-- failed envelope/auth check ----> protocol error / close
+   |
+   v
+send UploadAck(tx_id)
+   |
+   v
+validate shape, branch, tx id, reads, policy, current rows
+   |
+   +-- invalid or denied ------------> TxStatus(tx_id, Rejected)
+   |
+   v
+expand client delta into authoritative local storage/history
+   |
+   v
+record edge/global/rejection fate when known
+   |
+   v
+TxStatus(tx_id, EdgeAccepted | GlobalAccepted | Rejected)
+```
+
+Duplicate upload of an already known transaction is idempotent. The server
+still sends `UploadAck`; if it already knows terminal or settled fate, it should
+also send the current `TxStatus` so the client can complete reconciliation.
+
+If the server lacks authoritative state needed to validate an update or delete,
+it should fetch or wait for trusted upstream state rather than trusting client
+history. Missing local state is not automatically proof that the transaction is
+invalid.
+
+Protocol version is `2` for this wire shape. `ProtocolCapabilities` includes
+`tx_upload`; clients reject a server hello that does not advertise it.
+
+## 18. Subscriptions
 
 One-shot queries and live subscriptions share query semantics.
 
@@ -185,7 +356,22 @@ Invalidation may start coarse but must be correct. Useful invalidation facts:
 Row-id cursors alone are insufficient for ordered-page invalidation because a
 row outside the page may move inside the page when its order key changes.
 
-## 18. Incoming Sync Application
+Unsubscribe is explicit:
+
+```rust
+ClientMessage::Unsubscribe {
+    subscription_id: SubscriptionId,
+}
+```
+
+The server removes exactly that active subscription, drops pending download
+messages and last acknowledged cursor state for that subscription, and sends no
+reply. Unsubscribe does not touch upload queue state and does not rely on
+replaying the remaining subscription set. `Replay` remains the reconnect/full
+subscription reconciliation message, not the single-subscription removal
+mechanism.
+
+## 19. Incoming Sync Application
 
 Incoming sync application is semantic, not insert-only.
 

@@ -390,6 +390,23 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
           PRIMARY KEY (tx_num, table_num, row_num, reason)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS jazz_tx_upload_queue (
+          sync_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          tx_num INTEGER NOT NULL UNIQUE,
+          status INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          branch_id TEXT,
+          author TEXT,
+          completed_at INTEGER,
+          last_upload_attempt_at INTEGER,
+          last_ack_at INTEGER,
+          attempt_count INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS jazz_tx_upload_queue_active_idx
+        ON jazz_tx_upload_queue(status, created_at, sync_seq)
+        WHERE status = 1;
+
         CREATE TABLE IF NOT EXISTS jazz_query_read (
           branch_id TEXT NOT NULL,
           table_name TEXT NOT NULL,

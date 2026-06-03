@@ -84,6 +84,9 @@ pub struct DownstreamConnectionManager {
     session: DownstreamSession,
     pending_subscriptions: BTreeMap<SubscriptionId, PendingSubscription>,
     dropped_subscriptions: BTreeSet<SubscriptionId>,
+    in_flight_uploads: BTreeSet<String>,
+    sent_uploads: BTreeSet<String>,
+    max_in_flight_uploads: usize,
     next_subscription_id: u64,
 }
 
@@ -113,14 +116,23 @@ impl DownstreamConnectionManager {
             ),
             pending_subscriptions: BTreeMap::new(),
             dropped_subscriptions: BTreeSet::new(),
+            in_flight_uploads: BTreeSet::new(),
+            sent_uploads: BTreeSet::new(),
+            max_in_flight_uploads: 1000,
             next_subscription_id: 0,
         }
     }
 
     pub fn open(&mut self) -> Result<Vec<ClientMessage>> {
         let mut batch = DownstreamMessageBatch::empty();
+        self.in_flight_uploads.clear();
+        self.sent_uploads.clear();
         self.session.open(&mut batch)?;
         Ok(batch.into_client_messages())
+    }
+
+    pub fn set_max_in_flight_uploads_for_test(&mut self, max: usize) {
+        self.max_in_flight_uploads = max;
     }
 
     pub fn subscribe(
@@ -165,12 +177,36 @@ impl DownstreamConnectionManager {
         Ok(batch.into_client_messages())
     }
 
+    pub fn flush(&mut self, runtime: &mut Runtime) -> Result<Vec<ClientMessage>> {
+        if self.session.is_closed() {
+            return Err(Error::new("session is closed"));
+        }
+        if !self.is_ready() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = DownstreamMessageBatch::empty();
+        self.flush_pending_subscriptions(&mut batch)?;
+        self.flush_uploads(runtime, &mut batch)?;
+        Ok(batch.into_client_messages())
+    }
+
     pub fn receive(
         &mut self,
         runtime: &mut Runtime,
         server_messages: Vec<ServerMessage>,
     ) -> Result<Vec<ClientMessage>> {
         let server_messages = self.filter_dropped_server_messages(server_messages);
+        let should_process_upload_acks = self.is_ready();
+        if should_process_upload_acks {
+            for message in &server_messages {
+                if let ServerMessage::UploadAck { tx_id } = message {
+                    if self.in_flight_uploads.remove(tx_id) {
+                        runtime.mark_upload_ack(tx_id)?;
+                    }
+                }
+            }
+        }
         let protocol_error = server_messages.iter().find_map(|message| match message {
             ServerMessage::Error(error) => Some(error.clone()),
             _ => None,
@@ -184,7 +220,7 @@ impl DownstreamConnectionManager {
             )));
         }
         if self.is_ready() {
-            self.flush_pending_subscriptions(&mut batch)?;
+            batch.extend_client_messages(self.flush(runtime)?);
         }
         Ok(batch.into_client_messages())
     }
@@ -202,7 +238,9 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        self.session.replay(&mut batch)?;
+        batch.send_client_message(ClientMessage::Unsubscribe {
+            subscription_id: subscription.id().clone(),
+        });
         Ok(batch.into_client_messages())
     }
 
@@ -229,6 +267,8 @@ impl DownstreamConnectionManager {
     pub fn close(&mut self, reason: CloseReason) -> Result<Vec<ClientMessage>> {
         let mut batch = DownstreamMessageBatch::empty();
         self.pending_subscriptions.clear();
+        self.in_flight_uploads.clear();
+        self.sent_uploads.clear();
         self.session.close(&mut batch, reason)?;
         Ok(batch.into_client_messages())
     }
@@ -253,6 +293,31 @@ impl DownstreamConnectionManager {
                 subscription.query,
                 subscription.requested_tier,
             )?;
+        }
+        Ok(())
+    }
+
+    fn flush_uploads(
+        &mut self,
+        runtime: &mut Runtime,
+        batch: &mut DownstreamMessageBatch,
+    ) -> Result<()> {
+        let available = self
+            .max_in_flight_uploads
+            .saturating_sub(self.in_flight_uploads.len());
+        if available == 0 {
+            return Ok(());
+        }
+        for upload in runtime.active_uploads(available, &self.sent_uploads)? {
+            let tx_id = upload.tx.tx_id.clone();
+            batch.send_client_message(ClientMessage::UploadTx {
+                tx: upload.tx,
+                data: upload.data,
+                reads: upload.reads,
+            });
+            runtime.mark_upload_attempt(&tx_id)?;
+            self.in_flight_uploads.insert(tx_id.clone());
+            self.sent_uploads.insert(tx_id);
         }
         Ok(())
     }
@@ -284,6 +349,8 @@ impl DownstreamConnectionManager {
                     subscription_id: None,
                     ..
                 }
+                | ServerMessage::UploadAck { .. }
+                | ServerMessage::TxStatus { .. }
                 | ServerMessage::Close(_) => true,
             })
             .collect()
@@ -307,6 +374,40 @@ impl UpstreamConnectionManager {
         }
     }
 
+    pub fn new_authenticated_for_test(
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+        schema_fingerprint: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        connection_auth_user: impl Into<String>,
+    ) -> Self {
+        Self::new_authenticated(
+            session_id,
+            node_id,
+            schema_fingerprint,
+            policy_fingerprint,
+            connection_auth_user,
+        )
+    }
+
+    pub fn new_authenticated(
+        session_id: impl Into<String>,
+        node_id: impl Into<String>,
+        schema_fingerprint: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        connection_auth_user: impl Into<String>,
+    ) -> Self {
+        Self {
+            session: UpstreamSession::new_authenticated(
+                session_id,
+                node_id,
+                schema_fingerprint,
+                policy_fingerprint,
+                connection_auth_user,
+            ),
+        }
+    }
+
     pub fn receive(
         &mut self,
         runtime: &mut Runtime,
@@ -314,6 +415,16 @@ impl UpstreamConnectionManager {
     ) -> Result<Vec<ServerMessage>> {
         let mut batch = UpstreamMessageBatch::new(client_messages);
         self.session.pump(runtime, &mut batch)?;
+        Ok(batch.into_server_messages())
+    }
+
+    pub fn refresh_active_subscriptions(
+        &mut self,
+        runtime: &Runtime,
+    ) -> Result<Vec<ServerMessage>> {
+        let mut batch = UpstreamMessageBatch::new(Vec::new());
+        self.session
+            .refresh_active_subscriptions(runtime, &mut batch)?;
         Ok(batch.into_server_messages())
     }
 
@@ -350,6 +461,10 @@ impl DownstreamMessageBatch {
 
     pub fn into_client_messages(self) -> Vec<ClientMessage> {
         self.client_messages
+    }
+
+    fn extend_client_messages(&mut self, messages: Vec<ClientMessage>) {
+        self.client_messages.extend(messages);
     }
 }
 
