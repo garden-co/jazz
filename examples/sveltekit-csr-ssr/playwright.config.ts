@@ -20,9 +20,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev",
+    // `dev:e2e` clears the persisted dev-server store before starting, so each
+    // run gets a fresh, empty backend. Never reuse a running server, since that
+    // would skip the reset and leak rows between runs.
+    command: "pnpm run dev:e2e",
     url: BASE_URL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });
