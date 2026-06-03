@@ -140,7 +140,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("venue");
     const VenueList = defineComponent({
       setup() {
-        const venues = useAll(s.queries.venues);
+        const { data: venues } = useAll(s.queries.venues);
         return () =>
           h("ul", { id: "venues" }, venues.value?.map((v) => h("li", { key: v.id }, v.name)) ?? []);
       },
@@ -172,7 +172,9 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("stop");
     const StopList = defineComponent({
       setup() {
-        const stops = useAll(s.queries.stops.include({ venue: true }).orderBy("date", "asc"));
+        const { data: stops } = useAll(
+          s.queries.stops.include({ venue: true }).orderBy("date", "asc"),
+        );
         return () =>
           h(
             "ul",
@@ -261,7 +263,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const Inserter = defineComponent({
       setup() {
         const db = useDb();
-        const venues = useAll(s.queries.venues);
+        const { data: venues } = useAll(s.queries.venues);
         function add() {
           db.insert(
             app.venues,

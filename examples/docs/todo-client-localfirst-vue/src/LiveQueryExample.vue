@@ -3,7 +3,7 @@
 import { useAll } from "jazz-tools/vue";
 import { app } from "../schema.js";
 
-const todos = useAll(app.todos);
+const { data: todos } = useAll(app.todos);
 // undefined = not yet connected; [] = connected, no rows; [...] = rows present
 </script>
 
