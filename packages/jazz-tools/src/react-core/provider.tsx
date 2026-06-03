@@ -114,12 +114,27 @@ function releaseClient(configKey: string, holder: object): void {
   }, 0);
 }
 
+// Refresh latch keyed on the client, not the component. The client is a
+// module-singleton, so a remount or a second provider would otherwise each
+// hold their own latch and double-fire the JWT refresh on an "expired" event.
+const authRefreshLatches = new WeakMap<object, { inFlight: boolean }>();
+
+function getAuthRefreshLatch(client: object): { inFlight: boolean } {
+  let latch = authRefreshLatches.get(client);
+  if (!latch) {
+    latch = { inFlight: false };
+    authRefreshLatches.set(client, latch);
+  }
+  return latch;
+}
+
 function useAuthSubscription(
   client: CoreJazzClient,
   onJWTExpired: JwtRefreshFn | undefined,
 ): number {
-  // Latch serializes concurrent "expired" rejections into one refresh call.
-  const inFlight = useRef(false);
+  // Client-scoped latch serializes concurrent "expired" rejections into one
+  // refresh call across every provider/remount sharing this client.
+  const latch = getAuthRefreshLatch(client);
   // Refcell keeps the callback fresh without re-subscribing when callers pass
   // an inline function that changes every render.
   const callbackRef = useRef(onJWTExpired);
@@ -137,8 +152,8 @@ function useAuthSubscription(
       if (state.error !== "expired") return;
       const fn = callbackRef.current;
       if (!fn) return;
-      if (inFlight.current) return;
-      inFlight.current = true;
+      if (latch.inFlight) return;
+      latch.inFlight = true;
 
       Promise.resolve()
         .then(() => fn())
@@ -149,10 +164,10 @@ function useAuthSubscription(
         })
         .catch(() => {})
         .finally(() => {
-          inFlight.current = false;
+          latch.inFlight = false;
         });
     });
-  }, [client]);
+  }, [client, latch]);
 
   return authRev;
 }
