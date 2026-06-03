@@ -119,6 +119,11 @@ function releaseClient(configKey: string, holder: object): void {
 // hold their own latch and double-fire the JWT refresh on an "expired" event.
 const authRefreshLatches = new WeakMap<object, { inFlight: boolean }>();
 
+// Ceiling on how long the latch stays held for a single refresh. A caller whose
+// `onJWTExpired` never settles must not wedge the latch forever — after this we
+// release it so a later "expired" event can retry.
+const JWT_REFRESH_TIMEOUT_MS = 30_000;
+
 function getAuthRefreshLatch(client: object): { inFlight: boolean } {
   let latch = authRefreshLatches.get(client);
   if (!latch) {
@@ -155,16 +160,28 @@ function useAuthSubscription(
       if (latch.inFlight) return;
       latch.inFlight = true;
 
+      // Release exactly once — whichever of settle or timeout comes first. The
+      // `settled` guard also stops a refresh that resolves *after* timing out
+      // from applying a now-stale token.
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        latch.inFlight = false;
+      };
+      const timeoutId = setTimeout(release, JWT_REFRESH_TIMEOUT_MS);
+
       Promise.resolve()
         .then(() => fn())
         .then((newToken) => {
-          if (newToken) {
+          if (!settled && newToken) {
             client.db.updateAuthToken(newToken);
           }
         })
         .catch(() => {})
         .finally(() => {
-          latch.inFlight = false;
+          clearTimeout(timeoutId);
+          release();
         });
     });
   }, [client, latch]);

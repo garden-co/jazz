@@ -96,7 +96,7 @@ describe("JazzClientProvider — onJWTExpired", () => {
     try {
       const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
       const onJWTExpired = vi
-        .fn<[], Promise<string | null>>()
+        .fn()
         .mockImplementationOnce(() => new Promise<string | null>(() => {}))
         .mockResolvedValueOnce("fresh.jwt.token");
 
