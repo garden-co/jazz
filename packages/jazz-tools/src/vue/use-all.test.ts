@@ -34,7 +34,7 @@ vi.mock("./provider.js", () => ({
   }),
 }));
 
-import { useAll } from "./use-all.js";
+import { useAll, useAllSuspense } from "./use-all.js";
 
 function makeQuery(marker = "todos") {
   return { _build: () => `{"table":"${marker}"}`, _table: marker } as any;
@@ -109,7 +109,7 @@ describe("vue/useAll", () => {
 
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
-    expect(result!.value).toEqual([alice]);
+    expect(result!.data.value).toEqual([alice]);
     scope.stop();
   });
 
@@ -121,7 +121,7 @@ describe("vue/useAll", () => {
 
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
-    expect(result!.value).toBeUndefined();
+    expect(result!.data.value).toBeUndefined();
     scope.stop();
   });
 
@@ -141,8 +141,8 @@ describe("vue/useAll", () => {
     const result = scope.run(() => useAll(makeQuery()));
 
     // Initial state from cache
-    expect(result!.value).toHaveLength(1);
-    const originalRef = result!.value![0];
+    expect(result!.data.value).toHaveLength(1);
+    const originalRef = result!.data.value![0];
 
     // Simulate a delta — role changed, name unchanged
     capturedOnDelta!({
@@ -150,10 +150,10 @@ describe("vue/useAll", () => {
       delta: [{ kind: 2, id: "u1", index: 0, item: { id: "u1", name: "Alice", role: "editor" } }],
     });
 
-    expect(result!.value).toHaveLength(1);
-    expect(result!.value![0]).toBe(originalRef); // same object reference
-    expect((result!.value![0] as any).role).toBe("editor"); // updated value
-    expect((result!.value![0] as any).name).toBe("Alice"); // unchanged
+    expect(result!.data.value).toHaveLength(1);
+    expect(result!.data.value![0]).toBe(originalRef); // same object reference
+    expect((result!.data.value![0] as any).role).toBe("editor"); // updated value
+    expect((result!.data.value![0] as any).name).toBe("Alice"); // unchanged
 
     scope.stop();
   });
@@ -178,9 +178,9 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
 
-    expect(result!.value).toHaveLength(3);
-    const bobRef = result!.value![1];
-    const carolRef = result!.value![2];
+    expect(result!.data.value).toHaveLength(3);
+    const bobRef = result!.data.value![1];
+    const carolRef = result!.data.value![2];
 
     // Batch: remove alice (was at index 0) + add dave (at index 2 in final state)
     capturedOnDelta!({
@@ -195,10 +195,10 @@ describe("vue/useAll", () => {
       ],
     });
 
-    expect(result!.value).toHaveLength(3);
-    expect(result!.value![0]).toBe(bobRef); // bob preserved
-    expect(result!.value![1]).toBe(carolRef); // carol preserved
-    expect((result!.value![2] as any).name).toBe("Dave"); // dave added
+    expect(result!.data.value).toHaveLength(3);
+    expect(result!.data.value![0]).toBe(bobRef); // bob preserved
+    expect(result!.data.value![1]).toBe(carolRef); // carol preserved
+    expect((result!.data.value![2] as any).name).toBe("Dave"); // dave added
 
     scope.stop();
   });
@@ -224,9 +224,9 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
 
-    expect(result!.value).toHaveLength(4);
-    const bobRef = result!.value![1];
-    const daveRef = result!.value![3];
+    expect(result!.data.value).toHaveLength(4);
+    const bobRef = result!.data.value![1];
+    const daveRef = result!.data.value![3];
 
     // Batch: remove alice + remove carol
     capturedOnDelta!({
@@ -240,9 +240,9 @@ describe("vue/useAll", () => {
       ],
     });
 
-    expect(result!.value).toHaveLength(2);
-    expect(result!.value![0]).toBe(bobRef); // bob preserved
-    expect(result!.value![1]).toBe(daveRef); // dave preserved
+    expect(result!.data.value).toHaveLength(2);
+    expect(result!.data.value![0]).toBe(bobRef); // bob preserved
+    expect(result!.data.value![1]).toBe(daveRef); // dave preserved
 
     scope.stop();
   });
@@ -267,9 +267,9 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
 
-    const aliceRef = result!.value![0];
-    const bobRef = result!.value![1];
-    const carolRef = result!.value![2];
+    const aliceRef = result!.data.value![0];
+    const bobRef = result!.data.value![1];
+    const carolRef = result!.data.value![2];
 
     // Alice's score changed, causing her to sort to the end
     capturedOnDelta!({
@@ -281,11 +281,54 @@ describe("vue/useAll", () => {
       delta: [{ kind: 2, id: "u1", index: 2, item: { id: "u1", name: "Alice", score: 5 } }],
     });
 
-    expect(result!.value).toHaveLength(3);
-    expect(result!.value![0]).toBe(bobRef); // bob kept position
-    expect(result!.value![1]).toBe(carolRef); // carol kept position
-    expect(result!.value![2]).toBe(aliceRef); // alice moved, identity preserved
-    expect((result!.value![2] as any).score).toBe(5); // property updated
+    expect(result!.data.value).toHaveLength(3);
+    expect(result!.data.value![0]).toBe(bobRef); // bob kept position
+    expect(result!.data.value![1]).toBe(carolRef); // carol kept position
+    expect(result!.data.value![2]).toBe(aliceRef); // alice moved, identity preserved
+    expect((result!.data.value![2] as any).score).toBe(5); // property updated
+
+    scope.stop();
+  });
+
+  it("VU-ALL-11: surfaces subscription errors via the error ref", () => {
+    let capturedOnError: ((err: unknown) => void) | undefined;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "pending" as const },
+      subscribe: (callbacks: any) => {
+        capturedOnError = callbacks.onError;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const scope = effectScope();
+    const result = scope.run(() => useAll(makeQuery()))!;
+
+    expect(result.error.value).toBeNull();
+    expect(result.loading.value).toBe(true);
+
+    capturedOnError!(new Error("network down"));
+
+    expect(result.error.value).toBeInstanceOf(Error);
+    expect((result.error.value as Error).message).toBe("network down");
+    expect(result.data.value).toBeUndefined();
+    expect(result.loading.value).toBe(false);
+
+    scope.stop();
+  });
+
+  it("VU-ALL-13: useAllSuspense awaits the entry promise then exposes data", async () => {
+    const alice = { id: "1", name: "Alice" };
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [alice] },
+      promise: Promise.resolve([alice]),
+      subscribe: mocks.subscribe,
+    } as any);
+
+    const scope = effectScope();
+    const result = await scope.run(() => useAllSuspense(makeQuery()))!;
+
+    expect(result.data.value).toEqual([alice]);
+    expect(result.loading.value).toBe(false);
 
     scope.stop();
   });
