@@ -1,13 +1,11 @@
-import * as React from "react";
-import { type Usable, use } from "react";
+import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { UseAllState } from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
 
 type UseAllOptions = {
   suspense?: boolean;
 };
-
-const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
@@ -16,53 +14,76 @@ function useAllBase<T extends { id: string }>(
 ): T[] | undefined {
   const { suspense = false } = options ?? {};
   const { manager } = useJazzClient();
-  const entry = React.useMemo(() => {
-    if (!query) return null;
-    const key = manager.makeQueryKey(query, queryOptions);
-    return manager.getCacheEntry<T>(key);
-  }, [manager, query, queryOptions]);
-  const dispatch = React.useReducer((_, action) => action, entry?.state)[1];
 
-  React.useLayoutEffect(() => {
-    if (!entry) return;
+  // Pure, render-safe key: computeKey neither registers the query nor opens a
+  // subscription, so the render phase stays side-effect free (concurrent/strict
+  // and SSR safe). Registration + subscription happen in the commit-phase
+  // `subscribe` callback below.
+  const key = query ? manager.computeKey(query, queryOptions) : null;
 
-    const unsubscribe = entry.subscribe({
-      onfulfilled: () => {
-        dispatch(entry.state);
-      },
-      onDelta: () => {
-        dispatch(entry.state);
-      },
-      onError: () => {
-        dispatch(entry.state);
-      },
-    });
+  // Keep the latest query/options in refs so the keyed `subscribe`/`getSnapshot`
+  // callbacks can read them without depending on object identity — an inline
+  // `app.todos.where(...)` is a fresh object every render, but the string key is
+  // stable, so we must not resubscribe just because the object changed.
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const optionsRef = useRef(queryOptions);
+  optionsRef.current = queryOptions;
 
-    return () => {
-      unsubscribe();
-    };
-  }, [entry]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      const q = queryRef.current;
+      if (!q || key === null) {
+        return () => {};
+      }
+      manager.makeQueryKey(q, optionsRef.current);
+      const entry = manager.getCacheEntry<T>(key);
+      return entry.subscribe({
+        onfulfilled: onStoreChange,
+        onDelta: onStoreChange,
+        onError: onStoreChange,
+      });
+    },
+    [manager, key],
+  );
 
-  if (!entry) {
-    if (suspense) {
-      return use(SUSPEND_FOREVER as unknown as Usable<T[]>);
-    }
-    return undefined;
-  }
+  const getSnapshot = useCallback(
+    (): UseAllState<T> | null => (key === null ? null : manager.peekState<T>(key)),
+    [manager, key],
+  );
 
-  const state = entry.state;
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   if (suspense) {
-    if (state.status === "pending") {
-      return use(state.promise as unknown as Usable<T[]>);
+    if (!query || key === null) {
+      return undefined;
     }
 
-    if (state.status === "rejected") {
-      throw state.error;
+    if (state) {
+      if (state.status === "fulfilled") {
+        return state.data;
+      }
+      if (state.status === "rejected") {
+        throw state.error;
+      }
     }
+
+    // Pending: a suspense data source must start fetching during render — the
+    // `subscribe` effect can't run while the boundary is suspended — so create
+    // the entry here and suspend on its real promise (which resolves on the
+    // first result), rather than a sentinel that never resolves.
+    manager.makeQueryKey(query, queryOptions);
+    const entry = manager.getCacheEntry<T>(key);
+    if (entry.state.status === "rejected") {
+      throw entry.state.error;
+    }
+    if (entry.state.status === "fulfilled") {
+      return entry.state.data;
+    }
+    return use(entry.promise as unknown as Usable<T[]>);
   }
 
-  return state.status === "fulfilled" ? state.data : undefined;
+  return state?.status === "fulfilled" ? state.data : undefined;
 }
 
 /**
@@ -82,6 +103,10 @@ export function useAll<T extends { id: string }>(
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  * Suspends until the query is executed.
+ *
+ * For server rendering, seed the result via `makeQueryKey(query, options, snapshot)`
+ * so the snapshot can be read synchronously; without a seed there is no data to
+ * resolve on the server.
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
