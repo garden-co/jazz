@@ -1,3 +1,4 @@
+// #region prefetch
 import { app } from "../schema";
 import { db, createServerSnapshot } from "@/lib/jazz-server";
 import HydratedTodoClient from "./HydratedTodoClient";
@@ -17,6 +18,7 @@ export default async function HydratedTodoServer() {
     </>
   );
 }
+// #endregion prefetch
 
 function TodoForm() {
   async function addTodo(formData: FormData) {

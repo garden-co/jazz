@@ -1,3 +1,4 @@
+// #region load
 import { app } from "$lib/schema";
 import { backendDb, createServerSnapshot } from "$lib/server/jazz";
 import type { Actions, PageServerLoad } from "./$types";
@@ -19,6 +20,7 @@ export const load: PageServerLoad = async () => {
     snapshot,
   };
 };
+// #endregion load
 
 export const actions: Actions = {
   addServer: async ({ request }) => {

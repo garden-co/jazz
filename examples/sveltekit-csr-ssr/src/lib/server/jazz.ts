@@ -1,3 +1,4 @@
+// #region jazz-server
 import {
   createJazzContext,
   createSnapshotBuilder,
@@ -40,3 +41,4 @@ export function backendDb(): Db {
 export function createServerSnapshot() {
   return createSnapshotBuilder({ appId: appId(), schema: app });
 }
+// #endregion jazz-server
