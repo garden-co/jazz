@@ -7,6 +7,12 @@ type UseAllOptions = {
   suspense?: boolean;
 };
 
+// A query that never arrives has nothing to fetch, so the suspense variant
+// suspends on this until one is supplied on a later render (the boundary shows
+// its fallback meanwhile). Distinct from a pending real query, which suspends on
+// its entry promise — opened during render so a suspended effect can't strand it.
+const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
+
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
@@ -57,7 +63,7 @@ function useAllBase<T extends { id: string }>(
 
   if (suspense) {
     if (!query || key === null) {
-      return undefined;
+      return use(SUSPEND_FOREVER as unknown as Usable<T[]>);
     }
 
     if (state) {
