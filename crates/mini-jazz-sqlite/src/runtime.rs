@@ -402,12 +402,6 @@ impl Runtime {
         let table = self.schema.table_def(table_name)?.clone();
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
-        let upload_records = vec![ClientDataRecord {
-            table: table_name.to_owned(),
-            row_id: id.to_owned(),
-            op: data_op_from_storage(op)?,
-            values: values.clone(),
-        }];
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -436,7 +430,7 @@ impl Runtime {
             )?;
         }
         if allowed {
-            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user, &upload_records)?;
+            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user)?;
         }
         db.commit()?;
         Ok(tx_id)
@@ -2757,18 +2751,13 @@ impl Runtime {
         self.active_uploads(limit, &BTreeSet::new())
     }
 
-    pub fn upload_queue_counts_for_test(&self) -> Result<(usize, usize)> {
+    pub fn upload_queue_count_for_test(&self) -> Result<usize> {
         let queue_count =
             self.conn
                 .query_row("SELECT COUNT(*) FROM jazz_tx_upload_queue", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-        let data_count =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM jazz_tx_upload_data", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-        Ok((queue_count as usize, data_count as usize))
+        Ok(queue_count as usize)
     }
 
     pub fn upload_ack_count_for_test(&self) -> Result<usize> {
@@ -2821,10 +2810,6 @@ impl Runtime {
 
         let db = self.conn.transaction()?;
         for tx_num in tx_nums {
-            db.execute(
-                "DELETE FROM jazz_tx_upload_data WHERE tx_num = ?",
-                params![tx_num],
-            )?;
             db.execute(
                 "DELETE FROM jazz_tx_upload_queue
                  WHERE tx_num = ?
@@ -2978,7 +2963,7 @@ impl Runtime {
             if excluded_tx_ids.contains(&tx_id) {
                 continue;
             }
-            let data = upload_data_records(&self.conn, tx_num)?;
+            let data = upload_data_records(&self.conn, &self.schema, tx_num, &tx_id)?;
             entries.push(UploadQueueEntry {
                 tx: ClientTx {
                     tx_id,
@@ -3007,12 +2992,6 @@ impl Runtime {
             .ok_or_else(|| crate::Error::new(format!("row {id} is not visible")))?;
         let user = self.attribution_user().to_owned();
         let bypass_policy = self.bypasses_policy();
-        let upload_records = vec![ClientDataRecord {
-            table: table_name.to_owned(),
-            row_id: id.to_owned(),
-            op: DataOp::Delete,
-            values: BTreeMap::new(),
-        }];
         let db = self.conn.transaction()?;
         let now = now_ms();
         let (tx_num, tx_id) = tx::create_tx(&db, self.node_num, &self.node_id, now)?;
@@ -3171,7 +3150,7 @@ impl Runtime {
             projection::rebuild(&db, &self.schema, self.node_num)?;
         }
         if allowed {
-            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user, &upload_records)?;
+            enqueue_upload_tx(&db, tx_num, now, self.branch_num, &user)?;
         }
         db.commit()?;
         Ok(tx_id)
@@ -5801,7 +5780,6 @@ fn enqueue_upload_tx(
     created_at: i64,
     branch_num: i64,
     author: &str,
-    records: &[ClientDataRecord],
 ) -> Result<()> {
     let branch_id = branch_id_for_num(conn, branch_num)?;
     conn.execute(
@@ -5810,23 +5788,6 @@ fn enqueue_upload_tx(
          VALUES (?, ?, ?, ?, ?)",
         params![tx_num, UPLOAD_STATUS_ACTIVE, created_at, branch_id, author],
     )?;
-    for (record_index, record) in records.iter().enumerate() {
-        let values_json = serde_json::to_string(&record.values)
-            .map_err(|err| crate::Error::new(format!("invalid upload values JSON: {err}")))?;
-        conn.execute(
-            "INSERT INTO jazz_tx_upload_data
-             (tx_num, record_index, table_name, row_id, op, values_json)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                tx_num,
-                record_index as i64,
-                &record.table,
-                &record.row_id,
-                data_op_to_storage(&record.op),
-                values_json
-            ],
-        )?;
-    }
     Ok(())
 }
 
@@ -5864,34 +5825,28 @@ fn tx_conflict_mode_from_storage(mode: i64) -> Result<TxConflictMode> {
     }
 }
 
-fn upload_data_records(conn: &Connection, tx_num: i64) -> Result<Vec<ClientDataRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT table_name, row_id, op, values_json
-         FROM jazz_tx_upload_data
-         WHERE tx_num = ?
-         ORDER BY record_index",
-    )?;
-    let rows = stmt.query_map(params![tx_num], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-
-    let mut records = Vec::new();
-    for row in rows {
-        let (table, row_id, op, values_json) = row?;
-        records.push(ClientDataRecord {
-            table,
-            row_id,
-            op: data_op_from_storage(op)?,
-            values: serde_json::from_str::<BTreeMap<String, JsonValue>>(&values_json)
-                .map_err(|err| crate::Error::new(format!("invalid upload values JSON: {err}")))?,
-        });
-    }
-    Ok(records)
+fn upload_data_records(
+    conn: &Connection,
+    schema: &SchemaDef,
+    tx_num: i64,
+    tx_id: &str,
+) -> Result<Vec<ClientDataRecord>> {
+    history_records_for_tx(conn, schema, tx_num, tx_id)?
+        .into_iter()
+        .map(|record| {
+            let op = data_op_from_storage(record.op)?;
+            Ok(ClientDataRecord {
+                table: record.table,
+                row_id: record.row_id,
+                values: if matches!(op, DataOp::Delete) {
+                    BTreeMap::new()
+                } else {
+                    record.values
+                },
+                op,
+            })
+        })
+        .collect()
 }
 
 fn upload_read_records(conn: &Connection, tx_num: i64) -> Result<Vec<ReadRecord>> {
@@ -6226,28 +6181,6 @@ impl<'a> TransactionBuilder<'a> {
         if mutations.is_empty() {
             return Ok(String::new());
         }
-        let upload_records = mutations
-            .iter()
-            .map(|mutation| match mutation {
-                Mutation::Row {
-                    table,
-                    id,
-                    values,
-                    op,
-                } => Ok(ClientDataRecord {
-                    table: table.clone(),
-                    row_id: id.clone(),
-                    op: data_op_from_storage(*op)?,
-                    values: values.clone(),
-                }),
-                Mutation::DeleteRow { table, id } => Ok(ClientDataRecord {
-                    table: table.clone(),
-                    row_id: id.clone(),
-                    op: DataOp::Delete,
-                    values: BTreeMap::new(),
-                }),
-            })
-            .collect::<Result<Vec<_>>>()?;
         let user = self.runtime.attribution_user().to_owned();
         let bypass_policy = self.runtime.bypasses_policy();
         let mut delete_snapshots = BTreeMap::new();
@@ -6493,14 +6426,7 @@ impl<'a> TransactionBuilder<'a> {
             projection::rebuild(&db, &self.runtime.schema, self.runtime.node_num)?;
         }
         if allowed {
-            enqueue_upload_tx(
-                &db,
-                tx_num,
-                now,
-                self.runtime.branch_num,
-                &user,
-                &upload_records,
-            )?;
+            enqueue_upload_tx(&db, tx_num, now, self.runtime.branch_num, &user)?;
         }
         db.commit()?;
         Ok(tx_id)

@@ -120,10 +120,10 @@ struct ClientDataRecord {
 }
 ```
 
-`values` is delta-shaped:
+`values` is row-image-shaped:
 
-- `Insert`: values contain the proposed fields for a new row
-- `Update`: values contain only changed fields
+- `Insert`: values contain the effective fields for the new row
+- `Update`: values contain the effective fields after the update
 - `Delete`: values must be empty
 
 System fields such as `j_created_at`, `j_updated_at`, `j_created_by`, and
@@ -246,15 +246,6 @@ CREATE INDEX jazz_tx_upload_queue_active_idx
 ON jazz_tx_upload_queue(status, created_at, sync_seq)
 WHERE status = 1;
 
-CREATE TABLE jazz_tx_upload_data (
-  tx_num INTEGER NOT NULL,
-  record_index INTEGER NOT NULL,
-  table_name TEXT NOT NULL,
-  row_id TEXT NOT NULL,
-  op INTEGER NOT NULL,
-  values_json TEXT NOT NULL,
-  PRIMARY KEY (tx_num, record_index)
-) WITHOUT ROWID;
 ```
 
 Status values:
@@ -273,8 +264,8 @@ ORDER BY created_at, sync_seq
 
 `sync_seq` is local-only and is not sent to the server.
 
-`jazz_tx_upload_data` stores the transaction's row deltas in transaction-local order.
-Cleanup removes completed queue/data rows only; it never deletes transaction records,
+Upload data is reconstructed from transaction write metadata and committed history
+rows. Cleanup removes completed queue rows only; it never deletes transaction records,
 history, receipts, or rejection details.
 
 Upload queue completion rule for mergeable transactions:

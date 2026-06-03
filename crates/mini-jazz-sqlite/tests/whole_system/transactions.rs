@@ -56,7 +56,7 @@ fn committed_transaction_uses_opaque_uuid_tx_id() {
 }
 
 #[test]
-fn committed_transaction_enters_upload_queue_with_delta_payload() {
+fn committed_transaction_enters_upload_queue_with_row_image_payload() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     alice.create_project("project-1", "Upload plan").unwrap();
 
@@ -83,11 +83,18 @@ fn committed_transaction_enters_upload_queue_with_delta_payload() {
     assert_eq!(upload.data.len(), 1);
     assert_eq!(upload.data[0].table, "todos");
     assert_eq!(upload.data[0].row_id, "todo-upload-1");
-    assert_eq!(upload.data[0].values["title"], json!("Upload one tx"));
+    assert_eq!(
+        upload.data[0].values,
+        BTreeMap::from([
+            ("done".to_owned(), json!(false)),
+            ("project".to_owned(), json!("project-1")),
+            ("title".to_owned(), json!("Upload one tx")),
+        ])
+    );
 }
 
 #[test]
-fn update_upload_payload_keeps_only_delta_values() {
+fn update_upload_payload_contains_effective_row_image() {
     let mut alice = Runtime::open(Storage::Memory, "alice-node", "alice").unwrap();
     alice.create_project("project-1", "Upload plan").unwrap();
     alice
@@ -112,7 +119,11 @@ fn update_upload_payload_keeps_only_delta_values() {
         .expect("queued update");
     assert_eq!(
         upload.data[0].values,
-        BTreeMap::from([("title".to_owned(), json!("Changed"))])
+        BTreeMap::from([
+            ("done".to_owned(), json!(false)),
+            ("project".to_owned(), json!("project-1")),
+            ("title".to_owned(), json!("Changed")),
+        ])
     );
 }
 
@@ -332,9 +343,9 @@ fn upload_queue_cleanup_prunes_only_completed_rows() {
     alice
         .apply_tx_status_for_test(&completed, TxStatusKind::EdgeAccepted)
         .unwrap();
-    assert_eq!(alice.upload_queue_counts_for_test().unwrap(), (3, 3));
+    assert_eq!(alice.upload_queue_count_for_test().unwrap(), 3);
     alice.cleanup_completed_uploads_for_test(0, 10).unwrap();
-    assert_eq!(alice.upload_queue_counts_for_test().unwrap(), (2, 2));
+    assert_eq!(alice.upload_queue_count_for_test().unwrap(), 2);
 
     let active_uploads = alice.active_uploads_for_test(10).unwrap();
     assert!(!active_uploads

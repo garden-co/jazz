@@ -102,20 +102,11 @@ CREATE INDEX IF NOT EXISTS jazz_tx_upload_queue_active_idx
 ON jazz_tx_upload_queue(status, created_at, sync_seq)
 WHERE status = 1;
 
-CREATE TABLE IF NOT EXISTS jazz_tx_upload_data (
-  tx_num INTEGER NOT NULL,
-  record_index INTEGER NOT NULL,
-  table_name TEXT NOT NULL,
-  row_id TEXT NOT NULL,
-  op INTEGER NOT NULL,
-  values_json TEXT NOT NULL,
-  PRIMARY KEY (tx_num, record_index)
-) WITHOUT ROWID;
 ```
 
 `jazz_tx_upload_queue` owns retry, in-flight bookkeeping, and completion
-metadata. `jazz_tx_upload_data` stores the transaction's row deltas in
-transaction-local order. The registry joins to `jazz_tx` through `tx_num`; the
+metadata. Upload data is reconstructed from transaction write metadata and
+committed history rows. The registry joins to `jazz_tx` through `tx_num`; the
 public `tx_id` is read from `jazz_tx` when constructing an upload message.
 
 Active upload scans use:
@@ -129,10 +120,10 @@ The partial index keeps this scan small even when many completed rows are
 retained for diagnostics or delayed cleanup. `sync_seq` is a local-only
 monotonic tie-breaker and never crosses the protocol boundary.
 
-Cleanup deletes completed rows from `jazz_tx_upload_queue` and
-`jazz_tx_upload_data` only. It must never delete `jazz_tx`, transaction
-receipts, rejection details, history, current projection, or row identity
-metadata. Active rows are never eligible for cleanup by age.
+Cleanup deletes completed rows from `jazz_tx_upload_queue` only. It must never
+delete `jazz_tx`, transaction receipts, rejection details, history, current
+projection, or row identity metadata. Active rows are never eligible for cleanup
+by age.
 
 ### 26.3 History And Current Tables
 

@@ -237,8 +237,8 @@ feature exists.
   catalogue state, or semantic system fields.
 - Upload uses one `UploadTx` message per transaction. Protocol batching may
   carry many upload messages, but one message is still one transaction.
-- Uploaded row data is delta-shaped: inserts carry proposed fields, updates
-  carry changed fields, and deletes carry empty values.
+- Uploaded row data is row-image-shaped: inserts and updates carry effective
+  field values, and deletes carry empty values.
 - Mergeable upload transactions may omit reads; exclusive upload transactions
   require the read facts needed for validation.
 - Uploads are sent from the durable registry ordered by `(created_at,
@@ -443,12 +443,12 @@ sync_seq)`, where `sync_seq` is a local-only monotonic tie-breaker.
 
 - Hot paths use local integer surrogates for repeated public ids.
 - Hot enum fields use integer discriminants.
-- The upload registry stores retry metadata and row deltas only; transaction
-  fate, receipts, rejection detail, row history, and current projection remain
+- The upload registry stores retry metadata only; transaction fate, receipts,
+  rejection detail, row history, current projection, and upload row data remain
   in their normal storage tables.
-- Upload registry cleanup deletes only completed registry/data rows and never
-  deletes transaction records, history, receipts, rejection detail, row identity
-  mappings, or current projection.
+- Upload registry cleanup deletes only completed registry rows and never deletes
+  transaction records, history, receipts, rejection detail, row identity mappings,
+  or current projection.
 - Upload registry cleanup never deletes active rows, regardless of age.
 - Runtime can install and use schemas that are not the todo fixture; fixture
   helpers do not define core semantics.

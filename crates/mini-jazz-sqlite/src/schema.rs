@@ -407,16 +407,6 @@ pub(crate) fn install(conn: &Connection, schema: &SchemaDef) -> Result<()> {
         ON jazz_tx_upload_queue(status, created_at, sync_seq)
         WHERE status = 1;
 
-        CREATE TABLE IF NOT EXISTS jazz_tx_upload_data (
-          tx_num INTEGER NOT NULL,
-          record_index INTEGER NOT NULL,
-          table_name TEXT NOT NULL,
-          row_id TEXT NOT NULL,
-          op INTEGER NOT NULL,
-          values_json TEXT NOT NULL,
-          PRIMARY KEY (tx_num, record_index)
-        ) WITHOUT ROWID;
-
         CREATE TABLE IF NOT EXISTS jazz_query_read (
           branch_id TEXT NOT NULL,
           table_name TEXT NOT NULL,

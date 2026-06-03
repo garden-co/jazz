@@ -137,7 +137,7 @@ write provenance from the authenticated connection/session. For trusted peer or
 server connections, the peer may be authoritative for author/provenance subject
 to the connection role.
 
-`ClientDataRecord` carries row deltas:
+`ClientDataRecord` carries row data:
 
 ```rust
 struct ClientDataRecord {
@@ -148,10 +148,10 @@ struct ClientDataRecord {
 }
 ```
 
-`values` is delta-shaped:
+`values` is row-image-shaped:
 
-- `Insert`: proposed fields for the new row
-- `Update`: changed fields only
+- `Insert`: effective fields for the new row
+- `Update`: effective fields after the update
 - `Delete`: empty values
 
 System fields such as `j_created_at`, `j_updated_at`, `j_created_by`, and
