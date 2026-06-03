@@ -2038,8 +2038,12 @@ export class Db {
    * Subscribe to a query and receive updates when results change.
    *
    * The callback receives a SubscriptionDelta with:
-   * - `all`: Complete current result set
-   * - `delta`: Ordered list of row-level changes
+   * - `all`: Complete current result set. Freshly allocated on every delta —
+   *   the rows are new object references each time, so diffing `all` by identity
+   *   sees every row as changed. Reactive-framework consumers should reconcile
+   *   with `applyDelta`/`reconcileArray` from `reconcile-array.js` to preserve
+   *   identity for unchanged rows.
+   * - `delta`: Ordered list of row-level changes (see `RowDelta`)
    *
    * @param query QueryBuilder instance
    * @param callback Called with delta whenever results change
@@ -2047,11 +2051,13 @@ export class Db {
    *
    * @example
    * ```typescript
+   * import { RowChangeKind } from "jazz-tools";
+   *
    * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   for (const change of delta.delta) {
-   *     if (change.kind === 0) {
-   *       console.log("New row:", change.row);
+   *     if (change.kind === RowChangeKind.Added) {
+   *       console.log("New row:", change.item);
    *     }
    *   }
    * });
