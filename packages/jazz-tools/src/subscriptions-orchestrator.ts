@@ -203,6 +203,7 @@ export class SubscriptionsOrchestrator {
     }
     this.entries.clear();
     this.queryDefinitions.clear();
+    this.seededStates.clear();
   }
 
   /**
@@ -378,6 +379,10 @@ export class SubscriptionsOrchestrator {
     this.cancelCleanup(entry);
     this.entries.delete(entry.key);
     this.queryDefinitions.delete(entry.key);
+    // Drop the memoised pre-entry snapshot too: leaving it behind would make a
+    // later `peekState` return stale `fulfilled` data for a key whose definition
+    // no longer exists (and which `getCacheEntry` would now reject as unknown).
+    this.seededStates.delete(entry.key);
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
@@ -416,6 +421,10 @@ export class SubscriptionsOrchestrator {
         this.session ?? undefined,
       );
     } catch (error) {
+      // Only a synchronous setup (protocol-level) failure from `subscribeAll`
+      // lands here and drives the entry to `rejected`. Data-level errors inside
+      // an established subscription flow through the subscription's own on-error
+      // channel and do not reject the entry; that separation is intentional.
       entry.state = { status: "rejected", data: undefined, error };
       entry.rejectfulfilled(error);
       for (const listener of Array.from(entry.listeners)) {

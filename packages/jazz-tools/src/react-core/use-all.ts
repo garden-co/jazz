@@ -110,9 +110,11 @@ export function useAll<T extends { id: string }>(
  * Read all matching rows and subscribe to changes that modify the query's results.
  * Suspends until the query is executed.
  *
- * On the server the hook reads synchronously from a seeded snapshot when the SSR
- * hydration setup has provided one, and never opens a subscription; without a
- * seed there is no data to resolve on the server.
+ * On the server, a seeded snapshot (provided by the SSR hydration setup) is read
+ * synchronously and no subscription is opened. Without a seed the hook suspends:
+ * a suspense data source must begin fetching during render, so the subscription
+ * is opened during the server render and the boundary renders its fallback (the
+ * promise does not resolve server-side).
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
