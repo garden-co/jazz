@@ -110,9 +110,9 @@ export function useAll<T extends { id: string }>(
  * Read all matching rows and subscribe to changes that modify the query's results.
  * Suspends until the query is executed.
  *
- * For server rendering, seed the result via `makeQueryKey(query, options, snapshot)`
- * so the snapshot can be read synchronously; without a seed there is no data to
- * resolve on the server.
+ * On the server the hook reads synchronously from a seeded snapshot when the SSR
+ * hydration setup has provided one, and never opens a subscription; without a
+ * seed there is no data to resolve on the server.
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *

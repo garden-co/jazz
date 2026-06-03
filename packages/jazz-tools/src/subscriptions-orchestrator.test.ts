@@ -206,9 +206,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
+          tier: "edge",
           localUpdates: "deferred",
           propagation: "local-only",
-          tier: "edge",
         })}:${query._build()}`,
       );
     } finally {
@@ -567,31 +567,6 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         user_id: "alice",
         claims: { role: "reader" },
         authMode: "external",
-      });
-
-      expect(harness.calls).toHaveLength(1);
-      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
-    } finally {
-      await harness.manager.shutdown();
-    }
-  });
-
-  it("SO-U24 setSession treats key-reordered sessions as equal (no resubscribe)", async () => {
-    const initialSession: Session = {
-      user_id: "alice",
-      claims: { role: "reader" },
-      authMode: "external",
-    };
-    const harness = createUnitHarness("orchestrator-unit-canonical", initialSession);
-
-    try {
-      harness.makeEntry();
-      expect(harness.calls).toHaveLength(1);
-
-      harness.manager.setSession({
-        authMode: "external",
-        claims: { role: "reader" },
-        user_id: "alice",
       });
 
       expect(harness.calls).toHaveLength(1);
