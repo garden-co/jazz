@@ -151,7 +151,7 @@ Used across the app: `App.vue`, `StopDetail`, `StopCreateForm`, `TourCalendar`, 
 
 ![bg right:38% 85%](screenshots/03-logged-in-globe.png)
 
-`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns a deeply reactive ref that stays in sync with the live local database — nested rows and relations included. Every write (from any user, anywhere) triggers a Vue re-render automatically.
+`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns `{ data, error, loading }`, where `data` is a deeply reactive ref that stays in sync with the live local database — nested rows and relations included. Every write (from any user, anywhere) triggers a Vue re-render automatically.
 
 **[`src/App.vue`](../src/App.vue)**
 

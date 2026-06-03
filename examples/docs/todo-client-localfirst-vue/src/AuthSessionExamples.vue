@@ -13,7 +13,9 @@ const sessionUserId = session?.user_id ?? null;
 // #endregion auth-session-vue-user-id
 
 // #region auth-session-vue-query
-const ownedTodos = useAll(sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined);
+const { data: ownedTodos } = useAll(
+  sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined,
+);
 // #endregion auth-session-vue-query
 
 // #region auth-session-vue-insert
