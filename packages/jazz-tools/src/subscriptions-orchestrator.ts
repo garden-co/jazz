@@ -1,4 +1,4 @@
-import { SubscriptionManager, type SubscriptionDelta } from "./runtime/subscription-manager.js";
+import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
@@ -144,7 +144,6 @@ interface InternalCacheEntry<T extends { id: string }> {
   listeners: Set<QueryEntryCallbacks<T>>;
   cleanupTimeoutId: ReturnType<typeof setTimeout> | null;
   unsubscribe?: () => void;
-  subscriptionManager?: SubscriptionManager<T>;
   status: UseAllState<T>["status"];
   error: unknown;
   subscribe(callbacks: QueryEntryCallbacks<T>): () => void;
@@ -380,8 +379,6 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe();
     }
     entry.unsubscribe = undefined;
-    entry.subscriptionManager?.clear();
-    entry.subscriptionManager = undefined;
     entry.listeners.clear();
     this.cancelCleanup(entry);
     this.entries.delete(entry.key);
@@ -394,10 +391,6 @@ export class SubscriptionsOrchestrator {
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     try {
-      if (!entry.subscriptionManager) {
-        entry.subscriptionManager = new SubscriptionManager<T>();
-      }
-
       entry.unsubscribe = this.db.subscribeAll<T>(
         entry.query,
         (delta) => {
