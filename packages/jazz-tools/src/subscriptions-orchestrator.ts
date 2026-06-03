@@ -30,6 +30,13 @@ export type QueryEntryCallbacks<T extends { id: string }> = {
   onfulfilled?: (data: T[]) => void;
   onDelta?: (delta: SubscriptionDelta<T>) => void;
   onError?: (error: unknown) => void;
+  /**
+   * Fired when the entry is reset to `pending` underneath an active listener —
+   * currently on a session change (see {@link SubscriptionsOrchestrator.setSession}).
+   * The previous session's rows are no longer valid, so consumers should drop
+   * back to a loading state and clear any cached data until the next delta.
+   */
+  onReset?: () => void;
 };
 
 export type CacheEntryHandle<T extends { id: string }> = {
@@ -434,10 +441,40 @@ export class SubscriptionsOrchestrator {
     }
   }
 
+  /**
+   * Reset an entry to a fresh `pending` state with a new deferred, so a later
+   * suspense read awaits the reload rather than the stale resolved promise.
+   * Used by session-change resubscription.
+   */
+  private resetEntryToPending<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    const next = makeDeferred<T[]>();
+    next.catch(() => {});
+    entry.promise = next;
+    entry.resolvefulfilled = (data) => {
+      next.resolve(data);
+    };
+    entry.rejectfulfilled = (error) => {
+      next.reject(error);
+    };
+    entry.state = { status: "pending", data: undefined, promise: next, error: null };
+  }
+
   private resubscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     if (entry.unsubscribe) {
       entry.unsubscribe();
       entry.unsubscribe = undefined;
+    }
+
+    // The prior session's rows are no longer valid. Drop a settled entry back to
+    // `pending` and tell listeners to clear, so stale data is nuked with the
+    // session instead of lingering until the new subscription's first delta. A
+    // still-`pending` entry is left as-is — its in-flight promise may already be
+    // awaited by a suspense reader.
+    if (entry.state.status !== "pending") {
+      this.resetEntryToPending(entry);
+      for (const listener of Array.from(entry.listeners)) {
+        listener.onReset?.();
+      }
     }
 
     this.subscribeEntry(entry);

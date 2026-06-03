@@ -66,6 +66,11 @@ function subscribeToEntry<T extends { id: string }>(
       data.value = undefined;
       loading.value = false;
     },
+    onReset: () => {
+      data.value = undefined;
+      error.value = null;
+      loading.value = true;
+    },
   });
 }
 

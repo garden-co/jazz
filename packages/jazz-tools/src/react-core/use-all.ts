@@ -42,6 +42,7 @@ function useAllBase<T extends { id: string }>(
         onfulfilled: onStoreChange,
         onDelta: onStoreChange,
         onError: onStoreChange,
+        onReset: onStoreChange,
       });
     },
     [manager, key],
