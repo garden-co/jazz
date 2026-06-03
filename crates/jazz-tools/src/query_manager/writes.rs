@@ -9,7 +9,9 @@ use crate::row_histories::{
     ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
     RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
 };
-use crate::schema_manager::{SchemaContext, resolve_current_table_name};
+use crate::schema_manager::{
+    SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
+};
 use crate::storage::{
     RowLocator, Storage, metadata_from_row_locator,
     prepared_row_write_context_for_known_exact_locator,
@@ -36,6 +38,42 @@ pub struct RowBranchWrite<'a> {
     pub values: &'a [Value],
     pub old_data_for_policy: &'a [u8],
     pub old_provenance_for_policy: &'a RowProvenance,
+}
+
+/// Base row used to apply an update. Contains both the result of applying
+/// lenses as well as the original data (necessary to prevent data loss on
+/// lenses that remove columns)
+pub(crate) struct SchemaUpdateRow {
+    pub table: String,
+    pub source_table: String,
+    pub source_branch: String,
+    pub target_data: Vec<u8>,
+    pub source_provenance: RowProvenance,
+    pub source_schema_hash: SchemaHash,
+    pub source_data: Vec<u8>,
+    pub is_deleted: bool,
+}
+
+impl SchemaUpdateRow {
+    pub(crate) fn from_target_branch_row(
+        table: String,
+        branch: &str,
+        schema_hash: SchemaHash,
+        row: QueryRowBatch,
+    ) -> Self {
+        let data = row.data.to_vec();
+
+        Self {
+            table: table.clone(),
+            source_table: table,
+            source_branch: branch.to_string(),
+            target_data: data.clone(),
+            source_provenance: row.row_provenance(),
+            source_schema_hash: schema_hash,
+            source_data: data,
+            is_deleted: row.is_soft_deleted() || row.is_hard_deleted(),
+        }
+    }
 }
 
 struct PreparedUpdateWrite {
@@ -903,23 +941,13 @@ impl QueryManager {
     /// If the row exists on the current schema branch, use that version.
     /// Otherwise, fall back to the newest visible row across sibling
     /// schema-version branches for the same logical user branch.
-    pub fn load_row_for_schema_update<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        id: ObjectId,
-        branches: &[String],
-    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
-        let schema_context = self.schema_context.clone();
-        self.load_row_for_schema_update_in_context(storage, id, branches, &schema_context)
-    }
-
-    pub fn load_row_for_schema_update_in_context<H: Storage>(
+    pub(crate) fn load_row_for_schema_update_in_context<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
         branches: &[String],
         schema_context: &SchemaContext,
-    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
+    ) -> Option<SchemaUpdateRow> {
         let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
         let (table, row) = self.load_best_visible_row_batch(
             storage,
@@ -929,6 +957,19 @@ impl QueryManager {
             schema_context,
             &branch_schema_map,
         )?;
+        let source_branch = row.branch.as_str().to_string();
+        let source_schema_hash = branch_schema_map
+            .get(&source_branch)
+            .copied()
+            .unwrap_or(schema_context.current_hash);
+        let source_table = if source_schema_hash == schema_context.current_hash {
+            table.clone()
+        } else {
+            translate_table_name_to_schema(schema_context, &table, &source_schema_hash)
+                .unwrap_or_else(|| table.clone())
+        };
+        let source_data = row.data.to_vec();
+        let source_provenance = row.row_provenance();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
@@ -947,14 +988,15 @@ impl QueryManager {
             BranchName::new(&row.branch),
             &mut transform_context,
         )
-        .map(|resolved| {
-            (
-                table,
-                resolved.branch_name.as_str().to_string(),
-                resolved.content,
-                resolved.batch_id,
-                row.row_provenance(),
-            )
+        .map(|resolved| SchemaUpdateRow {
+            table,
+            source_table,
+            source_branch: resolved.branch_name.as_str().to_string(),
+            target_data: resolved.content,
+            source_provenance,
+            source_schema_hash,
+            source_data,
+            is_deleted: row.is_soft_deleted() || row.is_hard_deleted(),
         })
     }
 

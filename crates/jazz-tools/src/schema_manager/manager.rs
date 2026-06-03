@@ -23,7 +23,7 @@ use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
 };
-use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite, SchemaUpdateRow};
 use crate::row_format::decode_row;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
@@ -81,6 +81,15 @@ struct InsertAlignmentColumn {
 struct InsertAlignmentPlan {
     columns: Vec<InsertAlignmentColumn>,
     positions_by_name: HashMap<String, usize>,
+}
+
+struct SchemaUpdateWrite<'a> {
+    table: &'a str,
+    branch: &'a str,
+    values: Vec<Value>,
+    old_data_for_policy: &'a [u8],
+    old_provenance_for_policy: &'a crate::metadata::RowProvenance,
+    schema: Schema,
 }
 
 /// SchemaManager coordinates schema evolution with query execution.
@@ -425,6 +434,199 @@ impl SchemaManager {
 
         temp_context.try_activate_pending();
         Ok(temp_context)
+    }
+
+    fn table_descriptor(schema: &Schema, table: &str) -> Result<RowDescriptor, QueryError> {
+        let table_name = TableName::new(table);
+        Ok(schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?
+            .columns
+            .clone())
+    }
+
+    fn load_row_for_schema_write<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        target_branch: &str,
+        target_hash: SchemaHash,
+        target_context: &SchemaContext,
+        write_context: Option<&WriteContext>,
+    ) -> Option<SchemaUpdateRow> {
+        if let Some(batch_id) = write_context.and_then(WriteContext::batch_id)
+            && let Some((table, row)) = self
+                .query_manager
+                .load_latest_transactional_staged_row_on_branch(
+                    storage,
+                    object_id,
+                    target_branch,
+                    batch_id,
+                )
+        {
+            return Some(SchemaUpdateRow::from_target_branch_row(
+                table,
+                target_branch,
+                target_hash,
+                row,
+            ));
+        }
+
+        let branches = target_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch_name| branch_name.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        self.query_manager.load_row_for_schema_update_in_context(
+            storage,
+            object_id,
+            &branches,
+            target_context,
+        )
+    }
+
+    fn update_can_preserve_on_source_branch(
+        source_hash: SchemaHash,
+        target_hash: SchemaHash,
+        source_descriptor: &RowDescriptor,
+        target_descriptor: &RowDescriptor,
+        write_context: Option<&WriteContext>,
+    ) -> bool {
+        if source_hash == target_hash
+            || write_context
+                .and_then(WriteContext::target_branch_name)
+                .is_some()
+            || write_context.and_then(WriteContext::batch_id).is_some()
+        {
+            return false;
+        }
+
+        source_descriptor.columns.iter().any(|column| {
+            target_descriptor
+                .column_index(column.name.as_str())
+                .is_none()
+        })
+    }
+
+    fn source_patch_values_for_update(
+        target_context: &SchemaContext,
+        row: &SchemaUpdateRow,
+        source_descriptor: &RowDescriptor,
+        values: &[(String, Value)],
+    ) -> Result<Option<Vec<Value>>, QueryError> {
+        let mut source_values = decode_row(source_descriptor, &row.source_data)
+            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
+
+        for (column_name, new_value) in values {
+            let Some((source_table, source_column)) =
+                super::transformer::translate_table_and_column_for_schema(
+                    target_context,
+                    &row.table,
+                    column_name,
+                    &row.source_schema_hash,
+                )
+            else {
+                return Ok(None);
+            };
+
+            if source_table != row.source_table {
+                return Ok(None);
+            }
+
+            let Some(index) = source_descriptor.column_index(&source_column) else {
+                return Ok(None);
+            };
+
+            source_values[index] = new_value.clone();
+        }
+
+        Ok(Some(source_values))
+    }
+
+    fn target_patch_values_for_update(
+        target_descriptor: &RowDescriptor,
+        row: &SchemaUpdateRow,
+        values: &[(String, Value)],
+    ) -> Result<Vec<Value>, QueryError> {
+        let mut current_values = decode_row(target_descriptor, &row.target_data)
+            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
+
+        for (column_name, new_value) in values {
+            let Some(index) = target_descriptor.column_index(column_name) else {
+                return Err(QueryError::EncodingError(format!(
+                    "column '{column_name}' not found"
+                )));
+            };
+            current_values[index] = new_value.clone();
+        }
+
+        Ok(current_values)
+    }
+
+    fn try_prepare_preserving_source_update<'a>(
+        &self,
+        row: &'a SchemaUpdateRow,
+        values: &[(String, Value)],
+        target_hash: SchemaHash,
+        target_context: &SchemaContext,
+        target_descriptor: &RowDescriptor,
+        write_context: Option<&WriteContext>,
+    ) -> Result<Option<SchemaUpdateWrite<'a>>, QueryError> {
+        let source_schema = self
+            .schema_for_hash(row.source_schema_hash)
+            .ok_or(QueryError::UnknownSchema(row.source_schema_hash))?
+            .clone();
+        let source_descriptor = Self::table_descriptor(&source_schema, &row.source_table)?;
+
+        if !Self::update_can_preserve_on_source_branch(
+            row.source_schema_hash,
+            target_hash,
+            &source_descriptor,
+            target_descriptor,
+            write_context,
+        ) {
+            return Ok(None);
+        }
+
+        let Some(source_values) =
+            Self::source_patch_values_for_update(target_context, row, &source_descriptor, values)?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(SchemaUpdateWrite {
+            table: &row.source_table,
+            branch: &row.source_branch,
+            values: source_values,
+            old_data_for_policy: &row.source_data,
+            old_provenance_for_policy: &row.source_provenance,
+            schema: source_schema,
+        }))
+    }
+
+    fn write_schema_update_values<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        write: SchemaUpdateWrite<'_>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<crate::row_histories::BatchId, QueryError> {
+        self.query_manager
+            .write_existing_row_on_branch_with_schema_and_write_context(
+                storage,
+                RowBranchWrite {
+                    table: write.table,
+                    branch: write.branch,
+                    id: object_id,
+                    values: &write.values,
+                    old_data_for_policy: write.old_data_for_policy,
+                    old_provenance_for_policy: write.old_provenance_for_policy,
+                },
+                &write.schema,
+                write_context,
+                false,
+            )
     }
 
     fn insert_alignment_plan_for_schema(
@@ -1698,34 +1900,17 @@ impl SchemaManager {
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
         let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
 
-        if let Some(existing_table) = write_context
-            .and_then(WriteContext::batch_id)
-            .and_then(|batch_id| {
-                self.query_manager
-                    .load_latest_transactional_staged_row_on_branch(
-                        storage,
-                        object_id,
-                        &target_branch,
-                        batch_id,
-                    )
-                    .map(|(table, _row)| table)
-            })
-            .or_else(|| {
-                self.query_manager
-                    .load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                    .map(|(table, ..)| table)
-            })
+        if let Some(existing_table) = self
+            .load_row_for_schema_write(
+                storage,
+                object_id,
+                &target_branch,
+                target_hash,
+                &target_context,
+                write_context,
+            )
+            .map(|row| row.table)
         {
             if existing_table != table {
                 return Err(QueryError::EncodingError(format!(
@@ -1757,102 +1942,51 @@ impl SchemaManager {
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
-        let (
-            table,
-            source_branch,
-            old_current_data,
-            _source_commit_id,
-            old_current_provenance,
-            current_row_is_deleted,
-        ) = write_context
-            .and_then(WriteContext::batch_id)
-            .and_then(|batch_id| {
-                self.query_manager
-                    .load_latest_transactional_staged_row_on_branch(
-                        storage,
-                        object_id,
-                        &target_branch,
-                        batch_id,
-                    )
-                    .map(|(table, row)| {
-                        (
-                            table,
-                            target_branch.clone(),
-                            row.data.to_vec(),
-                            row.batch_id(),
-                            row.row_provenance(),
-                            row.is_soft_deleted() || row.is_hard_deleted(),
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.query_manager
-                    .load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                    .map(|(table, source_branch, data, batch_id, provenance)| {
-                        (table, source_branch, data, batch_id, provenance, false)
-                    })
-            })
+        let current_row = self
+            .load_row_for_schema_write(
+                storage,
+                object_id,
+                &target_branch,
+                target_hash,
+                &target_context,
+                write_context,
+            )
             .ok_or(QueryError::ObjectNotFound(object_id))?;
 
-        if current_row_is_deleted
+        if current_row.is_deleted
             || self.query_manager().row_is_deleted_on_branch(
                 storage,
-                &table,
-                &source_branch,
+                &current_row.source_table,
+                &current_row.source_branch,
                 object_id,
             )
         {
             return Err(QueryError::RowAlreadyDeleted(object_id));
         }
 
-        let table_name = TableName::new(&table);
-        let descriptor = target_schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?
-            .columns
-            .clone();
+        let descriptor = Self::table_descriptor(&target_schema, &current_row.table)?;
 
-        let mut current_values = decode_row(&descriptor, &old_current_data)
-            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
+        let write = if let Some(write) = self.try_prepare_preserving_source_update(
+            &current_row,
+            values,
+            target_hash,
+            &target_context,
+            &descriptor,
+            write_context,
+        )? {
+            write
+        } else {
+            SchemaUpdateWrite {
+                table: &current_row.table,
+                branch: &target_branch,
+                values: Self::target_patch_values_for_update(&descriptor, &current_row, values)?,
+                old_data_for_policy: &current_row.target_data,
+                old_provenance_for_policy: &current_row.source_provenance,
+                schema: target_schema,
+            }
+        };
 
-        for (column_name, new_value) in values {
-            let Some(index) = descriptor.column_index(column_name) else {
-                return Err(QueryError::EncodingError(format!(
-                    "column '{column_name}' not found"
-                )));
-            };
-            current_values[index] = new_value.clone();
-        }
-
-        let _ = source_branch;
-        let batch_id = self
-            .query_manager
-            .write_existing_row_on_branch_with_schema_and_write_context(
-                storage,
-                RowBranchWrite {
-                    table: &table,
-                    branch: &target_branch,
-                    id: object_id,
-                    values: &current_values,
-                    old_data_for_policy: &old_current_data,
-                    old_provenance_for_policy: &old_current_provenance,
-                },
-                &target_schema,
-                write_context,
-                false,
-            )?;
-
-        Ok(batch_id)
+        self.write_schema_update_values(storage, object_id, write, write_context)
     }
 
     /// Delete a row (soft delete), performing copy-on-write when the latest
@@ -1870,53 +2004,27 @@ impl SchemaManager {
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
-        let branches = target_context
-            .all_branch_names()
-            .into_iter()
-            .map(|branch_name| branch_name.as_str().to_string())
-            .collect::<Vec<_>>();
-        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            write_context
-                .and_then(WriteContext::batch_id)
-                .and_then(|batch_id| {
-                    self.query_manager
-                        .load_latest_transactional_staged_row_on_branch(
-                            storage,
-                            object_id,
-                            &target_branch,
-                            batch_id,
-                        )
-                        .map(|(table, row)| {
-                            (
-                                table,
-                                target_branch.clone(),
-                                row.data.to_vec(),
-                                row.batch_id(),
-                                row.row_provenance(),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    self.query_manager.load_row_for_schema_update_in_context(
-                        storage,
-                        object_id,
-                        &branches,
-                        &target_context,
-                    )
-                })
-                .ok_or(QueryError::ObjectNotFound(object_id))?;
+        let current_row = self
+            .load_row_for_schema_write(
+                storage,
+                object_id,
+                &target_branch,
+                target_hash,
+                &target_context,
+                write_context,
+            )
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
 
-        let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        let _ = source_branch;
+        let _span = tracing::debug_span!("SM::delete", table = current_row.table, %object_id, schema_hash = %self.context.current_hash).entered();
         self.query_manager
             .delete_existing_row_on_branch_with_schema_and_write_context(
                 storage,
                 RowBranchDelete {
-                    table: &table,
+                    table: &current_row.table,
                     branch: &target_branch,
                     id: object_id,
-                    old_data_for_policy: &old_current_data,
-                    old_provenance_for_policy: &old_current_provenance,
+                    old_data_for_policy: &current_row.target_data,
+                    old_provenance_for_policy: &current_row.source_provenance,
                 },
                 &target_schema,
                 write_context,

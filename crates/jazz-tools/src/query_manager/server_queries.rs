@@ -38,7 +38,6 @@ enum AuthorizedTuplesResult {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
-    pub batch_id: BatchId,
     pub content: Vec<u8>,
 }
 
@@ -684,7 +683,6 @@ impl QueryManager {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
-                        batch_id: result.batch_id,
                         content: result.data,
                     });
                 }
@@ -710,7 +708,6 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
-            batch_id,
             content,
         })
     }

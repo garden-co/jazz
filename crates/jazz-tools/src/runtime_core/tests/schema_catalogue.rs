@@ -181,16 +181,15 @@ fn rc_delete_old_schema_row_after_evolution_hides_row_from_queries() {
     );
 }
 
-/// FIXME: this is an undesired behavior. See `/specs/todo/ideas/1_mvp/lens-hardening.md`
 #[test]
-fn rc_old_client_update_removes_unseen_newer_fields() {
+fn rc_old_client_update_preserves_unseen_newer_fields() {
     let v1 = schema_evolution_v1();
     let v2 = schema_evolution_v2();
 
     // Flow:
     // v2 client writes row with email on the v2 branch
     // v1 client reads that row through v2 -> v1 lens and updates only name
-    // v2 client does not see the original email after the v1-originated update
+    // v2 client still sees the original email after the v1-originated update
     let mut new_runtime =
         create_runtime_with_schema(v2.clone(), "schema-evolution-backward-update-test");
     let user_id = ObjectId::new();
@@ -273,8 +272,8 @@ fn rc_old_client_update_removes_unseen_newer_fields() {
     );
     assert_eq!(
         queried_values[email_idx],
-        Value::Text("".to_string()),
-        "Old-client updates remove unseen new-schema fields",
+        Value::Text("alice@example.com".to_string()),
+        "Old-client updates must preserve unseen new-schema fields",
     );
 }
 
