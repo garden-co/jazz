@@ -633,4 +633,24 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it("SO-U28 destroying a seeded entry drops its memoised peekState snapshot", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness("app-so-u28");
+    try {
+      const snapshot = [makeTodo("1", "seed")];
+      const key = harness.manager.makeQueryKey(makeQuery(), undefined, snapshot);
+      expect(harness.manager.peekState<Todo>(key).status).toBe("fulfilled");
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      const unsubscribe = entry.subscribe({});
+      unsubscribe();
+      vi.advanceTimersByTime(30_000);
+
+      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
 });
