@@ -26,6 +26,7 @@ pub struct BrowserRuntimeConfig {
     pub user: String,
     pub schema: SchemaDef,
     pub hydrate_queries: Vec<BuiltQuery>,
+    pub native_sync_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -117,6 +118,7 @@ impl BrowserRuntime {
                 schema: config.schema,
                 hydrate_queries: config.hydrate_queries,
                 client_messages: opening_client_messages,
+                native_sync_url: config.native_sync_url,
             })?;
             Ok(())
         })?;
@@ -296,6 +298,10 @@ impl BrowserRuntime {
                 server_messages,
                 storage_stats,
             } => self.apply_protocol(request_id, server_messages, storage_stats),
+            RuntimeWorkerOutput::Pushed {
+                server_messages,
+                storage_stats,
+            } => self.apply_pushed(server_messages, storage_stats),
             RuntimeWorkerOutput::Exported { request_id, bundle } => {
                 self.apply_hydrated(request_id, vec![bundle])
             }
@@ -385,6 +391,25 @@ impl BrowserRuntime {
         })
     }
 
+    fn apply_pushed(
+        &self,
+        server_messages: Vec<ServerMessage>,
+        storage_stats: BrowserStorageStats,
+    ) -> Result<Vec<PendingSubscriptionNotification>, String> {
+        self.with_inner(|inner| {
+            if server_messages.is_empty() || !inner.connection_manager.is_ready() {
+                return Ok(Vec::new());
+            }
+            let client_messages = inner.apply_protocol_messages(server_messages)?;
+            inner.send_protocol_messages(client_messages)?;
+            let notifications = inner.refresh_subscriptions()?;
+            inner.status.worker_storage_stats = storage_stats;
+            inner.status.syncing = inner.has_pending_work();
+            inner.status.error.clear();
+            Ok(notifications)
+        })
+    }
+
     fn apply_hydrated(
         &self,
         request_id: RuntimeRequestId,
@@ -430,24 +455,21 @@ impl BrowserRuntime {
 }
 
 impl Inner {
-    fn sync_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+    fn sync_queries(&mut self, _queries: Vec<BuiltQuery>) -> Result<(), String> {
         self.ensure_ready()?;
-        if queries.is_empty() {
+        let client_messages = self
+            .connection_manager
+            .flush(&mut self.main)
+            .map_err(error_message)?;
+        if client_messages.is_empty() {
             return Ok(());
         }
 
-        let bundles = queries
-            .into_iter()
-            .map(|query| self.main.export_query(query).map_err(error_message))
-            .collect::<Result<Vec<_>, _>>()?;
-        let client_messages = self.replay_connection_subscriptions()?;
         let request_id = self.next_request_id()?;
-
-        self.pending_syncs.insert(request_id);
+        self.pending_protocols.insert(request_id);
         self.status.syncing = true;
-        self.worker.send(RuntimeWorkerInput::ApplyBundles {
+        self.worker.send(RuntimeWorkerInput::Protocol {
             request_id,
-            bundles,
             client_messages,
         })?;
         Ok(())
@@ -491,10 +513,6 @@ impl Inner {
         } else {
             Err("runtime is opening".to_owned())
         }
-    }
-
-    fn replay_connection_subscriptions(&mut self) -> Result<Vec<ClientMessage>, String> {
-        self.connection_manager.replay().map_err(error_message)
     }
 
     fn apply_protocol_messages(

@@ -1,6 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod browser_runtime;
 pub mod browser_worker;
+pub mod native_sync;
 pub mod query_builder;
 pub mod todo_query {
     use crate::query_builder::QueryBuilder;

@@ -2530,13 +2530,16 @@ dependencies = [
 name = "mini-sqlite-todo-yew"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "console_error_panic_hook",
+ "futures-util",
  "js-sys",
  "mini-jazz-sqlite",
  "serde",
  "serde_json",
  "sqlite-wasm-rs",
  "sqlite-wasm-vfs",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
