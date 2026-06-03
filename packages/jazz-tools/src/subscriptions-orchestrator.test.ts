@@ -206,9 +206,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
-          tier: "edge",
           localUpdates: "deferred",
           propagation: "local-only",
+          tier: "edge",
         })}:${query._build()}`,
       );
     } finally {

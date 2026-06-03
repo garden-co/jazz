@@ -143,6 +143,20 @@ interface InternalCacheEntry<T extends { id: string }> {
   subscribe(callbacks: QueryEntryCallbacks<T>): () => void;
 }
 
+/**
+ * Shared, identity-stable `pending` state returned by {@link
+ * SubscriptionsOrchestrator.peekState} when a key has no entry and no seeded
+ * snapshot. A single instance keeps `useSyncExternalStore` from looping on a
+ * fresh object every render. The promise never resolves and is never awaited on
+ * this path (the non-suspense reader ignores it).
+ */
+const SHARED_PENDING: UseAllStatePending<any> = {
+  status: "pending",
+  data: undefined,
+  promise: makeDeferred<any>(),
+  error: null,
+};
+
 interface DbLike {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
@@ -156,6 +170,9 @@ export class SubscriptionsOrchestrator {
   private readonly cleanupDelayMs = 30_000;
   private readonly entries = new Map<string, InternalCacheEntry<any>>();
   private readonly queryDefinitions = new Map<string, QueryDefinition<any>>();
+  // Memoised fulfilled states for seeded keys read via peekState before their
+  // entry exists; keeps the snapshot identity stable for useSyncExternalStore.
+  private readonly seededStates = new Map<string, UseAllState<any>>();
   private session?: Session | null;
 
   constructor(
@@ -188,17 +205,28 @@ export class SubscriptionsOrchestrator {
     this.queryDefinitions.clear();
   }
 
+  /**
+   * Compute the cache key for a query without any side effects. Safe to call
+   * during a React render (it neither registers the query nor subscribes). Use
+   * {@link makeQueryKey} to register, and {@link getCacheEntry} to subscribe.
+   */
+  computeKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
+    return `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+  }
+
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    const key = this.computeKey(query, options);
     this.queryDefinitions.set(key, {
       query,
       options,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
+    // A re-seed invalidates any memoised pre-entry snapshot state.
+    this.seededStates.delete(key);
 
     const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
     if (existing && existing.state.status === "pending" && snapshot) {
@@ -211,6 +239,38 @@ export class SubscriptionsOrchestrator {
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
     return this.ensureEntryForKey<T>(key);
+  }
+
+  /**
+   * Read the current state for a key without creating an entry or opening a
+   * subscription. Render-safe: returns the live entry state if one exists, the
+   * seeded snapshot's fulfilled state if the key was registered with one, or a
+   * shared identity-stable `pending` state otherwise. Used by React's
+   * `useSyncExternalStore` (`getSnapshot`/`getServerSnapshot`).
+   */
+  peekState<T extends { id: string }>(key: string): UseAllState<T> {
+    const existing = this.entries.get(key);
+    if (existing) {
+      return existing.state as UseAllState<T>;
+    }
+
+    const cachedSeed = this.seededStates.get(key);
+    if (cachedSeed) {
+      return cachedSeed as UseAllState<T>;
+    }
+
+    const queryDef = this.queryDefinitions.get(key);
+    if (queryDef?.snapshot !== undefined) {
+      const seeded: UseAllState<T> = {
+        status: "fulfilled",
+        data: queryDef.snapshot as T[],
+        error: null,
+      };
+      this.seededStates.set(key, seeded);
+      return seeded;
+    }
+
+    return SHARED_PENDING as UseAllState<T>;
   }
 
   private ensureEntryForKey<T extends { id: string }>(key: string): InternalCacheEntry<T> {
@@ -230,6 +290,11 @@ export class SubscriptionsOrchestrator {
       status: hasSnapshot ? "fulfilled" : "pending",
       value: hasSnapshot ? queryDef.snapshot : undefined,
     });
+    // Callback-based consumers (non-suspense React, Svelte, Vue) never await
+    // this promise, so a subscription failure would surface as an unhandled
+    // rejection. Attach a no-op handler; the suspense reader still attaches its
+    // own via `use()`.
+    deferred.catch(() => {});
 
     const initialState: UseAllState<T> = hasSnapshot
       ? { status: "fulfilled", data: queryDef.snapshot as T[], error: null }
@@ -370,12 +435,31 @@ export class SubscriptionsOrchestrator {
   }
 }
 
+/**
+ * JSON serialization with object keys sorted recursively, so that two values
+ * that differ only in key order produce the same string. Arrays keep their
+ * order; primitives pass through.
+ */
+function canonicalStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      const source = val as Record<string, unknown>;
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(source).sort()) {
+        sorted[k] = source[k];
+      }
+      return sorted;
+    }
+    return val;
+  });
+}
+
 function sessionsEqual(a: Session | null, b: Session | null): boolean {
   if (a === b) {
     return true;
   }
 
-  return JSON.stringify(a) === JSON.stringify(b);
+  return canonicalStringify(a) === canonicalStringify(b);
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
@@ -383,5 +467,5 @@ function serializeQueryOptions(options?: QueryOptions): string {
     return "{}";
   }
 
-  return JSON.stringify(options);
+  return canonicalStringify(options);
 }
