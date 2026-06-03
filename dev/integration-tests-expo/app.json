@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "integration-tests-expo",
+    "slug": "integration-tests-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "android": {
+      "package": "dev.jazz.integrationtests"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.integrationtests"
+    }
+  }
+}

@@ -6,6 +6,7 @@ packages:
   - examples/docs/*
   - dev/stress-tests/*
   - dev/local-telemetry/web
+  - dev/integration-tests-expo
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
