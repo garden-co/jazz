@@ -89,6 +89,12 @@ function useAllBase<T extends { id: string }>(
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  *
+ * Loading and error states are handled the React way: `undefined` means the
+ * query has not resolved yet, and for error handling use {@link useAllSuspense}
+ * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
+ * capabilities idiomatically — Svelte's `QuerySubscription` via
+ * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
+ *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
  * @returns the matching rows, or `undefined` if the query is not yet executed

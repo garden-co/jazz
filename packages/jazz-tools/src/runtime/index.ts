@@ -78,7 +78,7 @@ export {
 } from "./file-storage.js";
 export {
   SubscriptionManager,
-  type RowChangeKind,
+  RowChangeKind,
   type RowDelta,
   type SubscriptionDelta,
 } from "./subscription-manager.js";
