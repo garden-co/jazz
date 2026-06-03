@@ -445,7 +445,7 @@ impl SchemaManager {
             .clone())
     }
 
-    fn load_row_for_schema_write<H: Storage>(
+    fn load_row_for_update<H: Storage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
@@ -478,12 +478,8 @@ impl SchemaManager {
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
 
-        self.query_manager.load_row_for_schema_update_in_context(
-            storage,
-            object_id,
-            &branches,
-            target_context,
-        )
+        self.query_manager
+            .load_row_for_update(storage, object_id, &branches, target_context)
     }
 
     fn update_can_preserve_on_source_branch(
@@ -1902,7 +1898,7 @@ impl SchemaManager {
         let target_context = self.schema_context_for_hash(target_hash)?;
 
         if let Some(existing_table) = self
-            .load_row_for_schema_write(
+            .load_row_for_update(
                 storage,
                 object_id,
                 &target_branch,
@@ -1943,7 +1939,7 @@ impl SchemaManager {
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
         let current_row = self
-            .load_row_for_schema_write(
+            .load_row_for_update(
                 storage,
                 object_id,
                 &target_branch,
@@ -2005,7 +2001,7 @@ impl SchemaManager {
             .clone();
         let target_context = self.schema_context_for_hash(target_hash)?;
         let current_row = self
-            .load_row_for_schema_write(
+            .load_row_for_update(
                 storage,
                 object_id,
                 &target_branch,

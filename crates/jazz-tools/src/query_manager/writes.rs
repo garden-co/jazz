@@ -941,7 +941,7 @@ impl QueryManager {
     /// If the row exists on the current schema branch, use that version.
     /// Otherwise, fall back to the newest visible row across sibling
     /// schema-version branches for the same logical user branch.
-    pub(crate) fn load_row_for_schema_update_in_context<H: Storage>(
+    pub(crate) fn load_row_for_update<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
