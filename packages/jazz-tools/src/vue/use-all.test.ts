@@ -45,7 +45,7 @@ describe("vue/useAll", () => {
     mocks.reset();
   });
 
-  it("VU-ALL-01: calls makeQueryKey without options when none provided", () => {
+  it("calls makeQueryKey without options when none provided", () => {
     const query = makeQuery();
     const scope = effectScope();
     scope.run(() => useAll(query));
@@ -53,7 +53,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-02: forwards QueryOptions with tier to makeQueryKey", () => {
+  it("forwards QueryOptions with tier to makeQueryKey", () => {
     const query = makeQuery();
     const scope = effectScope();
     scope.run(() => useAll(query, { tier: "edge" }));
@@ -61,7 +61,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-03: forwards full QueryOptions to makeQueryKey", () => {
+  it("forwards full QueryOptions to makeQueryKey", () => {
     const query = makeQuery();
     const options = {
       tier: "local" as const,
@@ -74,7 +74,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-04: reactive options trigger re-subscription on change", async () => {
+  it("reactive options trigger re-subscription on change", async () => {
     const query = makeQuery();
     const options = ref<any>({ tier: "local" });
 
@@ -100,7 +100,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-05: returns data from cache entry state", () => {
+  it("returns data from cache entry state", () => {
     const alice = { id: "1", name: "Alice" };
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "fulfilled" as const, data: [alice] },
@@ -113,7 +113,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-06: returns undefined when entry state is pending", () => {
+  it("returns undefined when entry state is pending", () => {
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "pending" as const },
       subscribe: mocks.subscribe,
@@ -125,7 +125,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-07: onDelta reconciles in-place, preserving object identity", () => {
+  it("onDelta reconciles in-place, preserving object identity", () => {
     const alice = { id: "u1", name: "Alice", role: "admin" };
     let capturedOnDelta: ((delta: any) => void) | undefined;
 
@@ -158,7 +158,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-08: batch delta with remove + add preserves correct items", () => {
+  it("batch delta with remove + add preserves correct items", () => {
     //  Before:  [alice, bob, carol]
     //  Delta:   remove alice (index 0), add dave (index 2)
     //  After:   [bob, carol, dave]
@@ -203,7 +203,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-09: batch delta with two removes preserves survivors", () => {
+  it("batch delta with two removes preserves survivors", () => {
     //  Before:  [alice, bob, carol, dave]
     //  Delta:   remove alice (index 0), remove carol (index 2)
     //  After:   [bob, dave]
@@ -247,7 +247,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-10: updated item changes position, array reorders correctly", () => {
+  it("updated item changes position, array reorders correctly", () => {
     //  Before: [alice, bob, carol]
     //  Delta:  alice updated and moved to end (e.g. sort order changed)
     //  After:  [bob, carol, alice']
