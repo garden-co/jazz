@@ -11,7 +11,9 @@ use axum::{
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
 #[cfg(not(target_arch = "wasm32"))]
-use mini_jazz_sqlite::{connection::UpstreamConnectionManager, Runtime, Storage};
+use mini_jazz_sqlite::{
+    connection::UpstreamConnectionManager, protocol::ClientMessage, Runtime, Storage,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use mini_sqlite_todo_yew::{
     native_sync::{decode_client_frame, encode_server_frame},
@@ -23,11 +25,14 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::broadcast;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
+    changes: broadcast::Sender<()>,
     user: String,
 }
 
@@ -49,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let state = AppState {
         runtime: Arc::new(Mutex::new(runtime)),
+        changes: broadcast::channel(64).0,
         user,
     };
 
@@ -89,46 +95,85 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         state.user.clone(),
     );
     let (mut sender, mut receiver) = socket.split();
+    let mut changes = state.changes.subscribe();
 
-    while let Some(message) = receiver.next().await {
-        let Ok(message) = message else {
-            break;
-        };
-        let Message::Text(encoded) = message else {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
-            continue;
-        };
-        let frame = match decode_client_frame(&encoded) {
-            Ok(frame) => frame,
-            Err(error) => {
-                eprintln!("invalid native sync frame: {error}");
-                break;
-            }
-        };
-        let server_messages = {
-            let Ok(mut runtime) = state.runtime.lock() else {
-                break;
-            };
-            match upstream.receive(&mut runtime, frame.client_messages) {
-                Ok(server_messages) => server_messages,
-                Err(error) => {
-                    eprintln!("native sync protocol error: {error}");
+    loop {
+        tokio::select! {
+            message = receiver.next() => {
+                let Some(message) = message else {
+                    break;
+                };
+                let Ok(message) = message else {
+                    break;
+                };
+                let Message::Text(encoded) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                    continue;
+                };
+                let frame = match decode_client_frame(&encoded) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        eprintln!("invalid native sync frame: {error}");
+                        break;
+                    }
+                };
+                let should_notify = frame.client_messages.iter().any(|message| {
+                    matches!(message, ClientMessage::UploadTx { .. })
+                });
+                let server_messages = {
+                    let Ok(mut runtime) = state.runtime.lock() else {
+                        break;
+                    };
+                    match upstream.receive(&mut runtime, frame.client_messages) {
+                        Ok(server_messages) => server_messages,
+                        Err(error) => {
+                            eprintln!("native sync protocol error: {error}");
+                            break;
+                        }
+                    }
+                };
+                if !server_messages.is_empty() && send_server_messages(&mut sender, server_messages).await.is_err() {
                     break;
                 }
+                if should_notify {
+                    let _ = state.changes.send(());
+                }
             }
-        };
-        if server_messages.is_empty() {
-            continue;
-        }
-        let Ok(encoded) = encode_server_frame(server_messages) else {
-            break;
-        };
-        if sender.send(Message::Text(encoded)).await.is_err() {
-            break;
+            change = changes.recv() => {
+                match change {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let server_messages = {
+                            let Ok(runtime) = state.runtime.lock() else {
+                                break;
+                            };
+                            match upstream.refresh_active_subscriptions(&runtime) {
+                                Ok(server_messages) => server_messages,
+                                Err(error) => {
+                                    eprintln!("native sync protocol error: {error}");
+                                    break;
+                                }
+                            }
+                        };
+                        if !server_messages.is_empty() && send_server_messages(&mut sender, server_messages).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn send_server_messages(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    server_messages: Vec<mini_jazz_sqlite::protocol::ServerMessage>,
+) -> Result<(), ()> {
+    let encoded = encode_server_frame(server_messages).map_err(|_| ())?;
+    sender.send(Message::Text(encoded)).await.map_err(|_| ())
 }
 
 #[cfg(target_arch = "wasm32")]

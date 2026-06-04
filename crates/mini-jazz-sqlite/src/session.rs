@@ -1,8 +1,9 @@
 use crate::connection::{DownstreamEndpoint, UpstreamEndpoint};
 use crate::protocol::{
     ClientHello, ClientMessage, CloseReason, MessageId, ProtocolCapabilities, ProtocolError,
-    ProtocolVersion, ReplayCursor, ReplaySubscription, RetryHint, ServerHello, ServerMessage,
-    SessionId, SettlementTier, SubscriptionId, TxStatusKind, SUPPORTED_PROTOCOL_VERSION,
+    ProtocolVersion, ReconciliationSketch, ReplayCursor, ReplaySubscription, RetryHint,
+    ServerHello, ServerMessage, SessionId, SettlementTier, SubscriptionId, TxStatusKind,
+    SUPPORTED_PROTOCOL_VERSION,
 };
 use crate::{BuiltQuery, Error, Result, Runtime};
 use serde_json::json;
@@ -13,6 +14,7 @@ struct ActiveSubscription {
     query: BuiltQuery,
     requested_tier: SettlementTier,
     last_applied_cursor: Option<ReplayCursor>,
+    reconciliation: Option<ReconciliationSketch>,
 }
 
 pub struct DownstreamSession {
@@ -97,6 +99,17 @@ impl DownstreamSession {
         query: BuiltQuery,
         requested_tier: SettlementTier,
     ) -> Result<()> {
+        self.subscribe_with_reconciliation(conn, subscription_id, query, requested_tier, None)
+    }
+
+    pub fn subscribe_with_reconciliation(
+        &mut self,
+        conn: &mut impl DownstreamEndpoint,
+        subscription_id: SubscriptionId,
+        query: BuiltQuery,
+        requested_tier: SettlementTier,
+        reconciliation: Option<ReconciliationSketch>,
+    ) -> Result<()> {
         ensure_open(self.closed)?;
         ensure_handshake(self.upstream_hello.is_some())?;
         if self.active_subscriptions.contains_key(&subscription_id) {
@@ -108,6 +121,7 @@ impl DownstreamSession {
                 query: query.clone(),
                 requested_tier,
                 last_applied_cursor: None,
+                reconciliation: reconciliation.clone(),
             },
         );
         self.settled
@@ -116,6 +130,7 @@ impl DownstreamSession {
             subscription_id,
             query,
             requested_tier,
+            reconciliation,
         });
         Ok(())
     }
@@ -131,10 +146,19 @@ impl DownstreamSession {
                 query: subscription.query.clone(),
                 requested_tier: subscription.requested_tier,
                 last_applied_cursor: subscription.last_applied_cursor,
+                reconciliation: subscription.reconciliation.clone(),
             })
             .collect();
         conn.send_client_message(ClientMessage::Replay { subscriptions });
         Ok(())
+    }
+
+    pub fn refresh_subscription_reconciliations(&mut self, runtime: &Runtime) {
+        for subscription in self.active_subscriptions.values_mut() {
+            subscription.reconciliation = runtime
+                .subscription_reconciliation_for_query(&subscription.query)
+                .ok();
+        }
     }
 
     pub fn close(&mut self, conn: &mut impl DownstreamEndpoint, reason: CloseReason) -> Result<()> {
@@ -423,6 +447,7 @@ impl UpstreamSession {
                     subscription_id,
                     query,
                     requested_tier,
+                    reconciliation,
                 } => {
                     ensure_open(self.closed)?;
                     if self.peer_hello.is_none() {
@@ -461,6 +486,7 @@ impl UpstreamSession {
                         subscription_id.clone(),
                         query,
                         requested_tier,
+                        reconciliation,
                     ) {
                         self.send_scoped_error(conn, "query_rejected", error, subscription_id);
                     }
@@ -506,6 +532,7 @@ impl UpstreamSession {
                             subscription.subscription_id.clone(),
                             subscription.query,
                             subscription.requested_tier,
+                            subscription.reconciliation,
                         ) {
                             self.send_scoped_error(
                                 conn,
@@ -643,12 +670,20 @@ impl UpstreamSession {
                     subscription_id.clone(),
                     subscription.query.clone(),
                     subscription.requested_tier,
+                    subscription.reconciliation.clone(),
                 )
             })
             .collect::<Vec<_>>();
 
-        for (subscription_id, query, requested_tier) in subscriptions {
-            self.send_subscription_data(runtime, conn, subscription_id, query, requested_tier)?;
+        for (subscription_id, query, requested_tier, reconciliation) in subscriptions {
+            self.send_subscription_data(
+                runtime,
+                conn,
+                subscription_id,
+                query,
+                requested_tier,
+                reconciliation,
+            )?;
         }
         Ok(())
     }
@@ -708,8 +743,11 @@ impl UpstreamSession {
         subscription_id: SubscriptionId,
         query: BuiltQuery,
         requested_tier: SettlementTier,
+        reconciliation: Option<ReconciliationSketch>,
     ) -> Result<()> {
-        let bundle = runtime.export_query(query.clone())?;
+        let bundle =
+            runtime.export_subscription_reconciliation(query.clone(), reconciliation.clone())?;
+        let next_reconciliation = runtime.subscription_reconciliation_for_query(&query).ok();
         let cursor = self.next_cursor();
         let message_id = self.next_message_id();
         self.active_subscriptions.insert(
@@ -718,6 +756,7 @@ impl UpstreamSession {
                 query,
                 requested_tier,
                 last_applied_cursor: Some(cursor),
+                reconciliation: next_reconciliation,
             },
         );
         self.pending_messages

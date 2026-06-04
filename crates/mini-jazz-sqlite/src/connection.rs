@@ -137,6 +137,7 @@ impl DownstreamConnectionManager {
 
     pub fn subscribe(
         &mut self,
+        runtime: &Runtime,
         query: BuiltQuery,
         requested_tier: SettlementTier,
     ) -> Result<(DownstreamConnectionSubscription, Vec<ClientMessage>)> {
@@ -159,12 +160,18 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        self.session
-            .subscribe(&mut batch, id, query, requested_tier)?;
+        let reconciliation = runtime.subscription_reconciliation_for_query(&query).ok();
+        self.session.subscribe_with_reconciliation(
+            &mut batch,
+            id,
+            query,
+            requested_tier,
+            reconciliation,
+        )?;
         Ok((subscription, batch.into_client_messages()))
     }
 
-    pub fn replay(&mut self) -> Result<Vec<ClientMessage>> {
+    pub fn replay(&mut self, runtime: &Runtime) -> Result<Vec<ClientMessage>> {
         if self.session.is_closed() {
             return Err(Error::new("session is closed"));
         }
@@ -173,6 +180,7 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
+        self.session.refresh_subscription_reconciliations(runtime);
         self.session.replay(&mut batch)?;
         Ok(batch.into_client_messages())
     }
@@ -186,7 +194,7 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        self.flush_pending_subscriptions(&mut batch)?;
+        self.flush_pending_subscriptions(runtime, &mut batch)?;
         self.flush_uploads(runtime, &mut batch)?;
         Ok(batch.into_client_messages())
     }
@@ -284,14 +292,22 @@ impl DownstreamConnectionManager {
         })
     }
 
-    fn flush_pending_subscriptions(&mut self, batch: &mut DownstreamMessageBatch) -> Result<()> {
+    fn flush_pending_subscriptions(
+        &mut self,
+        runtime: &Runtime,
+        batch: &mut DownstreamMessageBatch,
+    ) -> Result<()> {
         let pending = std::mem::take(&mut self.pending_subscriptions);
         for (subscription_id, subscription) in pending {
-            self.session.subscribe(
+            let reconciliation = runtime
+                .subscription_reconciliation_for_query(&subscription.query)
+                .ok();
+            self.session.subscribe_with_reconciliation(
                 batch,
                 subscription_id,
                 subscription.query,
                 subscription.requested_tier,
+                reconciliation,
             )?;
         }
         Ok(())

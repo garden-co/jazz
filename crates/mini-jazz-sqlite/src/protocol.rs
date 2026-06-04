@@ -1,6 +1,7 @@
 use crate::sync::Bundle;
 use crate::BuiltQuery;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(2);
 
@@ -101,7 +102,7 @@ pub struct ClientDataRecord {
     pub table: String,
     pub row_id: String,
     pub op: DataOp,
-    pub values: std::collections::BTreeMap<String, serde_json::Value>,
+    pub values: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +123,33 @@ pub struct ReplaySubscription {
     pub query: BuiltQuery,
     pub requested_tier: SettlementTier,
     pub last_applied_cursor: Option<ReplayCursor>,
+    pub reconciliation: Option<ReconciliationSketch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RowHeadItem {
+    pub branch_id: String,
+    pub table: String,
+    pub row_id: String,
+    pub head_tx_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReconcileSet {
+    RowHeads,
+    PolicyDeps,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReconcileAlgorithm {
+    Exact,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationSketch {
+    pub set: ReconcileSet,
+    pub algorithm: ReconcileAlgorithm,
+    pub row_heads: Vec<RowHeadItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +194,7 @@ pub enum ClientMessage {
         subscription_id: SubscriptionId,
         query: BuiltQuery,
         requested_tier: SettlementTier,
+        reconciliation: Option<ReconciliationSketch>,
     },
     Replay {
         subscriptions: Vec<ReplaySubscription>,

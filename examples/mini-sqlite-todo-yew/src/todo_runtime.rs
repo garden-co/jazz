@@ -1,4 +1,4 @@
-use js_sys::{Date, Function, Promise};
+use js_sys::{Date, Function, Math, Promise};
 use mini_jazz_sqlite::{BuiltQuery, RowView, SubscriptionDelta};
 use mini_sqlite_todo_yew::browser_runtime::{
     BrowserRuntime, BrowserRuntimeConfig, BrowserRuntimeStatus, SubscriptionId,
@@ -18,6 +18,7 @@ use yew::Callback;
 const PROJECT_ID: &str = "todo-list";
 const SYNC_BATCH_SIZE: u64 = 100;
 const TOTAL_TO_GENERATE: u64 = 100_000;
+const CLIENT_ID_STORAGE_KEY: &str = "mini-sqlite-todo-yew-client-id";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Todo {
@@ -83,12 +84,13 @@ struct Inner {
 
 impl TodoRuntime {
     pub fn open(set_state: Callback<TodoState>) -> Result<Self, String> {
+        let client_id = browser_client_id();
         let runtime_slot = Rc::new(RefCell::new(None::<TodoRuntime>));
         let browser = BrowserRuntime::open(
             BrowserRuntimeConfig {
-                db_name: "mini-jazz-sqlite-yew-serde-worker.sqlite3".to_owned(),
-                main_node_id: "browser-yew-main".to_owned(),
-                worker_node_id: "browser-yew-worker".to_owned(),
+                db_name: format!("mini-jazz-sqlite-yew-serde-worker-{client_id}.sqlite3"),
+                main_node_id: format!("{client_id}-main"),
+                worker_node_id: format!("{client_id}-worker"),
                 user: "alice".to_owned(),
                 schema: todo_schema(),
                 hydrate_queries: vec![
@@ -474,6 +476,29 @@ impl Inner {
 
 fn native_sync_url() -> Option<String> {
     Some("ws://127.0.0.1:8787/sync".to_owned())
+}
+
+fn browser_client_id() -> String {
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    if let Some(storage) = storage {
+        if let Ok(Some(id)) = storage.get_item(CLIENT_ID_STORAGE_KEY) {
+            if !id.trim().is_empty() {
+                return id;
+            }
+        }
+
+        let id = new_browser_client_id();
+        let _ = storage.set_item(CLIENT_ID_STORAGE_KEY, &id);
+        return id;
+    }
+
+    new_browser_client_id()
+}
+
+fn new_browser_client_id() -> String {
+    let time = Date::now() as u64;
+    let random = (Math::random() * u32::MAX as f64) as u32;
+    format!("browser-yew-{time}-{random:08x}")
 }
 
 fn project_query() -> BuiltQuery {

@@ -19,6 +19,10 @@ pub struct Bundle {
     pub reads: Vec<ReadRecord>,
     #[serde(default)]
     pub query_reads: Vec<QueryReadRecord>,
+    #[serde(default)]
+    pub rows: Vec<RowDataUpdate>,
+    #[serde(default)]
+    pub obfuscated: Vec<ObfuscatedRowAdvance>,
     pub history: Vec<HistoryRecord>,
 }
 
@@ -34,12 +38,16 @@ pub fn merge_bundles(bundles: &[Bundle]) -> Result<Bundle> {
         txs: Vec::new(),
         reads: Vec::new(),
         query_reads: Vec::new(),
+        rows: Vec::new(),
+        obfuscated: Vec::new(),
         history: Vec::new(),
     };
     let mut branches = BTreeMap::new();
     let mut txs = BTreeMap::new();
     let mut reads = BTreeMap::new();
     let mut query_reads = BTreeMap::new();
+    let mut row_updates = BTreeMap::new();
+    let mut obfuscated = BTreeMap::new();
     let mut history = BTreeMap::new();
     for bundle in bundles {
         if bundle.protocol_version != merged.protocol_version
@@ -62,6 +70,12 @@ pub fn merge_bundles(bundles: &[Bundle]) -> Result<Bundle> {
         for record in &bundle.query_reads {
             query_reads.insert(stable_key(record)?, record.clone());
         }
+        for record in &bundle.rows {
+            row_updates.insert(stable_key(record)?, record.clone());
+        }
+        for record in &bundle.obfuscated {
+            obfuscated.insert(stable_key(record)?, record.clone());
+        }
         for record in &bundle.history {
             history.insert(stable_key(record)?, record.clone());
         }
@@ -70,6 +84,8 @@ pub fn merge_bundles(bundles: &[Bundle]) -> Result<Bundle> {
     merged.txs = txs.into_values().collect();
     merged.reads = reads.into_values().collect();
     merged.query_reads = query_reads.into_values().collect();
+    merged.rows = row_updates.into_values().collect();
+    merged.obfuscated = obfuscated.into_values().collect();
     merged.history = history.into_values().collect();
     Ok(merged)
 }
@@ -134,6 +150,29 @@ pub struct QueryReadRecord {
     #[serde(default = "default_query_predicate_op")]
     pub op: String,
     pub value: JsonValue,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RowDataUpdate {
+    pub table: String,
+    pub row_id: String,
+    pub branch_id: String,
+    pub tx_id: String,
+    pub op: i64,
+    pub values: BTreeMap<String, JsonValue>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub created_by: String,
+    pub updated_by: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObfuscatedRowAdvance {
+    pub table: String,
+    pub row_id: String,
+    pub branch_id: String,
+    pub tx_id: String,
+    pub parent_tx_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

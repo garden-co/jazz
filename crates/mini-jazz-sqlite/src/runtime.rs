@@ -1,4 +1,7 @@
-use crate::protocol::{ClientDataRecord, ClientTx, DataOp, TxConflictMode, TxStatusKind};
+use crate::protocol::{
+    ClientDataRecord, ClientTx, DataOp, ReconcileAlgorithm, ReconcileSet, ReconciliationSketch,
+    RowHeadItem, TxConflictMode, TxStatusKind,
+};
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::read_visibility::ReadVisibility;
 use crate::rows::{
@@ -7,8 +10,8 @@ use crate::rows::{
 use crate::schema::{FieldDef, FieldKind, PolicyDef, SchemaDef};
 use crate::subscription::{RejectionSubscription, RowsSubscription, RowsSubscriptionQuery};
 use crate::sync::{
-    BranchRecord, Bundle, HistoryRecord, QueryReadRecord, ReadRecord, TxRecord,
-    BUNDLE_PROTOCOL_VERSION,
+    BranchRecord, Bundle, HistoryRecord, ObfuscatedRowAdvance, QueryReadRecord, ReadRecord,
+    RowDataUpdate, TxRecord, BUNDLE_PROTOCOL_VERSION,
 };
 use crate::time::now_ms;
 use crate::types::{
@@ -942,6 +945,12 @@ impl Runtime {
         };
         for record in &bundle.history {
             Self::apply_history_record(&mut history_context, record)?;
+        }
+        for record in &bundle.rows {
+            Self::apply_row_data_update(&mut history_context, record)?;
+        }
+        for record in &bundle.obfuscated {
+            Self::apply_obfuscated_row_advance(&mut history_context, record)?;
         }
         let history_ms = history_started.elapsed_ms();
 
@@ -2224,21 +2233,26 @@ impl Runtime {
             rusqlite::types::Value::Integer(record.op),
         ];
         for field in &table.fields {
-            let value = record
-                .values
-                .get(&field.name)
-                .or_else(|| record.values.get(&field.storage_name))
-                .ok_or_else(|| crate::Error::new(format!("missing field {}", field.name)))?;
             columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
                 field,
             )));
-            values.push(crate::schema::field_sql_value(
-                field,
-                value,
-                |ref_table, row_id| {
-                    cached_ensure_row_id(context.db, context.row_nums_by_id, ref_table, row_id)
-                },
-            )?);
+            if let Some(value) = record
+                .values
+                .get(&field.name)
+                .or_else(|| record.values.get(&field.storage_name))
+            {
+                values.push(crate::schema::field_sql_value(
+                    field,
+                    value,
+                    |ref_table, row_id| {
+                        cached_ensure_row_id(context.db, context.row_nums_by_id, ref_table, row_id)
+                    },
+                )?);
+            } else if record.op == 3 {
+                values.push(rusqlite::types::Value::Null);
+            } else {
+                return Err(crate::Error::new(format!("missing field {}", field.name)));
+            }
         }
         columns.extend([
             "j_created_at".to_owned(),
@@ -2364,6 +2378,124 @@ impl Runtime {
                 &current_values,
             )?;
         }
+        Ok(())
+    }
+
+    fn apply_row_data_update(
+        context: &mut ApplyHistoryContext<'_>,
+        record: &RowDataUpdate,
+    ) -> Result<()> {
+        Self::apply_history_record(
+            context,
+            &HistoryRecord {
+                table: record.table.clone(),
+                row_id: record.row_id.clone(),
+                branch_id: record.branch_id.clone(),
+                tx_id: record.tx_id.clone(),
+                op: record.op,
+                values: record.values.clone(),
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                created_by: record.created_by.clone(),
+                updated_by: record.updated_by.clone(),
+            },
+        )
+    }
+
+    fn apply_obfuscated_row_advance(
+        context: &mut ApplyHistoryContext<'_>,
+        record: &ObfuscatedRowAdvance,
+    ) -> Result<()> {
+        let table = context.schema.table_def(&record.table)?;
+        let row_num = cached_ensure_row_id_with_status(
+            context.db,
+            context.row_nums_by_id,
+            context.row_nums_created_in_apply,
+            &record.table,
+            &record.row_id,
+        )?;
+        let tx_num = context
+            .tx_nums_by_id
+            .get(&record.tx_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx::tx_num(context.db, &record.tx_id))?;
+        let branch_num = context
+            .branch_nums_by_id
+            .get(&record.branch_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| branch::ensure(context.db, &record.branch_id, None, now_ms()))?;
+        let tx_info = context
+            .tx_info_by_num
+            .get(&tx_num)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| tx_apply_info(context.db, tx_num))?;
+        if tx_info.outcome == tx::OUTCOME_REJECTED {
+            return Ok(());
+        }
+        if let Some(current_tx_num) =
+            current_visible_tx_num(context.db, &record.table, row_num, branch_num)?
+        {
+            if let Some(is_newer) =
+                tx_is_newer_than_current_fast_path(context.db, tx_num, current_tx_num)?
+            {
+                if !is_newer {
+                    return Ok(());
+                }
+            }
+        }
+        let table_num = context
+            .table_nums_by_name
+            .get(&record.table)
+            .copied()
+            .ok_or_else(|| crate::Error::new("obfuscated advance references missing table"))?;
+        record_tx_write_num(context.db, tx_num, table_num, row_num, 3)?;
+        context.db.execute(
+            &format!(
+                "DELETE FROM {} WHERE row_num = ? AND j_branch_num = ?",
+                crate::schema::current_table(&record.table)
+            ),
+            params![row_num, branch_num],
+        )?;
+        let mut columns = vec![
+            "row_num".to_owned(),
+            "j_branch_num".to_owned(),
+            "visible_tx_num".to_owned(),
+            "is_deleted".to_owned(),
+        ];
+        let mut values = vec![
+            rusqlite::types::Value::Integer(row_num),
+            rusqlite::types::Value::Integer(branch_num),
+            rusqlite::types::Value::Integer(tx_num),
+            rusqlite::types::Value::Integer(1),
+        ];
+        for field in &table.fields {
+            columns.push(crate::schema::quote_ident(&crate::schema::storage_column(
+                field,
+            )));
+            values.push(rusqlite::types::Value::Null);
+        }
+        let user_num = cached_ensure_user(context.db, context.user_nums_by_id, "unknown")?;
+        columns.extend([
+            "j_created_at".to_owned(),
+            "j_updated_at".to_owned(),
+            "j_created_by".to_owned(),
+            "j_updated_by".to_owned(),
+        ]);
+        values.extend([
+            rusqlite::types::Value::Integer(0),
+            rusqlite::types::Value::Integer(0),
+            rusqlite::types::Value::Integer(user_num),
+            rusqlite::types::Value::Integer(user_num),
+        ]);
+        insert_dynamic(
+            context.db,
+            &crate::schema::current_table(&record.table),
+            &columns,
+            &values,
+        )?;
         Ok(())
     }
 
@@ -3267,6 +3399,232 @@ impl Runtime {
 
     pub(crate) fn read_rows_for_built_query(&self, query: &BuiltQuery) -> Result<Vec<RowView>> {
         self.query_context().read_rows_for_built_query(query)
+    }
+
+    pub fn subscription_reconciliation_for_query(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<ReconciliationSketch> {
+        let branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let mut row_heads = self
+            .read_rows_for_built_query(query)?
+            .into_iter()
+            .map(|row| RowHeadItem {
+                branch_id: branch_id.clone(),
+                table: row.table,
+                row_id: row.id,
+                head_tx_id: row.tx_id,
+            })
+            .collect::<Vec<_>>();
+        row_heads.sort();
+        Ok(ReconciliationSketch {
+            set: ReconcileSet::RowHeads,
+            algorithm: ReconcileAlgorithm::Exact,
+            row_heads,
+        })
+    }
+
+    pub fn export_subscription_reconciliation(
+        &self,
+        query: BuiltQuery,
+        reconciliation: Option<ReconciliationSketch>,
+    ) -> Result<Bundle> {
+        let Some(reconciliation) = reconciliation else {
+            return self.export_query(query);
+        };
+        if reconciliation.set != ReconcileSet::RowHeads {
+            return self.export_query(query);
+        }
+
+        let branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
+        let client_heads = reconciliation
+            .row_heads
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let server_rows = self.read_rows_for_built_query(&query)?;
+        let mut server_heads = BTreeSet::new();
+        let mut server_identities = BTreeSet::new();
+        let mut rows = Vec::new();
+        let mut obfuscated = Vec::new();
+        let mut obfuscated_keys = BTreeSet::new();
+        let mut row_keys = BTreeSet::new();
+
+        for row in server_rows {
+            let row_head = RowHeadItem {
+                branch_id: branch_id.clone(),
+                table: row.table.clone(),
+                row_id: row.id.clone(),
+                head_tx_id: row.tx_id.clone(),
+            };
+            server_identities.insert(row_head_identity(&row_head));
+            server_heads.insert(row_head.clone());
+            if !client_heads.contains(&row_head) {
+                push_row_update(
+                    &mut rows,
+                    &mut row_keys,
+                    row_data_update_from_view(&self.conn, self.branch_num, &branch_id, row)?,
+                );
+            }
+        }
+
+        for client_head in reconciliation.row_heads {
+            if server_heads.contains(&client_head) {
+                continue;
+            }
+            if server_identities.contains(&row_head_identity(&client_head)) {
+                continue;
+            }
+            if let Some(update) = self.current_readable_row_update_for_head(&client_head)? {
+                if update.tx_id != client_head.head_tx_id {
+                    push_row_update(&mut rows, &mut row_keys, update);
+                }
+            } else if let Some(update) = self.deleted_row_update_for_head(&client_head)? {
+                if update.tx_id != client_head.head_tx_id {
+                    push_row_update(&mut rows, &mut row_keys, update);
+                }
+            } else if let Some(update) = self.obfuscated_row_advance_for_head(&client_head)? {
+                if obfuscated_keys.insert((
+                    update.branch_id.clone(),
+                    update.table.clone(),
+                    update.row_id.clone(),
+                    update.tx_id.clone(),
+                )) {
+                    obfuscated.push(update);
+                }
+            }
+        }
+
+        let mut tx_ids = rows
+            .iter()
+            .map(|row| row.tx_id.as_str())
+            .collect::<BTreeSet<_>>();
+        tx_ids.extend(
+            obfuscated
+                .iter()
+                .map(|row: &ObfuscatedRowAdvance| row.tx_id.as_str()),
+        );
+        let txs = export_txs_by_ids(&self.conn, tx_ids)?;
+        let mut branches = Vec::new();
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        let mut bundle = make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        bundle.rows = rows;
+        bundle.obfuscated = obfuscated;
+        Ok(bundle)
+    }
+
+    fn current_readable_row_update_for_head(
+        &self,
+        head: &RowHeadItem,
+    ) -> Result<Option<RowDataUpdate>> {
+        if head.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Ok(None);
+        }
+        let mut rows =
+            self.read_rows_where_eq(&head.table, "id", JsonValue::String(head.row_id.clone()))?;
+        let Some(row) = rows.pop() else {
+            return Ok(None);
+        };
+        Ok(Some(row_data_update_from_view(
+            &self.conn,
+            self.branch_num,
+            &head.branch_id,
+            row,
+        )?))
+    }
+
+    fn deleted_row_update_for_head(&self, head: &RowHeadItem) -> Result<Option<RowDataUpdate>> {
+        if head.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Ok(None);
+        }
+        self.schema.table_def(&head.table)?;
+        let Some(row_num) = existing_row_num(&self.conn, &head.row_id)? else {
+            return Ok(None);
+        };
+        let branch_num = branch::checkout(&self.conn, &head.branch_id)?;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT tx.tx_id,
+                            h.j_created_at,
+                            h.j_updated_at,
+                            {created_by} AS j_created_by,
+                            {updated_by} AS j_updated_by
+                     FROM {} h
+                     JOIN jazz_tx tx ON tx.tx_num = h.tx_num
+                     WHERE h.row_num = ?
+                       AND h.j_branch_num = ?
+                       AND h.op = 3
+                       AND tx.outcome != ?
+                     ORDER BY tx.global_epoch DESC NULLS LAST, tx.tx_num DESC
+                     LIMIT 1",
+                    crate::schema::history_table(&head.table),
+                    created_by = users::user_id_expr("h", "j_created_by"),
+                    updated_by = users::user_id_expr("h", "j_updated_by"),
+                ),
+                params![row_num, branch_num, tx::OUTCOME_REJECTED],
+                |row| {
+                    Ok(RowDataUpdate {
+                        table: head.table.clone(),
+                        row_id: head.row_id.clone(),
+                        branch_id: head.branch_id.clone(),
+                        tx_id: row.get(0)?,
+                        op: 3,
+                        values: BTreeMap::new(),
+                        created_at: row.get(1)?,
+                        updated_at: row.get(2)?,
+                        created_by: row.get(3)?,
+                        updated_by: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn obfuscated_row_advance_for_head(
+        &self,
+        head: &RowHeadItem,
+    ) -> Result<Option<ObfuscatedRowAdvance>> {
+        if head.branch_id != branch_id_for_num(&self.conn, self.branch_num)? {
+            return Ok(None);
+        }
+        self.schema.table_def(&head.table)?;
+        let Some(row_num) = existing_row_num(&self.conn, &head.row_id)? else {
+            return Ok(None);
+        };
+        let branch_num = branch::checkout(&self.conn, &head.branch_id)?;
+        let current_tx_id = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT tx.tx_id
+                     FROM {} current
+                     JOIN jazz_tx tx ON tx.tx_num = current.visible_tx_num
+                     WHERE current.row_num = ?
+                       AND current.j_branch_num = ?",
+                    crate::schema::current_table(&head.table)
+                ),
+                params![row_num, branch_num],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(current_tx_id.and_then(|tx_id| {
+            (tx_id != head.head_tx_id).then(|| ObfuscatedRowAdvance {
+                table: head.table.clone(),
+                row_id: head.row_id.clone(),
+                branch_id: head.branch_id.clone(),
+                tx_id,
+                parent_tx_id: head.head_tx_id.clone(),
+            })
+        }))
     }
 
     pub fn read_rows_where_eq(
@@ -8652,6 +9010,74 @@ fn observed_row_ids(rows: &[RowView]) -> Vec<String> {
     rows.iter().map(|row| row.id.clone()).collect()
 }
 
+fn row_head_identity(head: &RowHeadItem) -> (String, String, String) {
+    (
+        head.branch_id.clone(),
+        head.table.clone(),
+        head.row_id.clone(),
+    )
+}
+
+fn row_data_update_from_view(
+    conn: &Connection,
+    branch_num: i64,
+    branch_id: &str,
+    row: RowView,
+) -> Result<RowDataUpdate> {
+    let row_num = existing_row_num(conn, &row.id)?
+        .ok_or_else(|| crate::Error::new(format!("unknown row id {}", row.id)))?;
+    let (created_at, updated_at, created_by, updated_by) = conn.query_row(
+        &format!(
+            "SELECT current.j_created_at,
+                    current.j_updated_at,
+                    {created_by} AS j_created_by,
+                    {updated_by} AS j_updated_by
+             FROM {} current
+             WHERE current.row_num = ?
+               AND current.j_branch_num = ?",
+            crate::schema::current_table(&row.table),
+            created_by = users::user_id_expr("current", "j_created_by"),
+            updated_by = users::user_id_expr("current", "j_updated_by"),
+        ),
+        params![row_num, branch_num],
+        |raw| {
+            Ok((
+                raw.get::<_, i64>(0)?,
+                raw.get::<_, i64>(1)?,
+                raw.get::<_, String>(2)?,
+                raw.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    Ok(RowDataUpdate {
+        table: row.table,
+        row_id: row.id,
+        branch_id: branch_id.to_owned(),
+        tx_id: row.tx_id,
+        op: 2,
+        values: row.values,
+        created_at,
+        updated_at,
+        created_by,
+        updated_by,
+    })
+}
+
+fn push_row_update(
+    rows: &mut Vec<RowDataUpdate>,
+    row_keys: &mut BTreeSet<(String, String, String, String)>,
+    update: RowDataUpdate,
+) {
+    if row_keys.insert((
+        update.branch_id.clone(),
+        update.table.clone(),
+        update.row_id.clone(),
+        update.tx_id.clone(),
+    )) {
+        rows.push(update);
+    }
+}
+
 fn observed_ids_from_query_value(value: &JsonValue) -> Result<Vec<String>> {
     let Some(observed_ids) = value.get("observed_ids") else {
         return Ok(Vec::new());
@@ -8860,6 +9286,8 @@ fn make_bundle(
         txs,
         reads,
         query_reads,
+        rows: Vec::new(),
+        obfuscated: Vec::new(),
         history,
     }
 }

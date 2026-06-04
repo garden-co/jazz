@@ -180,7 +180,7 @@ impl BrowserRuntime {
                 .ok_or_else(|| "subscription id overflow".to_owned())?;
             let (connection_subscription, client_messages) = inner
                 .connection_manager
-                .subscribe(query.clone(), SettlementTier::Local)
+                .subscribe(&inner.main, query.clone(), SettlementTier::Local)
                 .map_err(error_message)?;
             inner.subscriptions.insert(
                 id,
