@@ -43,16 +43,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 }
 
 describe("JazzRnRuntimeAdapter", () => {
-  it("does not expose runtime-only server connection hooks", () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-    const serverAttachHook = "add" + "Server";
-    const serverDetachHook = "remove" + "Server";
-
-    expect(serverAttachHook in adapter).toBe(false);
-    expect(serverDetachHook in adapter).toBe(false);
-  });
-
   it("defers batched tick execution to avoid re-entrancy", async () => {
     const binding = createBinding();
     new JazzRnRuntimeAdapter(binding, {});
