@@ -13,7 +13,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-	{#snippet children({ db })}
+	{#snippet children()}
 		<Main />
 	{/snippet}
 </JazzSvelteProvider>

@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import type { DehydratedSnapshot } from "../backend/ssr.js";
+import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import {
@@ -31,15 +33,26 @@ export type JazzProviderProps = {
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
+  snapshot?: DehydratedSnapshot;
+  schema?: WasmSchemaInput;
 };
 
-export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+export function JazzProvider({
+  config,
+  fallback,
+  children,
+  onJWTExpired,
+  snapshot,
+  schema,
+}: JazzProviderProps) {
   return (
     <CoreJazzProvider
       config={config}
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
+      snapshot={snapshot}
+      schema={schema}
     >
       {children}
     </CoreJazzProvider>

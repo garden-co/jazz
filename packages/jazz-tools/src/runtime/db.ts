@@ -82,6 +82,12 @@ import {
   type TabSyncMessage,
 } from "./tab-sync-protocol.js";
 import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
+import {
+  installWasmTeardownTrapSuppressor,
+  isWasmTeardownInProgress,
+  isWasmTeardownTrap,
+  markWasmTeardownInProgress,
+} from "./wasm-teardown-trap-suppressor.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
@@ -821,6 +827,9 @@ export class Db {
     this.sendLifecycleHint(hidden ? "visibility-hidden" : "visibility-visible");
   };
   private readonly onPageHide = (): void => {
+    // Page navigating away: open the teardown window so the suppressor swallows
+    // the inert WASM-teardown trap.
+    markWasmTeardownInProgress();
     this.sendLifecycleHint("pagehide");
   };
   private readonly onPageFreeze = (): void => {
@@ -1257,6 +1266,8 @@ export class Db {
     if (this.lifecycleHooksAttached) return;
     if (typeof window === "undefined" || typeof document === "undefined") return;
 
+    // Arm the teardown-trap suppressor before the first `pagehide` can fire.
+    installWasmTeardownTrapSuppressor();
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     window.addEventListener("pagehide", this.onPageHide);
     // "freeze"/"resume" are non-standard but available in Chromium lifecycle APIs.
@@ -1576,6 +1587,14 @@ export class Db {
         clearTimeout(timeout);
         reject(new Error(`Worker load error: ${e.message}`));
       });
+    });
+
+    // Swallow the inert trap from the worker's dying WASM heap on navigation;
+    // only during the teardown window — a genuine worker fault still propagates.
+    worker.addEventListener("error", (e) => {
+      if (!isWasmTeardownInProgress()) return;
+      if (!isWasmTeardownTrap(e.message)) return;
+      e.preventDefault();
     });
 
     return worker;

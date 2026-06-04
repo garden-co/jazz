@@ -25,6 +25,7 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
+import { isWasmTeardownTrap } from "../runtime/wasm-teardown-trap-suppressor.js";
 
 /**
  * Init message: the only worker-protocol envelope that stays a JS object
@@ -77,6 +78,26 @@ function ensureVitestWorkerImportShim(): void {
 }
 
 ensureVitestWorkerImportShim();
+
+// When the page navigates away, this worker's `ws_stream_wasm`
+// transport is abandoned mid-flight and the dying WASM heap traps with
+// `RuntimeError: memory access out of bounds` (or an `unreachable` from a
+// `send_wrapper` panic in the WebSocket callback). The worker is being
+// terminated anyway, so swallow that one inert trap rather than letting it
+// reach the console. The Rust runtime sets `__jazzWorkerTearingDown` when it
+// receives the "pagehide" lifecycle hint, so this only fires during teardown —
+// a genuine fault during normal operation still surfaces.
+(globalThis as unknown as EventTarget).addEventListener(
+  "error",
+  (event) => {
+    if (!(globalThis as Record<string, unknown>).__jazzWorkerTearingDown) return;
+    const message = (event as ErrorEvent).message || (event as ErrorEvent).error?.message;
+    if (!isWasmTeardownTrap(message)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  },
+  true,
+);
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let initMessage: InitMessage | null = null;

@@ -14,6 +14,7 @@ export {
   useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense } from "./use-all.js";
+export type { DehydratedSnapshot, SnapshotEntry } from "../backend/ssr.js";
 export { useLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";

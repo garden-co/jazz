@@ -10,3 +10,11 @@ export {
 export type { WasmSchema } from "../drivers/types.js";
 export type { Session } from "../runtime/context.js";
 export { Db, type QueryBuilder, type QueryOptions, type TableProxy } from "../runtime/db.js";
+export {
+  createSnapshotBuilder,
+  type DehydratedSnapshot,
+  type PrefetchableDb,
+  type SnapshotBuilder,
+  type SnapshotBuilderConfig,
+  type SnapshotEntry,
+} from "./ssr.js";

@@ -85,6 +85,45 @@ export function getRuntimeSchemaCacheKey(
   return key;
 }
 
+export function computeSchemaFingerprint(
+  schema: WasmSchema,
+  options?: SerializeRuntimeSchemaOptions,
+): string {
+  // We only need a fast, stable hash to detect when two schemas differ — not a
+  // cryptographically secure one — so FNV-1a (32-bit) is fine here.
+  return fnv1a32Hex(serializeRuntimeSchema(schema, options));
+}
+
+/**
+ * Accepts either a raw {@link WasmSchema} or an App-like value carrying one in
+ * its `wasmSchema` field. Public API surfaces (the SSR snapshot builder,
+ * `JazzProvider.schema`) take whichever shape the caller has on hand, so more
+ * casual users can get this right by passing their `app` directly — without
+ * needing to plumb through the less-documented `.wasmSchema` API themselves.
+ */
+export type WasmSchemaInput = WasmSchema | { readonly wasmSchema: WasmSchema };
+
+export function resolveWasmSchema(input: WasmSchemaInput): WasmSchema {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "wasmSchema" in input &&
+    isWasmSchema((input as { wasmSchema: unknown }).wasmSchema)
+  ) {
+    return (input as { wasmSchema: WasmSchema }).wasmSchema;
+  }
+  return input as WasmSchema;
+}
+
+function fnv1a32Hex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 export function normalizeRuntimeSchemaJson(schemaJson: string): string {
   const parsed = JSON.parse(schemaJson) as unknown;
   if (isRuntimeSchemaEnvelope(parsed)) {

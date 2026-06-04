@@ -515,6 +515,27 @@ fn deliver_pending_mutation_errors(core_rc: &Rc<RefCell<WasmCoreType>>) {
     }
 }
 
+/// Shared, take-once slot holding a boxed one-shot task. Factored out to keep
+/// [`once_task_into_js`]'s type within clippy's complexity budget.
+type OnceTaskSlot = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+
+/// Wrap a one-shot task as a JS function that runs it **at most once**.
+///
+/// Unlike `Closure::once_into_js`, a second invocation is a safe no-op instead
+/// of a use-after-free of the freed `FnOnce`. See
+/// `specs/todo/issues/wasm-memory-access-oob-multi-client-teardown.md`.
+fn once_task_into_js(label: &'static str, task: impl FnOnce() + 'static) -> JsValue {
+    let slot: OnceTaskSlot = Rc::new(RefCell::new(Some(Box::new(task))));
+    Closure::<dyn FnMut()>::new(move || match slot.borrow_mut().take() {
+        Some(task) => task(),
+        None => tracing::warn!(
+            task = label,
+            "scheduled one-shot task invoked again; suppressed"
+        ),
+    })
+    .into_js_value()
+}
+
 fn schedule_pending_mutation_errors_emit(
     core_rc: Rc<RefCell<WasmCoreType>>,
     scheduled: Rc<RefCell<bool>>,
@@ -527,7 +548,7 @@ fn schedule_pending_mutation_errors_emit(
     drop(scheduled_guard);
 
     let scheduled_in_task = Rc::clone(&scheduled);
-    let task = Closure::once_into_js(move || {
+    let task = once_task_into_js("mutation_error_delivery", move || {
         *scheduled_in_task.borrow_mut() = false;
         deliver_pending_mutation_errors(&core_rc);
     });
@@ -544,7 +565,7 @@ fn schedule_pending_mutation_errors_emit(
 
 fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
     let flag_in_task = Rc::clone(&flag);
-    let task = Closure::once_into_js(move || {
+    let task = once_task_into_js("batched_tick", move || {
         *flag_in_task.borrow_mut() = false;
 
         let Some(core_rc) = core_ref.upgrade() else {

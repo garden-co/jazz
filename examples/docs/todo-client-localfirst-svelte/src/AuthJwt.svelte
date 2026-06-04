@@ -10,7 +10,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  {#snippet children({ db })}
+  {#snippet children()}
     <slot />
   {/snippet}
 </JazzSvelteProvider>

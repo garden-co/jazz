@@ -50,6 +50,21 @@ export class QuerySubscription<T extends { id: string }> {
     const ctx = getJazzContext();
     this.current = resolve(options)?.tier ? undefined : [];
 
+    const initialQuery = resolve(query);
+    const initialManager = ctx.manager;
+    if (initialQuery && initialManager) {
+      try {
+        const key = initialManager.makeQueryKey(initialQuery, resolve(options));
+        const entry = initialManager.getCacheEntry<T>(key);
+        if (entry.state.status === "fulfilled") {
+          this.current = entry.state.data;
+          this.loading = false;
+        }
+      } catch {
+        // Any error surfaces through the $effect subscription on the client.
+      }
+    }
+
     $effect(() => {
       const resolvedQuery = resolve(query);
       if (!resolvedQuery) {

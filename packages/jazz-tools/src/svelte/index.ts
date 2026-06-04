@@ -5,6 +5,7 @@ export {
   type JazzClient,
 } from "./create-jazz-client.js";
 export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
+export type { DehydratedSnapshot, SnapshotEntry } from "../backend/ssr.js";
 export { QuerySubscription } from "./use-all.svelte.js";
 export { LocalFirstAuth } from "./local-first-auth.svelte.js";
 export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";

@@ -15,7 +15,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  {#snippet children({ db })}
+  {#snippet children()}
     <YourApp />
   {/snippet}
   {#snippet fallback()}
