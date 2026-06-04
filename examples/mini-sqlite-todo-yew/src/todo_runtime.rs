@@ -98,6 +98,7 @@ impl TodoRuntime {
                     TodoQueryState::default().page_hydration_query(),
                 ],
                 native_sync_url: native_sync_url(),
+                native_sync_tracing: true,
             },
             Callback::from({
                 let runtime_slot = runtime_slot.clone();

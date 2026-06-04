@@ -27,6 +27,7 @@ pub struct BrowserRuntimeConfig {
     pub schema: SchemaDef,
     pub hydrate_queries: Vec<BuiltQuery>,
     pub native_sync_url: Option<String>,
+    pub native_sync_tracing: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -119,6 +120,7 @@ impl BrowserRuntime {
                 hydrate_queries: config.hydrate_queries,
                 client_messages: opening_client_messages,
                 native_sync_url: config.native_sync_url,
+                native_sync_tracing: config.native_sync_tracing,
             })?;
             Ok(())
         })?;

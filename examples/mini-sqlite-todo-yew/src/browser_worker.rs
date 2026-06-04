@@ -1,9 +1,14 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 #[cfg(target_arch = "wasm32")]
-use crate::native_sync::{decode_server_frame, encode_client_frame};
+use crate::native_sync::{
+    decode_server_frame, encode_client_frame_with_context, trace_client_messages,
+    trace_server_messages, NativeTraceContext,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::worker_bridge::WorkerResponder;
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Date, Math};
 use mini_jazz_sqlite::connection::UpstreamConnectionManager;
 #[cfg(target_arch = "wasm32")]
 use mini_jazz_sqlite::protocol::{ClientHello, SessionId, SUPPORTED_PROTOCOL_VERSION};
@@ -35,6 +40,7 @@ pub enum RuntimeWorkerInput {
         hydrate_queries: Vec<BuiltQuery>,
         client_messages: Vec<ClientMessage>,
         native_sync_url: Option<String>,
+        native_sync_tracing: bool,
     },
     ApplyBundles {
         request_id: RuntimeRequestId,
@@ -173,6 +179,9 @@ struct NativeSync {
     node_id: String,
     schema_fingerprint: String,
     policy_fingerprint: String,
+    tracing_enabled: bool,
+    trace_id: String,
+    next_span_id: u64,
     ready: bool,
     sent_hello: bool,
     pending_client_messages: Vec<ClientMessage>,
@@ -212,6 +221,7 @@ impl BrowserRuntimeWorker {
                 hydrate_queries,
                 client_messages,
                 native_sync_url,
+                native_sync_tracing,
             } => {
                 spawn_local(async move {
                     let native_node_id = node_id.clone();
@@ -241,6 +251,7 @@ impl BrowserRuntimeWorker {
                                         native_node_id.clone(),
                                         runtime.local_schema_fingerprint(),
                                         runtime.local_policy_fingerprint(),
+                                        native_sync_tracing,
                                     ) {
                                         Ok(sync) => Some(sync),
                                         Err(message) => {
@@ -653,6 +664,7 @@ impl NativeSync {
         node_id: String,
         schema_fingerprint: String,
         policy_fingerprint: String,
+        tracing_enabled: bool,
     ) -> Result<Self, String> {
         let socket =
             WebSocket::new(&url).map_err(|error| format!("open native sync: {error:?}"))?;
@@ -690,6 +702,18 @@ impl NativeSync {
                         return;
                     }
                 };
+                let tracing_enabled = worker
+                    .borrow()
+                    .native_sync
+                    .as_ref()
+                    .is_some_and(|sync| sync.tracing_enabled);
+                if tracing_enabled {
+                    trace_server_messages(
+                        "client.receive",
+                        frame.trace_context.as_ref(),
+                        &frame.server_messages,
+                    );
+                }
                 let output = {
                     let mut worker = worker.borrow_mut();
                     let result = {
@@ -762,6 +786,9 @@ impl NativeSync {
             node_id,
             schema_fingerprint,
             policy_fingerprint,
+            tracing_enabled,
+            trace_id: new_trace_id(),
+            next_span_id: 1,
             ready: false,
             sent_hello: false,
             pending_client_messages: Vec::new(),
@@ -802,12 +829,40 @@ impl NativeSync {
             if client_messages.is_empty() {
                 return Ok(());
             }
-            let encoded = encode_client_frame(client_messages)?;
+            let trace_context = self.next_trace_context();
+            if self.tracing_enabled {
+                trace_client_messages("client.send", trace_context.as_ref(), &client_messages);
+            }
+            let encoded = encode_client_frame_with_context(client_messages, trace_context)?;
             self.socket
                 .send_with_str(&encoded)
                 .map_err(|error| format!("send native sync frame: {error:?}"))?;
         }
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn next_trace_context(&mut self) -> Option<NativeTraceContext> {
+        if !self.tracing_enabled {
+            return None;
+        }
+        let span_id = self.next_span_id;
+        self.next_span_id = self.next_span_id.saturating_add(1);
+        Some(NativeTraceContext {
+            traceparent: format!("00-{}-{span_id:016x}-01", self.trace_id),
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn new_trace_id() -> String {
+    let high = Date::now() as u64;
+    let low = (Math::random() * u64::MAX as f64) as u64;
+    let trace_id = format!("{high:016x}{low:016x}");
+    if trace_id == "00000000000000000000000000000000" {
+        "00000000000000000000000000000001".to_owned()
+    } else {
+        trace_id
     }
 }
 
@@ -887,6 +942,7 @@ mod tests {
             }],
             client_messages: Vec::new(),
             native_sync_url: Some("ws://127.0.0.1:8787/sync".to_owned()),
+            native_sync_tracing: true,
         };
 
         let decoded: RuntimeWorkerInput = serde_round_trip(&message);
