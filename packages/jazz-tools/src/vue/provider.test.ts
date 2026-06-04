@@ -26,11 +26,11 @@ describe("vue/useSession", () => {
     mockClientRef.value = null;
   });
 
-  it("VU-SES-01: throws when no JazzProvider context is present", () => {
+  it("throws when no JazzProvider context is present", () => {
     expect(() => useSession()).toThrow("Jazz Vue composables must be used within <JazzProvider>");
   });
 
-  it("VU-SES-02: returns a reactive ComputedRef", () => {
+  it("returns a reactive ComputedRef", () => {
     mockClientRef.value = { session: null };
 
     const result = useSession();
@@ -38,7 +38,7 @@ describe("vue/useSession", () => {
     expect(isRef(result)).toBe(true);
   });
 
-  it("VU-SES-03: .value reflects the current session", () => {
+  it(".value reflects the current session", () => {
     const session = makeSession("alice");
     mockClientRef.value = { session };
 
@@ -47,7 +47,7 @@ describe("vue/useSession", () => {
     expect(sessionRef.value).toEqual(session);
   });
 
-  it("VU-SES-04: .value is null when the client has no session", () => {
+  it(".value is null when the client has no session", () => {
     mockClientRef.value = { session: null };
 
     const sessionRef = useSession();
@@ -55,7 +55,7 @@ describe("vue/useSession", () => {
     expect(sessionRef.value).toBeNull();
   });
 
-  it("VU-SES-05: .value updates when triggerRef is called after the session getter changes", () => {
+  it(".value updates when triggerRef is called after the session getter changes", () => {
     // Model the real JazzClient: session is exposed via a getter over a mutable local variable.
     // onAuthChanged updates the variable and calls triggerRef(clientRef).
     let currentSession: Session | null = makeSession("alice");
@@ -75,7 +75,7 @@ describe("vue/useSession", () => {
     expect(sessionRef.value).toEqual(makeSession("bob"));
   });
 
-  it("VU-SES-06: .value goes null when session is cleared and triggerRef fires", () => {
+  it(".value goes null when session is cleared and triggerRef fires", () => {
     let currentSession: Session | null = makeSession("alice");
     const client = {
       get session() {
