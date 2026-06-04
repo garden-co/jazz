@@ -69,9 +69,6 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
-      () => null,
-    ),
     onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
       mutationErrorCallback = callback;
     }),

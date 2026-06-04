@@ -44,8 +44,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_batch_fate, serialize_mutation_error_event,
-    subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -876,23 +875,6 @@ impl NapiRuntime {
             "values": row_values,
             "batchId": batch_id.to_string(),
         }))
-    }
-
-    #[napi(js_name = "loadBatchFate", ts_return_type = "any | null")]
-    pub fn load_batch_fate(&self, batch_id: String) -> napi::Result<serde_json::Value> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let fate = core
-            .batch_fate(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Load batch fate failed: {e}")))?;
-
-        Ok(match fate {
-            Some(fate) => serialize_batch_fate(&fate),
-            None => serde_json::Value::Null,
-        })
     }
 
     #[napi(

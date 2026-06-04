@@ -1379,62 +1379,6 @@ describe("Worker Bridge with OPFS", () => {
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("replays onMutationError when the rejection was not previously delivered", async () => {
-    const syncServer = await publishSyncServerSchemaAndPermissions(
-      "sync-on-mutation-error-deferred-listener",
-      readOnlyPermissions,
-    );
-
-    const sharedLocalAuthToken = generateAuthSecret();
-    const db = await createSyncedDb(
-      ctx,
-      "sync-on-mutation-error-deferred-listener",
-      sharedLocalAuthToken,
-      syncServer,
-    );
-
-    const insertResult = db.insert(todos, {
-      title: "Rejected before listener",
-      done: false,
-    });
-
-    await waitForCondition(
-      async () => {
-        const client = (db as any).getClient(app.wasmSchema);
-        return client.batchFate(insertResult.batchId)?.kind === "rejected";
-      },
-      5000,
-      "insert should be rejected before listener is registered",
-    );
-
-    const mutationErrorSpy = vi.fn();
-    db.onMutationError(mutationErrorSpy);
-
-    const todosAfterRejection = await db.all(allTodos, { tier: "local" });
-    expect(todosAfterRejection.length).toBe(0);
-
-    await waitForCondition(
-      async () => mutationErrorSpy.mock.calls.length > 0,
-      5000,
-      "onMutationError handler should receive queued rejection",
-    );
-    expect(mutationErrorSpy).toHaveBeenCalledWith({
-      code: "permission_denied",
-      reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
-        sealed: true,
-        latestSettlement: {
-          kind: "rejected",
-          batchId: insertResult.batchId,
-          code: "permission_denied",
-          reason: "Insert denied by policy on table todos",
-        },
-      },
-    });
-  });
-
   it("does not replay delivered rejected worker batches after restart", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",

@@ -24,7 +24,6 @@ export declare class NapiRuntime {
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
   restore(table: string, objectId: string, values: Record<string, unknown>): any
   restoreWithSession(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
-  loadBatchFate(batchId: string): any | null
   onMutationError(callback: (event: any) => void): void
   discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void

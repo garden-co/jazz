@@ -117,11 +117,6 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_batch_fate(
-    ptr: bigint,
-    batchId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
     ptr: bigint,
     callback: bigint,
@@ -385,7 +380,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_batch_fate(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
