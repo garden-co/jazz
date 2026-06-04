@@ -166,7 +166,7 @@ describe("svelte/createExtensionJazzClient", () => {
     mocks.trackPromise.mockImplementation((promise) => promise);
   });
 
-  it("SV-EXT-01: creates client from inspected page", async () => {
+  it("creates client from inspected page", async () => {
     const db = createMockDb("devtools-app");
     mocks.createDbFromInspectedPage.mockResolvedValue(db);
 
@@ -181,7 +181,7 @@ describe("svelte/createExtensionJazzClient", () => {
     expect(client.manager).toBe(mocks.orchestratorInstances[0]!);
   });
 
-  it("SV-EXT-02: rejects when config is missing", async () => {
+  it("rejects when config is missing", async () => {
     const db = { shutdown: vi.fn(), getConfig: vi.fn(() => null) };
     mocks.createDbFromInspectedPage.mockResolvedValue(db);
 
@@ -190,7 +190,7 @@ describe("svelte/createExtensionJazzClient", () => {
     );
   });
 
-  it("SV-EXT-03: wraps with trackPromise", async () => {
+  it("wraps with trackPromise", async () => {
     const db = createMockDb();
     mocks.createDbFromInspectedPage.mockResolvedValue(db);
 
