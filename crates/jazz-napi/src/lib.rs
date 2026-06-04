@@ -63,7 +63,7 @@ use jazz_tools::server::{
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{ClientId, DurabilityTier, ServerId, SyncManager};
+use jazz_tools::sync_manager::{DurabilityTier, ServerId, SyncManager};
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
@@ -1181,17 +1181,6 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.remove_server(server_id);
         Ok(())
-    }
-
-    #[napi(js_name = "addClient")]
-    pub fn add_client(&self) -> napi::Result<String> {
-        let client_id = ClientId::new();
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.add_client(client_id, None);
-        Ok(client_id.0.to_string())
     }
 
     // =========================================================================

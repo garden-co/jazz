@@ -95,7 +95,6 @@ export interface Runtime {
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
-  addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
    */

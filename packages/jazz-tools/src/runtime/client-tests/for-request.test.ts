@@ -210,7 +210,6 @@ describe("JazzClient runtime helpers", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "00000000-0000-0000-0000-000000000001",
       getSchema: () => ({}),
       getSchemaHash: () => "schema-hash",
     };

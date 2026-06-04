@@ -27,7 +27,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -112,7 +111,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema,
       getSchemaHash,
     };
@@ -176,7 +174,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -272,7 +269,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -383,7 +379,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -531,7 +526,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -661,7 +655,6 @@ describe("JazzClient schema order", () => {
       unsubscribe: () => {},
       addServer: () => {},
       removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [

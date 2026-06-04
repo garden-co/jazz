@@ -5,7 +5,6 @@ import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-valu
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
   const sealBatch = overrides.sealBatch ?? vi.fn();
   return {
-    addClient: vi.fn(() => "client-1"),
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
