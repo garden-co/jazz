@@ -15,7 +15,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteCalls: string[] = [];
 
   const runtimeBase: Runtime = {
-    loadBatchFate: () => null,
     insert: (table: string, values: Record<string, unknown>) => {
       insertCalls.push([table, values]);
       return {

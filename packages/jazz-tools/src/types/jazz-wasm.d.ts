@@ -121,7 +121,6 @@ declare module "jazz-wasm" {
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
-    loadBatchFate(batchId: string): BatchFate | null;
     replayBatchRejection(batchId: string, code: string, reason: string): void;
     discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;

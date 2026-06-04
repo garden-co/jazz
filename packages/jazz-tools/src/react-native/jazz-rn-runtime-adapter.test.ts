@@ -20,7 +20,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    loadBatchFate: vi.fn(() => null),
     waitForBatch: vi.fn(async () => undefined),
     insert: vi.fn((_table, _valuesJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
@@ -501,30 +500,16 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(listener).toHaveBeenCalledWith("token expired");
   });
 
-  it("bridges batch fate, mutation error callback, and batch sealing", () => {
+  it("bridges mutation error callback and batch sealing", () => {
     let capturedMutationError: { onError: (eventJson: string) => void } | null = null;
     const binding = createBinding({
       onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
         capturedMutationError = callback;
       }),
-      loadBatchFate: vi.fn(() =>
-        JSON.stringify({
-          kind: "rejected",
-          batchId: "batch-1",
-          code: "WriteRejected",
-          reason: "nope",
-        }),
-      ),
       sealBatch: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    expect(adapter.loadBatchFate("batch-1")).toEqual({
-      kind: "rejected",
-      batchId: "batch-1",
-      code: "WriteRejected",
-      reason: "nope",
-    });
     const mutationErrorListener = vi.fn();
     adapter.onMutationError(mutationErrorListener);
     capturedMutationError!.onError(
@@ -543,7 +528,6 @@ describe("JazzRnRuntimeAdapter", () => {
     );
     adapter.sealBatch("batch-1");
 
-    expect(binding.loadBatchFate).toHaveBeenCalledWith("batch-1");
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
       code: "WriteRejected",

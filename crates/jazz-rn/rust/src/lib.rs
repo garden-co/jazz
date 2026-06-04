@@ -20,7 +20,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_batch_fate, serialize_mutation_error_event, subscription_delta_to_json,
+    serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -1116,25 +1116,6 @@ impl RnRuntime {
             })?;
             core.flush_storage().map_err(runtime_err)?;
             Ok(())
-        })
-    }
-
-    pub fn load_batch_fate(&self, batch_id: String) -> Result<Option<String>, JazzRnError> {
-        with_panic_boundary("load_batch_fate", || {
-            let batch_id = parse_batch_id_input(&batch_id)
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let fate = core.batch_fate(batch_id).map_err(runtime_err)?;
-            fate.map(|fate| {
-                serde_json::to_string(&serialize_batch_fate(&fate)).map_err(|error| {
-                    JazzRnError::Internal {
-                        message: format!("load_batch_fate serialization failed: {error}"),
-                    }
-                })
-            })
-            .transpose()
         })
     }
 

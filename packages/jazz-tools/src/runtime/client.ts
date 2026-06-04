@@ -62,7 +62,6 @@ export interface Runtime {
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
-  loadBatchFate(batch_id: string): BatchFate | null;
   discardLocalBatch?(batch_id: string): boolean;
   query(
     query_json: string,
@@ -1154,10 +1153,6 @@ export class JazzClient {
       this.resolveWriteSession(session, attribution),
       attribution,
     );
-  }
-
-  batchFate(batchId: string): BatchFate | null {
-    return this.runtime.loadBatchFate(batchId);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
