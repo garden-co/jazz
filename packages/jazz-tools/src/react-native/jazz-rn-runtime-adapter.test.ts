@@ -67,6 +67,28 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.batchedTick).toHaveBeenCalledTimes(1);
   });
 
+  it("swallows errors thrown by deferred batched ticks", () => {
+    vi.useFakeTimers();
+    try {
+      const binding = createBinding({
+        batchedTick: vi.fn(() => {
+          throw new Error("tick failed");
+        }),
+      });
+      new JazzRnRuntimeAdapter(binding, {});
+
+      const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
+      const callbackObject = onBatchedTickNeeded.mock.calls[0]![0];
+
+      callbackObject.requestBatchedTick();
+
+      expect(() => vi.runOnlyPendingTimers()).not.toThrow();
+      expect(binding.batchedTick).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("serializes mutation payloads and parses query responses", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
