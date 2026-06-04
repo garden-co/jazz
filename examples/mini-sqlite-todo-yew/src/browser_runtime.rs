@@ -1,6 +1,8 @@
+use crate::browser_telemetry::{emit_span, BrowserTelemetryConfig};
 use crate::browser_worker::{
     BrowserStorageStats, RuntimeRequestId, RuntimeWorkerInput, RuntimeWorkerOutput,
 };
+use crate::native_sync::NativeTraceContext;
 use crate::worker_bridge::WorkerClient;
 use js_sys::{Function, Promise};
 use mini_jazz_sqlite::connection::{DownstreamConnectionManager, DownstreamConnectionSubscription};
@@ -28,6 +30,7 @@ pub struct BrowserRuntimeConfig {
     pub hydrate_queries: Vec<BuiltQuery>,
     pub native_sync_url: Option<String>,
     pub native_sync_tracing: bool,
+    pub browser_telemetry: Option<BrowserTelemetryConfig>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -55,6 +58,7 @@ struct Inner {
     pending_protocols: BTreeSet<RuntimeRequestId>,
     status: BrowserRuntimeStatus,
     on_status: Callback<BrowserRuntimeStatus>,
+    browser_telemetry: Option<BrowserTelemetryConfig>,
 }
 
 struct BrowserRowsSubscription {
@@ -107,6 +111,7 @@ impl BrowserRuntime {
                 pending_protocols: BTreeSet::new(),
                 status: BrowserRuntimeStatus::default(),
                 on_status,
+                browser_telemetry: config.browser_telemetry.clone(),
             })),
         };
         *runtime_slot.borrow_mut() = Some(runtime.clone());
@@ -121,6 +126,7 @@ impl BrowserRuntime {
                 client_messages: opening_client_messages,
                 native_sync_url: config.native_sync_url,
                 native_sync_tracing: config.native_sync_tracing,
+                browser_telemetry: config.browser_telemetry,
             })?;
             Ok(())
         })?;
@@ -231,7 +237,21 @@ impl BrowserRuntime {
     }
 
     pub fn sync_queries(&self, queries: Vec<BuiltQuery>) -> Result<(), String> {
-        let result = self.with_inner(|inner| inner.sync_queries(queries));
+        let result = self.with_inner(|inner| inner.sync_queries(queries, None));
+        if let Err(error) = &result {
+            self.set_error(error.clone());
+        } else {
+            self.emit_status();
+        }
+        result
+    }
+
+    pub fn sync_queries_with_trace_context(
+        &self,
+        queries: Vec<BuiltQuery>,
+        trace_context: NativeTraceContext,
+    ) -> Result<(), String> {
+        let result = self.with_inner(|inner| inner.sync_queries(queries, Some(trace_context)));
         if let Err(error) = &result {
             self.set_error(error.clone());
         } else {
@@ -241,7 +261,7 @@ impl BrowserRuntime {
     }
 
     pub fn sync_transaction(&self, tx_id: &str) -> Result<(), String> {
-        let result = self.with_inner(|inner| inner.sync_transaction(tx_id));
+        let result = self.with_inner(|inner| inner.sync_transaction(tx_id, None));
         if let Err(error) = &result {
             self.set_error(error.clone());
         } else {
@@ -322,16 +342,19 @@ impl BrowserRuntime {
                 request_id,
                 server_messages,
                 storage_stats,
+                ..
             } => self.apply_synced(request_id, server_messages, storage_stats),
             RuntimeWorkerOutput::Protocol {
                 request_id,
                 server_messages,
                 storage_stats,
+                ..
             } => self.apply_protocol(request_id, server_messages, storage_stats),
             RuntimeWorkerOutput::Pushed {
                 server_messages,
                 storage_stats,
-            } => self.apply_pushed(server_messages, storage_stats),
+                trace_context,
+            } => self.apply_pushed(server_messages, storage_stats, trace_context),
             RuntimeWorkerOutput::Exported { request_id, bundle } => {
                 self.apply_hydrated(request_id, vec![bundle])
             }
@@ -425,6 +448,7 @@ impl BrowserRuntime {
         &self,
         server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
+        trace_context: Option<NativeTraceContext>,
     ) -> Result<Vec<PendingSubscriptionNotification>, String> {
         self.with_inner(|inner| {
             if server_messages.is_empty() || !inner.connection_manager.is_ready() {
@@ -433,6 +457,14 @@ impl BrowserRuntime {
             let client_messages = inner.apply_protocol_messages(server_messages)?;
             inner.send_protocol_messages(client_messages)?;
             let notifications = inner.refresh_subscriptions()?;
+            if !notifications.is_empty() {
+                emit_span(
+                    inner.browser_telemetry.as_ref(),
+                    "todo.remote_subscription_delta",
+                    trace_context.as_ref(),
+                    [("sync.phase", "remote_subscription_delta")],
+                );
+            }
             inner.status.worker_storage_stats = storage_stats;
             inner.status.syncing = inner.has_pending_work();
             inner.status.error.clear();
@@ -485,22 +517,34 @@ impl BrowserRuntime {
 }
 
 impl Inner {
-    fn sync_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
+    fn sync_queries(
+        &mut self,
+        queries: Vec<BuiltQuery>,
+        trace_context: Option<NativeTraceContext>,
+    ) -> Result<(), String> {
         self.ensure_ready()?;
         let bundles = queries
             .into_iter()
             .map(|query| self.main.export_query(query).map_err(error_message))
             .collect::<Result<Vec<_>, _>>()?;
-        self.sync_bundles(bundles)
+        self.sync_bundles(bundles, trace_context)
     }
 
-    fn sync_transaction(&mut self, tx_id: &str) -> Result<(), String> {
+    fn sync_transaction(
+        &mut self,
+        tx_id: &str,
+        trace_context: Option<NativeTraceContext>,
+    ) -> Result<(), String> {
         self.ensure_ready()?;
         let bundle = self.main.export_transaction(tx_id).map_err(error_message)?;
-        self.sync_bundles(vec![bundle])
+        self.sync_bundles(vec![bundle], trace_context)
     }
 
-    fn sync_bundles(&mut self, bundles: Vec<Bundle>) -> Result<(), String> {
+    fn sync_bundles(
+        &mut self,
+        bundles: Vec<Bundle>,
+        trace_context: Option<NativeTraceContext>,
+    ) -> Result<(), String> {
         let client_messages = self
             .connection_manager
             .flush(&mut self.main)
@@ -516,6 +560,7 @@ impl Inner {
             self.worker.send(RuntimeWorkerInput::Protocol {
                 request_id,
                 client_messages,
+                trace_context,
             })?;
         } else {
             self.pending_syncs.insert(request_id);
@@ -523,6 +568,7 @@ impl Inner {
                 request_id,
                 bundles,
                 client_messages,
+                trace_context,
             })?;
         }
         Ok(())
@@ -590,6 +636,7 @@ impl Inner {
         self.worker.send(RuntimeWorkerInput::Protocol {
             request_id,
             client_messages,
+            trace_context: None,
         })?;
         Ok(())
     }

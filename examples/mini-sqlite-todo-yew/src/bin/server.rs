@@ -12,7 +12,10 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 #[cfg(not(target_arch = "wasm32"))]
 use mini_jazz_sqlite::{
-    connection::UpstreamConnectionManager, protocol::ClientMessage, Runtime, Storage,
+    connection::UpstreamConnectionManager,
+    protocol::{ClientMessage, MessageId, ReplayCursor, ServerMessage},
+    sync::Bundle,
+    Runtime, Storage,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use mini_sqlite_todo_yew::{
@@ -50,13 +53,25 @@ const SUBSCRIPTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 const SERVICE_NAME: &str = "mini-sqlite-todo-yew-server";
 
 #[cfg(not(target_arch = "wasm32"))]
+const SYNC_TRACE_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
-    changes: broadcast::Sender<u64>,
+    changes: broadcast::Sender<SyncChange>,
     next_connection_id: Arc<AtomicU64>,
     user: String,
     sync_tracing_enabled: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+struct SyncChange {
+    origin_connection_id: u64,
+    trace_context: Option<NativeTraceContext>,
+    bundles: Vec<Bundle>,
+    requires_subscription_refresh: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -132,6 +147,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut changes = state.changes.subscribe();
     let mut last_trace_context = None::<NativeTraceContext>;
+    let mut next_push_message_id = u64::MAX;
 
     loop {
         tokio::select! {
@@ -165,20 +181,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 if frame.trace_context.is_some() {
                     last_trace_context = frame.trace_context.clone();
                 }
-                let should_notify = frame.client_messages.iter().any(|message| {
-                    matches!(message, ClientMessage::UploadTx { .. })
-                });
-                let server_messages = {
+                let upload_tx_ids = frame.client_messages.iter().filter_map(upload_tx_id).collect::<Vec<_>>();
+                let should_notify = !upload_tx_ids.is_empty();
+                let (server_messages, upload_bundles) = {
                     let Ok(mut runtime) = state.runtime.lock() else {
                         break;
                     };
-                    match upstream.receive(&mut runtime, frame.client_messages) {
+                    let server_messages = match upstream.receive(&mut runtime, frame.client_messages) {
                         Ok(server_messages) => server_messages,
                         Err(error) => {
                             eprintln!("native sync protocol error: {error}");
                             break;
                         }
-                    }
+                    };
+                    let upload_bundles = upload_tx_ids
+                        .iter()
+                        .filter_map(|tx_id| export_upload_bundle(&runtime, tx_id))
+                        .collect::<Vec<_>>();
+                    (server_messages, upload_bundles)
                 };
                 if !server_messages.is_empty() && send_server_messages(
                     &mut sender,
@@ -189,17 +209,93 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     break;
                 }
                 if should_notify {
-                    let _ = state.changes.send(connection_id);
+                    let requires_subscription_refresh = upload_bundles.len() != upload_tx_ids.len();
+                    let _ = state.changes.send(SyncChange {
+                        origin_connection_id: connection_id,
+                        trace_context: frame.trace_context.clone(),
+                        bundles: upload_bundles,
+                        requires_subscription_refresh,
+                    });
                 }
             }
             change = changes.recv() => {
                 match change {
-                    Ok(origin_connection_id) if origin_connection_id == connection_id => {
+                    Ok(change) if change.origin_connection_id == connection_id => {
                         continue;
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(change) => {
+                        let mut refresh_trace_context = change.trace_context;
+                        let mut push_bundles = change.bundles;
+                        let mut requires_subscription_refresh = change.requires_subscription_refresh;
                         tokio::time::sleep(SUBSCRIPTION_REFRESH_DEBOUNCE).await;
-                        while changes.try_recv().is_ok() {}
+                        while let Ok(change) = changes.try_recv() {
+                            keep_refresh_change(
+                                &mut refresh_trace_context,
+                                &mut push_bundles,
+                                &mut requires_subscription_refresh,
+                                connection_id,
+                                change,
+                            );
+                        }
+                        let plan = change_broadcast_plan(
+                            !push_bundles.is_empty(),
+                            requires_subscription_refresh,
+                        );
+                        trace_change_broadcast_plan(
+                            &plan,
+                            push_bundles.len(),
+                            requires_subscription_refresh,
+                        );
+                        let trace_context = selected_refresh_trace_context(
+                            &refresh_trace_context,
+                            &last_trace_context,
+                        )
+                        .cloned();
+                        if plan.send_push_bundles {
+                            let server_messages =
+                                push_server_messages(push_bundles, &mut next_push_message_id);
+                            if !server_messages.is_empty() && send_server_messages(
+                                &mut sender,
+                                server_messages,
+                                state.sync_tracing_enabled,
+                                trace_context.as_ref(),
+                            ).await.is_err() {
+                                break;
+                            }
+                        }
+                        if plan.refresh_active_subscriptions {
+                            let server_messages = {
+                                let Ok(runtime) = state.runtime.lock() else {
+                                    break;
+                                };
+                                match upstream.refresh_active_subscriptions(&runtime) {
+                                    Ok(server_messages) => server_messages,
+                                    Err(error) => {
+                                        eprintln!("native sync protocol error: {error}");
+                                        break;
+                                    }
+                                }
+                            };
+                            if !server_messages.is_empty() && send_server_messages(
+                                &mut sender,
+                                server_messages,
+                                state.sync_tracing_enabled,
+                                trace_context.as_ref(),
+                            ).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let mut refresh_trace_context = None;
+                        tokio::time::sleep(SUBSCRIPTION_REFRESH_DEBOUNCE).await;
+                        while let Ok(change) = changes.try_recv() {
+                            keep_refresh_trace_context(
+                                &mut refresh_trace_context,
+                                connection_id,
+                                change,
+                            );
+                        }
                         let server_messages = {
                             let Ok(runtime) = state.runtime.lock() else {
                                 break;
@@ -216,7 +312,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             &mut sender,
                             server_messages,
                             state.sync_tracing_enabled,
-                            last_trace_context.as_ref(),
+                            selected_refresh_trace_context(
+                                &refresh_trace_context,
+                                &last_trace_context,
+                            ),
                         ).await.is_err() {
                             break;
                         }
@@ -229,9 +328,146 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn selected_refresh_trace_context<'a>(
+    refresh_trace_context: &'a Option<NativeTraceContext>,
+    last_trace_context: &'a Option<NativeTraceContext>,
+) -> Option<&'a NativeTraceContext> {
+    refresh_trace_context
+        .as_ref()
+        .or(last_trace_context.as_ref())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_refresh_trace_context(
+    refresh_trace_context: &mut Option<NativeTraceContext>,
+    connection_id: u64,
+    change: SyncChange,
+) {
+    if change.origin_connection_id != connection_id && change.trace_context.is_some() {
+        *refresh_trace_context = change.trace_context;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_refresh_change(
+    refresh_trace_context: &mut Option<NativeTraceContext>,
+    push_bundles: &mut Vec<Bundle>,
+    requires_subscription_refresh: &mut bool,
+    connection_id: u64,
+    change: SyncChange,
+) {
+    if change.origin_connection_id == connection_id {
+        return;
+    }
+    if change.trace_context.is_some() {
+        *refresh_trace_context = change.trace_context;
+    }
+    push_bundles.extend(change.bundles);
+    *requires_subscription_refresh |= change.requires_subscription_refresh;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Eq, PartialEq)]
+struct ChangeBroadcastPlan {
+    send_push_bundles: bool,
+    refresh_active_subscriptions: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn change_broadcast_plan(
+    has_push_bundles: bool,
+    requires_subscription_refresh: bool,
+) -> ChangeBroadcastPlan {
+    ChangeBroadcastPlan {
+        send_push_bundles: has_push_bundles,
+        refresh_active_subscriptions: requires_subscription_refresh || !has_push_bundles,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn export_upload_bundle(runtime: &Runtime, tx_id: &str) -> Option<Bundle> {
+    match runtime.export_transaction(tx_id) {
+        Ok(bundle) => {
+            trace_upload_bundle_export(tx_id, "ok", None, Some(&bundle));
+            Some(bundle)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            trace_upload_bundle_export(tx_id, "error", Some(message.as_str()), None);
+            None
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn trace_upload_bundle_export(
+    tx_id: &str,
+    status: &'static str,
+    error: Option<&str>,
+    bundle: Option<&Bundle>,
+) {
+    let span = tracing::info_span!(
+        target: SYNC_TRACE_TARGET,
+        "sync.server.upload_bundle_export",
+        sync_tx_id = tx_id,
+        sync_export_status = status,
+        sync_export_error = tracing::field::Empty,
+        sync_bundle_tx_count = bundle.map(|bundle| bundle.txs.len()).unwrap_or_default(),
+        sync_bundle_row_count = bundle.map(|bundle| bundle.rows.len()).unwrap_or_default(),
+        sync_bundle_history_count = bundle.map(|bundle| bundle.history.len()).unwrap_or_default(),
+    );
+    if let Some(error) = error {
+        span.record("sync_export_error", error);
+    }
+    let _entered = span.enter();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn trace_change_broadcast_plan(
+    plan: &ChangeBroadcastPlan,
+    push_bundle_count: usize,
+    requires_subscription_refresh: bool,
+) {
+    let span = tracing::info_span!(
+        target: SYNC_TRACE_TARGET,
+        "sync.server.change_broadcast_plan",
+        sync_push_bundle_count = push_bundle_count,
+        sync_requires_subscription_refresh = requires_subscription_refresh,
+        sync_send_push_bundles = plan.send_push_bundles,
+        sync_refresh_active_subscriptions = plan.refresh_active_subscriptions,
+    );
+    let _entered = span.enter();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn push_server_messages(bundles: Vec<Bundle>, next_message_id: &mut u64) -> Vec<ServerMessage> {
+    bundles
+        .into_iter()
+        .map(|bundle| {
+            let id = *next_message_id;
+            *next_message_id = next_message_id.saturating_sub(1);
+            ServerMessage::Data {
+                message_id: MessageId(id),
+                subscription_id: None,
+                cursor: ReplayCursor(id),
+                bundle,
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn upload_tx_id(message: &ClientMessage) -> Option<String> {
+    match message {
+        ClientMessage::UploadTx { tx, .. } => Some(tx.tx_id.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn send_server_messages(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    server_messages: Vec<mini_jazz_sqlite::protocol::ServerMessage>,
+    server_messages: Vec<ServerMessage>,
     sync_tracing_enabled: bool,
     trace_context: Option<&NativeTraceContext>,
 ) -> Result<(), ()> {
@@ -340,7 +576,23 @@ fn main() {}
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
+
+    fn test_bundle(schema_fingerprint: &str) -> mini_jazz_sqlite::sync::Bundle {
+        mini_jazz_sqlite::sync::Bundle {
+            protocol_version: mini_jazz_sqlite::sync::BUNDLE_PROTOCOL_VERSION,
+            schema_fingerprint: schema_fingerprint.to_owned(),
+            policy_fingerprint: "policy".to_owned(),
+            branches: Vec::new(),
+            txs: Vec::new(),
+            reads: Vec::new(),
+            query_reads: Vec::new(),
+            rows: Vec::new(),
+            obfuscated: Vec::new(),
+            history: Vec::new(),
+        }
+    }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -373,5 +625,351 @@ mod tests {
             normalize_otlp_traces_endpoint("http://127.0.0.1:54418/v1/traces"),
             "http://127.0.0.1:54418/v1/traces"
         );
+    }
+
+    #[test]
+    fn refresh_uses_origin_trace_context_before_socket_last_context() {
+        let origin = NativeTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+            probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
+                probe_id: "probe-insert".to_owned(),
+                operation: "insert".to_owned(),
+                table: "todos".to_owned(),
+                row_id: "todo-1".to_owned(),
+                origin_browser_id: "browser-a".to_owned(),
+            }),
+        };
+        let stale = NativeTraceContext {
+            traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_owned(),
+            probe: None,
+        };
+        let change = SyncChange {
+            origin_connection_id: 7,
+            trace_context: Some(origin.clone()),
+            bundles: Vec::new(),
+            requires_subscription_refresh: false,
+        };
+
+        let stale = Some(stale);
+        let selected =
+            selected_refresh_trace_context(&change.trace_context, &stale).expect("trace context");
+        assert_eq!(selected.traceparent, origin.traceparent);
+        assert_eq!(
+            selected.probe.as_ref().map(|probe| probe.probe_id.as_str()),
+            Some("probe-insert")
+        );
+    }
+
+    #[test]
+    fn refresh_updates_to_latest_drained_remote_trace_context() {
+        let insert = NativeTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+            probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
+                probe_id: "probe-insert".to_owned(),
+                operation: "insert".to_owned(),
+                table: "todos".to_owned(),
+                row_id: "todo-1".to_owned(),
+                origin_browser_id: "browser-a".to_owned(),
+            }),
+        };
+        let delete = NativeTraceContext {
+            traceparent: "00-bbf92f3577b34da6a3ce929d0e0e4736-10f067aa0ba902b7-01".to_owned(),
+            probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
+                probe_id: "probe-delete".to_owned(),
+                operation: "delete".to_owned(),
+                table: "todos".to_owned(),
+                row_id: "todo-1".to_owned(),
+                origin_browser_id: "browser-a".to_owned(),
+            }),
+        };
+        let own_change = NativeTraceContext {
+            traceparent: "00-ccf92f3577b34da6a3ce929d0e0e4736-20f067aa0ba902b7-01".to_owned(),
+            probe: None,
+        };
+        let mut selected = Some(insert);
+
+        keep_refresh_trace_context(
+            &mut selected,
+            9,
+            SyncChange {
+                origin_connection_id: 7,
+                trace_context: Some(delete),
+                bundles: Vec::new(),
+                requires_subscription_refresh: false,
+            },
+        );
+        keep_refresh_trace_context(
+            &mut selected,
+            9,
+            SyncChange {
+                origin_connection_id: 9,
+                trace_context: Some(own_change),
+                bundles: Vec::new(),
+                requires_subscription_refresh: false,
+            },
+        );
+
+        assert_eq!(
+            selected
+                .as_ref()
+                .and_then(|context| context.probe.as_ref())
+                .map(|probe| probe.probe_id.as_str()),
+            Some("probe-delete")
+        );
+    }
+
+    #[test]
+    fn drained_remote_changes_keep_bundles_for_direct_pushes() {
+        let delete = NativeTraceContext {
+            traceparent: "00-bbf92f3577b34da6a3ce929d0e0e4736-10f067aa0ba902b7-01".to_owned(),
+            probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
+                probe_id: "probe-delete".to_owned(),
+                operation: "delete".to_owned(),
+                table: "todos".to_owned(),
+                row_id: "todo-1".to_owned(),
+                origin_browser_id: "browser-a".to_owned(),
+            }),
+        };
+        let own_change = NativeTraceContext {
+            traceparent: "00-ccf92f3577b34da6a3ce929d0e0e4736-20f067aa0ba902b7-01".to_owned(),
+            probe: None,
+        };
+        let mut selected = None;
+        let mut push_bundles = Vec::new();
+        let mut requires_subscription_refresh = false;
+
+        keep_refresh_change(
+            &mut selected,
+            &mut push_bundles,
+            &mut requires_subscription_refresh,
+            9,
+            SyncChange {
+                origin_connection_id: 7,
+                trace_context: Some(delete),
+                bundles: vec![test_bundle("remote-delete")],
+                requires_subscription_refresh: false,
+            },
+        );
+        keep_refresh_change(
+            &mut selected,
+            &mut push_bundles,
+            &mut requires_subscription_refresh,
+            9,
+            SyncChange {
+                origin_connection_id: 9,
+                trace_context: Some(own_change),
+                bundles: vec![test_bundle("own-insert")],
+                requires_subscription_refresh: false,
+            },
+        );
+
+        assert!(!requires_subscription_refresh);
+        assert_eq!(push_bundles.len(), 1);
+        assert_eq!(push_bundles[0].schema_fingerprint, "remote-delete");
+        assert_eq!(
+            selected
+                .as_ref()
+                .and_then(|context| context.probe.as_ref())
+                .map(|probe| probe.probe_id.as_str()),
+            Some("probe-delete")
+        );
+    }
+
+    #[test]
+    fn upload_bundles_become_subscriptionless_push_data_messages() {
+        let mut next_message_id = u64::MAX;
+
+        let messages =
+            push_server_messages(vec![test_bundle("remote-insert")], &mut next_message_id);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(next_message_id, u64::MAX - 1);
+        match &messages[0] {
+            mini_jazz_sqlite::protocol::ServerMessage::Data {
+                message_id,
+                subscription_id,
+                cursor,
+                bundle,
+            } => {
+                assert_eq!(message_id.0, u64::MAX);
+                assert_eq!(cursor.0, u64::MAX);
+                assert!(subscription_id.is_none());
+                assert_eq!(bundle.schema_fingerprint, "remote-insert");
+            }
+            message => panic!("expected push data message, got {message:?}"),
+        }
+    }
+
+    #[test]
+    fn exportable_upload_bundles_are_pushed_even_when_refresh_is_needed() {
+        let plan = change_broadcast_plan(true, true);
+
+        assert!(plan.send_push_bundles);
+        assert!(plan.refresh_active_subscriptions);
+    }
+
+    #[test]
+    fn uploaded_todo_transaction_can_be_exported_for_direct_push() {
+        use mini_jazz_sqlite::protocol::{
+            ClientDataRecord, ClientHello, ClientMessage, ClientTx, DataOp, SessionId,
+            TxConflictMode, SUPPORTED_PROTOCOL_VERSION,
+        };
+
+        let mut runtime = Runtime::open_with_schema(
+            Storage::Memory,
+            "server-upload-export",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        runtime
+            .insert_row(
+                "projects",
+                "todo-list",
+                BTreeMap::from([("title".to_owned(), serde_json::json!("Todo List"))]),
+            )
+            .unwrap();
+        let schema_fingerprint = runtime.local_schema_fingerprint();
+        let policy_fingerprint = runtime.local_policy_fingerprint();
+        let mut upstream = UpstreamConnectionManager::new_authenticated_for_test(
+            "server-session",
+            "server",
+            schema_fingerprint.clone(),
+            policy_fingerprint.clone(),
+            "alice",
+        );
+        let tx_id = "tx-upload-todo-insert".to_owned();
+
+        upstream
+            .receive(
+                &mut runtime,
+                vec![
+                    ClientMessage::Hello(ClientHello {
+                        protocol_version: SUPPORTED_PROTOCOL_VERSION,
+                        session_id: SessionId::new("browser-session"),
+                        node_id: "browser".to_owned(),
+                        schema_fingerprint,
+                        policy_fingerprint,
+                    }),
+                    ClientMessage::UploadTx {
+                        tx: ClientTx {
+                            tx_id: tx_id.clone(),
+                            branch_id: None,
+                            conflict_mode: TxConflictMode::Mergeable,
+                            created_at: 1,
+                            author: Some("alice".to_owned()),
+                        },
+                        data: vec![ClientDataRecord {
+                            table: "todos".to_owned(),
+                            row_id: "todo-uploaded".to_owned(),
+                            op: DataOp::Insert,
+                            values: BTreeMap::from([
+                                ("title".to_owned(), serde_json::json!("Uploaded")),
+                                ("done".to_owned(), serde_json::json!(false)),
+                                ("project".to_owned(), serde_json::json!("todo-list")),
+                            ]),
+                        }],
+                        reads: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let bundle = runtime.export_transaction(&tx_id).unwrap();
+        assert!(bundle
+            .history
+            .iter()
+            .any(|row| row.row_id == "todo-uploaded" && row.op == 1));
+    }
+
+    #[test]
+    fn uploaded_todo_delete_transaction_can_be_exported_for_direct_push() {
+        use mini_jazz_sqlite::protocol::{
+            ClientDataRecord, ClientHello, ClientMessage, ClientTx, DataOp, SessionId,
+            TxConflictMode, SUPPORTED_PROTOCOL_VERSION,
+        };
+
+        let mut runtime = Runtime::open_with_schema(
+            Storage::Memory,
+            "server-upload-delete-export",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        runtime
+            .insert_row(
+                "projects",
+                "todo-list",
+                BTreeMap::from([("title".to_owned(), serde_json::json!("Todo List"))]),
+            )
+            .unwrap();
+        let schema_fingerprint = runtime.local_schema_fingerprint();
+        let policy_fingerprint = runtime.local_policy_fingerprint();
+        let mut upstream = UpstreamConnectionManager::new_authenticated_for_test(
+            "server-session",
+            "server",
+            schema_fingerprint.clone(),
+            policy_fingerprint.clone(),
+            "alice",
+        );
+        let insert_tx_id = "tx-upload-todo-insert-before-delete".to_owned();
+        let delete_tx_id = "tx-upload-todo-delete".to_owned();
+
+        upstream
+            .receive(
+                &mut runtime,
+                vec![
+                    ClientMessage::Hello(ClientHello {
+                        protocol_version: SUPPORTED_PROTOCOL_VERSION,
+                        session_id: SessionId::new("browser-session"),
+                        node_id: "browser".to_owned(),
+                        schema_fingerprint,
+                        policy_fingerprint,
+                    }),
+                    ClientMessage::UploadTx {
+                        tx: ClientTx {
+                            tx_id: insert_tx_id,
+                            branch_id: None,
+                            conflict_mode: TxConflictMode::Mergeable,
+                            created_at: 1,
+                            author: Some("alice".to_owned()),
+                        },
+                        data: vec![ClientDataRecord {
+                            table: "todos".to_owned(),
+                            row_id: "todo-uploaded-delete".to_owned(),
+                            op: DataOp::Insert,
+                            values: BTreeMap::from([
+                                ("title".to_owned(), serde_json::json!("Uploaded")),
+                                ("done".to_owned(), serde_json::json!(false)),
+                                ("project".to_owned(), serde_json::json!("todo-list")),
+                            ]),
+                        }],
+                        reads: Vec::new(),
+                    },
+                    ClientMessage::UploadTx {
+                        tx: ClientTx {
+                            tx_id: delete_tx_id.clone(),
+                            branch_id: None,
+                            conflict_mode: TxConflictMode::Mergeable,
+                            created_at: 2,
+                            author: Some("alice".to_owned()),
+                        },
+                        data: vec![ClientDataRecord {
+                            table: "todos".to_owned(),
+                            row_id: "todo-uploaded-delete".to_owned(),
+                            op: DataOp::Delete,
+                            values: BTreeMap::new(),
+                        }],
+                        reads: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let bundle = runtime.export_transaction(&delete_tx_id).unwrap();
+        assert!(bundle
+            .history
+            .iter()
+            .any(|row| row.row_id == "todo-uploaded-delete" && row.op == 3));
     }
 }

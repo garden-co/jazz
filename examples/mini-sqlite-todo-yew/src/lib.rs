@@ -1,8 +1,30 @@
 #[cfg(target_arch = "wasm32")]
 pub mod browser_runtime;
+pub mod browser_telemetry;
 pub mod browser_worker;
 pub mod native_sync;
 pub mod query_builder;
+pub mod runtime_config {
+    pub const NATIVE_SYNC_URL_STORAGE_KEY: &str = "mini-sqlite-todo-yew-sync-url";
+    const DEFAULT_NATIVE_SYNC_URL: &str = "ws://127.0.0.1:8787/sync";
+
+    pub fn selected_native_sync_url(stored: Option<String>) -> String {
+        stored.unwrap_or_else(|| DEFAULT_NATIVE_SYNC_URL.to_owned())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn native_sync_url_can_be_overridden_from_storage() {
+            assert_eq!(
+                selected_native_sync_url(Some("ws://127.0.0.1:8788/sync".to_owned())),
+                "ws://127.0.0.1:8788/sync"
+            );
+        }
+    }
+}
 pub mod todo_query {
     use crate::query_builder::QueryBuilder;
     use mini_jazz_sqlite::{BuiltQuery, QueryDirection};
@@ -194,7 +216,9 @@ mod tests {
         TodoDoneFilter, TodoQueryState, TodoSortDirection, TodoSortField, TODO_PAGE_SIZE,
     };
     use crate::todo_schema::todo_schema;
-    use mini_jazz_sqlite::{BuiltQuery, QueryConditionOp, QueryDirection, Runtime, Storage};
+    use mini_jazz_sqlite::{
+        BuiltQuery, QueryConditionOp, QueryDirection, Runtime, Storage, SubscriptionRowDelta,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -622,6 +646,74 @@ mod tests {
         assert!(rows.iter().all(|row| {
             row.values.get("done").and_then(serde_json::Value::as_bool) == Some(false)
         }));
+    }
+
+    #[test]
+    fn page_hydration_removes_deleted_synced_row_from_active_subscription() {
+        let mut worker = Runtime::open_with_schema(
+            Storage::Memory,
+            "worker-synced-delete-refill",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+        let mut main = Runtime::open_with_schema(
+            Storage::Memory,
+            "main-synced-delete-refill",
+            "alice",
+            todo_schema(),
+        )
+        .unwrap();
+
+        for index in 0..12 {
+            worker
+                .insert_row(
+                    "todos",
+                    &format!("todo-{index:02}"),
+                    BTreeMap::from([
+                        ("title".to_owned(), json!(format!("Todo {index:02}"))),
+                        ("done".to_owned(), json!(false)),
+                        ("project".to_owned(), json!("todo-list")),
+                    ]),
+                )
+                .unwrap();
+        }
+
+        let all_page = TodoQueryState {
+            sort_field: TodoSortField::Title,
+            sort_direction: TodoSortDirection::Asc,
+            ..TodoQueryState::default()
+        };
+        main.apply_bundle(
+            &worker
+                .export_query(all_page.page_hydration_query())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut subscription = main.subscribe_query(all_page.page_query()).unwrap();
+        assert!(subscription
+            .initial_rows()
+            .iter()
+            .any(|row| row.id == "todo-00"));
+
+        let reconciliation = main
+            .subscription_reconciliation_for_query(&all_page.page_query())
+            .unwrap();
+        worker.delete_row("todos", "todo-00").unwrap();
+        let bundle = worker
+            .export_subscription_reconciliation(all_page.page_query(), Some(reconciliation))
+            .unwrap();
+        assert!(bundle
+            .rows
+            .iter()
+            .any(|row| row.row_id == "todo-00" && row.op == 3));
+        main.apply_bundle(&bundle).unwrap();
+        let delta = main.subscription_delta(&mut subscription).unwrap();
+
+        assert!(!delta.all.iter().any(|row| row.id == "todo-00"));
+        assert!(delta.delta.iter().any(
+            |change| matches!(change, SubscriptionRowDelta::Removed { id, .. } if id == "todo-00")
+        ));
     }
 
     #[test]

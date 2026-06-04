@@ -3,7 +3,12 @@ use mini_jazz_sqlite::{BuiltQuery, RowView, SubscriptionDelta};
 use mini_sqlite_todo_yew::browser_runtime::{
     BrowserRuntime, BrowserRuntimeConfig, BrowserRuntimeStatus, SubscriptionId,
 };
+use mini_sqlite_todo_yew::browser_telemetry::{
+    emit_span, new_trace_context, BrowserTelemetryConfig,
+};
+use mini_sqlite_todo_yew::native_sync::{NativeSyncProbe, NativeTraceContext};
 use mini_sqlite_todo_yew::query_builder::QueryBuilder;
+use mini_sqlite_todo_yew::runtime_config::{selected_native_sync_url, NATIVE_SYNC_URL_STORAGE_KEY};
 use mini_sqlite_todo_yew::todo_query::{
     TodoDoneFilter, TodoQueryState, TodoSortDirection, TodoSortField,
 };
@@ -19,6 +24,7 @@ const PROJECT_ID: &str = "todo-list";
 const SYNC_BATCH_SIZE: u64 = 20_000;
 const TOTAL_TO_GENERATE: u64 = 100_000;
 const CLIENT_ID_STORAGE_KEY: &str = "mini-sqlite-todo-yew-client-id";
+const BROWSER_OTLP_ENDPOINT_STORAGE_KEY: &str = "mini-sqlite-todo-yew-otlp-endpoint";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Todo {
@@ -80,11 +86,14 @@ struct Inner {
     project_ensured: bool,
     page_subscription: Option<SubscriptionId>,
     next_page_subscription: Option<SubscriptionId>,
+    client_id: String,
+    browser_telemetry: Option<BrowserTelemetryConfig>,
 }
 
 impl TodoRuntime {
     pub fn open(set_state: Callback<TodoState>) -> Result<Self, String> {
         let client_id = browser_client_id();
+        let browser_telemetry = browser_telemetry_config(&client_id);
         let runtime_slot = Rc::new(RefCell::new(None::<TodoRuntime>));
         let browser = BrowserRuntime::open(
             BrowserRuntimeConfig {
@@ -99,6 +108,7 @@ impl TodoRuntime {
                 ],
                 native_sync_url: native_sync_url(),
                 native_sync_tracing: true,
+                browser_telemetry: browser_telemetry.clone(),
             },
             Callback::from({
                 let runtime_slot = runtime_slot.clone();
@@ -118,6 +128,8 @@ impl TodoRuntime {
                 project_ensured: false,
                 page_subscription: None,
                 next_page_subscription: None,
+                client_id,
+                browser_telemetry,
             })),
         };
         *runtime_slot.borrow_mut() = Some(runtime.clone());
@@ -136,6 +148,7 @@ impl TodoRuntime {
     pub fn add(&self, title: String) {
         let (browser, current_rows) = self.browser_and_current_rows();
         let id = format!("todo-{}-{}", Date::now() as u64, current_rows);
+        let trace_context = self.start_sync_probe("insert", &id);
         if let Err(error) = (|| {
             browser.insert_row(
                 "todos",
@@ -147,7 +160,8 @@ impl TodoRuntime {
                 ]),
             )?;
             browser.refresh_subscriptions()?;
-            browser.sync_queries(vec![todo_ids_query(vec![id])])?;
+            browser
+                .sync_queries_with_trace_context(vec![todo_ids_query(vec![id])], trace_context)?;
             Ok(())
         })() {
             self.set_error(error);
@@ -168,10 +182,12 @@ impl TodoRuntime {
 
     pub fn delete(&self, id: String) {
         let browser = self.browser();
+        let trace_context = self.start_sync_probe("delete", &id);
         if let Err(error) = (|| {
             browser.delete_row("todos", &id)?;
             browser.refresh_subscriptions()?;
-            browser.sync_queries(vec![todo_ids_query(vec![id])])?;
+            browser
+                .sync_queries_with_trace_context(vec![todo_ids_query(vec![id])], trace_context)?;
             Ok(())
         })() {
             self.set_error(error);
@@ -391,6 +407,27 @@ impl TodoRuntime {
         inner.emit();
     }
 
+    fn start_sync_probe(&self, operation: &str, row_id: &str) -> NativeTraceContext {
+        let (client_id, browser_telemetry) = self
+            .with_inner(|inner| Ok((inner.client_id.clone(), inner.browser_telemetry.clone())))
+            .unwrap_or_else(|_| ("browser-yew-unknown".to_owned(), None));
+        let probe_id = format!("sync-probe-{operation}-{}-{}", Date::now() as u64, row_id);
+        let trace_context = new_trace_context(NativeSyncProbe {
+            probe_id,
+            operation: operation.to_owned(),
+            table: "todos".to_owned(),
+            row_id: row_id.to_owned(),
+            origin_browser_id: client_id,
+        });
+        emit_span(
+            browser_telemetry.as_ref(),
+            "todo.action.start",
+            Some(&trace_context),
+            [("sync.phase", "local_action")],
+        );
+        trace_context
+    }
+
     fn update_query(&self, update: impl FnOnce(&mut TodoQueryState)) {
         if let Err(error) = self.replace_page_subscription(update) {
             self.set_error(error);
@@ -491,24 +528,48 @@ impl Inner {
 }
 
 fn native_sync_url() -> Option<String> {
-    Some("ws://127.0.0.1:8787/sync".to_owned())
+    Some(selected_native_sync_url(browser_storage_value(
+        NATIVE_SYNC_URL_STORAGE_KEY,
+    )))
+}
+
+fn browser_telemetry_config(client_id: &str) -> Option<BrowserTelemetryConfig> {
+    native_sync_otlp_endpoint().map(|endpoint| BrowserTelemetryConfig {
+        endpoint,
+        service_name: "mini-sqlite-todo-yew-browser".to_owned(),
+        service_version: env!("CARGO_PKG_VERSION").to_owned(),
+        browser_instance_id: client_id.to_owned(),
+        deployment_environment: "local".to_owned(),
+    })
+}
+
+fn native_sync_otlp_endpoint() -> Option<String> {
+    browser_storage_value(BROWSER_OTLP_ENDPOINT_STORAGE_KEY)
+        .or_else(|| option_env!("MINI_SQLITE_TODO_BROWSER_OTLP_ENDPOINT").map(str::to_owned))
+        .map(|endpoint| endpoint.trim().trim_end_matches('/').to_owned())
+        .filter(|endpoint| !endpoint.is_empty())
 }
 
 fn browser_client_id() -> String {
-    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
-    if let Some(storage) = storage {
-        if let Ok(Some(id)) = storage.get_item(CLIENT_ID_STORAGE_KEY) {
-            if !id.trim().is_empty() {
-                return id;
-            }
-        }
-
-        let id = new_browser_client_id();
-        let _ = storage.set_item(CLIENT_ID_STORAGE_KEY, &id);
+    if let Some(id) = browser_storage_value(CLIENT_ID_STORAGE_KEY) {
         return id;
     }
 
-    new_browser_client_id()
+    let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+    let id = new_browser_client_id();
+    if let Some(storage) = storage {
+        let _ = storage.set_item(CLIENT_ID_STORAGE_KEY, &id);
+    }
+
+    id
+}
+
+fn browser_storage_value(key: &str) -> Option<String> {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(key).ok().flatten())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn new_browser_client_id() -> String {

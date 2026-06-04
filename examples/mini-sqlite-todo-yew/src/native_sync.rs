@@ -12,8 +12,19 @@ const SUMMARY_ITEM_LIMIT: usize = 8;
 const SUMMARY_MAX_CHARS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSyncProbe {
+    pub probe_id: String,
+    pub operation: String,
+    pub table: String,
+    pub row_id: String,
+    pub origin_browser_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeTraceContext {
     pub traceparent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<NativeSyncProbe>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -529,6 +540,13 @@ mod tests {
     fn native_sync_frames_propagate_trace_context() {
         let context = NativeTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+            probe: Some(NativeSyncProbe {
+                probe_id: "probe-1".to_owned(),
+                operation: "insert".to_owned(),
+                table: "todos".to_owned(),
+                row_id: "todo-1".to_owned(),
+                origin_browser_id: "browser-a".to_owned(),
+            }),
         };
 
         let encoded = encode_client_frame_with_context(
