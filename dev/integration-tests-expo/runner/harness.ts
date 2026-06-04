@@ -53,20 +53,50 @@ export function summarize(results: TestResult[]): SuiteSummary {
   return { total, passed, failed, done, allPassed: done && failed === 0 };
 }
 
+function startupFailure(message: string): TestResult {
+  return {
+    suite: "runner",
+    name: "startup",
+    slug: "runner-startup",
+    status: "failed",
+    error: message,
+    durationMs: 0,
+  };
+}
+
+function collectItems(suites: Suite[]) {
+  const items: { body: TestBody; result: TestResult }[] = [];
+  for (const suite of suites) {
+    for (const t of suite.tests) {
+      items.push({
+        body: t.body,
+        result: {
+          suite: suite.name,
+          name: t.name,
+          slug: `${slugify(suite.name)}-${slugify(t.name)}`,
+          status: "pending" as const,
+        } as TestResult,
+      });
+    }
+  }
+  return items;
+}
+
+export function initialResultsForSuites(suites: Suite[]): TestResult[] {
+  const results = collectItems(suites).map((i) => i.result);
+  return results.length > 0 ? results : [startupFailure("No tests registered")];
+}
+
 export async function runSuites(suites: Suite[], deps: RunnerDeps): Promise<TestResult[]> {
   const perTestTimeoutMs = deps.perTestTimeoutMs ?? 30_000;
 
-  const items = suites.flatMap((suite) =>
-    suite.tests.map((t) => ({
-      body: t.body,
-      result: {
-        suite: suite.name,
-        name: t.name,
-        slug: `${slugify(suite.name)}-${slugify(t.name)}`,
-        status: "pending" as const,
-      } as TestResult,
-    })),
-  );
+  const items = collectItems(suites);
+  if (items.length === 0) {
+    const results = [startupFailure("No tests registered")];
+    deps.onUpdate([...results]);
+    return results;
+  }
+
   const results = items.map((i) => i.result);
   deps.onUpdate([...results]);
 

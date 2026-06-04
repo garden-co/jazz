@@ -1,19 +1,30 @@
 import * as React from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { createDb } from "jazz-tools/react-native";
-import { runSuites, summarize, type Suite } from "../runner/harness";
+import { initialResultsForSuites, runSuites, summarize, type Suite } from "../runner/harness";
 import type { TestResult, TestStatus } from "../runner/types";
 
 export function TestRunnerScreen({ suites }: { suites: Suite[] }) {
-  const [results, setResults] = React.useState<TestResult[]>([]);
+  const [results, setResults] = React.useState<TestResult[]>(() => initialResultsForSuites(suites));
   const started = React.useRef(false);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (started.current) return;
     started.current = true;
     void runSuites(suites, {
       createDb: (config) => createDb({ appId: config.appId }),
       onUpdate: (next) => setResults([...next]),
+    }).catch((error) => {
+      setResults([
+        {
+          suite: "runner",
+          name: "startup",
+          slug: "runner-startup",
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+          durationMs: 0,
+        },
+      ]);
     });
   }, [suites]);
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defineSuite, runSuites, slugify, summarize } from "./harness";
+import { initialResultsForSuites, defineSuite, runSuites, slugify, summarize } from "./harness";
 import type { TestResult } from "./types";
 
 describe("slugify", () => {
@@ -9,6 +9,54 @@ describe("slugify", () => {
 });
 
 describe("runSuites", () => {
+  it("initialResultsForSuites exposes pending rows before the runner effect starts", () => {
+    const suite = defineSuite("alpha", ({ test }) => {
+      test("first", async () => {});
+      test("second", async () => {});
+    });
+
+    expect(initialResultsForSuites([suite])).toEqual([
+      {
+        suite: "alpha",
+        name: "first",
+        slug: "alpha-first",
+        status: "pending",
+      },
+      {
+        suite: "alpha",
+        name: "second",
+        slug: "alpha-second",
+        status: "pending",
+      },
+    ]);
+  });
+
+  it("reports a terminal failure when no tests are registered", async () => {
+    let createDbCalls = 0;
+    const updates: TestResult[][] = [];
+
+    const results = await runSuites([], {
+      createDb: async () => {
+        createDbCalls += 1;
+        return { all: async () => [], shutdown: async () => {} } as any;
+      },
+      onUpdate: (next) => updates.push(next.map((r) => ({ ...r }))),
+    });
+
+    expect(createDbCalls).toBe(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.status).toBe("failed");
+    expect(results[0]!.error).toMatch(/No tests registered/);
+    expect(summarize(results)).toEqual({
+      total: 1,
+      passed: 0,
+      failed: 1,
+      done: true,
+      allPassed: false,
+    });
+    expect(updates.at(-1)).toEqual(results);
+  });
+
   it("runs sequentially; records pass/fail/timeout; isolates + shuts down a db per test", async () => {
     const appIds: string[] = [];
     let shutdowns = 0;
