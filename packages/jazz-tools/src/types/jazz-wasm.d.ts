@@ -103,22 +103,21 @@ declare module "jazz-wasm" {
     insert(
       table: string,
       values: InsertValues,
+      writeContextJson?: string | null,
       objectId?: string | null,
     ): { id: string; values: any[]; batchId: string };
-    insertWithSession(
+    restore(
       table: string,
+      objectId: string,
       values: InsertValues,
-      sessionJson?: string | null,
-      objectId?: string | null,
+      writeContextJson?: string | null,
     ): { id: string; values: any[]; batchId: string };
-    update(objectId: string, values: unknown): { batchId: string };
-    updateWithSession(
+    update(
       objectId: string,
       values: unknown,
-      sessionJson?: string | null,
+      writeContextJson?: string | null,
     ): { batchId: string };
-    delete(objectId: string): { batchId: string };
-    deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    delete(objectId: string, writeContextJson?: string | null): { batchId: string };
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
     replayBatchRejection(batchId: string, code: string, reason: string): void;

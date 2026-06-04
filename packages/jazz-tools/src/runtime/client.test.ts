@@ -17,17 +17,17 @@ function makeFakeRuntime() {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
-    insert: vi.fn(),
-    insertWithSession: vi.fn((table: string, values: any, writeContextJson?: string | null) => {
-      const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
-      return {
-        id: "todo-batch-query",
-        values: [],
-        batchId: writeContext.batch_id ?? "batch-query",
-      };
-    }),
-    restore: vi.fn(),
-    restoreWithSession: vi.fn(
+    insert: vi.fn(
+      (table: string, values: any, writeContextJson?: string | null, objectId?: string | null) => {
+        const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+        return {
+          id: objectId ?? "todo-batch-query",
+          values: [],
+          batchId: writeContext.batch_id ?? "batch-query",
+        };
+      },
+    ),
+    restore: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
         const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
         return {
@@ -37,8 +37,8 @@ function makeFakeRuntime() {
         };
       },
     ),
-    update: vi.fn(),
-    delete: vi.fn(),
+    update: vi.fn(() => ({ batchId: "batch-update" })),
+    delete: vi.fn(() => ({ batchId: "batch-delete" })),
     query:
       vi.fn<
         (

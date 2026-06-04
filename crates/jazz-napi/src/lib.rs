@@ -637,50 +637,19 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .insert_with_id(&table, values.0, object_id, None)
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
-
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "insertWithSession")]
-    pub fn insert_with_session(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let write_context = parse_write_context_json(write_context_json)?;
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let ((object_id, row_values), batch_id) = core
             .insert_with_id(&table, values.0, object_id, write_context.as_ref())
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
             core.current_schema(),
@@ -697,31 +666,6 @@ impl NapiRuntime {
 
     #[napi]
     pub fn update(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-    ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let updates = convert_updates(values.0);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .update(oid, updates, None)
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
-
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "updateWithSession")]
-    pub fn update_with_session(
         &self,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
@@ -748,26 +692,7 @@ impl NapiRuntime {
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .delete(oid, None)
-            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
-
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "deleteWithSession")]
-    pub fn delete_with_session(
+    pub fn delete_row(
         &self,
         object_id: String,
         write_context_json: Option<String>,
@@ -792,38 +717,6 @@ impl NapiRuntime {
 
     #[napi]
     pub fn restore(
-        &self,
-        table: String,
-        object_id: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-    ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .restore(&table, oid, values.0, None)
-            .map_err(|e| napi::Error::from_reason(format!("Restore failed: {:?}", e)))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
-
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "restoreWithSession")]
-    pub fn restore_with_session(
         &self,
         table: String,
         object_id: String,

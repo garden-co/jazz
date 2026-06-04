@@ -27,19 +27,16 @@ export interface JazzRnRuntimeBinding {
   disconnect(): void;
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
-  delete_(objectId: string): string;
-  deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
+  delete_(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
-  insert(table: string, valuesJson: string, objectId: string | undefined): string;
-  insertWithSession?(
+  insert(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
-  restore(table: string, objectId: string, valuesJson: string): string;
-  restoreWithSession?(
+  restore(
     table: string,
     objectId: string,
     valuesJson: string,
@@ -72,12 +69,7 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
-  update(objectId: string, valuesJson: string): string;
-  updateWithSession?(
-    objectId: string,
-    valuesJson: string,
-    writeContextJson: string | undefined,
-  ): string;
+  update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
   sealBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
@@ -171,41 +163,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  private requireWriteContextMethod<
-    T extends
-      | "insertWithSession"
-      | "restoreWithSession"
-      | "updateWithSession"
-      | "deleteWithSession",
-  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
-    const runtimeMethod = this.binding[method];
-    if (!runtimeMethod) {
-      throw new Error(`${method} is not supported by this RN runtime binding`);
-    }
-    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
-  }
-
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
-    try {
-      const rowJson = this.binding.insert(
-        table,
-        encodeFFIRecordToJson(values),
-        object_id ?? undefined,
-      );
-      return JSON.parse(rowJson) as DirectInsertResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  insertWithSession(
+  insert(
     table: string,
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult {
     try {
-      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+      const rowJson = this.binding.insert(
         table,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
@@ -217,23 +182,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  restore(table: string, object_id: string, values: InsertValues): DirectInsertResult {
-    try {
-      const rowJson = this.binding.restore(table, object_id, encodeFFIRecordToJson(values));
-      return JSON.parse(rowJson) as DirectInsertResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  restoreWithSession(
+  restore(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
   ): DirectInsertResult {
     try {
-      const rowJson = this.requireWriteContextMethod("restoreWithSession")(
+      const rowJson = this.binding.restore(
         table,
         object_id,
         encodeFFIRecordToJson(values),
@@ -245,22 +201,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult {
-    try {
-      const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  updateWithSession(
+  update(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult {
     try {
-      const resultJson = this.requireWriteContextMethod("updateWithSession")(
+      const resultJson = this.binding.update(
         object_id,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
@@ -271,21 +218,9 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  delete(object_id: string): DirectMutationResult {
+  delete(object_id: string, write_context_json?: string | null): DirectMutationResult {
     try {
-      const resultJson = this.binding.delete_(object_id);
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  deleteWithSession(object_id: string, write_context_json?: string | null): DirectMutationResult {
-    try {
-      const resultJson = this.requireWriteContextMethod("deleteWithSession")(
-        object_id,
-        write_context_json ?? undefined,
-      );
+      const resultJson = this.binding.delete_(object_id, write_context_json ?? undefined);
       return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
