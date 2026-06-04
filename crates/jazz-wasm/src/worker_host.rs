@@ -716,6 +716,18 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
                     });
                 }
             }
+            // On `pagehide` the page is navigating away and this worker is about
+            // to be terminated. The `ws_stream_wasm` transport is abandoned
+            // mid-flight and the dying WASM heap traps. Mark the worker scope so
+            // the bootstrap's `error` listener swallows that inert trap instead
+            // of letting it reach the console.
+            if matches!(event, WorkerLifecycleEvent::Pagehide) {
+                let _ = Reflect::set(
+                    &js_sys::global(),
+                    &JsValue::from_str("__jazzWorkerTearingDown"),
+                    &JsValue::TRUE,
+                );
+            }
         }
         _ => {}
     }
