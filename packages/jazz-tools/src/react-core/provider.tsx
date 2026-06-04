@@ -13,6 +13,10 @@ import {
   type WasmSchemaInput,
 } from "../drivers/schema-wire.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import {
+  acquireClient as registryAcquireClient,
+  releaseClient as registryReleaseClient,
+} from "../runtime/client-registry.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
@@ -69,68 +73,22 @@ type JazzContextValue = {
 
 const JazzContext = createContext<JazzContextValue | null>(null);
 
-type CachedClientEntry = {
-  configKey: string;
-  createJazzClient: CreateJazzClient;
-  initPromise: Promise<CoreJazzClient>;
-  holders: Set<object>;
-  releaseTimer: ReturnType<typeof setTimeout> | null;
-};
-
-let cachedClientEntry: CachedClientEntry | null = null;
-
+// Client lifecycle is delegated to the framework-agnostic, refcounted client
+// registry (keyed by configKey, with deferred release to survive Strict Mode's
+// mount→unmount→remount cycle). Using the shared Map-backed registry — rather
+// than a single cached slot — lets distinct configs (e.g. two principals on one
+// screen) coexist instead of evicting one another.
 function acquireClient<TClient extends CoreJazzClient>(
   configKey: string,
   config: DbConfig,
   createJazzClient: CreateJazzClient<TClient>,
   holder: object,
 ): Promise<TClient> {
-  if (
-    cachedClientEntry?.configKey !== configKey ||
-    cachedClientEntry?.createJazzClient !== createJazzClient
-  ) {
-    cachedClientEntry = {
-      configKey,
-      createJazzClient,
-      initPromise: createJazzClient(config),
-      holders: new Set(),
-      releaseTimer: null,
-    };
-  }
-
-  cachedClientEntry.holders.add(holder);
-  if (cachedClientEntry.releaseTimer) {
-    clearTimeout(cachedClientEntry.releaseTimer);
-    cachedClientEntry.releaseTimer = null;
-  }
-
-  return cachedClientEntry.initPromise as Promise<TClient>;
+  return registryAcquireClient<TClient>(configKey, () => createJazzClient(config), holder);
 }
 
 function releaseClient(configKey: string, holder: object): void {
-  if (!cachedClientEntry || cachedClientEntry.configKey !== configKey) {
-    return;
-  }
-
-  cachedClientEntry.holders.delete(holder);
-  if (cachedClientEntry.holders.size > 0 || cachedClientEntry.releaseTimer) {
-    return;
-  }
-
-  const entry = cachedClientEntry;
-  // Delayed release survives Strict Mode's mount→unmount→remount cycle:
-  // without it, the unmount would tear down the client before the remount reuses it.
-  entry.releaseTimer = setTimeout(() => {
-    if (entry.holders.size > 0) {
-      entry.releaseTimer = null;
-      return;
-    }
-
-    void entry.initPromise.then((resolved) => resolved.shutdown()).catch(() => {});
-    if (cachedClientEntry === entry) {
-      cachedClientEntry = null;
-    }
-  }, 0);
+  void registryReleaseClient(configKey, holder);
 }
 
 function useAuthSubscription(
