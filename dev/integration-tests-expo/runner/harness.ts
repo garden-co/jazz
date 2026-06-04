@@ -107,17 +107,23 @@ export async function runSuites(suites: Suite[], deps: RunnerDeps): Promise<Test
     const started = Date.now();
     let db: Db | undefined;
     try {
-      db = await deps.createDb({ appId: support.uniqueAppId(result.slug) });
-      const ctx: TestCtx = {
-        db,
-        expect,
-        waitForQuery: support.waitForQuery,
-        waitForCondition: support.waitForCondition,
-        withTimeout: support.withTimeout,
-        sleep: support.sleep,
-        uniqueAppId: support.uniqueAppId,
-      };
-      await support.withTimeout(body(ctx), perTestTimeoutMs, `${result.suite} › ${result.name}`);
+      await support.withTimeout(
+        (async () => {
+          db = await deps.createDb({ appId: support.uniqueAppId(result.slug) });
+          const ctx: TestCtx = {
+            db,
+            expect,
+            waitForQuery: support.waitForQuery,
+            waitForCondition: support.waitForCondition,
+            withTimeout: support.withTimeout,
+            sleep: support.sleep,
+            uniqueAppId: support.uniqueAppId,
+          };
+          await body(ctx);
+        })(),
+        perTestTimeoutMs,
+        `${result.suite} › ${result.name}`,
+      );
       result.status = "passed";
     } catch (error) {
       result.status = "failed";

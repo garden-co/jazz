@@ -57,6 +57,34 @@ describe("runSuites", () => {
     expect(updates.at(-1)).toEqual(results);
   });
 
+  it("times out a hung db creation and continues to later tests", async () => {
+    let createDbCalls = 0;
+    const suite = defineSuite("alpha", ({ test }) => {
+      test("db hangs", async ({ expect: e }) => {
+        e(true).toBe(true);
+      });
+      test("runs after timeout", async ({ expect: e }) => {
+        e(true).toBe(true);
+      });
+    });
+
+    const results = await runSuites([suite], {
+      createDb: async () => {
+        createDbCalls += 1;
+        if (createDbCalls === 1) {
+          await new Promise(() => {});
+        }
+        return { all: async () => [], shutdown: async () => {} } as any;
+      },
+      onUpdate: () => {},
+      perTestTimeoutMs: 100,
+    });
+
+    expect(results.map((r) => r.status)).toEqual(["failed", "passed"]);
+    expect(results[0]!.error).toMatch(/Timeout/i);
+    expect(createDbCalls).toBe(2);
+  });
+
   it("runs sequentially; records pass/fail/timeout; isolates + shuts down a db per test", async () => {
     const appIds: string[] = [];
     let shutdowns = 0;
