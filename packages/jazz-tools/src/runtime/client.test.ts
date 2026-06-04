@@ -74,8 +74,6 @@ function makeFakeRuntime() {
     }),
     sealBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
-    addServer: vi.fn(),
-    removeServer: vi.fn(),
     returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),

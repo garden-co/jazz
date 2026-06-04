@@ -149,8 +149,6 @@ declare module "jazz-wasm" {
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
-    addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-    removeServer(): void;
     batchedTick?(): void;
     getSchema(): unknown;
     getSchemaHash(): string;

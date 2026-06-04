@@ -142,7 +142,7 @@ impl WasmWorkerBridge {
         // Register the worker as the upstream server for the main runtime.
         runtime
             .add_server(None, Some(1.0))
-            .map_err(|e| JsError::new(&format!("addServer: {e:?}")))?;
+            .map_err(|e| JsError::new(&format!("add server: {e:?}")))?;
 
         // Initial upstream-ready signalling.
         if expects_upstream {

@@ -63,7 +63,7 @@ use jazz_tools::server::{
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{DurabilityTier, ServerId, SyncManager};
+use jazz_tools::sync_manager::{DurabilityTier, SyncManager};
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
@@ -247,23 +247,6 @@ fn open_sqlite_storage(data_path: &str) -> napi::Result<SqliteStorage> {
 // ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     parse_binding_tier(tier).map_err(napi::Error::from_reason)
-}
-
-fn parse_optional_sequence(sequence: Option<f64>) -> napi::Result<Option<u64>> {
-    let Some(sequence) = sequence else {
-        return Ok(None);
-    };
-    if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
-        return Err(napi::Error::from_reason(
-            "Invalid stream sequence: expected a non-negative integer",
-        ));
-    }
-    if sequence > u64::MAX as f64 {
-        return Err(napi::Error::from_reason(
-            "Invalid stream sequence: value exceeds u64 range",
-        ));
-    }
-    Ok(Some(sequence as u64))
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
@@ -582,7 +565,6 @@ fn build_napi_runtime(
 
     Ok(NapiRuntime {
         core: core_arc,
-        upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
     })
@@ -595,7 +577,6 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
-    upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
 }
@@ -1125,65 +1106,6 @@ impl NapiRuntime {
     }
 
     // =========================================================================
-    // Sync Operations
-    // =========================================================================
-
-    #[napi(js_name = "addServer")]
-    pub fn add_server(
-        &self,
-        server_catalogue_state_hash: Option<String>,
-        next_sync_seq: Option<f64>,
-    ) -> napi::Result<()> {
-        let next_sync_seq = parse_optional_sequence(next_sync_seq)?;
-        let server_id = {
-            let mut slot = self
-                .upstream_server_id
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            if let Some(server_id) = *slot {
-                server_id
-            } else {
-                let server_id = ServerId::new();
-                *slot = Some(server_id);
-                server_id
-            }
-        };
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        // Re-attach semantics: remove existing upstream edge then add again so
-        // replay/full-sync runs on every successful reconnect.
-        core.remove_server(server_id);
-        core.add_server_with_catalogue_state_hash(
-            server_id,
-            server_catalogue_state_hash.as_deref(),
-        );
-        if let Some(next_sync_seq) = next_sync_seq {
-            core.set_next_expected_server_sequence(server_id, next_sync_seq);
-        }
-        Ok(())
-    }
-
-    #[napi(js_name = "removeServer")]
-    pub fn remove_server(&self) -> napi::Result<()> {
-        let Some(server_id) = *self
-            .upstream_server_id
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-        else {
-            return Ok(());
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.remove_server(server_id);
-        Ok(())
-    }
-
-    // =========================================================================
     // Schema Access
     // =========================================================================
 
@@ -1319,11 +1241,13 @@ impl NapiRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     #[napi]
     pub fn disconnect(&self) {
-        let server_id = self.upstream_server_id.lock().ok().and_then(|slot| *slot);
         if let Ok(mut core) = self.core.lock() {
-            if let Some(handle) = core.transport() {
+            let server_id = if let Some(handle) = core.transport() {
                 handle.disconnect();
-            }
+                Some(handle.server_id)
+            } else {
+                None
+            };
             if let Some(server_id) = server_id {
                 core.remove_server(server_id);
             }

@@ -93,8 +93,6 @@ export interface Runtime {
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-  removeServer(): void;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
    */

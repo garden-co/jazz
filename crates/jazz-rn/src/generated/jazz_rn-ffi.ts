@@ -44,10 +44,6 @@ interface NativeModuleInterface {
     dataPath: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_server(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -134,10 +130,6 @@ interface NativeModuleInterface {
     sessionJson: Uint8Array,
     tier: Uint8Array
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
     ptr: bigint,
     batchId: Uint8Array,
@@ -345,7 +337,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
@@ -362,7 +353,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
