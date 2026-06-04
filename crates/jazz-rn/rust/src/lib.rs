@@ -32,10 +32,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
-    SyncPayload,
-};
+use jazz_tools::sync_manager::{ClientId, DurabilityTier, QueryPropagation, ServerId, SyncManager};
 
 // ============================================================================
 // Errors
@@ -964,45 +961,6 @@ impl RnRuntime {
     // =========================================================================
     // Sync
     // =========================================================================
-
-    pub fn on_sync_message_received(&self, message_json: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_received", || {
-            let payload: SyncPayload = serde_json::from_str(&message_json).map_err(json_err)?;
-            let entry = InboxEntry {
-                source: Source::Server(ServerId::new()),
-                payload,
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.park_sync_message(entry);
-            Ok(())
-        })
-    }
-
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: String,
-        message_json: String,
-    ) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_received_from_client", || {
-            let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
-                message: e.to_string(),
-            })?;
-            let cid = ClientId(uuid);
-            let payload: SyncPayload = serde_json::from_str(&message_json).map_err(json_err)?;
-
-            let entry = InboxEntry {
-                source: Source::Client(cid),
-                payload,
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.park_sync_message(entry);
-            Ok(())
-        })
-    }
 
     pub fn add_server(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("add_server", || {

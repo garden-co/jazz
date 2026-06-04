@@ -83,7 +83,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    onSyncMessageReceived: () => {},
     sealBatch: vi.fn(),
     addServer: () => {},
     removeServer: () => {},

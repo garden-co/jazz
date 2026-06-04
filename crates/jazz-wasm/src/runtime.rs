@@ -112,9 +112,10 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    ClientId, Destination, DurabilityTier, OutboxEntry, ServerId, SyncManager, SyncPayload,
 };
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::sync_manager::{InboxEntry, Source};
 
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
@@ -1076,6 +1077,87 @@ impl WasmRuntime {
             .acknowledge_handled_rejected_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            SyncPayload::from_bytes(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
+    }
+
+    /// Internal worker/bridge hook for server-originated sync payloads.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server(
+        &self,
+        payload: JsValue,
+        sequence: Option<f64>,
+    ) -> Result<(), JsError> {
+        let _span =
+            debug_span!("wasm::receiveSyncMessageFromServer", tier = self.tier_label).entered();
+        let mut payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
+        let server_id = self.upstream_server_id.get().ok_or_else(|| {
+            JsError::new("No upstream server registered; call addServer() before sync delivery")
+        })?;
+
+        let entry = InboxEntry {
+            source: Source::Server(server_id),
+            payload,
+        };
+
+        let mut core = self.core.borrow_mut();
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
+        Ok(())
+    }
+
+    /// Internal worker/bridge hook for client-originated sync payloads.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_client(
+        &self,
+        client_id: &str,
+        payload: JsValue,
+    ) -> Result<(), JsError> {
+        let _span = debug_span!(
+            "wasm::receiveSyncMessageFromClient",
+            tier = self.tier_label,
+            client_id
+        )
+        .entered();
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let payload = self.parse_sync_payload(payload)?;
+
+        let entry = InboxEntry {
+            source: Source::Client(cid),
+            payload,
+        };
+
+        self.core.borrow_mut().park_sync_message(entry);
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -1189,78 +1271,6 @@ impl WasmRuntime {
         })
     }
 
-    /// Called by JS when a sync message arrives from the server.
-    ///
-    /// # Arguments
-    /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
-    ///   or JSON-encoded SyncPayload (`string`)
-    #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(
-        &self,
-        payload: JsValue,
-        sequence: Option<f64>,
-    ) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let mut payload = self.parse_sync_payload(payload)?;
-        let sequence = Self::parse_optional_sequence(sequence)?;
-        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
-            (sequence.as_ref(), &mut payload)
-        {
-            // Local worker->main delivery is ordered and lossless, so the
-            // upstream stream watermark cannot be interpreted against this
-            // unsequenced in-process hop.
-            *through_seq = 0;
-        }
-        let server_id = self.upstream_server_id.get().ok_or_else(|| {
-            JsError::new("No upstream server registered; call addServer() before sync delivery")
-        })?;
-
-        let entry = InboxEntry {
-            source: Source::Server(server_id),
-            payload,
-        };
-
-        let mut core = self.core.borrow_mut();
-        if let Some(sequence) = sequence {
-            core.park_sync_message_with_sequence(entry, sequence);
-        } else {
-            core.park_sync_message(entry);
-        }
-        Ok(())
-    }
-
-    /// Called by JS when a sync message arrives from a client (not a server).
-    ///
-    /// # Arguments
-    /// * `client_id` - UUID string of the sending client
-    /// * `payload` - Postcard-encoded SyncPayload bytes
-    #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: &str,
-        payload: JsValue,
-    ) -> Result<(), JsError> {
-        let _span = debug_span!(
-            "wasm::onSyncMessageReceivedFromClient",
-            tier = self.tier_label,
-            client_id
-        )
-        .entered();
-        let uuid = uuid::Uuid::parse_str(client_id)
-            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let payload = self.parse_sync_payload(payload)?;
-
-        let entry = InboxEntry {
-            source: Source::Client(cid),
-            payload,
-        };
-
-        self.core.borrow_mut().park_sync_message(entry);
-        Ok(())
-    }
-
     /// Drive the runtime's batched receive/apply/send loop immediately.
     #[wasm_bindgen(js_name = batchedTick)]
     pub fn batched_tick(&self) {
@@ -1270,21 +1280,6 @@ impl WasmRuntime {
 
     fn batched_tick_and_emit_mutation_errors(&self) {
         self.core.borrow_mut().batched_tick();
-    }
-
-    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
-        if let Some(json) = payload.as_string() {
-            SyncPayload::from_json(&json)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
-        } else if payload.is_instance_of::<Uint8Array>() {
-            let bytes = Uint8Array::new(&payload).to_vec();
-            SyncPayload::from_bytes(&bytes)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
-        } else {
-            Err(JsError::new(
-                "Invalid sync payload type: expected Uint8Array or JSON string",
-            ))
-        }
     }
 
     fn parse_optional_sequence(sequence: Option<f64>) -> Result<Option<u64>, JsError> {

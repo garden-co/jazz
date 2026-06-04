@@ -16,8 +16,6 @@ function makeFakeRnBinding() {
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "fake-hash"),
     insert: vi.fn(),
-    onSyncMessageReceived: vi.fn(),
-    onSyncMessageReceivedFromClient: vi.fn(),
     query: vi.fn(),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),

@@ -567,10 +567,8 @@ fn process_main_message(msg: MainToWorkerMessage) {
             };
             for payload in payloads {
                 let arr = Uint8Array::from(payload.as_ref());
-                if let Err(err) =
-                    rt.on_sync_message_received_from_client(&main_client_id, arr.into())
-                {
-                    tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
+                if let Err(err) = rt.receive_sync_message_from_client(&main_client_id, arr.into()) {
+                    tracing::warn!("receive sync message from main client: {err:?}");
                 }
             }
             rt.batched_tick();
@@ -593,9 +591,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
                     });
                     for payload in payloads {
                         let arr = Uint8Array::from(payload.as_ref());
-                        if let Err(err) =
-                            rt.on_sync_message_received_from_client(&client, arr.into())
-                        {
+                        if let Err(err) = rt.receive_sync_message_from_client(&client, arr.into()) {
                             tracing::warn!("peer-sync route: {err:?}");
                         }
                     }

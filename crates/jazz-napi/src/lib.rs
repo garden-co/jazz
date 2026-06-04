@@ -63,9 +63,7 @@ use jazz_tools::server::{
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
-};
+use jazz_tools::sync_manager::{ClientId, DurabilityTier, ServerId, SyncManager};
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
@@ -1129,77 +1127,6 @@ impl NapiRuntime {
     // =========================================================================
     // Sync Operations
     // =========================================================================
-
-    #[napi(js_name = "onSyncMessageReceived")]
-    pub fn on_sync_message_received(
-        &self,
-        message_json: String,
-        sequence: Option<f64>,
-    ) -> napi::Result<()> {
-        let mut payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
-        let sequence = parse_optional_sequence(sequence)?;
-        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
-            (sequence.as_ref(), &mut payload)
-        {
-            // Local worker->main delivery is ordered and lossless, so the
-            // upstream stream watermark cannot be interpreted against this
-            // unsequenced in-process hop.
-            *through_seq = 0;
-        }
-        let server_id = (*self
-            .upstream_server_id
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?)
-        .ok_or_else(|| {
-            napi::Error::from_reason(
-                "No upstream server registered; call addServer() before sync delivery",
-            )
-        })?;
-
-        let entry = InboxEntry {
-            source: Source::Server(server_id),
-            payload,
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        if let Some(sequence) = sequence {
-            core.park_sync_message_with_sequence(entry, sequence);
-        } else {
-            core.park_sync_message(entry);
-        }
-        Ok(())
-    }
-
-    /// Called by JS when a sync message arrives from a client (not a server).
-    #[napi(js_name = "onSyncMessageReceivedFromClient")]
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: String,
-        message_json: String,
-    ) -> napi::Result<()> {
-        let uuid = uuid::Uuid::parse_str(&client_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
-
-        let entry = InboxEntry {
-            source: Source::Client(cid),
-            payload,
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.park_sync_message(entry);
-        Ok(())
-    }
 
     #[napi(js_name = "addServer")]
     pub fn add_server(

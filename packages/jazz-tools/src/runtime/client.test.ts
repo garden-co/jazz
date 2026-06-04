@@ -74,7 +74,6 @@ function makeFakeRuntime() {
     }),
     sealBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
-    onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
     addClient: vi.fn().mockReturnValue("client-id"),

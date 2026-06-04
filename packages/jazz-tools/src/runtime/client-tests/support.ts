@@ -112,7 +112,6 @@ export function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    onSyncMessageReceived: () => {},
     addServer: () => {},
     removeServer: () => {},
     addClient: () => "00000000-0000-0000-0000-000000000001",
@@ -168,7 +167,6 @@ export function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    onSyncMessageReceived: () => {},
     addServer: () => {},
     removeServer: () => {},
     addClient: () => "00000000-0000-0000-0000-000000000001",

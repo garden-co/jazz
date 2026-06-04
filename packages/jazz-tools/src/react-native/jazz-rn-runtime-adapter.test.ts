@@ -34,8 +34,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-restore-2" }),
     ),
     onBatchedTickNeeded: vi.fn(),
-    onSyncMessageReceived: vi.fn(),
-    onSyncMessageReceivedFromClient: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
@@ -455,20 +453,16 @@ describe("JazzRnRuntimeAdapter", () => {
     expect((error as Error & { cause?: unknown }).cause).toBe(schemaError);
   });
 
-  it("no-ops sync hooks after close", () => {
+  it("no-ops lifecycle hooks after close", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.close();
     adapter.addServer();
     adapter.removeServer();
-    adapter.onSyncMessageReceived('{"Ping":{}}');
-    adapter.onSyncMessageReceivedFromClient("client-1", '{"Ping":{}}');
 
     expect(binding.addServer).not.toHaveBeenCalled();
     expect(binding.removeServer).not.toHaveBeenCalled();
-    expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
-    expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
   });
 
   it("forwards updateAuth JSON payload to the native binding", () => {
