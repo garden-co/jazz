@@ -146,7 +146,6 @@ declare module "jazz-wasm" {
       optionsJson?: string | null,
     ): number;
     unsubscribe(handle: number): void;
-    onSyncMessageReceived(messageJson: string, seq?: number | null): void;
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
@@ -158,7 +157,6 @@ declare module "jazz-wasm" {
     getSchemaHash(): string;
     close?(): void;
     setClientRole?(clientId: string, role: string): void;
-    onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;
 
     /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
     static deriveUserId(seedB64: string): string;

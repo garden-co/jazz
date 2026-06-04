@@ -132,17 +132,6 @@ interface NativeModuleInterface {
     callback: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
-    ptr: bigint,
-    messageJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received_from_client(
-    ptr: bigint,
-    clientId: Uint8Array,
-    messageJson: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
     ptr: bigint,
     queryJson: Uint8Array,
@@ -383,8 +372,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;

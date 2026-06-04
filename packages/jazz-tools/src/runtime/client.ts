@@ -84,7 +84,6 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   /**
    * Construct a Rust-owned worker bridge attached to this runtime. Returns
    * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
@@ -105,7 +104,6 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect?(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */

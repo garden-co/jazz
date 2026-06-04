@@ -322,7 +322,7 @@ impl WasmWorkerBridge {
         }
         self.inner
             .runtime
-            .on_sync_message_received(payload.into(), None)
+            .receive_sync_message_from_server(payload.into(), None)
     }
 
     #[wasm_bindgen(js_name = waitForUpstreamServerConnection)]
@@ -823,21 +823,24 @@ impl BridgeInner {
                     match entry {
                         SyncEntry::BareBytes(bytes) => {
                             let arr = Uint8Array::from(bytes.as_ref());
-                            let _ = self.runtime.on_sync_message_received(arr.into(), None);
+                            let _ = self
+                                .runtime
+                                .receive_sync_message_from_server(arr.into(), None);
                         }
                         SyncEntry::BareString(s) => {
                             let _ = self
                                 .runtime
-                                .on_sync_message_received(JsValue::from_str(&s), None);
+                                .receive_sync_message_from_server(JsValue::from_str(&s), None);
                         }
                         SyncEntry::SequencedBytes { payload, sequence } => {
                             let arr = Uint8Array::from(payload.as_ref());
-                            let _ = self
-                                .runtime
-                                .on_sync_message_received(arr.into(), Some(sequence as f64));
+                            let _ = self.runtime.receive_sync_message_from_server(
+                                arr.into(),
+                                Some(sequence as f64),
+                            );
                         }
                         SyncEntry::SequencedString { payload, sequence } => {
-                            let _ = self.runtime.on_sync_message_received(
+                            let _ = self.runtime.receive_sync_message_from_server(
                                 JsValue::from_str(&payload),
                                 Some(sequence as f64),
                             );

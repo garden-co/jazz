@@ -56,15 +56,12 @@ export interface JazzRnRuntimeBinding {
         }
       | undefined,
   ): void;
-  onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
   query(
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
   ): Promise<string>;
   removeServer(): void;
-  setClientRole(clientId: string, role: string): void;
   createSubscription(
     queryJson: string,
     sessionJson: string | undefined,
@@ -384,11 +381,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  onSyncMessageReceived(message_json: string, seq?: number | null): void {
-    if (this.closed) return;
-    this.binding.onSyncMessageReceived(message_json, seq);
-  }
-
   // No outbox-target attachment on RN — server sync is handled by the
   // Rust-owned WebSocket transport (runtime.connect()), and there is no
   // worker `postMessage` channel.
@@ -462,15 +454,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   getSchemaHash(): string {
     return this.binding.getSchemaHash();
-  }
-
-  setClientRole(client_id: string, role: string): void {
-    this.binding.setClientRole(client_id, role);
-  }
-
-  onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
-    if (this.closed) return;
-    this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
   }
 
   close(): void {

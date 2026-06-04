@@ -35,9 +35,6 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
-  /** Called by JS when a sync message arrives from a client (not a server). */
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string

@@ -832,11 +832,6 @@ export interface RnRuntimeInterface {
     callback: BatchedTickCallback | undefined
   ) /*throws*/ : void;
   onMutationError(callback: MutationErrorCallback) /*throws*/ : void;
-  onSyncMessageReceived(messageJson: string) /*throws*/ : void;
-  onSyncMessageReceivedFromClient(
-    clientId: string,
-    messageJson: string
-  ) /*throws*/ : void;
   /**
    * One-shot query returning a JSON string:
    * `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
@@ -1249,42 +1244,6 @@ export class RnRuntime
         nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_mutation_error(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterTypeMutationErrorCallback.lower(callback),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  onSyncMessageReceived(messageJson: string): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterString.lower(messageJson),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  onSyncMessageReceivedFromClient(
-    clientId: string,
-    messageJson: string
-  ): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received_from_client(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterString.lower(clientId),
-          FfiConverterString.lower(messageJson),
           callStatus
         );
       },
@@ -1816,22 +1775,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received() !==
-    57227
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client() !==
-    32020
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client'
     );
   }
   if (
