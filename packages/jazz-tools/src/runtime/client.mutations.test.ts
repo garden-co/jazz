@@ -213,7 +213,7 @@ describe("JazzClient mutation durability split", () => {
     });
 
     expect(insert).toHaveBeenCalledWith("todos", values, undefined, externalId);
-    expect(update).toHaveBeenCalledWith(externalId, values);
+    expect(update).toHaveBeenCalledWith(externalId, values, undefined);
   });
 
   it("returns the inserted batch id when upsert creates a new row", () => {
@@ -300,7 +300,7 @@ describe("JazzClient mutation durability split", () => {
     client.create("todos", insertValues, { updatedAt });
     client.update("row-1", updates, { updatedAt });
 
-    expect(insert).toHaveBeenCalledWith("todos", insertValues, updatedAtContext);
+    expect(insert).toHaveBeenCalledWith("todos", insertValues, updatedAtContext, undefined);
     expect(update).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
   });
 

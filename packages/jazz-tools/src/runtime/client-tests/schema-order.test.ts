@@ -72,10 +72,15 @@ describe("JazzClient schema order", () => {
       done: { type: "Boolean", value: false },
     });
 
-    expect(insert).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Buy milk" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(insert).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Buy milk" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+      undefined,
+    );
   });
 
   it("aligns create result rows from declared schema context without runtime schema hashing", async () => {
