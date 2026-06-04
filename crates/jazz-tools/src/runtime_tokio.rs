@@ -850,32 +850,14 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// task. The manager drives the WebSocket connection, reconnecting on
     /// failure until the handle is dropped.
     pub fn connect(&self, url: String, auth: crate::transport_manager::AuthConfig) {
-        self.connect_with_retry_config(
-            url,
-            auth,
-            crate::transport_manager::TransportRetryConfig::default(),
-        );
-    }
-
-    /// Connect to a Jazz server over WebSocket with explicit retry attempt
-    /// deadlines.
-    pub fn connect_with_retry_config(
-        &self,
-        url: String,
-        auth: crate::transport_manager::AuthConfig,
-        retry_config: crate::transport_manager::TransportRetryConfig,
-    ) {
         let tick = NativeTickNotifier {
             scheduler: self.scheduler.clone(),
         };
         let manager = {
             let mut core = self.core.lock().unwrap();
-            crate::runtime_core::install_transport_with_retry_config::<
-                _,
-                _,
-                crate::ws_stream::NativeWsStream,
-                _,
-            >(&mut core, url, auth, tick, retry_config)
+            crate::runtime_core::install_transport::<_, _, crate::ws_stream::NativeWsStream, _>(
+                &mut core, url, auth, tick,
+            )
         };
         tokio::spawn(manager.run());
     }
