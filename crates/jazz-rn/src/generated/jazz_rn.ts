@@ -766,7 +766,6 @@ const FfiConverterTypeJazzRnError = (() => {
 })();
 
 export interface RnRuntimeInterface {
-  addClient() /*throws*/ : string;
   addServer() /*throws*/ : void;
   /**
    * Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
@@ -913,23 +912,6 @@ export class RnRuntime
     this[pointerLiteralSymbol] = pointer;
     this[destructorGuardSymbol] =
       uniffiTypeRnRuntimeObjectFactory.bless(pointer);
-  }
-
-  addClient(): string /*throws*/ {
-    return FfiConverterString.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_client(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
   }
 
   addServer(): void /*throws*/ {
@@ -1621,14 +1603,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_func_mint_local_first_token'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client() !==
-    20251
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_add_client'
     );
   }
   if (

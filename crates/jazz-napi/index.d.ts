@@ -37,7 +37,6 @@ export declare class NapiRuntime {
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
-  addClient(): string
   getSchema(): any
   getSchemaHash(): string
   flush(): void

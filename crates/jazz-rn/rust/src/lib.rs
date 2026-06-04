@@ -32,7 +32,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{ClientId, DurabilityTier, QueryPropagation, ServerId, SyncManager};
+use jazz_tools::sync_manager::{DurabilityTier, QueryPropagation, ServerId, SyncManager};
 
 // ============================================================================
 // Errors
@@ -1008,17 +1008,6 @@ impl RnRuntime {
             })?;
             core.remove_server(server_id);
             Ok(())
-        })
-    }
-
-    pub fn add_client(&self) -> Result<String, JazzRnError> {
-        with_panic_boundary("add_client", || {
-            let client_id = ClientId::new();
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.add_client(client_id, None);
-            Ok(client_id.0.to_string())
         })
     }
 

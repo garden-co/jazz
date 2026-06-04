@@ -152,7 +152,6 @@ declare module "jazz-wasm" {
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     batchedTick?(): void;
-    addClient(): string;
     getSchema(): unknown;
     getSchemaHash(): string;
     close?(): void;

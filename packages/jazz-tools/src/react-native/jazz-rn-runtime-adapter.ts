@@ -21,7 +21,6 @@ export type JazzRnNormalizedError = Error & {
 };
 
 export interface JazzRnRuntimeBinding {
-  addClient(): string;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
@@ -442,10 +441,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
   removeServer(): void {
     if (this.closed) return;
     this.binding.removeServer();
-  }
-
-  addClient(): string {
-    return this.binding.addClient();
   }
 
   getSchema(): any {

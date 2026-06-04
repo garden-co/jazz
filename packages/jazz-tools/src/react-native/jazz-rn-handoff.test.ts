@@ -4,7 +4,6 @@ import type { WasmSchema } from "../drivers/types.js";
 function makeFakeRnBinding() {
   return {
     onBatchedTickNeeded: vi.fn(),
-    addClient: vi.fn(),
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),

@@ -111,11 +111,11 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, OutboxEntry, ServerId, SyncManager, SyncPayload,
-};
 #[cfg(target_arch = "wasm32")]
-use jazz_tools::sync_manager::{InboxEntry, Source};
+use jazz_tools::sync_manager::{ClientId, InboxEntry, Source};
+use jazz_tools::sync_manager::{
+    Destination, DurabilityTier, OutboxEntry, ServerId, SyncManager, SyncPayload,
+};
 
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
@@ -1160,6 +1160,16 @@ impl WasmRuntime {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_client(&self) -> String {
+        let _span = info_span!("wasm::add_client", tier = self.tier_label).entered();
+        let client_id = ClientId::new();
+        info!(%client_id, "generated client id");
+        let mut core = self.core.borrow_mut();
+        core.add_client(client_id, None);
+        client_id.0.to_string()
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
         use jazz_tools::sync_manager::ClientRole;
 
@@ -1909,17 +1919,6 @@ impl WasmRuntime {
         if let Some(server_id) = self.upstream_server_id.get() {
             core.remove_server(server_id);
         }
-    }
-
-    /// Add a client connection (for server-side use in tests).
-    #[wasm_bindgen(js_name = addClient)]
-    pub fn add_client(&self) -> String {
-        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
-        let client_id = ClientId::new();
-        info!(%client_id, "generated client id");
-        let mut core = self.core.borrow_mut();
-        core.add_client(client_id, None);
-        client_id.0.to_string()
     }
 
     // =========================================================================
