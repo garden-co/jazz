@@ -158,6 +158,20 @@ impl BrowserRuntime {
         self.with_inner(|inner| inner.main.delete_row(table_name, id).map_err(error_message))
     }
 
+    pub fn insert_rows_in_transaction(
+        &self,
+        table_name: &str,
+        rows: Vec<(String, BTreeMap<String, Value>)>,
+    ) -> Result<String, String> {
+        self.with_inner(|inner| {
+            let mut transaction = inner.main.transaction();
+            for (id, values) in rows {
+                transaction = transaction.insert_row(table_name, &id, values);
+            }
+            transaction.commit().map_err(error_message)
+        })
+    }
+
     pub fn query(&self, query: BuiltQuery) -> Result<Vec<RowView>, String> {
         self.with_inner(|inner| inner.main.query(query).map_err(error_message))
     }
@@ -224,6 +238,16 @@ impl BrowserRuntime {
         result
     }
 
+    pub fn sync_transaction(&self, tx_id: &str) -> Result<(), String> {
+        let result = self.with_inner(|inner| inner.sync_transaction(tx_id));
+        if let Err(error) = &result {
+            self.set_error(error.clone());
+        } else {
+            self.emit_status();
+        }
+        result
+    }
+
     pub fn sync_queries_after_render(&self, queries: Vec<BuiltQuery>) {
         let runtime = self.clone();
         spawn_local(async move {
@@ -279,6 +303,10 @@ impl BrowserRuntime {
 
     pub fn status(&self) -> BrowserRuntimeStatus {
         self.inner.borrow().status.clone()
+    }
+
+    pub fn has_pending_bundle_sync(&self) -> bool {
+        !self.inner.borrow().pending_syncs.is_empty()
     }
 
     fn handle_worker_output(&self, output: RuntimeWorkerOutput) {
@@ -455,23 +483,46 @@ impl BrowserRuntime {
 }
 
 impl Inner {
-    fn sync_queries(&mut self, _queries: Vec<BuiltQuery>) -> Result<(), String> {
+    fn sync_queries(&mut self, queries: Vec<BuiltQuery>) -> Result<(), String> {
         self.ensure_ready()?;
+        let bundles = queries
+            .into_iter()
+            .map(|query| self.main.export_query(query).map_err(error_message))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.sync_bundles(bundles)
+    }
+
+    fn sync_transaction(&mut self, tx_id: &str) -> Result<(), String> {
+        self.ensure_ready()?;
+        let bundle = self.main.export_transaction(tx_id).map_err(error_message)?;
+        self.sync_bundles(vec![bundle])
+    }
+
+    fn sync_bundles(&mut self, bundles: Vec<Bundle>) -> Result<(), String> {
         let client_messages = self
             .connection_manager
             .flush(&mut self.main)
             .map_err(error_message)?;
-        if client_messages.is_empty() {
+        if bundles.is_empty() && client_messages.is_empty() {
             return Ok(());
         }
 
         let request_id = self.next_request_id()?;
-        self.pending_protocols.insert(request_id);
         self.status.syncing = true;
-        self.worker.send(RuntimeWorkerInput::Protocol {
-            request_id,
-            client_messages,
-        })?;
+        if bundles.is_empty() {
+            self.pending_protocols.insert(request_id);
+            self.worker.send(RuntimeWorkerInput::Protocol {
+                request_id,
+                client_messages,
+            })?;
+        } else {
+            self.pending_syncs.insert(request_id);
+            self.worker.send(RuntimeWorkerInput::ApplyBundles {
+                request_id,
+                bundles,
+                client_messages,
+            })?;
+        }
         Ok(())
     }
 

@@ -935,6 +935,7 @@ mod tests {
                     },
                     requested_tier: mini_jazz_sqlite::protocol::SettlementTier::Local,
                     last_applied_cursor: None,
+                    reconciliation: None,
                 }],
             }],
         };
@@ -1015,6 +1016,7 @@ mod tests {
                     offset: None,
                 },
                 requested_tier: SettlementTier::Local,
+                reconciliation: None,
             },
             ClientMessage::UploadTx {
                 tx: ClientTx {
@@ -1137,6 +1139,7 @@ mod tests {
                     subscription_id: subscription_id.clone(),
                     query,
                     requested_tier: SettlementTier::Local,
+                    reconciliation: None,
                 },
             ],
         });

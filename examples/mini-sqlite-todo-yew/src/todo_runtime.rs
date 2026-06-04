@@ -16,7 +16,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use yew::Callback;
 
 const PROJECT_ID: &str = "todo-list";
-const SYNC_BATCH_SIZE: u64 = 100;
+const SYNC_BATCH_SIZE: u64 = 20_000;
 const TOTAL_TO_GENERATE: u64 = 100_000;
 const CLIENT_ID_STORAGE_KEY: &str = "mini-sqlite-todo-yew-client-id";
 
@@ -247,24 +247,24 @@ impl TodoRuntime {
 
     async fn generate_100k_inner(&self) -> Result<(), String> {
         let id_seed = Date::now() as u64;
-        let mut batch_ids = Vec::new();
+        let mut batch_rows = Vec::new();
         let browser = self.browser();
         for index in 0..TOTAL_TO_GENERATE {
             let id = format!("todo-{id_seed}-{index}");
-            browser.insert_row(
-                "todos",
-                &id,
+            batch_rows.push((
+                id,
                 row_values([
                     ("title", json!(format!("Todo {}", index + 1))),
                     ("done", json!(false)),
                     ("project", json!(PROJECT_ID)),
                 ]),
-            )?;
-            batch_ids.push(id);
+            ));
 
             if (index + 1) % SYNC_BATCH_SIZE == 0 {
-                let query = todo_ids_query(std::mem::take(&mut batch_ids));
-                browser.sync_queries(vec![query])?;
+                let tx_id =
+                    browser.insert_rows_in_transaction("todos", std::mem::take(&mut batch_rows))?;
+                browser.sync_transaction(&tx_id)?;
+                self.wait_for_sync_idle().await?;
             }
 
             if (index + 1) % 1000 == 0 {
@@ -277,8 +277,10 @@ impl TodoRuntime {
             }
         }
 
-        if !batch_ids.is_empty() {
-            browser.sync_queries(vec![todo_ids_query(batch_ids)])?;
+        if !batch_rows.is_empty() {
+            let tx_id = browser.insert_rows_in_transaction("todos", batch_rows)?;
+            browser.sync_transaction(&tx_id)?;
+            self.wait_for_sync_idle().await?;
         }
         browser.refresh_subscriptions()?;
 
@@ -287,6 +289,19 @@ impl TodoRuntime {
             inner.emit();
             Ok(())
         })
+    }
+
+    async fn wait_for_sync_idle(&self) -> Result<(), String> {
+        loop {
+            let status = self.browser().status();
+            if !status.error.is_empty() {
+                return Err(status.error);
+            }
+            if !self.browser().has_pending_bundle_sync() {
+                return Ok(());
+            }
+            let _ = JsFuture::from(next_tick()).await;
+        }
     }
 
     fn handle_status(&self, status: BrowserRuntimeStatus) {

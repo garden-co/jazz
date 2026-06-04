@@ -493,6 +493,28 @@ impl Runtime {
         ))
     }
 
+    pub fn export_transaction(&self, tx_id: &str) -> Result<Bundle> {
+        let tx_num = tx::tx_num(&self.conn, tx_id)?;
+        let history = history_records_for_tx(&self.conn, &self.schema, tx_num, tx_id)?;
+        if history.is_empty() {
+            return Err(crate::Error::new(format!(
+                "transaction {tx_id} has no exported history"
+            )));
+        }
+        let reads = export_reads_for_history(&self.conn, &history)?;
+        let txs = export_txs_for_query_scope(&self.conn, "", &history, &reads, &[])?;
+        let mut branches = export_branch_records_for_history(&self.conn, &history)?;
+        include_branch_record(&self.conn, &mut branches, self.branch_num)?;
+        Ok(make_bundle(
+            &self.schema,
+            branches,
+            txs,
+            reads,
+            Vec::new(),
+            history,
+        ))
+    }
+
     pub fn export_exclusive_transaction_forwarding(
         &self,
         table_name: &str,
@@ -1286,6 +1308,9 @@ impl Runtime {
         else {
             return Ok(None);
         };
+        let can_skip_edge_projection_rebuild =
+            matches!(upload_tx.conflict_mode, TxConflictMode::Mergeable)
+                && upload_can_skip_edge_accept_projection_rebuild(data);
         self.apply_untrusted_bundle_as_user(&bundle, connection_auth_user)?;
 
         if let Some(status) = self.upload_tx_status(&upload_tx.tx_id)? {
@@ -1299,7 +1324,11 @@ impl Runtime {
             {
                 return Ok(None);
             }
-            self.accept_transaction_at_edge(&upload_tx.tx_id)?;
+            if can_skip_edge_projection_rebuild {
+                self.accept_transaction_at_edge_without_projection_rebuild(&upload_tx.tx_id)?;
+            } else {
+                self.accept_uploaded_mergeable_transaction_at_edge(&upload_tx.tx_id)?;
+            }
             return Ok(Some(TxStatusKind::EdgeAccepted));
         }
         Ok(None)
@@ -2550,10 +2579,33 @@ impl Runtime {
     }
 
     fn accept_transaction_at_edge_observed(&mut self, tx_id: &str, observed_at: i64) -> Result<()> {
+        self.accept_transaction_at_edge_observed_inner(tx_id, observed_at, true)
+    }
+
+    fn accept_transaction_at_edge_without_projection_rebuild(&mut self, tx_id: &str) -> Result<()> {
+        self.accept_transaction_at_edge_observed_inner(tx_id, now_ms(), false)
+    }
+
+    fn accept_uploaded_mergeable_transaction_at_edge(&mut self, tx_id: &str) -> Result<()> {
+        let tx_num = tx::accept_edge(&self.conn, tx_id, now_ms())?;
+        clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
+        Self::complete_upload_for_status(&self.conn, tx_id, UploadCompletion::EdgeAccepted)?;
+        projection::rebuild_transaction_writes(&self.conn, &self.schema, self.node_num, tx_num)?;
+        Ok(())
+    }
+
+    fn accept_transaction_at_edge_observed_inner(
+        &mut self,
+        tx_id: &str,
+        observed_at: i64,
+        rebuild_projection: bool,
+    ) -> Result<()> {
         let tx_num = tx::accept_edge(&self.conn, tx_id, observed_at)?;
         clear_transaction_awaiting_dependency(&self.conn, tx_num)?;
         Self::complete_upload_for_status(&self.conn, tx_id, UploadCompletion::EdgeAccepted)?;
-        projection::rebuild(&self.conn, &self.schema, self.node_num)?;
+        if rebuild_projection {
+            projection::rebuild(&self.conn, &self.schema, self.node_num)?;
+        }
         Ok(())
     }
 
@@ -6271,6 +6323,11 @@ fn upload_waits_for_missing_current_dependency(
     Ok(false)
 }
 
+fn upload_can_skip_edge_accept_projection_rebuild(data: &[ClientDataRecord]) -> bool {
+    data.iter()
+        .all(|record| matches!(record.op, DataOp::Insert))
+}
+
 fn upload_history_records(
     conn: &Connection,
     schema: &SchemaDef,
@@ -9373,6 +9430,157 @@ mod tests {
         peer.apply_bundle(&upstream.export_query(query.clone())?)?;
 
         assert_eq!(peer.query(query)?.len(), ROW_COUNT);
+        Ok(())
+    }
+
+    #[test]
+    fn export_transaction_exports_all_rows_from_one_transaction() -> Result<()> {
+        let schema = SchemaDef::new().table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+        });
+        let mut upstream = Runtime::open_with_schema(
+            Storage::Memory,
+            "tx-export-upstream",
+            "alice",
+            schema.clone(),
+        )?;
+        let mut peer =
+            Runtime::open_with_schema(Storage::Memory, "tx-export-peer", "alice", schema)?;
+
+        let tx_id = upstream
+            .transaction()
+            .insert_row(
+                "tasks",
+                "task-1",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Task 1")),
+                    ("done".to_owned(), json!(false)),
+                ]),
+            )
+            .insert_row(
+                "tasks",
+                "task-2",
+                BTreeMap::from([
+                    ("title".to_owned(), json!("Task 2")),
+                    ("done".to_owned(), json!(true)),
+                ]),
+            )
+            .commit()?;
+
+        let bundle = upstream.export_transaction(&tx_id)?;
+        assert_eq!(bundle.history.len(), 2);
+        assert!(bundle.query_reads.is_empty());
+
+        peer.apply_bundle(&bundle)?;
+        let rows = peer.read_rows("tasks")?;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.tx_id == tx_id));
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_write_projection_rebuild_applies_accepted_remote_update() -> Result<()> {
+        let schema = SchemaDef::new().table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+        });
+        let mut server = Runtime::open_with_schema(
+            Storage::Memory,
+            "projection-server",
+            "alice",
+            schema.clone(),
+        )?;
+        let mut client =
+            Runtime::open_with_schema(Storage::Memory, "projection-client", "alice", schema)?;
+
+        let base_tx_id = server.insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Task 1")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )?;
+        server.accept_transaction_at_edge(&base_tx_id)?;
+        client.apply_bundle(&server.export_query(BuiltQuery::from_json_value(json!({
+            "table": "tasks"
+        }))?)?)?;
+
+        let update_tx_id = client.update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )?;
+        server
+            .apply_untrusted_bundle_as_user(&client.export_transaction(&update_tx_id)?, "alice")?;
+        assert_eq!(
+            server.read_rows("tasks")?[0].values.get("done"),
+            Some(&json!(false))
+        );
+
+        let update_tx_num = tx::accept_edge(&server.conn, &update_tx_id, now_ms())?;
+        projection::rebuild_transaction_writes(
+            &server.conn,
+            &server.schema,
+            server.node_num,
+            update_tx_num,
+        )?;
+
+        assert_eq!(
+            server.read_rows("tasks")?[0].values.get("done"),
+            Some(&json!(true))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mergeable_upload_update_projects_after_edge_acceptance() -> Result<()> {
+        let schema = SchemaDef::new().table("tasks", |table| {
+            table.text("title");
+            table.bool("done");
+        });
+        let mut server =
+            Runtime::open_with_schema(Storage::Memory, "upload-server", "alice", schema.clone())?;
+        let mut client =
+            Runtime::open_with_schema(Storage::Memory, "upload-client", "alice", schema)?;
+
+        let base_tx_id = server.insert_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([
+                ("title".to_owned(), json!("Task 1")),
+                ("done".to_owned(), json!(false)),
+            ]),
+        )?;
+        server.accept_transaction_at_edge(&base_tx_id)?;
+        client.apply_bundle(&server.export_query(BuiltQuery::from_json_value(json!({
+            "table": "tasks"
+        }))?)?)?;
+
+        client.update_row(
+            "tasks",
+            "task-1",
+            BTreeMap::from([("done".to_owned(), json!(true))]),
+        )?;
+        let upload = client
+            .active_uploads_for_test(1)?
+            .pop()
+            .expect("upload queued");
+
+        let status = server.apply_upload_tx_as_user(
+            &upload.tx,
+            &upload.data,
+            &upload.reads,
+            "upload-client",
+            "alice",
+        )?;
+
+        assert_eq!(status, Some(TxStatusKind::EdgeAccepted));
+        assert_eq!(
+            server.read_rows("tasks")?[0].values.get("done"),
+            Some(&json!(true))
+        );
         Ok(())
     }
 }

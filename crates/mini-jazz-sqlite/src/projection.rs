@@ -17,11 +17,59 @@ pub(crate) fn rebuild(conn: &Connection, schema: &SchemaDef, local_node_num: i64
     Ok(())
 }
 
+pub(crate) fn rebuild_transaction_writes(
+    conn: &Connection,
+    schema: &SchemaDef,
+    local_node_num: i64,
+    tx_num: i64,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT tables.table_name
+         FROM jazz_tx_write writes
+         JOIN jazz_table tables ON tables.table_num = writes.table_num
+         WHERE writes.tx_num = ?
+         ORDER BY tables.table_name",
+    )?;
+    let table_names = stmt
+        .query_map(params![tx_num], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    for table_name in table_names {
+        let table = schema.table_def(&table_name)?;
+        let row_nums = transaction_write_row_nums(conn, table, tx_num)?;
+        rebuild_table_rows(conn, table, local_node_num, Some(&row_nums))?;
+    }
+    Ok(())
+}
+
 fn rebuild_table(
     conn: &Connection,
     table: &crate::schema::TableDef,
     local_node_num: i64,
 ) -> Result<()> {
+    rebuild_table_rows(conn, table, local_node_num, None)
+}
+
+fn rebuild_table_rows(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    local_node_num: i64,
+    row_nums: Option<&[i64]>,
+) -> Result<()> {
+    if matches!(row_nums, Some([])) {
+        return Ok(());
+    }
+    if let Some(row_nums) = row_nums {
+        conn.execute(
+            &format!(
+                "DELETE FROM {} WHERE row_num IN ({})",
+                current_table(&table.name),
+                integer_list_sql(row_nums)
+            ),
+            [],
+        )?;
+    }
+
     let field_columns = table
         .fields
         .iter()
@@ -40,11 +88,15 @@ fn rebuild_table(
         "h.j_created_by".to_owned(),
         "h.j_updated_by".to_owned(),
     ]);
+    let row_filter = row_nums
+        .map(|row_nums| format!("AND h.row_num IN ({})", integer_list_sql(row_nums)))
+        .unwrap_or_default();
     let sql = format!(
         "SELECT {}
          FROM {} h
          JOIN jazz_tx tx ON tx.tx_num = h.tx_num
          WHERE tx.outcome != ?
+           {row_filter}
            AND NOT (tx.outcome = ? AND tx.conflict_mode = ?)
            AND NOT EXISTS (
              SELECT 1
@@ -148,11 +200,37 @@ fn rebuild_table(
     Ok(())
 }
 
+fn transaction_write_row_nums(
+    conn: &Connection,
+    table: &crate::schema::TableDef,
+    tx_num: i64,
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT row_num
+         FROM {}
+         WHERE tx_num = ?
+         ORDER BY row_num",
+        history_table(&table.name)
+    ))?;
+    let row_nums = stmt
+        .query_map(params![tx_num], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(row_nums)
+}
+
 fn integer_value(value: &rusqlite::types::Value, name: &str) -> Result<i64> {
     match value {
         rusqlite::types::Value::Integer(value) => Ok(*value),
         _ => Err(crate::Error::new(format!("expected integer {name}"))),
     }
+}
+
+fn integer_list_sql(values: &[i64]) -> String {
+    values
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn insert_dynamic(

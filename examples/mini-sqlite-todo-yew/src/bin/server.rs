@@ -23,16 +23,24 @@ use mini_sqlite_todo_yew::{
 use std::{
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::broadcast;
 
 #[cfg(not(target_arch = "wasm32"))]
+const SUBSCRIPTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
-    changes: broadcast::Sender<()>,
+    changes: broadcast::Sender<u64>,
+    next_connection_id: Arc<AtomicU64>,
     user: String,
 }
 
@@ -55,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         runtime: Arc::new(Mutex::new(runtime)),
         changes: broadcast::channel(64).0,
+        next_connection_id: Arc::new(AtomicU64::new(1)),
         user,
     };
 
@@ -78,6 +87,7 @@ async fn sync_websocket(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn handle_socket(socket: WebSocket, state: AppState) {
+    let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let (schema_fingerprint, policy_fingerprint) = {
         let Ok(runtime) = state.runtime.lock() else {
             return;
@@ -138,12 +148,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     break;
                 }
                 if should_notify {
-                    let _ = state.changes.send(());
+                    let _ = state.changes.send(connection_id);
                 }
             }
             change = changes.recv() => {
                 match change {
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(origin_connection_id) if origin_connection_id == connection_id => {
+                        continue;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        tokio::time::sleep(SUBSCRIPTION_REFRESH_DEBOUNCE).await;
+                        while changes.try_recv().is_ok() {}
                         let server_messages = {
                             let Ok(runtime) = state.runtime.lock() else {
                                 break;
