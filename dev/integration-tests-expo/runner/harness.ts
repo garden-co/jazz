@@ -11,6 +11,7 @@ export interface TestCtx {
   withTimeout: typeof support.withTimeout;
   sleep: typeof support.sleep;
   uniqueAppId: typeof support.uniqueAppId;
+  step: (message: string) => Promise<void>;
 }
 
 export type TestBody = (ctx: TestCtx) => Promise<void>;
@@ -102,14 +103,22 @@ export async function runSuites(suites: Suite[], deps: RunnerDeps): Promise<Test
 
   for (const { body, result } of items) {
     result.status = "running";
+    result.currentStep = "starting";
     deps.onUpdate([...results]);
 
     const started = Date.now();
     let db: Db | undefined;
+    const step = async (message: string) => {
+      result.currentStep = message;
+      deps.onUpdate([...results]);
+      await support.sleep(0);
+    };
     try {
       await support.withTimeout(
         (async () => {
+          await step("creating db");
           db = await deps.createDb({ appId: support.uniqueAppId(result.slug) });
+          await step("running test body");
           const ctx: TestCtx = {
             db,
             expect,
@@ -118,6 +127,7 @@ export async function runSuites(suites: Suite[], deps: RunnerDeps): Promise<Test
             withTimeout: support.withTimeout,
             sleep: support.sleep,
             uniqueAppId: support.uniqueAppId,
+            step,
           };
           await body(ctx);
         })(),
@@ -125,6 +135,7 @@ export async function runSuites(suites: Suite[], deps: RunnerDeps): Promise<Test
         `${result.suite} › ${result.name}`,
       );
       result.status = "passed";
+      result.currentStep = undefined;
     } catch (error) {
       result.status = "failed";
       result.error = error instanceof Error ? error.message : String(error);

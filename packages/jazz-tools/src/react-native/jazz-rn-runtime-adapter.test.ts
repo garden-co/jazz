@@ -50,7 +50,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 }
 
 describe("JazzRnRuntimeAdapter", () => {
-  it("defers batched tick execution to avoid re-entrancy", async () => {
+  it("schedules batched tick on a macrotask so timers and rendering can run", async () => {
     const binding = createBinding();
     new JazzRnRuntimeAdapter(binding, {});
 
@@ -61,6 +61,9 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.batchedTick).not.toHaveBeenCalled();
 
     await Promise.resolve();
+    expect(binding.batchedTick).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(binding.batchedTick).toHaveBeenCalledTimes(1);
   });
 

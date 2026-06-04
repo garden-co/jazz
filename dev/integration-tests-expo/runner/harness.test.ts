@@ -85,6 +85,27 @@ describe("runSuites", () => {
     expect(createDbCalls).toBe(2);
   });
 
+  it("publishes progress steps around db creation and test body execution", async () => {
+    const updates: TestResult[][] = [];
+    const suite = defineSuite("alpha", ({ test }) => {
+      test("reports progress", async ({ expect: e }) => {
+        e(true).toBe(true);
+      });
+    });
+
+    await runSuites([suite], {
+      createDb: async () => ({ all: async () => [], shutdown: async () => {} }) as any,
+      onUpdate: (next) => updates.push(next.map((r) => ({ ...r }))),
+    });
+
+    const progressSteps = updates
+      .flatMap((snapshot) => snapshot.map((result) => result.currentStep))
+      .filter((step): step is string => !!step);
+
+    expect(progressSteps).toContain("creating db");
+    expect(progressSteps).toContain("running test body");
+  });
+
   it("runs sequentially; records pass/fail/timeout; isolates + shuts down a db per test", async () => {
     const appIds: string[] = [];
     let shutdowns = 0;

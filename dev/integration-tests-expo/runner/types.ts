@@ -6,6 +6,7 @@ export interface TestResult {
   slug: string;
   status: TestStatus;
   error?: string;
+  currentStep?: string;
   durationMs?: number;
 }
 

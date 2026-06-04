@@ -157,16 +157,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
   ) {
     this.binding.onBatchedTickNeeded({
       requestBatchedTick: () => {
-        // Avoid re-entering Rust while the originating call still holds its mutex.
-        Promise.resolve()
-          .then(() => {
-            if (!this.closed) {
-              this.binding.batchedTick();
-            }
-          })
-          .catch(() => {
-            // Ignore callback failures from deferred ticks.
-          });
+        // Avoid re-entering Rust while the originating call still holds its mutex,
+        // and give timers/rendering a turn between repeated tick requests.
+        setTimeout(() => {
+          if (!this.closed) {
+            this.binding.batchedTick();
+          }
+        }, 0);
       },
     });
   }

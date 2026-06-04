@@ -51,6 +51,11 @@ export function TestRunnerScreen({ suites }: { suites: Suite[] }) {
                   {r.error}
                 </Text>
               ) : null}
+              {r.status === "running" && r.currentStep ? (
+                <Text testID={`test-progress-${r.slug}`} style={styles.progress}>
+                  {r.currentStep}
+                </Text>
+              ) : null}
             </View>
           </View>
         ))}
@@ -133,6 +138,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   error: { fontSize: 12, color: "#b91c1c", marginTop: 2 },
+  progress: { fontSize: 12, color: "#4b5563", marginTop: 2 },
   bannerPass: { backgroundColor: "#dcfce7", padding: 12, borderRadius: 8 },
   bannerFail: { backgroundColor: "#fee2e2", padding: 12, borderRadius: 8 },
   bannerText: { fontSize: 16, fontWeight: "700", color: "#111827" },
