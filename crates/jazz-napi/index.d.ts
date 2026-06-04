@@ -38,8 +38,6 @@ export declare class NapiRuntime {
   addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string
-  /** Set a client's role ("user", "admin", or "peer"). */
-  setClientRole(clientId: string, role: string): void
   getSchema(): any
   getSchemaHash(): string
   flush(): void

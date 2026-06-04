@@ -18,7 +18,6 @@ function makeFakeRnBinding() {
     insert: vi.fn(),
     query: vi.fn(),
     removeServer: vi.fn(),
-    setClientRole: vi.fn(),
     createSubscription: vi.fn(),
     executeSubscription: vi.fn(),
     subscribe: vi.fn(),

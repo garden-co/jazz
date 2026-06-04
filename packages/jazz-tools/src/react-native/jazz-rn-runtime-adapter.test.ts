@@ -36,7 +36,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onBatchedTickNeeded: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
     removeServer: vi.fn(),
-    setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),

@@ -156,7 +156,6 @@ declare module "jazz-wasm" {
     getSchema(): unknown;
     getSchemaHash(): string;
     close?(): void;
-    setClientRole?(clientId: string, role: string): void;
 
     /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
     static deriveUserId(seedB64: string): string;

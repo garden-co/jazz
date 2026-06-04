@@ -1022,37 +1022,6 @@ impl RnRuntime {
         })
     }
 
-    pub fn set_client_role(&self, client_id: String, role: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("set_client_role", || {
-            use jazz_tools::sync_manager::ClientRole;
-
-            let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
-                message: e.to_string(),
-            })?;
-            let cid = ClientId(uuid);
-
-            let client_role = match role.as_str() {
-                "user" => ClientRole::User,
-                "admin" => ClientRole::Admin,
-                "peer" => ClientRole::Peer,
-                _ => {
-                    return Err(JazzRnError::Runtime {
-                        message: format!(
-                            "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                            role
-                        ),
-                    });
-                }
-            };
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.set_client_role_by_name(cid, client_role);
-            Ok(())
-        })
-    }
-
     // =========================================================================
     // Schema/state access
     // =========================================================================

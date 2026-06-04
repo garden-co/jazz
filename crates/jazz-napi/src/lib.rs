@@ -1194,35 +1194,6 @@ impl NapiRuntime {
         Ok(client_id.0.to_string())
     }
 
-    /// Set a client's role ("user", "admin", or "peer").
-    #[napi(js_name = "setClientRole")]
-    pub fn set_client_role(&self, client_id: String, role: String) -> napi::Result<()> {
-        use jazz_tools::sync_manager::ClientRole;
-
-        let uuid = uuid::Uuid::parse_str(&client_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let client_role = match role.as_str() {
-            "user" => ClientRole::User,
-            "admin" => ClientRole::Admin,
-            "peer" => ClientRole::Peer,
-            _ => {
-                return Err(napi::Error::from_reason(format!(
-                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                    role
-                )));
-            }
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.set_client_role_by_name(cid, client_role);
-        Ok(())
-    }
-
     // =========================================================================
     // Schema Access
     // =========================================================================

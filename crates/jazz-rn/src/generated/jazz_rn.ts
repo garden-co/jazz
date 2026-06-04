@@ -850,7 +850,6 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : Promise<string>;
   removeServer() /*throws*/ : void;
   sealBatch(batchId: string) /*throws*/ : void;
-  setClientRole(clientId: string, role: string) /*throws*/ : void;
   subscribe(
     queryJson: string,
     callback: SubscriptionCallback,
@@ -1333,23 +1332,6 @@ export class RnRuntime
     );
   }
 
-  setClientRole(clientId: string, role: string): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterString.lower(clientId),
-          FfiConverterString.lower(role),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
   subscribe(
     queryJson: string,
     callback: SubscriptionCallback,
@@ -1799,14 +1781,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_seal_batch'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role() !==
-    4241
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_set_client_role'
     );
   }
   if (
