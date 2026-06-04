@@ -41,7 +41,7 @@
   <h2>The Band</h2>
 
   {#each participants.current ?? [] as participant (participant.id)}
-    {@const isMe = participant.$createdBy === session?.user_id}
+    {@const isMe = participant.$createdBy === session.current?.user_id}
     <div class="participant" class:is-me={isMe}>
       <div
         class="avatar"

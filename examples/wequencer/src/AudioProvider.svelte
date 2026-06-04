@@ -287,11 +287,11 @@
 
 	// Join the jam as a participant (only after the jam row exists locally)
 	$effect(() => {
-		if (!session) return;
+		if (!session.current) return;
 		const jamRows = jam.current ?? [];
 		if (jamRows.length === 0) return;
 
-		db.all(app.participants.where({ jamId: jamId, $createdBy: session.user_id })).then((existing) => {
+		db.all(app.participants.where({ jamId: jamId, $createdBy: session.current.user_id })).then((existing) => {
 			if (existing.length === 0) {
 				const name = localStorage.getItem('wequencer-name') ?? getRandomName();
 				localStorage.setItem('wequencer-name', name);

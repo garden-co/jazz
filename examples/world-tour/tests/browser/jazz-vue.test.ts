@@ -242,7 +242,8 @@ describe("world-tour Jazz + Vue integration", () => {
     const SessionProbe = defineComponent({
       setup() {
         const session = useSession();
-        return () => h("p", { id: "session" }, session ? `id:${session.user_id}` : "anonymous");
+        return () =>
+          h("p", { id: "session" }, session.value ? `id:${session.value.user_id}` : "anonymous");
       },
     });
 
