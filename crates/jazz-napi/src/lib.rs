@@ -649,7 +649,7 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let ((object_id, row_values), batch_id) = core
             .insert_with_id(&table, values.0, object_id, write_context.as_ref())
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
+            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
             core.current_schema(),
