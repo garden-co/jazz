@@ -21,7 +21,6 @@ export type JazzRnNormalizedError = Error & {
 };
 
 export interface JazzRnRuntimeBinding {
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
   connect(url: string, authJson: string): void;
@@ -60,7 +59,6 @@ export interface JazzRnRuntimeBinding {
     sessionJson: string | undefined,
     tier: string | undefined,
   ): Promise<string>;
-  removeServer(): void;
   createSubscription(
     queryJson: string,
     sessionJson: string | undefined,
@@ -431,16 +429,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
-  }
-
-  addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {
-    if (this.closed) return;
-    this.binding.addServer();
-  }
-
-  removeServer(): void {
-    if (this.closed) return;
-    this.binding.removeServer();
   }
 
   getSchema(): any {

@@ -32,7 +32,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{DurabilityTier, QueryPropagation, ServerId, SyncManager};
+use jazz_tools::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
 
 // ============================================================================
 // Errors
@@ -380,7 +380,6 @@ fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Arc<Mutex<RnCoreType>>,
-    upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
 }
@@ -463,7 +462,6 @@ impl RnRuntime {
 
             Ok(Arc::new(Self {
                 core,
-                upstream_server_id: Mutex::new(None),
                 declared_schema,
                 subscription_queries: Mutex::new(HashMap::new()),
             }))
@@ -959,59 +957,6 @@ impl RnRuntime {
     }
 
     // =========================================================================
-    // Sync
-    // =========================================================================
-
-    pub fn add_server(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("add_server", || {
-            let server_id = {
-                let mut slot =
-                    self.upstream_server_id
-                        .lock()
-                        .map_err(|_| JazzRnError::Internal {
-                            message: "lock poisoned".into(),
-                        })?;
-                if let Some(server_id) = *slot {
-                    server_id
-                } else {
-                    let server_id = ServerId::new();
-                    *slot = Some(server_id);
-                    server_id
-                }
-            };
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.remove_server(server_id);
-            core.add_server(server_id);
-            Ok(())
-        })
-    }
-
-    pub fn remove_server(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("remove_server", || {
-            let server_id = {
-                let slot = self
-                    .upstream_server_id
-                    .lock()
-                    .map_err(|_| JazzRnError::Internal {
-                        message: "lock poisoned".into(),
-                    })?;
-                *slot
-            };
-            let Some(server_id) = server_id else {
-                return Ok(());
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.remove_server(server_id);
-            Ok(())
-        })
-    }
-
-    // =========================================================================
     // Schema/state access
     // =========================================================================
 
@@ -1128,8 +1073,14 @@ impl RnRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     pub fn disconnect(&self) {
         if let Ok(mut core) = self.core.lock() {
-            if let Some(handle) = core.transport() {
+            let server_id = if let Some(handle) = core.transport() {
                 handle.disconnect();
+                Some(handle.server_id)
+            } else {
+                None
+            };
+            if let Some(server_id) = server_id {
+                core.remove_server(server_id);
             }
             core.clear_transport();
         }

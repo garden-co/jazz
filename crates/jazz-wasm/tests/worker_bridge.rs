@@ -659,7 +659,7 @@ async fn forwarder_routes_server_bound_through_callback() {
     bridge
         .set_server_payload_forwarder(Some(forwarder.as_ref().unchecked_ref::<Function>().clone()));
 
-    // `replayServerConnection` re-runs `removeServer` + `addServer`, which
+    // `replayServerConnection` re-runs internal server detach/attach, which
     // emits catalogue server-bound traffic through the runtime's outbox.
     // With the forwarder installed, those payloads land in `captured`.
     let posted_count_before = fw.posted.borrow().len();

@@ -5,7 +5,6 @@ import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-valu
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
   const sealBatch = overrides.sealBatch ?? vi.fn();
   return {
-    addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
     connect: vi.fn(),
@@ -34,7 +33,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     ),
     onBatchedTickNeeded: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
-    removeServer: vi.fn(),
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
@@ -45,6 +43,16 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 }
 
 describe("JazzRnRuntimeAdapter", () => {
+  it("does not expose runtime-only server connection hooks", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+    const serverAttachHook = "add" + "Server";
+    const serverDetachHook = "remove" + "Server";
+
+    expect(serverAttachHook in adapter).toBe(false);
+    expect(serverDetachHook in adapter).toBe(false);
+  });
+
   it("defers batched tick execution to avoid re-entrancy", async () => {
     const binding = createBinding();
     new JazzRnRuntimeAdapter(binding, {});
@@ -451,16 +459,14 @@ describe("JazzRnRuntimeAdapter", () => {
     expect((error as Error & { cause?: unknown }).cause).toBe(schemaError);
   });
 
-  it("no-ops lifecycle hooks after close", () => {
+  it("no-ops close after close", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     adapter.close();
-    adapter.addServer();
-    adapter.removeServer();
+    adapter.close();
 
-    expect(binding.addServer).not.toHaveBeenCalled();
-    expect(binding.removeServer).not.toHaveBeenCalled();
+    expect(binding.close).toHaveBeenCalledTimes(1);
   });
 
   it("forwards updateAuth JSON payload to the native binding", () => {

@@ -12,7 +12,7 @@
 //!
 //!   1. open runtime, register clients
 //!   2. attach outbox target (worker side)
-//!   3. bootstrap catalogue (`addServer` / `removeServer` while flag is set)
+//!   3. bootstrap catalogue (internal server attach/detach while flag is set)
 //!   4. connect upstream (install Rust transport handle)
 //!   5. drain pending pre-init messages (sync, peer-sync, control)
 //!   6. sync retained local batch records + queue rejected-batch replay
@@ -298,7 +298,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //     payloads so the main runtime owns delivery and acknowledgement.
     replay_startup_mutation_errors(&runtime_rc);
 
-    // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
+    // 5. Bootstrap catalogue (internal server attach/detach forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
     //    Must run BEFORE upstream connect — once a transport handle is
     //    installed, server-bound outbox traffic routes there and bypasses

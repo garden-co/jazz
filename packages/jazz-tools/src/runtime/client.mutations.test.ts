@@ -84,8 +84,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     executeSubscription: () => {},
     unsubscribe: () => {},
     sealBatch: vi.fn(),
-    addServer: () => {},
-    removeServer: () => {},
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };

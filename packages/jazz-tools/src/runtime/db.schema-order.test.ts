@@ -168,8 +168,6 @@ describe("Db runtime schema order", () => {
       createSubscription: vi.fn(),
       executeSubscription: vi.fn(),
       unsubscribe: vi.fn(),
-      addServer: vi.fn(),
-      removeServer: vi.fn(),
     };
     const client = JazzClient.connectWithRuntime(runtime as any, {
       appId: "client-backed-schema-order",

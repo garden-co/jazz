@@ -659,7 +659,7 @@ struct RustOutboxSenderInner {
     server_payload_forwarder: RefCell<Option<Function>>,
     /// Worker-side: while `true`, server-bound `isCatalogue=true` outbox
     /// entries are queued into the main-bound sync batch. Set by the TS
-    /// shim around the `addServer/removeServer` bootstrap dance.
+    /// shim around the internal server attach/detach bootstrap dance.
     bootstrap_catalogue_forwarding: RefCell<bool>,
     /// Encoding mode for **server-bound** payloads. Client-bound payloads
     /// are always binary postcard. JSON when `false`, postcard when `true`.
@@ -1033,7 +1033,7 @@ pub struct WasmRuntime {
     pub(crate) core: Rc<RefCell<WasmCoreType>>,
     pub(crate) mutation_error_emit_scheduled: Rc<RefCell<bool>>,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
-    /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
+    /// clone and mutates `upstream_server_id` via internal server attach helpers
     /// — those updates must be visible through the original handle too.
     pub(crate) upstream_server_id: Rc<std::cell::Cell<Option<ServerId>>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
@@ -1113,9 +1113,10 @@ impl WasmRuntime {
             // unsequenced in-process hop.
             *through_seq = 0;
         }
-        let server_id = self.upstream_server_id.get().ok_or_else(|| {
-            JsError::new("No upstream server registered; call addServer() before sync delivery")
-        })?;
+        let server_id = self
+            .upstream_server_id
+            .get()
+            .ok_or_else(|| JsError::new("No upstream server registered before sync delivery"))?;
 
         let entry = InboxEntry {
             source: Source::Server(server_id),
@@ -1167,6 +1168,58 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.add_client(client_id, None);
         client_id.0.to_string()
+    }
+
+    /// Add a server connection.
+    ///
+    /// After adding the server, immediately flushes the outbox so that
+    /// catalogue sync messages (from queue_full_sync_to_server) are sent
+    /// before the call returns, rather than being deferred to a microtask.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> Result<(), JsError> {
+        let _span = info_span!("wasm::add_server", tier = self.tier_label).entered();
+        let transport_server_id = self
+            .core
+            .borrow()
+            .transport()
+            .map(|handle| handle.server_id);
+        let server_id = match self.upstream_server_id.get() {
+            Some(id) => id,
+            None => {
+                let id = match transport_server_id {
+                    Some(id) => id,
+                    None => ServerId::new(),
+                };
+                self.upstream_server_id.set(Some(id));
+                id
+            }
+        };
+        let mut core = self.core.borrow_mut();
+        // Re-attach semantics: remove existing upstream edge then add again so
+        // replay/full-sync runs on every successful reconnect.
+        core.remove_server(server_id);
+        core.add_server_with_catalogue_state_hash(
+            server_id,
+            server_catalogue_state_hash.as_deref(),
+        );
+        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
+        core.batched_tick();
+        Ok(())
+    }
+
+    /// Remove the current upstream server connection.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn remove_server(&self) {
+        let mut core = self.core.borrow_mut();
+        if let Some(server_id) = self.upstream_server_id.get() {
+            core.remove_server(server_id);
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1318,6 +1371,7 @@ impl WasmRuntime {
         self.core.borrow_mut().batched_tick();
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn parse_optional_sequence(sequence: Option<f64>) -> Result<Option<u64>, JsError> {
         let Some(sequence) = sequence else {
             return Ok(None);
@@ -1863,62 +1917,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
 
         Ok(())
-    }
-
-    // =========================================================================
-    // Sync Operations
-    // =========================================================================
-
-    /// Add a server connection.
-    ///
-    /// After adding the server, immediately flushes the outbox so that
-    /// catalogue sync messages (from queue_full_sync_to_server) are sent
-    /// before the call returns, rather than being deferred to a microtask.
-    #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(
-        &self,
-        server_catalogue_state_hash: Option<String>,
-        next_sync_seq: Option<f64>,
-    ) -> Result<(), JsError> {
-        let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
-        let transport_server_id = self
-            .core
-            .borrow()
-            .transport()
-            .map(|handle| handle.server_id);
-        let server_id = match self.upstream_server_id.get() {
-            Some(id) => id,
-            None => {
-                let id = match transport_server_id {
-                    Some(id) => id,
-                    None => ServerId::new(),
-                };
-                self.upstream_server_id.set(Some(id));
-                id
-            }
-        };
-        let mut core = self.core.borrow_mut();
-        // Re-attach semantics: remove existing upstream edge then add again so
-        // replay/full-sync runs on every successful reconnect.
-        core.remove_server(server_id);
-        core.add_server_with_catalogue_state_hash(
-            server_id,
-            server_catalogue_state_hash.as_deref(),
-        );
-        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
-            core.set_next_expected_server_sequence(server_id, next_sync_seq);
-        }
-        core.batched_tick();
-        Ok(())
-    }
-
-    /// Remove the current upstream server connection.
-    #[wasm_bindgen(js_name = removeServer)]
-    pub fn remove_server(&self) {
-        let mut core = self.core.borrow_mut();
-        if let Some(server_id) = self.upstream_server_id.get() {
-            core.remove_server(server_id);
-        }
     }
 
     // =========================================================================
