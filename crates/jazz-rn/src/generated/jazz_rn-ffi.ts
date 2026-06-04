@@ -147,12 +147,6 @@ interface NativeModuleInterface {
     batchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
-    ptr: bigint,
-    clientId: Uint8Array,
-    role: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
     ptr: bigint,
     queryJson: Uint8Array,
@@ -375,7 +369,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;

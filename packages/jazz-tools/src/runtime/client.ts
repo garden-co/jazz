@@ -103,7 +103,6 @@ export interface Runtime {
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
-  setClientRole?(client_id: string, role: string): void;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect?(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */

@@ -1158,6 +1158,32 @@ impl WasmRuntime {
         self.core.borrow_mut().park_sync_message(entry);
         Ok(())
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
+        use jazz_tools::sync_manager::ClientRole;
+
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let client_role = match role {
+            "user" => ClientRole::User,
+            "admin" => ClientRole::Admin,
+            "peer" => ClientRole::Peer,
+            _ => {
+                return Err(JsError::new(&format!(
+                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
+                    role
+                )));
+            }
+        };
+
+        self.core
+            .borrow_mut()
+            .set_client_role_by_name(cid, client_role);
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -1894,37 +1920,6 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.add_client(client_id, None);
         client_id.0.to_string()
-    }
-
-    /// Set a client's role.
-    ///
-    /// # Arguments
-    /// * `client_id` - UUID string of the client
-    /// * `role` - One of "user", "admin", "peer"
-    #[wasm_bindgen(js_name = setClientRole)]
-    pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
-        use jazz_tools::sync_manager::ClientRole;
-
-        let uuid = uuid::Uuid::parse_str(client_id)
-            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let client_role = match role {
-            "user" => ClientRole::User,
-            "admin" => ClientRole::Admin,
-            "peer" => ClientRole::Peer,
-            _ => {
-                return Err(JsError::new(&format!(
-                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                    role
-                )));
-            }
-        };
-
-        self.core
-            .borrow_mut()
-            .set_client_role_by_name(cid, client_role);
-        Ok(())
     }
 
     // =========================================================================
