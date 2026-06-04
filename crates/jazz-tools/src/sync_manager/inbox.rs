@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::{BatchFate, BatchMode, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, BatchMode, SealedBatchSubmission, TransactionVisibility};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -62,7 +62,12 @@ impl SyncManager {
         }
 
         if submission.batch_digest
-            != SealedBatchSubmission::compute_batch_digest(&submission.members)
+            != SealedBatchSubmission::compute_batch_digest(
+                submission.visible_at,
+                &submission.members,
+            )
+            && submission.batch_digest
+                != SealedBatchSubmission::compute_legacy_batch_digest(&submission.members)
         {
             return Err(BatchFate::Rejected {
                 batch_id: submission.batch_id,
@@ -430,6 +435,7 @@ impl SyncManager {
                 RowState::VisibleTransactional => BatchFate::AcceptedTransaction {
                     batch_id: row.batch_id,
                     confirmed_tier,
+                    visible_at: TransactionVisibility::from_confirmed_tier(confirmed_tier),
                 },
                 RowState::StagingPending | RowState::Superseded | RowState::Rejected => {
                     unreachable!("row.state.is_visible() guarded non-visible states")
@@ -571,6 +577,7 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
+        include_all_known_rows: bool,
     ) -> Vec<(String, StoredRowBatch)> {
         let mut object_ids = HashSet::new();
         for scope in self.remote_query_scopes.values() {
@@ -583,6 +590,20 @@ impl SyncManager {
         }
         if let Ok(Some(submission)) = storage.load_sealed_batch_submission(batch_id) {
             object_ids.extend(submission.members.iter().map(|member| member.object_id));
+        }
+        if include_all_known_rows {
+            match storage.scan_row_locators() {
+                Ok(row_locators) => {
+                    object_ids.extend(row_locators.into_iter().map(|(object_id, _)| object_id));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?batch_id,
+                        %error,
+                        "failed to scan known rows while applying transaction fate"
+                    );
+                }
+            }
         }
         self.transactional_batch_rows(
             storage,
@@ -660,53 +681,64 @@ impl SyncManager {
                     });
                 }
             }
-            BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
-                for (_table, row) in batch_rows {
-                    let row_id = row.row_id;
-                    let branch_name = BranchName::new(&row.branch);
-                    let accepted_row = row.accepted_transaction_output(*confirmed_tier);
-                    let applied =
-                        apply_row_batch(storage, row_id, &branch_name, accepted_row.clone(), &[])
-                            .ok();
+            BatchFate::AcceptedTransaction {
+                confirmed_tier,
+                visible_at,
+                ..
+            } => {
+                if visible_at.is_satisfied_by(*confirmed_tier) {
+                    for (_table, row) in batch_rows {
+                        let row_id = row.row_id;
+                        let branch_name = BranchName::new(&row.branch);
+                        let accepted_row = row.accepted_transaction_output(*confirmed_tier);
+                        let applied = apply_row_batch(
+                            storage,
+                            row_id,
+                            &branch_name,
+                            accepted_row.clone(),
+                            &[],
+                        )
+                        .ok();
 
-                    let metadata = storage
-                        .load_row_locator(row_id)
-                        .ok()
-                        .flatten()
-                        .map(|locator| metadata_from_row_locator(&locator));
+                        let metadata = storage
+                            .load_row_locator(row_id)
+                            .ok()
+                            .flatten()
+                            .map(|locator| metadata_from_row_locator(&locator));
 
-                    if let Some(metadata) = metadata {
-                        for server_id in &server_ids {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Server(*server_id),
-                                payload: SyncPayload::RowBatchNeeded {
-                                    metadata: Some(RowMetadata {
-                                        id: row_id,
-                                        metadata: metadata.clone(),
-                                    }),
-                                    row: accepted_row.clone(),
-                                },
-                            });
+                        if let Some(metadata) = metadata {
+                            for server_id in &server_ids {
+                                self.outbox.push(OutboxEntry {
+                                    destination: Destination::Server(*server_id),
+                                    payload: SyncPayload::RowBatchNeeded {
+                                        metadata: Some(RowMetadata {
+                                            id: row_id,
+                                            metadata: metadata.clone(),
+                                        }),
+                                        row: accepted_row.clone(),
+                                    },
+                                });
+                            }
                         }
-                    }
 
-                    if let Some(applied) = applied
-                        && let Some(update) = applied.visibility_change
-                    {
-                        self.pending_row_visibility_changes.push(update);
-                        if let Some(client_id) = origin_client_id {
-                            self.forward_update_to_clients_except_with_storage(
-                                storage,
-                                row_id,
-                                branch_name,
-                                client_id,
-                            );
-                        } else {
-                            self.forward_update_to_clients_with_storage(
-                                storage,
-                                row_id,
-                                branch_name,
-                            );
+                        if let Some(applied) = applied
+                            && let Some(update) = applied.visibility_change
+                        {
+                            self.pending_row_visibility_changes.push(update);
+                            if let Some(client_id) = origin_client_id {
+                                self.forward_update_to_clients_except_with_storage(
+                                    storage,
+                                    row_id,
+                                    branch_name,
+                                    client_id,
+                                );
+                            } else {
+                                self.forward_update_to_clients_with_storage(
+                                    storage,
+                                    row_id,
+                                    branch_name,
+                                );
+                            }
                         }
                     }
                 }
@@ -821,6 +853,16 @@ impl SyncManager {
         self.apply_transactional_batch_fate_to_rows(storage, origin_client_id, &fate, batch_rows);
     }
 
+    fn sealed_submission_prunable_after_fate(fate: &BatchFate) -> bool {
+        match fate {
+            BatchFate::Rejected { .. } | BatchFate::DurableDirect { .. } => true,
+            BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
+                *confirmed_tier >= DurabilityTier::GlobalServer
+            }
+            BatchFate::Missing { .. } => false,
+        }
+    }
+
     fn declared_rows_for_submission(
         submission: &SealedBatchSubmission,
         batch_rows: &[(String, StoredRowBatch)],
@@ -887,6 +929,7 @@ impl SyncManager {
                         SealedBatchMode::Transactional => BatchFate::AcceptedTransaction {
                             batch_id,
                             confirmed_tier,
+                            visible_at: submission.visible_at,
                         },
                     };
                     let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
@@ -905,7 +948,7 @@ impl SyncManager {
             }
         };
 
-        if !matches!(fate, BatchFate::Missing { .. })
+        if Self::sealed_submission_prunable_after_fate(&fate)
             && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
         {
             tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
@@ -962,11 +1005,7 @@ impl SyncManager {
                     // Continue into seal validation so this authority can promote a
                     // previously local direct fate to its own durability tier.
                 } else {
-                    let should_prune_submission = matches!(fate, BatchFate::Rejected { .. })
-                        || fate
-                            .confirmed_tier()
-                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
-                    let prune_result = if should_prune_submission {
+                    let prune_result = if Self::sealed_submission_prunable_after_fate(&fate) {
                         storage.delete_sealed_batch_submission(batch_id)
                     } else {
                         Ok(())
@@ -1073,7 +1112,41 @@ impl SyncManager {
         };
 
         let mut recovered_any = false;
+        let highest_authority_tier = self.my_tiers.iter().copied().max();
         for submission in submissions {
+            match storage.load_authoritative_batch_fate(submission.batch_id) {
+                Ok(Some(fate)) => {
+                    let should_revalidate_for_promotion = matches!(
+                        fate,
+                        BatchFate::DurableDirect { confirmed_tier, .. }
+                            if highest_authority_tier
+                                .is_some_and(|authority_tier| confirmed_tier < authority_tier)
+                    );
+                    if !should_revalidate_for_promotion {
+                        if Self::sealed_submission_prunable_after_fate(&fate)
+                            && let Err(error) =
+                                storage.delete_sealed_batch_submission(submission.batch_id)
+                        {
+                            tracing::warn!(
+                                batch_id = ?submission.batch_id,
+                                %error,
+                                "failed to delete sealed batch submission"
+                            );
+                        }
+                        continue;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        batch_id = ?submission.batch_id,
+                        %error,
+                        "failed to load authoritative batch fate during sealed batch recovery"
+                    );
+                    continue;
+                }
+            }
+
             let batch_rows = self.transactional_batch_rows(
                 storage,
                 submission.batch_id,
@@ -1191,8 +1264,17 @@ impl SyncManager {
                     Ok(_) => self.pending_batch_fates.push(fate.clone()),
                     Err(_) => return,
                 }
-                if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
-                    let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
+                if let BatchFate::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier,
+                    visible_at,
+                } = fate
+                {
+                    let rows = self.known_transactional_batch_rows_for_fate(
+                        storage,
+                        batch_id,
+                        visible_at.is_satisfied_by(confirmed_tier),
+                    );
                     self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
                 }
                 let interested = self.interested_clients_for_batch_fate(&fate);

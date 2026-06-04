@@ -37,6 +37,7 @@ use smolset::SmolSet;
 
 use crate::batch_fate::{
     BatchFate, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
+    TransactionVisibility,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -1627,6 +1628,49 @@ fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescripto
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
         ColumnDescriptor::new("mode", ColumnType::Text),
+        ColumnDescriptor::new(
+            "visible_at",
+            ColumnType::Enum {
+                variants: vec![
+                    "immediate".to_string(),
+                    "local".to_string(),
+                    "edge".to_string(),
+                    "global".to_string(),
+                ],
+            },
+        ),
+        ColumnDescriptor::new("target_branch_ord", ColumnType::Integer),
+        ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
+        ColumnDescriptor::new(
+            "members",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+        ColumnDescriptor::new(
+            "captured_frontier",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("branch_ord", ColumnType::Integer),
+                        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+                    ])),
+                }),
+            },
+        ),
+    ])
+}
+
+fn legacy_sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("target_branch_ord", ColumnType::Integer),
         ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
@@ -1656,6 +1700,39 @@ fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescripto
 }
 
 fn local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
+    RowDescriptor::new(vec![
+        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
+        ColumnDescriptor::new(
+            "visible_at",
+            ColumnType::Enum {
+                variants: vec![
+                    "immediate".to_string(),
+                    "local".to_string(),
+                    "edge".to_string(),
+                    "global".to_string(),
+                ],
+            },
+        ),
+        ColumnDescriptor::new("sealed", ColumnType::Boolean),
+        ColumnDescriptor::new(
+            "members",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                        ColumnDescriptor::new("table_name", ColumnType::Text),
+                        ColumnDescriptor::new("branch_ord", ColumnType::Integer),
+                        ColumnDescriptor::new("schema_hash", ColumnType::Bytea),
+                        ColumnDescriptor::new("row_digest", ColumnType::Bytea),
+                    ])),
+                }),
+            },
+        ),
+    ])
+}
+
+fn legacy_local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
         ColumnDescriptor::new("mode", ColumnType::Text),
@@ -2476,6 +2553,7 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         &[
             Value::BatchId(*submission.batch_id.as_bytes()),
             Value::Text(encode_batch_mode(submission.mode).to_string()),
+            Value::Text(submission.visible_at.as_str().to_string()),
             Value::Integer(target_branch_ord),
             Value::Bytea(submission.batch_digest.0.to_vec()),
             Value::Array(member_values),
@@ -2489,11 +2567,25 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     storage: &H,
     bytes: &[u8],
 ) -> Result<SealedBatchSubmission, StorageError> {
-    let values = decode_row(
+    let (values, legacy) = match decode_row(
         &sealed_batch_submission_storage_descriptor_with_branch_ords(),
         bytes,
-    )
-    .map_err(|err| StorageError::IoError(format!("decode sealed batch submission: {err}")))?;
+    ) {
+        Ok(values) => (values, false),
+        Err(new_error) => {
+            let legacy_values = decode_row(
+                &legacy_sealed_batch_submission_storage_descriptor_with_branch_ords(),
+                bytes,
+            )
+            .map_err(|legacy_error| {
+                StorageError::IoError(format!(
+                    "decode sealed batch submission: {new_error}; legacy decode also failed: {legacy_error}"
+                ))
+            })?;
+            (legacy_values, true)
+        }
+    };
+    let visible_at_value;
     let [
         batch_id,
         mode,
@@ -2501,11 +2593,53 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         batch_digest,
         members,
         captured_frontier,
-    ] = values.as_slice()
-    else {
-        return Err(StorageError::IoError(
-            "unexpected sealed batch submission shape".to_string(),
-        ));
+    ] = if legacy {
+        let [
+            batch_id,
+            mode,
+            target_branch_ord,
+            batch_digest,
+            members,
+            captured_frontier,
+        ] = values.as_slice()
+        else {
+            return Err(StorageError::IoError(
+                "unexpected legacy sealed batch submission shape".to_string(),
+            ));
+        };
+        visible_at_value = None;
+        [
+            batch_id,
+            mode,
+            target_branch_ord,
+            batch_digest,
+            members,
+            captured_frontier,
+        ]
+    } else {
+        let [
+            batch_id,
+            mode,
+            visible_at,
+            target_branch_ord,
+            batch_digest,
+            members,
+            captured_frontier,
+        ] = values.as_slice()
+        else {
+            return Err(StorageError::IoError(
+                "unexpected sealed batch submission shape".to_string(),
+            ));
+        };
+        visible_at_value = Some(visible_at);
+        [
+            batch_id,
+            mode,
+            target_branch_ord,
+            batch_digest,
+            members,
+            captured_frontier,
+        ]
     };
 
     let batch_id = decode_storage_batch_id_value(batch_id, "decode sealed batch id")?;
@@ -2514,6 +2648,17 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         other => {
             return Err(StorageError::IoError(format!(
                 "expected sealed batch mode text, got {other:?}"
+            )));
+        }
+    };
+    let visible_at = match visible_at_value {
+        Some(Value::Text(raw)) => {
+            TransactionVisibility::parse(raw).map_err(StorageError::IoError)?
+        }
+        Some(Value::Null) | None => TransactionVisibility::legacy_default_for_batch_mode(mode),
+        Some(other) => {
+            return Err(StorageError::IoError(format!(
+                "expected sealed transaction visibility text, got {other:?}"
             )));
         }
     };
@@ -2666,19 +2811,23 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         }
     };
 
-    let submission = SealedBatchSubmission::new(
+    let mut submission = SealedBatchSubmission::new_with_visibility(
         batch_id,
         mode,
+        visible_at,
         target_branch_name,
         members,
         captured_frontier,
     );
-    if submission.batch_digest != batch_digest {
+    let legacy_batch_digest =
+        SealedBatchSubmission::compute_legacy_batch_digest(&submission.members);
+    if submission.batch_digest != batch_digest && legacy_batch_digest != batch_digest {
         return Err(StorageError::IoError(format!(
             "sealed batch digest mismatch: expected {batch_digest:?}, computed {:?}",
             submission.batch_digest
         )));
     }
+    submission.batch_digest = batch_digest;
     Ok(submission)
 }
 
@@ -2691,6 +2840,7 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         &[
             Value::BatchId(*record.batch_id.as_bytes()),
             Value::Text(encode_batch_mode(record.mode).to_string()),
+            Value::Text(record.visible_at.as_str().to_string()),
             Value::Boolean(record.sealed),
             Value::Array(
                 record
@@ -2720,15 +2870,41 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     storage: &H,
     bytes: &[u8],
 ) -> Result<LocalBatchRecord, StorageError> {
-    let values = decode_row(
+    let (values, legacy) = match decode_row(
         &local_batch_record_storage_descriptor_with_branch_ords(),
         bytes,
-    )
-    .map_err(|err| StorageError::IoError(format!("decode local batch record: {err}")))?;
-    let [batch_id, mode, sealed, members] = values.as_slice() else {
-        return Err(StorageError::IoError(
-            "unexpected local batch record shape".to_string(),
-        ));
+    ) {
+        Ok(values) => (values, false),
+        Err(new_error) => {
+            let legacy_values = decode_row(
+                &legacy_local_batch_record_storage_descriptor_with_branch_ords(),
+                bytes,
+            )
+            .map_err(|legacy_error| {
+                StorageError::IoError(format!(
+                    "decode local batch record: {new_error}; legacy decode also failed: {legacy_error}"
+                ))
+            })?;
+            (legacy_values, true)
+        }
+    };
+    let visible_at_value;
+    let [batch_id, mode, sealed, members] = if legacy {
+        let [batch_id, mode, sealed, members] = values.as_slice() else {
+            return Err(StorageError::IoError(
+                "unexpected legacy local batch record shape".to_string(),
+            ));
+        };
+        visible_at_value = None;
+        [batch_id, mode, sealed, members]
+    } else {
+        let [batch_id, mode, visible_at, sealed, members] = values.as_slice() else {
+            return Err(StorageError::IoError(
+                "unexpected local batch record shape".to_string(),
+            ));
+        };
+        visible_at_value = Some(visible_at);
+        [batch_id, mode, sealed, members]
     };
 
     let batch_id = decode_storage_batch_id_value(batch_id, "decode local batch record batch id")?;
@@ -2737,6 +2913,17 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         other => {
             return Err(StorageError::IoError(format!(
                 "expected batch mode text, got {other:?}"
+            )));
+        }
+    };
+    let visible_at = match visible_at_value {
+        Some(Value::Text(raw)) => {
+            TransactionVisibility::parse(raw).map_err(StorageError::IoError)?
+        }
+        Some(Value::Null) | None => TransactionVisibility::legacy_default_for_batch_mode(mode),
+        Some(other) => {
+            return Err(StorageError::IoError(format!(
+                "expected local batch record visibility text, got {other:?}"
             )));
         }
     };
@@ -2852,6 +3039,7 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     Ok(LocalBatchRecord {
         batch_id,
         mode,
+        visible_at,
         sealed,
         members,
         sealed_submission: storage.load_sealed_batch_submission(batch_id)?,

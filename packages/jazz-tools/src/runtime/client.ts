@@ -199,6 +199,13 @@ interface TimestampOverrideOptions {
 }
 
 export type BatchMode = "direct" | "transactional";
+export type TransactionVisibility = LocalUpdatesMode;
+
+type TransactionVisibleAt = "immediate" | DurabilityTier;
+
+export interface TransactionOptions {
+  visibility?: TransactionVisibility;
+}
 
 export type BatchFate =
   | {
@@ -220,11 +227,13 @@ export type BatchFate =
       kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
+      visibleAt?: TransactionVisibility;
     };
 
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
+  visibleAt?: TransactionVisibility;
   sealed: boolean;
   latestSettlement: BatchFate | null;
   encodedRecord?: Uint8Array;
@@ -275,6 +284,7 @@ interface WriteContextPayload {
   updated_at?: number;
   batch_mode?: BatchMode;
   batch_id?: string;
+  visible_at?: TransactionVisibleAt;
   target_branch_name?: string;
 }
 
@@ -329,6 +339,24 @@ export function resolveEffectiveQueryExecutionOptions(
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
   };
+}
+
+export function resolveTransactionVisibleAt(
+  context: Pick<AppContext, "serverUrl" | "driver">,
+  options?: TransactionOptions,
+): TransactionVisibleAt {
+  // Transactions explicitly marked as "immediate" become visible on commit
+  if (options?.visibility === "immediate") {
+    return "immediate";
+  }
+  // If the DB is connected to a server, the transaction becomes visible
+  // once it's accepted by the core server
+  if (context.serverUrl) {
+    return "global";
+  }
+  // For persistent DBs without a server, transactions become visible
+  // once the persistent runtime accepts them
+  return "local";
 }
 
 type RelationIrNode = Record<string, unknown>;
@@ -551,6 +579,7 @@ function shouldFallbackToUpsertUpdate(error: unknown): boolean {
 type BatchWriteContext = {
   batchMode: BatchMode;
   batchId: string;
+  visibleAt?: TransactionVisibleAt;
   targetBranchName: string;
 };
 
@@ -1100,18 +1129,23 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginTransaction(): Transaction {
-    return this.beginTransactionInternal();
+  beginTransaction(options?: TransactionOptions): Transaction {
+    return this.beginTransactionInternal(undefined, undefined, options);
   }
 
   transaction<TResult>(
     callback: (tx: TransactionScope) => Promise<TResult>,
+    options?: TransactionOptions,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => TResult,
+    options?: TransactionOptions,
+  ): WriteResult<TResult>;
   transaction<TResult>(
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+    options?: TransactionOptions,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
+    const transaction = this.beginTransaction(options);
     return runInBatch(transaction, callback, this);
   }
 
@@ -1130,18 +1164,26 @@ export class JazzClient {
     return runInBatch(batch, callback, this);
   }
 
-  private createBatchContext(batchMode: BatchMode): BatchWriteContext {
+  private createBatchContext(
+    batchMode: BatchMode,
+    visibleAt: TransactionVisibleAt,
+  ): BatchWriteContext {
     return {
       batchMode,
       batchId: generateBatchId(),
+      visibleAt,
       targetBranchName: composeTargetBranchName(this.getSchemaContext()),
     };
   }
 
-  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+  beginTransactionInternal(
+    session?: Session,
+    attribution?: string,
+    options?: TransactionOptions,
+  ): Transaction {
     return new Transaction(
       this,
-      this.createBatchContext("transactional"),
+      this.createBatchContext("transactional", resolveTransactionVisibleAt(this.context, options)),
       this.resolveWriteSession(session, attribution),
       attribution,
     );
@@ -1150,7 +1192,7 @@ export class JazzClient {
   beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
-      this.createBatchContext("direct"),
+      this.createBatchContext("direct", "immediate"),
       this.resolveWriteSession(session, attribution),
       attribution,
     );
@@ -1254,6 +1296,7 @@ export class JazzClient {
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
       payload.batch_id = batchContext.batchId;
+      payload.visible_at = batchContext.visibleAt;
       payload.target_branch_name = batchContext.targetBranchName;
     }
     return JSON.stringify(payload);

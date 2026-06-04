@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import { publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
+import { getTestingServerInfo } from "./testing-server.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -111,15 +113,86 @@ describe("db transaction reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
 
-  it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
-    const tx = db.beginTransaction();
+  it("immediate transactions become visible on commit", async () => {
+    const tx = db.beginTransaction({ visibility: "immediate" });
+
     const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
-    const _txResult = tx.commit();
-    // No need to wait in this case, because the Db is not connected to a server
-    // await _txResult.wait({ tier: "global" });
+    tx.commit();
+
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
+  describe("transactions with `deferred` visibility", () => {
+    it("wait for `global` approval on DBs connected to a server", async () => {
+      const { appId, serverUrl, adminSecret } = await getTestingServerInfo(
+        uniqueDbName("db-transaction-reads-global"),
+      );
+      await publishStoredSchema(serverUrl, {
+        appId,
+        adminSecret,
+        schema,
+      });
+      const client = await createDb({
+        appId,
+        driver: { type: "persistent", dbName: uniqueDbName("client") },
+        serverUrl,
+        adminSecret,
+      });
+
+      try {
+        const tx = client.beginTransaction({ visibility: "deferred" });
+
+        const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
+
+        expect(await client.one<Todo>(makeTodoQuery())).toBeNull();
+
+        const result = tx.commit();
+
+        expect(await client.one<Todo>(makeTodoQuery())).toBeNull();
+
+        await result.wait({ tier: "global" });
+
+        expect(await client.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    it("wait for `local` approval on persistent local DBs", async () => {
+      const tx = db.beginTransaction({ visibility: "deferred" });
+
+      const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
+
+      expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+
+      const result = tx.commit();
+
+      // The tx is accepted before the query is performed
+      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+
+      await result.wait({ tier: "local" });
+
+      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+    });
+  });
+
+  it("transactions without explicit visibility are `deferred` transactions", async () => {
+    // The DB is not connected to a server, so txs wait for `local` approval
+    const tx = db.beginTransaction();
+
+    const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+
+    const result = tx.commit();
+
+    // The tx is accepted before the query is performed
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+
+    await result.wait({ tier: "local" });
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });

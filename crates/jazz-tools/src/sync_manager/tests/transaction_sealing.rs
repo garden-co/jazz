@@ -561,6 +561,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
     let BatchFate::AcceptedTransaction {
         batch_id: settled_batch_id,
         confirmed_tier,
+        ..
     } = settlement
     else {
         panic!("expected accepted transactional settlement, got {settlement:?}");
@@ -599,6 +600,7 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
                 fate: BatchFate::AcceptedTransaction {
                     batch_id: changed_batch_id,
                     confirmed_tier: DurabilityTier::Local,
+                    visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
                 },
             },
         } if *id == client_id && *changed_batch_id == batch_id
@@ -873,6 +875,7 @@ fn seal_batch_waits_for_declared_latest_row_batch_before_accepting() {
     let BatchFate::AcceptedTransaction {
         batch_id: settled_batch_id,
         confirmed_tier,
+        ..
     } = settlement
     else {
         panic!("expected accepted transactional settlement, got {settlement:?}");
@@ -1266,6 +1269,7 @@ fn seal_batch_accepts_when_unrelated_family_visible_frontier_changed() {
         Some(BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         })
     );
     let visible = io
@@ -1348,6 +1352,7 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
         Some(BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }) if settled_batch_id == batch_id
     ));
 }
@@ -1516,6 +1521,7 @@ fn seal_batch_accepts_when_transactional_row_parent_frontier_matches() {
         Some(BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }) if settled_batch_id == batch_id
     ));
 }
@@ -1640,6 +1646,7 @@ fn seal_batch_accepts_transactional_insert_when_row_is_not_visible() {
         Some(BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }) if settled_batch_id == batch_id
     ));
 }
@@ -1742,6 +1749,7 @@ fn seal_batch_validates_full_transactional_parent_frontier() {
         Some(BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
+            visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
         }) if settled_batch_id == batch_id
     ));
 }
@@ -1810,6 +1818,7 @@ fn seal_batch_replay_returns_existing_settlement_after_frontier_moves() {
     let accepted_settlement = BatchFate::AcceptedTransaction {
         batch_id,
         confirmed_tier: DurabilityTier::Local,
+        visible_at: TransactionVisibility::Deferred(DurabilityTier::Local),
     };
     assert_eq!(
         io.load_authoritative_batch_fate(batch_id).unwrap(),

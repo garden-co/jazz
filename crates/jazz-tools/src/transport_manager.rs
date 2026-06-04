@@ -7,7 +7,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, SyncPayload};
 use futures::channel::mpsc;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 3;
+pub const SYNC_PROTOCOL_VERSION: u32 = 4;
 const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
 
 pub trait TickNotifier: 'static {

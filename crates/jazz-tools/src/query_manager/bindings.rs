@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
+use crate::batch_fate::{BatchFate, BatchMode, LocalBatchRecord, TransactionVisibility};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -193,6 +193,8 @@ struct WriteContextPayloadWire {
     #[serde(default)]
     batch_id: Option<String>,
     #[serde(default)]
+    visible_at: Option<String>,
+    #[serde(default)]
     target_branch_name: Option<String>,
 }
 
@@ -215,6 +217,11 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
             .as_deref()
             .map(parse_batch_id_input)
             .transpose()?;
+        let visible_at = value
+            .visible_at
+            .as_deref()
+            .map(TransactionVisibility::parse)
+            .transpose()?;
 
         Ok(WriteContext {
             session: value.session,
@@ -222,6 +229,7 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
             updated_at: value.updated_at,
             batch_mode,
             batch_id,
+            visible_at,
             target_branch_name: value.target_branch_name,
         })
     }
@@ -273,6 +281,10 @@ fn serialize_batch_mode(mode: BatchMode) -> &'static str {
     }
 }
 
+pub fn serialize_transaction_visibility(visibility: TransactionVisibility) -> &'static str {
+    visibility.as_str()
+}
+
 pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
     match settlement {
         BatchFate::Rejected {
@@ -296,10 +308,12 @@ pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
         BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier,
+            visible_at,
         } => json!({
             "kind": "acceptedTransaction",
             "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleAt": serialize_transaction_visibility(*visible_at),
         }),
         BatchFate::Missing { batch_id } => json!({
             "kind": "missing",
@@ -312,6 +326,7 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
     json!({
         "batchId": record.batch_id.to_string(),
         "mode": serialize_batch_mode(record.mode),
+        "visibleAt": serialize_transaction_visibility(record.visible_at),
         "sealed": record.sealed,
         "latestSettlement": record.latest_fate.as_ref().map(serialize_batch_fate),
     })
@@ -463,13 +478,14 @@ mod tests {
         parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
         query_rows_can_be_schema_aligned,
     };
-    use crate::batch_fate::BatchMode;
+    use crate::batch_fate::{BatchMode, TransactionVisibility};
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use crate::sync_manager::DurabilityTier;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -698,5 +714,26 @@ mod tests {
         assert_eq!(context.batch_mode(), BatchMode::Transactional);
         assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
         assert!(context.batch_id().is_some());
+    }
+
+    #[test]
+    fn write_context_accepts_transaction_visibility() {
+        let context = parse_write_context_input(Some(
+            r#"{
+                "batch_mode": "transactional",
+                "batch_id": "0196721ac2617f10a4bebbc7f7ffdb3f",
+                "visible_at": "global",
+                "target_branch_name": "dev-111111111111-main"
+            }"#,
+        ))
+        .expect("parse write context")
+        .expect("write context present");
+
+        assert_eq!(
+            context.visible_at(),
+            Some(TransactionVisibility::Deferred(
+                DurabilityTier::GlobalServer
+            ))
+        );
     }
 }

@@ -69,8 +69,9 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         appId: config.appId,
         schema,
         driver: config.driver,
-        // In worker mode, don't connect to server directly — worker handles it.
-        serverUrl: hasWorker ? undefined : config.serverUrl,
+        // In worker mode, the main thread's client is not connected to the server directly,
+        // but rather through the worker.
+        serverUrl: config.serverUrl,
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,

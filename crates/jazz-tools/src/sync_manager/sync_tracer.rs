@@ -959,6 +959,7 @@ impl<'a> Normalizer<'a> {
             crate::batch_fate::BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier,
+                ..
             } => {
                 format!(
                     "accepted_transaction batch:{} tier:{confirmed_tier:?}",
@@ -1118,6 +1119,7 @@ fn format_settlement_details(
         crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier,
+            ..
         } => {
             format!(
                 "accepted_transaction batch:{} tier:{confirmed_tier:?}",
