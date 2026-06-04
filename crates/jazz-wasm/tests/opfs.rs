@@ -64,7 +64,7 @@ async fn cleanup_opfs(db_name: &str) {
 fn insert_todo(runtime: &WasmRuntime, title: &str, completed: bool) -> String {
     let wasm_values = vec![Value::Text(title.to_string()), Value::Boolean(completed)];
     let values = serde_wasm_bindgen::to_value(&wasm_values).unwrap();
-    let result = runtime.insert("todos", values, None).unwrap();
+    let result = runtime.insert("todos", values, None, None).unwrap();
     js_sys::Reflect::get(&result, &wasm_bindgen::JsValue::from_str("id"))
         .unwrap()
         .as_string()
@@ -250,7 +250,7 @@ async fn opfs_runtime_core_e2e() {
     let mut update_map = std::collections::HashMap::new();
     update_map.insert("completed".to_string(), Value::Boolean(true));
     let update_values = serde_wasm_bindgen::to_value(&update_map).unwrap();
-    runtime.update(&id, update_values).unwrap();
+    runtime.update(&id, update_values, None).unwrap();
 
     // Query → verify updated value
     let rows = query_todos(&runtime).await;
@@ -260,7 +260,7 @@ async fn opfs_runtime_core_e2e() {
     assert_eq!(values[1]["value"], true);
 
     // Delete
-    runtime.delete(&id).unwrap();
+    runtime.delete(&id, None).unwrap();
 
     // Query → verify 0 rows
     let rows = query_todos(&runtime).await;
