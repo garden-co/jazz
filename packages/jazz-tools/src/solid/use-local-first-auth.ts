@@ -19,7 +19,7 @@ export type UseLocalFirstAuth = ReturnType<typeof useLocalFirstAuth>;
 export function useLocalFirstAuth(store: Accessor<AuthSecretStore> = () => browserAuthSecretStore) {
   const [secret, setSecret] = createSignal<string | null>(null);
   const [isLoading, setIsLoading] = createSignal(true);
-  const [error, setError] = createSignal<Error | undefined>(undefined);
+  const [error, setError] = createSignal<Error | null>(null);
 
   createEffect(() => {
     let disposed = false;
@@ -42,7 +42,7 @@ export function useLocalFirstAuth(store: Accessor<AuthSecretStore> = () => brows
         }
         setSecret(resolved);
         setIsLoading(false);
-        setError(undefined);
+        setError(null);
       } catch (err) {
         if (stale()) {
           return;

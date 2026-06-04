@@ -52,7 +52,7 @@ describe("solid/useLocalFirstAuth", () => {
 
       await vi.waitFor(() => expect(auth.isLoading).toBe(false));
       expect(typeof auth.secret).toBe("string");
-      expect(auth.error).toBeUndefined();
+      expect(auth.error).toBeNull();
     } finally {
       dispose?.();
     }
