@@ -316,7 +316,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-13: useAllSuspense awaits the entry promise then exposes data", async () => {
+  it("VU-ALL-13: useAllSuspense exposes data and error but omits loading", async () => {
     const alice = { id: "1", name: "Alice" };
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "fulfilled" as const, data: [alice] },
@@ -328,7 +328,7 @@ describe("vue/useAll", () => {
     const result = await scope.run(() => useAllSuspense(makeQuery()))!;
 
     expect(result.data.value).toEqual([alice]);
-    expect(result.loading.value).toBe(false);
+    expect("loading" in result).toBe(false);
 
     scope.stop();
   });
