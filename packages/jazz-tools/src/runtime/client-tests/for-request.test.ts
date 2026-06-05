@@ -176,20 +176,16 @@ describe("JazzClient runtime helpers", () => {
 
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
-      insertWithSession: (_table, _values, contextJson) => {
+      insert: (_table, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
-      restore: () => mockRow("00000000-0000-0000-0000-000000000001"),
-      restoreWithSession: (_table, _objectId, _values, contextJson) => {
+      restore: (_table, _objectId, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
       update: () => mockMutation(),
-      updateWithSession: () => mockMutation(),
       delete: () => mockMutation(),
-      deleteWithSession: () => mockMutation(),
       query: async (
         queryJson: string,
         sessionJson?: string | null,
@@ -208,10 +204,6 @@ describe("JazzClient runtime helpers", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "00000000-0000-0000-0000-000000000001",
       getSchema: () => ({}),
       getSchemaHash: () => "schema-hash",
     };

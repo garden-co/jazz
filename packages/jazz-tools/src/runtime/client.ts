@@ -37,32 +37,27 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
-  insertWithSession?(
+  insert(
     table: string,
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
-  restore(table: string, object_id: string, values: InsertValues): DirectInsertResult;
-  restoreWithSession?(
+  restore(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
   ): DirectInsertResult;
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult;
-  updateWithSession?(
+  update(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  delete(object_id: string): DirectMutationResult;
-  deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
+  delete(object_id: string, write_context_json?: string | null): DirectMutationResult;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
-  loadBatchFate(batch_id: string): BatchFate | null;
   discardLocalBatch?(batch_id: string): boolean;
   query(
     query_json: string,
@@ -85,7 +80,6 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   /**
    * Construct a Rust-owned worker bridge attached to this runtime. Returns
    * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
@@ -95,9 +89,6 @@ export interface Runtime {
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-  removeServer(): void;
-  addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
    */
@@ -105,8 +96,6 @@ export interface Runtime {
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
-  setClientRole?(client_id: string, role: string): void;
-  onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect?(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */
@@ -1156,10 +1145,6 @@ export class JazzClient {
     );
   }
 
-  batchFate(batchId: string): BatchFate | null {
-    return this.runtime.loadBatchFate(batchId);
-  }
-
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
   }
@@ -1267,19 +1252,6 @@ export class JazzClient {
       return undefined;
     }
     return this.resolvedSession ?? undefined;
-  }
-
-  private requireSessionWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      "insertWithSession" | "restoreWithSession" | "updateWithSession" | "deleteWithSession"
-    >,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
   }
 
   private alignRowValuesToDeclaredSchema(
@@ -1582,36 +1554,13 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const row =
-      effectiveSession ||
-      attribution !== undefined ||
-      batchContext ||
-      options?.updatedAt !== undefined
-        ? options?.id
-          ? this.requireSessionWriteMethod("insertWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options.updatedAt,
-              ),
-              options.id,
-            )
-          : this.requireSessionWriteMethod("insertWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options?.updatedAt,
-              ),
-            )
-        : options?.id
-          ? this.runtime.insert(table, values, options.id)
-          : this.runtime.insert(table, values);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      options?.updatedAt,
+    );
+    const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(
@@ -1636,23 +1585,13 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const row =
-      effectiveSession ||
-      attribution !== undefined ||
-      batchContext ||
-      options?.updatedAt !== undefined
-        ? this.requireSessionWriteMethod("restoreWithSession")(
-            table,
-            objectId,
-            values,
-            this.encodeWriteContext(
-              effectiveSession,
-              attribution,
-              batchContext,
-              options?.updatedAt,
-            ),
-          )
-        : this.runtime.restore(table, objectId, values);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      options?.updatedAt,
+    );
+    const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(
@@ -1792,14 +1731,13 @@ export class JazzClient {
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      return this.requireSessionWriteMethod("updateWithSession")(
-        objectId,
-        updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-      );
-    }
-    return this.runtime.update(objectId, updates);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      updatedAt,
+    );
+    return this.runtime.update(objectId, updates, writeContext);
   }
 
   /**
@@ -1835,13 +1773,13 @@ export class JazzClient {
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      return this.requireSessionWriteMethod("deleteWithSession")(
-        objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-      );
-    }
-    return this.runtime.delete(objectId);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      updatedAt,
+    );
+    return this.runtime.delete(objectId, writeContext);
   }
 
   /**

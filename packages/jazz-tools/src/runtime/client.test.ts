@@ -17,17 +17,17 @@ function makeFakeRuntime() {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
-    insert: vi.fn(),
-    insertWithSession: vi.fn((table: string, values: any, writeContextJson?: string | null) => {
-      const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
-      return {
-        id: "todo-batch-query",
-        values: [],
-        batchId: writeContext.batch_id ?? "batch-query",
-      };
-    }),
-    restore: vi.fn(),
-    restoreWithSession: vi.fn(
+    insert: vi.fn(
+      (table: string, values: any, writeContextJson?: string | null, objectId?: string | null) => {
+        const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+        return {
+          id: objectId ?? "todo-batch-query",
+          values: [],
+          batchId: writeContext.batch_id ?? "batch-query",
+        };
+      },
+    ),
+    restore: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
         const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
         return {
@@ -37,8 +37,8 @@ function makeFakeRuntime() {
         };
       },
     ),
-    update: vi.fn(),
-    delete: vi.fn(),
+    update: vi.fn(() => ({ batchId: "batch-update" })),
+    delete: vi.fn(() => ({ batchId: "batch-delete" })),
     query:
       vi.fn<
         (
@@ -69,18 +69,11 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
-      () => null,
-    ),
     onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
       mutationErrorCallback = callback;
     }),
     sealBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
-    onSyncMessageReceived: vi.fn(),
-    addServer: vi.fn(),
-    removeServer: vi.fn(),
-    addClient: vi.fn().mockReturnValue("client-id"),
     returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),

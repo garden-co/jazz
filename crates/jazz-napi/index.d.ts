@@ -16,15 +16,10 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
-  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
-  update(objectId: string, values: any): any
-  updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
-  delete(objectId: string): any
-  deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
-  restore(table: string, objectId: string, values: Record<string, unknown>): any
-  restoreWithSession(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
-  loadBatchFate(batchId: string): any | null
+  insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
+  update(objectId: string, values: any, writeContextJson?: string | undefined | null): any
+  delete(objectId: string, writeContextJson?: string | undefined | null): any
+  restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void
   discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void
@@ -36,14 +31,6 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
-  /** Called by JS when a sync message arrives from a client (not a server). */
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
-  addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
-  removeServer(): void
-  addClient(): string
-  /** Set a client's role ("user", "admin", or "peer"). */
-  setClientRole(clientId: string, role: string): void
   getSchema(): any
   getSchemaHash(): string
   flush(): void

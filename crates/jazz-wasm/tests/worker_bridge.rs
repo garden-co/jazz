@@ -659,7 +659,7 @@ async fn forwarder_routes_server_bound_through_callback() {
     bridge
         .set_server_payload_forwarder(Some(forwarder.as_ref().unchecked_ref::<Function>().clone()));
 
-    // `replayServerConnection` re-runs `removeServer` + `addServer`, which
+    // `replayServerConnection` re-runs internal server detach/attach, which
     // emits catalogue server-bound traffic through the runtime's outbox.
     // With the forwarder installed, those payloads land in `captured`.
     let posted_count_before = fw.posted.borrow().len();
@@ -788,7 +788,7 @@ fn auth_failed_fires_listener() {
 }
 
 #[wasm_bindgen_test]
-fn local_batch_records_sync_hydrates_main_runtime() {
+async fn local_batch_records_sync_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
     let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
@@ -810,42 +810,13 @@ fn local_batch_records_sync_hydrates_main_runtime() {
         encoded_records: vec![ByteBuf::from(encoded_record)],
     });
 
-    let fate = runtime
-        .load_batch_fate(&batch_id.to_string())
-        .expect("load fate");
-    let kind = Reflect::get(&fate, &"kind".into())
-        .ok()
-        .and_then(|value| value.as_string());
-    let tier = Reflect::get(&fate, &"confirmedTier".into())
-        .ok()
-        .and_then(|value| value.as_string());
-    assert_eq!(kind.as_deref(), Some("durableDirect"));
-    assert_eq!(tier.as_deref(), Some("global"));
-}
-
-#[wasm_bindgen_test]
-fn mutation_error_replay_hydrates_main_runtime() {
-    let fw = FakeWorker::new();
-    let runtime = fresh_runtime();
-    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
-        .expect("attach");
-    let batch_id = "00000000000000000000000000000009";
-
-    fw.emit_wire(&WorkerToMainWire::MutationErrorReplay {
-        batch_id: batch_id.into(),
-        code: "rejected".into(),
-        reason: "boom".into(),
-    });
-
-    let fate = runtime.load_batch_fate(batch_id).expect("load fate");
-    let kind = Reflect::get(&fate, &"kind".into())
-        .ok()
-        .and_then(|value| value.as_string());
-    let code = Reflect::get(&fate, &"code".into())
-        .ok()
-        .and_then(|value| value.as_string());
-    assert_eq!(kind.as_deref(), Some("rejected"));
-    assert_eq!(code.as_deref(), Some("rejected"));
+    JsFuture::from(
+        runtime
+            .wait_for_batch(&batch_id.to_string(), "global")
+            .expect("wait for hydrated batch"),
+    )
+    .await
+    .expect("hydrated durable batch should satisfy a public wait");
 }
 
 // =============================================================================

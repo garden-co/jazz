@@ -12,7 +12,7 @@
 //!
 //!   1. open runtime, register clients
 //!   2. attach outbox target (worker side)
-//!   3. bootstrap catalogue (`addServer` / `removeServer` while flag is set)
+//!   3. bootstrap catalogue (internal server attach/detach while flag is set)
 //!   4. connect upstream (install Rust transport handle)
 //!   5. drain pending pre-init messages (sync, peer-sync, control)
 //!   6. sync retained local batch records + queue rejected-batch replay
@@ -298,7 +298,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //     payloads so the main runtime owns delivery and acknowledgement.
     replay_startup_mutation_errors(&runtime_rc);
 
-    // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
+    // 5. Bootstrap catalogue (internal server attach/detach forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
     //    Must run BEFORE upstream connect — once a transport handle is
     //    installed, server-bound outbox traffic routes there and bypasses
@@ -567,10 +567,8 @@ fn process_main_message(msg: MainToWorkerMessage) {
             };
             for payload in payloads {
                 let arr = Uint8Array::from(payload.as_ref());
-                if let Err(err) =
-                    rt.on_sync_message_received_from_client(&main_client_id, arr.into())
-                {
-                    tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
+                if let Err(err) = rt.receive_sync_message_from_client(&main_client_id, arr.into()) {
+                    tracing::warn!("receive sync message from main client: {err:?}");
                 }
             }
             rt.batched_tick();
@@ -593,9 +591,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
                     });
                     for payload in payloads {
                         let arr = Uint8Array::from(payload.as_ref());
-                        if let Err(err) =
-                            rt.on_sync_message_received_from_client(&client, arr.into())
-                        {
+                        if let Err(err) = rt.receive_sync_message_from_client(&client, arr.into()) {
                             tracing::warn!("peer-sync route: {err:?}");
                         }
                     }

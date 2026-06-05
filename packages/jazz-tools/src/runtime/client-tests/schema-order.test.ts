@@ -25,10 +25,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -76,10 +72,15 @@ describe("JazzClient schema order", () => {
       done: { type: "Boolean", value: false },
     });
 
-    expect(insert).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Buy milk" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(insert).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Buy milk" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+      undefined,
+    );
   });
 
   it("aligns create result rows from declared schema context without runtime schema hashing", async () => {
@@ -111,10 +112,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema,
       getSchemaHash,
     };
@@ -176,10 +173,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -273,10 +266,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -385,10 +374,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -534,10 +519,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
@@ -665,10 +646,6 @@ describe("JazzClient schema order", () => {
         onUpdate = callback as (delta: unknown) => void;
       },
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
       getSchema: () =>
         new Map([
           [
