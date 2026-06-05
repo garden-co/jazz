@@ -364,6 +364,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
 
+    /// Batch ids sealed without any local writes. These have no local record,
+    /// sealed submission, or remote fate; waits should resolve immediately.
+    completed_empty_batches: HashSet<BatchId>,
+
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
 
@@ -473,6 +477,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             rejected_batch_acknowledged_callback: None,
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
+            completed_empty_batches: HashSet::new(),
             tier_label: "unknown",
             synthesize_direct_write_fate: true,
             sync_tracer: None,

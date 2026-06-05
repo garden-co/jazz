@@ -316,9 +316,9 @@ describe("JazzClient transactions", () => {
 
     const committed = client.beginTransaction().commit();
 
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
+    expect(runtime.sealBatch).toHaveBeenCalledWith(committed.batchId);
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
   });
 
@@ -360,9 +360,9 @@ describe("JazzClient transactions", () => {
 
     const committed = client.beginBatch().commit();
 
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
+    expect(runtime.sealBatch).toHaveBeenCalledWith(committed.batchId);
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
   });
 

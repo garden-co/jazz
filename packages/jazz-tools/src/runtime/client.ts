@@ -811,10 +811,7 @@ abstract class BatchHandleBase {
 
   commit(): WriteHandle {
     this.ensureActive();
-    const handle =
-      this.touchedRowIds.size === 0
-        ? this.client.completeEmptyBatch(this.batchId())
-        : this.client.sealBatch(this.batchId());
+    const handle = this.client.sealBatch(this.batchId());
     this.status = "committed";
     return handle;
   }
@@ -934,11 +931,6 @@ export class JazzClient {
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
-  /**
-   * Keeps track of batches/transactions that were completed without issuing any writes to the runtime.
-   * Necessary to resolve {@link waitForBatch} promises on these batches.
-   */
-  private readonly completedEmptyBatchIds = new Set<string>();
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
   private cachedRuntimeSchema: WasmSchema | null = null;
@@ -1078,11 +1070,6 @@ export class JazzClient {
 
   sealBatch(batchId: string): WriteHandle {
     this.runtime.sealBatch(batchId);
-    return new WriteHandle(batchId, this);
-  }
-
-  completeEmptyBatch(batchId: string): WriteHandle {
-    this.completedEmptyBatchIds.add(batchId);
     return new WriteHandle(batchId, this);
   }
 
@@ -1847,9 +1834,6 @@ export class JazzClient {
   }
 
   async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
-    if (this.completedEmptyBatchIds.has(batchId)) {
-      return;
-    }
     try {
       await this.runtime.waitForBatch(batchId, tier);
     } catch (error) {
