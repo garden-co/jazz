@@ -44,8 +44,7 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_batch_fate, serialize_mutation_error_event,
-    subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -64,9 +63,7 @@ use jazz_tools::server::{
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
-};
+use jazz_tools::sync_manager::{DurabilityTier, SyncManager};
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
@@ -250,23 +247,6 @@ fn open_sqlite_storage(data_path: &str) -> napi::Result<SqliteStorage> {
 // ============================================================================
 fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     parse_binding_tier(tier).map_err(napi::Error::from_reason)
-}
-
-fn parse_optional_sequence(sequence: Option<f64>) -> napi::Result<Option<u64>> {
-    let Some(sequence) = sequence else {
-        return Ok(None);
-    };
-    if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
-        return Err(napi::Error::from_reason(
-            "Invalid stream sequence: expected a non-negative integer",
-        ));
-    }
-    if sequence > u64::MAX as f64 {
-        return Err(napi::Error::from_reason(
-            "Invalid stream sequence: value exceeds u64 range",
-        ));
-    }
-    Ok(Some(sequence as u64))
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
@@ -585,7 +565,6 @@ fn build_napi_runtime(
 
     Ok(NapiRuntime {
         core: core_arc,
-        upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
     })
@@ -598,7 +577,6 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
-    upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
 }
@@ -659,43 +637,12 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .insert_with_id(&table, values.0, object_id, None)
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
-
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "insertWithSession")]
-    pub fn insert_with_session(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let write_context = parse_write_context_json(write_context_json)?;
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
         let mut core = self
             .core
             .lock()
@@ -722,31 +669,6 @@ impl NapiRuntime {
         &self,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-    ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let updates = convert_updates(values.0);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .update(oid, updates, None)
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
-
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "updateWithSession")]
-    pub fn update_with_session(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let uuid = uuid::Uuid::parse_str(&object_id)
@@ -770,26 +692,7 @@ impl NapiRuntime {
     }
 
     #[napi(js_name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .delete(oid, None)
-            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
-
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "deleteWithSession")]
-    pub fn delete_with_session(
+    pub fn delete_row(
         &self,
         object_id: String,
         write_context_json: Option<String>,
@@ -814,38 +717,6 @@ impl NapiRuntime {
 
     #[napi]
     pub fn restore(
-        &self,
-        table: String,
-        object_id: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-    ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .restore(&table, oid, values.0, None)
-            .map_err(|e| napi::Error::from_reason(format!("Restore failed: {:?}", e)))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
-
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
-    }
-
-    #[napi(js_name = "restoreWithSession")]
-    pub fn restore_with_session(
         &self,
         table: String,
         object_id: String,
@@ -876,23 +747,6 @@ impl NapiRuntime {
             "values": row_values,
             "batchId": batch_id.to_string(),
         }))
-    }
-
-    #[napi(js_name = "loadBatchFate", ts_return_type = "any | null")]
-    pub fn load_batch_fate(&self, batch_id: String) -> napi::Result<serde_json::Value> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let fate = core
-            .batch_fate(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Load batch fate failed: {e}")))?;
-
-        Ok(match fate {
-            Some(fate) => serialize_batch_fate(&fate),
-            None => serde_json::Value::Null,
-        })
     }
 
     #[napi(
@@ -1145,176 +999,6 @@ impl NapiRuntime {
     }
 
     // =========================================================================
-    // Sync Operations
-    // =========================================================================
-
-    #[napi(js_name = "onSyncMessageReceived")]
-    pub fn on_sync_message_received(
-        &self,
-        message_json: String,
-        sequence: Option<f64>,
-    ) -> napi::Result<()> {
-        let mut payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
-        let sequence = parse_optional_sequence(sequence)?;
-        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
-            (sequence.as_ref(), &mut payload)
-        {
-            // Local worker->main delivery is ordered and lossless, so the
-            // upstream stream watermark cannot be interpreted against this
-            // unsequenced in-process hop.
-            *through_seq = 0;
-        }
-        let server_id = (*self
-            .upstream_server_id
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?)
-        .ok_or_else(|| {
-            napi::Error::from_reason(
-                "No upstream server registered; call addServer() before sync delivery",
-            )
-        })?;
-
-        let entry = InboxEntry {
-            source: Source::Server(server_id),
-            payload,
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        if let Some(sequence) = sequence {
-            core.park_sync_message_with_sequence(entry, sequence);
-        } else {
-            core.park_sync_message(entry);
-        }
-        Ok(())
-    }
-
-    /// Called by JS when a sync message arrives from a client (not a server).
-    #[napi(js_name = "onSyncMessageReceivedFromClient")]
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: String,
-        message_json: String,
-    ) -> napi::Result<()> {
-        let uuid = uuid::Uuid::parse_str(&client_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
-
-        let entry = InboxEntry {
-            source: Source::Client(cid),
-            payload,
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.park_sync_message(entry);
-        Ok(())
-    }
-
-    #[napi(js_name = "addServer")]
-    pub fn add_server(
-        &self,
-        server_catalogue_state_hash: Option<String>,
-        next_sync_seq: Option<f64>,
-    ) -> napi::Result<()> {
-        let next_sync_seq = parse_optional_sequence(next_sync_seq)?;
-        let server_id = {
-            let mut slot = self
-                .upstream_server_id
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            if let Some(server_id) = *slot {
-                server_id
-            } else {
-                let server_id = ServerId::new();
-                *slot = Some(server_id);
-                server_id
-            }
-        };
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        // Re-attach semantics: remove existing upstream edge then add again so
-        // replay/full-sync runs on every successful reconnect.
-        core.remove_server(server_id);
-        core.add_server_with_catalogue_state_hash(
-            server_id,
-            server_catalogue_state_hash.as_deref(),
-        );
-        if let Some(next_sync_seq) = next_sync_seq {
-            core.set_next_expected_server_sequence(server_id, next_sync_seq);
-        }
-        Ok(())
-    }
-
-    #[napi(js_name = "removeServer")]
-    pub fn remove_server(&self) -> napi::Result<()> {
-        let Some(server_id) = *self
-            .upstream_server_id
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-        else {
-            return Ok(());
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.remove_server(server_id);
-        Ok(())
-    }
-
-    #[napi(js_name = "addClient")]
-    pub fn add_client(&self) -> napi::Result<String> {
-        let client_id = ClientId::new();
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.add_client(client_id, None);
-        Ok(client_id.0.to_string())
-    }
-
-    /// Set a client's role ("user", "admin", or "peer").
-    #[napi(js_name = "setClientRole")]
-    pub fn set_client_role(&self, client_id: String, role: String) -> napi::Result<()> {
-        use jazz_tools::sync_manager::ClientRole;
-
-        let uuid = uuid::Uuid::parse_str(&client_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let client_role = match role.as_str() {
-            "user" => ClientRole::User,
-            "admin" => ClientRole::Admin,
-            "peer" => ClientRole::Peer,
-            _ => {
-                return Err(napi::Error::from_reason(format!(
-                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                    role
-                )));
-            }
-        };
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.set_client_role_by_name(cid, client_role);
-        Ok(())
-    }
-
-    // =========================================================================
     // Schema Access
     // =========================================================================
 
@@ -1450,11 +1134,13 @@ impl NapiRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     #[napi]
     pub fn disconnect(&self) {
-        let server_id = self.upstream_server_id.lock().ok().and_then(|slot| *slot);
         if let Ok(mut core) = self.core.lock() {
-            if let Some(handle) = core.transport() {
+            let server_id = if let Some(handle) = core.transport() {
                 handle.disconnect();
-            }
+                Some(handle.server_id)
+            } else {
+                None
+            };
             if let Some(server_id) = server_id {
                 core.remove_server(server_id);
             }

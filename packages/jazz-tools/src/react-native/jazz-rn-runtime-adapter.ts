@@ -1,6 +1,5 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
-  BatchFate,
   DirectInsertResult,
   DirectMutationResult,
   MutationErrorEvent,
@@ -22,33 +21,27 @@ export type JazzRnNormalizedError = Error & {
 };
 
 export interface JazzRnRuntimeBinding {
-  addClient(): string;
-  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
   connect(url: string, authJson: string): void;
   disconnect(): void;
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
-  delete_(objectId: string): string;
-  deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
+  delete_(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
-  insert(table: string, valuesJson: string, objectId: string | undefined): string;
-  insertWithSession?(
+  insert(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
-  restore(table: string, objectId: string, valuesJson: string): string;
-  restoreWithSession?(
+  restore(
     table: string,
     objectId: string,
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
-  loadBatchFate(batchId: string): string | null | undefined;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
@@ -58,15 +51,11 @@ export interface JazzRnRuntimeBinding {
         }
       | undefined,
   ): void;
-  onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
   query(
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
   ): Promise<string>;
-  removeServer(): void;
-  setClientRole(clientId: string, role: string): void;
   createSubscription(
     queryJson: string,
     sessionJson: string | undefined,
@@ -80,12 +69,7 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
-  update(objectId: string, valuesJson: string): string;
-  updateWithSession?(
-    objectId: string,
-    valuesJson: string,
-    writeContextJson: string | undefined,
-  ): string;
+  update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
   sealBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
@@ -179,41 +163,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  private requireWriteContextMethod<
-    T extends
-      | "insertWithSession"
-      | "restoreWithSession"
-      | "updateWithSession"
-      | "deleteWithSession",
-  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
-    const runtimeMethod = this.binding[method];
-    if (!runtimeMethod) {
-      throw new Error(`${method} is not supported by this RN runtime binding`);
-    }
-    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
-  }
-
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
-    try {
-      const rowJson = this.binding.insert(
-        table,
-        encodeFFIRecordToJson(values),
-        object_id ?? undefined,
-      );
-      return JSON.parse(rowJson) as DirectInsertResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  insertWithSession(
+  insert(
     table: string,
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult {
     try {
-      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+      const rowJson = this.binding.insert(
         table,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
@@ -225,23 +182,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  restore(table: string, object_id: string, values: InsertValues): DirectInsertResult {
-    try {
-      const rowJson = this.binding.restore(table, object_id, encodeFFIRecordToJson(values));
-      return JSON.parse(rowJson) as DirectInsertResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  restoreWithSession(
+  restore(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
   ): DirectInsertResult {
     try {
-      const rowJson = this.requireWriteContextMethod("restoreWithSession")(
+      const rowJson = this.binding.restore(
         table,
         object_id,
         encodeFFIRecordToJson(values),
@@ -253,22 +201,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult {
-    try {
-      const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  updateWithSession(
+  update(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult {
     try {
-      const resultJson = this.requireWriteContextMethod("updateWithSession")(
+      const resultJson = this.binding.update(
         object_id,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
@@ -279,31 +218,10 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  delete(object_id: string): DirectMutationResult {
+  delete(object_id: string, write_context_json?: string | null): DirectMutationResult {
     try {
-      const resultJson = this.binding.delete_(object_id);
+      const resultJson = this.binding.delete_(object_id, write_context_json ?? undefined);
       return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  deleteWithSession(object_id: string, write_context_json?: string | null): DirectMutationResult {
-    try {
-      const resultJson = this.requireWriteContextMethod("deleteWithSession")(
-        object_id,
-        write_context_json ?? undefined,
-      );
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  loadBatchFate(batch_id: string): BatchFate | null {
-    try {
-      const fateJson = this.binding.loadBatchFate(batch_id);
-      return fateJson ? (JSON.parse(fateJson) as BatchFate) : null;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -395,11 +313,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  onSyncMessageReceived(message_json: string, seq?: number | null): void {
-    if (this.closed) return;
-    this.binding.onSyncMessageReceived(message_json, seq);
-  }
-
   // No outbox-target attachment on RN — server sync is handled by the
   // Rust-owned WebSocket transport (runtime.connect()), and there is no
   // worker `postMessage` channel.
@@ -453,35 +366,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {
-    if (this.closed) return;
-    this.binding.addServer();
-  }
-
-  removeServer(): void {
-    if (this.closed) return;
-    this.binding.removeServer();
-  }
-
-  addClient(): string {
-    return this.binding.addClient();
-  }
-
   getSchema(): any {
     return this.schema;
   }
 
   getSchemaHash(): string {
     return this.binding.getSchemaHash();
-  }
-
-  setClientRole(client_id: string, role: string): void {
-    this.binding.setClientRole(client_id, role);
-  }
-
-  onSyncMessageReceivedFromClient(client_id: string, message_json: string): void {
-    if (this.closed) return;
-    this.binding.onSyncMessageReceivedFromClient(client_id, message_json);
   }
 
   close(): void {

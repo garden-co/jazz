@@ -103,25 +103,23 @@ declare module "jazz-wasm" {
     insert(
       table: string,
       values: InsertValues,
+      writeContextJson?: string | null,
       objectId?: string | null,
     ): { id: string; values: any[]; batchId: string };
-    insertWithSession(
+    restore(
       table: string,
+      objectId: string,
       values: InsertValues,
-      sessionJson?: string | null,
-      objectId?: string | null,
+      writeContextJson?: string | null,
     ): { id: string; values: any[]; batchId: string };
-    update(objectId: string, values: unknown): { batchId: string };
-    updateWithSession(
+    update(
       objectId: string,
       values: unknown,
-      sessionJson?: string | null,
+      writeContextJson?: string | null,
     ): { batchId: string };
-    delete(objectId: string): { batchId: string };
-    deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    delete(objectId: string, writeContextJson?: string | null): { batchId: string };
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
-    loadBatchFate(batchId: string): BatchFate | null;
     replayBatchRejection(batchId: string, code: string, reason: string): void;
     discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
@@ -147,19 +145,13 @@ declare module "jazz-wasm" {
       optionsJson?: string | null,
     ): number;
     unsubscribe(handle: number): void;
-    onSyncMessageReceived(messageJson: string, seq?: number | null): void;
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
-    addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
-    removeServer(): void;
     batchedTick?(): void;
-    addClient(): string;
     getSchema(): unknown;
     getSchemaHash(): string;
     close?(): void;
-    setClientRole?(clientId: string, role: string): void;
-    onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;
 
     /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
     static deriveUserId(seedB64: string): string;
