@@ -1,0 +1,36 @@
+---
+title: Overview
+description: The frameworks Jazz supports, with a side-by-side API reference for each binding.
+---
+
+Jazz ships first-class bindings for every major frontend framework, plus a low-level client for
+plain TypeScript. Each has its own Quickstart and Reference in this section.
+
+## Supported frameworks
+
+- [React](/docs/reference/supported-frameworks/react/quickstart)&hairsp;—&hairsp;`jazz-tools/react`
+- [React Native / Expo](/docs/reference/supported-frameworks/expo/quickstart)&hairsp;—&hairsp;`jazz-tools/react-native`, plus `jazz-tools/expo` for Expo's secure-store auth
+- [Svelte](/docs/reference/supported-frameworks/svelte/quickstart)&hairsp;—&hairsp;`jazz-tools/svelte`
+- [Vue](/docs/reference/supported-frameworks/vue/quickstart)&hairsp;—&hairsp;`jazz-tools/vue`
+- [Solid](/docs/reference/supported-frameworks/solid/quickstart)&hairsp;—&hairsp;`jazz-tools/solid`
+- [TypeScript](/docs/reference/supported-frameworks/typescript/quickstart)&hairsp;—&hairsp;the low-level `jazz-tools` client, with no framework bindings
+
+Want to build a binding for a framework that isn't here yet? Come say hello in
+[our Discord](https://discord.com/channels/1139617727565271160/1466883461397614755)&hairsp;—&hairsp;we're
+happy to help you get started.
+
+## API equivalents
+
+The reactive bindings share the same shape across frameworks. Plain TypeScript uses the low-level
+`createDb` client instead&hairsp;—&hairsp;see its
+[Reference](/docs/reference/supported-frameworks/typescript/reference). For the full behaviour of
+each, see [Reading Data](/docs/reading/queries), [Writing Data](/docs/writing/writing-data), and
+[Sessions](/docs/auth/sessions).
+
+| Concept            | [React / Expo](/docs/reference/supported-frameworks/react/reference) | [Vue](/docs/reference/supported-frameworks/vue/reference) | [Svelte](/docs/reference/supported-frameworks/svelte/reference) | [Solid](/docs/reference/supported-frameworks/solid/reference) |
+| ------------------ | -------------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
+| Provider           | `<JazzProvider config={config}>`                                     | `<JazzProvider :client="client">`                         | `<JazzSvelteProvider {client}>`                                 | `<JazzProvider client={...}>`                                 |
+| Query subscription | `useAll(query)`                                                      | `useAll(query)`                                           | `new QuerySubscription(query)`                                  | `useAll(() => ({ query }))`                                   |
+| DB access          | `useDb()`                                                            | `useDb()`                                                 | `getDb()`                                                       | `useDb()`                                                     |
+| Session            | `useSession()`                                                       | `useSession()`                                            | `getSession()`                                                  | `useSession()`                                                |
+| Client creation    | `createJazzClient(config)`                                           | `createJazzClient(config)`                                | `createJazzClient(config)`                                      | `createSolidJazzClient(...)`                                  |

@@ -3,7 +3,6 @@
   "pages": [
     "where-operators",
     "durability-tiers",
-    "framework-patterns",
     "examples",
     "inspector",
     "mcp",

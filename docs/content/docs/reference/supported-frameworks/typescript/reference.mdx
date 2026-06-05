@@ -1,0 +1,58 @@
+---
+title: Reference
+description: Plain TypeScript reference — the low-level Jazz client API with no framework bindings.
+---
+
+Plain TypeScript uses the low-level client directly. There is no provider or hooks: you create a
+`Db` with `createDb`, then read, subscribe, and write through it. See
+[Overview](/docs/reference/supported-frameworks/overview) for the cross-framework API table.
+
+## Client creation
+
+`createDb` returns a `Db` handle. Pass an `appId`, and a `secret` for
+[local-first auth](/docs/auth/local-first-auth) (omit it for anonymous, read-only mode).
+
+<include cwd lang="ts" meta='title="src/main.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#setup-ts
+</include>
+
+## Reading
+
+Run a one-shot query with `db.all` / `db.one`, or subscribe with `db.subscribeAll`. See
+[Reading Data](/docs/reading/queries).
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
+</include>
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
+</include>
+
+## Writing
+
+Insert, update, and delete through the `Db` handle. See
+[Writing Data](/docs/writing/writing-data).
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+</include>
+
+## Sessions and identity
+
+Read the current session and user ID with `db.getAuthState()`, and react to changes with
+`db.onAuthChanged`. See [Sessions](/docs/auth/sessions).
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-hook
+</include>
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user-id
+</include>
+
+## Local-first auth
+
+Plain TypeScript has no auth hook: read or create the secret directly with `browserAuthSecretStore`
+and pass it to `createDb`. See [Local-first auth](/docs/auth/local-first-auth) for the full flows,
+including recovery passphrase and passkey backup.
