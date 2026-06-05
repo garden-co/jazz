@@ -800,6 +800,7 @@ export type BatchScope = Scoped<DbDirectBatch>;
  */
 export class Db {
   private clients = new Map<string, JazzClient>();
+  private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
@@ -815,6 +816,7 @@ export class Db {
   private followerReady: Promise<void> | null = null;
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
+  private brokerResetSchema: WasmSchema | null = null;
   private readonly pendingLeaderFollowerPorts = new Map<
     string,
     { followerTabId: string; term: number; port: MessagePort }
@@ -1029,9 +1031,9 @@ export class Db {
         tabId: db.tabId,
         fingerprint: Db.createBrokerFingerprint(config, db.primaryDbName),
         visibility: db.currentBrokerVisibility(),
-        onBecomeLeader: (client, term) => {
+        onBecomeLeader: (client, term, resetRequestId) => {
           db.brokerClient = client;
-          const promotion = db.promoteViaBroker(term);
+          const promotion = db.promoteViaBroker(term, resetRequestId);
           db.brokerPromotion = promotion;
           return promotion;
         },
@@ -1048,6 +1050,7 @@ export class Db {
         onCloseFollowerPort: (term) => {
           db.handleBrokerCloseFollowerPort(term);
         },
+        onStorageResetBegin: (_requestId, term) => db.prepareForBrokerStorageReset(term),
       });
       db.brokerClient = broker;
       db.adoptBrokerSnapshot(broker.snapshot());
@@ -1115,6 +1118,7 @@ export class Db {
         });
       }
       this.clients.set(key, client);
+      this.clientSchemas.set(key, runtimeSchema);
     }
 
     return this.clients.get(key)!;
@@ -1352,7 +1356,7 @@ export class Db {
     return `jazz-leader-lock:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
   }
 
-  private async promoteViaBroker(term: number): Promise<void> {
+  private async promoteViaBroker(term: number, resetRequestId?: string): Promise<void> {
     if (this.isShuttingDown || !this.primaryDbName) return;
 
     this.closeFollowerPortState(new Error("Follower port closed during leader promotion"));
@@ -1375,8 +1379,15 @@ export class Db {
       }
       this.compatibilityLockLease = compatibilityLockLease;
 
+      if (resetRequestId) {
+        await this.deleteBrokerStorageFiles();
+      }
+
       this.worker = await Db.spawnWorker(this.config.runtimeSources);
       this.tabRole = "leader";
+      if (resetRequestId) {
+        this.recreateFirstClientAfterBrokerReset();
+      }
       this.attachWorkerBridgeForExistingClient();
     } catch (error) {
       this.brokerClient?.reportLeaderFailed(term, stringifyError(error));
@@ -1411,6 +1422,17 @@ export class Db {
     this.brokerLeaderReadyTerm = null;
     this.closePendingLeaderFollowerPorts();
     await this.shutdownLeaderWorker();
+    this.releaseBrokerLeadershipResources();
+  }
+
+  private async prepareForBrokerStorageReset(term: number): Promise<void> {
+    if (this.isShuttingDown) return;
+    if (term !== this.currentLeaderTerm) return;
+
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyTerm = null;
+    await this.shutdownWorkerAndClientsForStorageReset();
     this.releaseBrokerLeadershipResources();
   }
 
@@ -1524,6 +1546,30 @@ export class Db {
     if (first.done) return;
     const [schemaJson, client] = first.value;
     this.attachWorkerBridge(schemaJson, client);
+  }
+
+  private recreateFirstClientAfterBrokerReset(): void {
+    if (this.clients.size > 0 || !this.brokerResetSchema) return;
+    if (!this.runtimeModule) {
+      throw new Error("Db runtime module is not initialized for broker storage reset");
+    }
+
+    const schema = this.brokerResetSchema;
+    const schemaJson = getRuntimeSchemaCacheKey(schema);
+    this.brokerResetSchema = null;
+    this.installMainThreadWasmTelemetry();
+    const client = this.runtimeModule.createClient({
+      config: { ...this.config },
+      schema,
+      hasWorker: true,
+      useBinaryEncoding: true,
+      onAuthFailure: (reason) => {
+        this.markUnauthenticated(reason);
+      },
+    });
+    this.attachMutationErrorHandler(client);
+    this.clients.set(schemaJson, client);
+    this.clientSchemas.set(schemaJson, schema);
   }
 
   private closeFollowerPortState(error?: Error): void {
@@ -1848,8 +1894,74 @@ export class Db {
     return this.workerDbName ?? driver.dbName ?? this.config.appId;
   }
 
+  private async deleteBrokerStorageFiles(): Promise<void> {
+    if (!this.primaryDbName) {
+      throw new Error("Browser storage reset requires an initialized primary Db namespace.");
+    }
+
+    const rootDirectory = await navigator.storage.getDirectory();
+    const namespaces = await this.collectBrokerStorageNamespaces(rootDirectory, this.primaryDbName);
+    for (const namespace of namespaces) {
+      await this.removeBrokerStorageNamespace(rootDirectory, namespace);
+    }
+  }
+
+  private async collectBrokerStorageNamespaces(
+    rootDirectory: FileSystemDirectoryHandle,
+    primaryDbName: string,
+  ): Promise<string[]> {
+    const namespaces = new Set<string>([primaryDbName]);
+    const rootWithEntries = rootDirectory as FileSystemDirectoryHandle & {
+      entries?: () => AsyncIterable<[string, FileSystemHandle]>;
+    };
+    if (typeof rootWithEntries.entries !== "function") {
+      return [...namespaces];
+    }
+
+    const suffix = ".opfsbtree";
+    const legacyFallbackPrefix = `${primaryDbName}__fallback__`;
+    for await (const [name] of rootWithEntries.entries()) {
+      if (!name.endsWith(suffix)) continue;
+      const namespace = name.slice(0, -suffix.length);
+      if (namespace === primaryDbName || namespace.startsWith(legacyFallbackPrefix)) {
+        namespaces.add(namespace);
+      }
+    }
+
+    return [...namespaces];
+  }
+
+  private async removeBrokerStorageNamespace(
+    rootDirectory: FileSystemDirectoryHandle,
+    namespace: string,
+  ): Promise<void> {
+    try {
+      await rootDirectory.removeEntry(`${namespace}.opfsbtree`, { recursive: false });
+    } catch (error) {
+      const name = (error as { name?: string } | undefined)?.name;
+      if (name === "NotFoundError") {
+        return;
+      }
+      if (name === "NoModificationAllowedError" || name === "InvalidStateError") {
+        throw new Error(
+          `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+        );
+      }
+      throw new Error(
+        `Failed to delete browser storage for "${namespace}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
     const currentWorker = this.worker;
+    const firstClient = this.clients.entries().next();
+    this.brokerResetSchema = firstClient.done
+      ? null
+      : (this.clientSchemas.get(firstClient.value[0]) ??
+        normalizeRuntimeSchema(firstClient.value[1].getSchema()));
 
     if (this.workerBridge && currentWorker) {
       try {
@@ -1868,6 +1980,7 @@ export class Db {
       await client.shutdown();
     }
     this.clients.clear();
+    this.clientSchemas.clear();
     this.leaderPeerIds.clear();
     this.activeRemoteLeaderTabId = null;
 
@@ -2250,7 +2363,10 @@ export class Db {
       throw new Error("deleteClientStorage() requires an initialized storage-reset coordinator.");
     }
     const operation = this.workerReconfigure.then(async () => {
-      this.brokerClient?.requestStorageReset(`storage-reset-${Date.now()}`);
+      if (this.brokerClient) {
+        await this.brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
+        return;
+      }
       await coordinator.requestReset();
     });
 

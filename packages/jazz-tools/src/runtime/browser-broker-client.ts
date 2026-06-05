@@ -34,12 +34,17 @@ export interface BrowserBrokerClientOptions {
   globalLike?: BrowserBrokerCapabilityGlobal;
   respondToBrokerPings?: boolean | (() => boolean);
   onBrokerPing?: () => void;
-  onBecomeLeader?: (client: BrowserBrokerClient, term: number) => void | Promise<void>;
+  onBecomeLeader?: (
+    client: BrowserBrokerClient,
+    term: number,
+    resetRequestId?: string,
+  ) => void | Promise<void>;
   onDemote?: (term: number) => void | Promise<void>;
   onAttachFollowerPort?: (followerTabId: string, term: number, port: MessagePort) => void;
   onUseFollowerPort?: (leaderTabId: string, term: number, port: MessagePort) => void;
   onFollowerReady?: (leaderTabId: string, term: number) => void;
   onCloseFollowerPort?: (term: number) => void;
+  onStorageResetBegin?: (requestId: string, term: number) => void | Promise<void>;
 }
 
 type RoleWaiter = {
@@ -47,6 +52,11 @@ type RoleWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+};
+
+type ResetWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
 };
 
 type SharedWorkerConstructor = new (
@@ -70,6 +80,7 @@ export class BrowserBrokerClient {
   private term = 0;
   private closed = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
+  private readonly resetWaiters = new Map<string, ResetWaiter[]>();
 
   private constructor(worker: SharedWorker, options: BrowserBrokerClientOptions) {
     this.worker = worker;
@@ -161,12 +172,20 @@ export class BrowserBrokerClient {
     });
   }
 
-  requestStorageReset(requestId: string): void {
-    if (this.closed) return;
+  async requestStorageReset(requestId: string): Promise<void> {
+    if (this.closed) {
+      throw new Error("Browser broker client closed");
+    }
+    const completion = new Promise<void>((resolve, reject) => {
+      const waiters = this.resetWaiters.get(requestId) ?? [];
+      waiters.push({ resolve, reject });
+      this.resetWaiters.set(requestId, waiters);
+    });
     this.port.postMessage({
       type: "storage-reset-request",
       requestId,
     });
+    await completion;
   }
 
   async shutdown(): Promise<void> {
@@ -179,6 +198,7 @@ export class BrowserBrokerClient {
       waiter.reject(new Error("Browser broker client closed"));
     }
     this.roleWaiters.clear();
+    this.rejectResetWaiters(new Error("Browser broker client closed"));
   }
 
   private async start(): Promise<void> {
@@ -249,7 +269,9 @@ export class BrowserBrokerClient {
         return;
       case "become-leader":
         this.term = message.term;
-        void Promise.resolve(this.options.onBecomeLeader?.(this, message.term)).catch((error) => {
+        void Promise.resolve(
+          this.options.onBecomeLeader?.(this, message.term, message.resetRequestId),
+        ).catch((error) => {
           this.reportLeaderFailed(message.term, stringifyError(error));
         });
         return;
@@ -286,10 +308,23 @@ export class BrowserBrokerClient {
       case "close-follower-port":
         this.options.onCloseFollowerPort?.(message.term);
         return;
+      case "storage-reset-begin":
+        void Promise.resolve(this.options.onStorageResetBegin?.(message.requestId, message.term))
+          .then(() => {
+            this.reportStorageResetReady(message.requestId, true);
+          })
+          .catch((error) => {
+            this.reportStorageResetReady(message.requestId, false, stringifyError(error));
+          });
+        return;
+      case "storage-reset-finished":
+        this.resolveResetWaiters(message.requestId, message.success, message.errorMessage);
+        return;
       case "unsupported":
         this.closed = true;
         this.worker.port.close();
         this.rejectRoleWaiters(new Error(message.reason));
+        this.rejectResetWaiters(new Error(message.reason));
         return;
     }
   }
@@ -311,6 +346,47 @@ export class BrowserBrokerClient {
       waiter.reject(error);
     }
     this.roleWaiters.clear();
+  }
+
+  private reportStorageResetReady(
+    requestId: string,
+    success: boolean,
+    errorMessage?: string,
+  ): void {
+    if (this.closed) return;
+    this.port.postMessage({
+      type: "storage-reset-ready",
+      requestId,
+      success,
+      ...(errorMessage ? { errorMessage } : {}),
+    });
+  }
+
+  private resolveResetWaiters(
+    requestId: string,
+    success: boolean,
+    errorMessage: string | undefined,
+  ): void {
+    const waiters = this.resetWaiters.get(requestId);
+    if (!waiters) return;
+    this.resetWaiters.delete(requestId);
+    const error = success ? null : new Error(errorMessage ?? "Browser storage reset failed");
+    for (const waiter of waiters) {
+      if (error) {
+        waiter.reject(error);
+      } else {
+        waiter.resolve();
+      }
+    }
+  }
+
+  private rejectResetWaiters(error: Error): void {
+    for (const waiters of this.resetWaiters.values()) {
+      for (const waiter of waiters) {
+        waiter.reject(error);
+      }
+    }
+    this.resetWaiters.clear();
   }
 
   private shouldRespondToBrokerPing(): boolean {

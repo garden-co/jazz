@@ -67,6 +67,13 @@ export interface BrowserBrokerStorageResetRequestMessage {
   requestId: string;
 }
 
+export interface BrowserBrokerStorageResetReadyMessage {
+  type: "storage-reset-ready";
+  requestId: string;
+  success: boolean;
+  errorMessage?: string;
+}
+
 export interface BrowserBrokerShutdownMessage {
   type: "shutdown";
 }
@@ -83,6 +90,7 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerLeaderFailedMessage
   | BrowserBrokerFollowerPortAttachedMessage
   | BrowserBrokerStorageResetRequestMessage
+  | BrowserBrokerStorageResetReadyMessage
   | BrowserBrokerShutdownMessage
   | BrowserBrokerPongMessage;
 
@@ -101,6 +109,7 @@ export interface BrowserBrokerPingMessage extends BrokerEpochMessage {
 export interface BrowserBrokerBecomeLeaderMessage extends BrokerEpochMessage {
   type: "become-leader";
   term: number;
+  resetRequestId?: string;
 }
 
 export interface BrowserBrokerDemoteMessage extends BrokerEpochMessage {
