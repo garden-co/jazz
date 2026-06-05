@@ -912,11 +912,6 @@ export class Transaction extends BatchHandleBase {
 }
 
 /**
- * Transaction object available inside {@link JazzClient.transaction}'s callback.
- */
-export type TransactionScope = Scoped<Transaction>;
-
-/**
  * Direct batches group a set of writes under one batch id and publish them when committed.
  */
 export class DirectBatch extends BatchHandleBase {
@@ -929,11 +924,6 @@ export class DirectBatch extends BatchHandleBase {
     super("Direct batch", client, batchContext, session, attribution);
   }
 }
-
-/**
- * Batch object available inside {@link JazzClient.batch}'s callback.
- */
-export type BatchScope = Scoped<DirectBatch>;
 
 /**
  * High-level Jazz client.
@@ -1056,36 +1046,6 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginTransaction(): Transaction {
-    return this.beginTransactionInternal();
-  }
-
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction();
-    return runInBatch(transaction, callback, this);
-  }
-
-  beginBatch(): DirectBatch {
-    return this.beginBatchInternal();
-  }
-
-  batch<TResult>(
-    callback: (batch: BatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
-  batch<TResult>(
-    callback: (batch: BatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(batch, callback, this);
-  }
-
   private createBatchContext(batchMode: BatchMode): BatchWriteContext {
     return {
       batchMode,
@@ -1094,7 +1054,7 @@ export class JazzClient {
     };
   }
 
-  beginTransactionInternal(session?: Session, attribution?: string): Transaction {
+  beginTransaction(session?: Session, attribution?: string): Transaction {
     return new Transaction(
       this,
       this.createBatchContext("transactional"),
@@ -1103,7 +1063,7 @@ export class JazzClient {
     );
   }
 
-  beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
+  beginBatch(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
       this.createBatchContext("direct"),
