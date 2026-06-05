@@ -1,0 +1,20 @@
+{
+  "name": "todo-client-localfirst-solid-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "solid-js": "^1.9.13"
+  },
+  "devDependencies": {
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-solid": "catalog:default"
+  }
+}

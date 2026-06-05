@@ -139,17 +139,18 @@ magic columns.
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
 
-| Framework  | API                            | Notes                       |
-| ---------- | ------------------------------ | --------------------------- |
-| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`  |
-| Vue        | `useAll(query)`                | Returns a `Ref`             |
-| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` |
+| Framework  | API                            | Notes                                |
+| ---------- | ------------------------------ | ------------------------------------ |
+| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`           |
+| Vue        | `useAll(query)`                | Returns a `Ref`                      |
+| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current`          |
+| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }` |
 
 ### The `undefined` loading state
 
 `useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-loading-state-react
@@ -165,6 +166,11 @@ Each framework has a reactive binding that re-renders when query results change.
       ../examples/docs/todo-client-localfirst-svelte/src/LiveQueryExample.svelte#reading-loading-state-svelte
     </include>
   </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/LiveQueryExample.tsx
+    </include>
+  </Tab>
 </Tabs>
 
 <Callout type="info">
@@ -175,13 +181,14 @@ Each framework has a reactive binding that re-renders when query results change.
 
 ### Fine-grained updates
 
-Vue's `useAll` and Svelte's `QuerySubscription` reconcile new query results into the existing reactive array in place rather than swapping the reference. When an upstream change touches a single row, only that row's affected fields write into the reactive proxy, so `$effect` (Svelte) and `watch` / template bindings (Vue) only re-fire for components that depend on the fields that actually changed.
+Vue's `useAll`, Svelte's `QuerySubscription`, and Solid's `useAll` reconcile new query results into the existing reactive array in place rather than swapping the reference. When an upstream change touches a single row, only that row's affected fields write into the reactive proxy, so `$effect` (Svelte), Solid computations/effects, and `watch` / template bindings (Vue) only re-fire for components that depend on the fields that actually changed.
 
 In practice this means:
 
 - Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
 - Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
 - Vue's `useAll` returns a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+- Solid's `useAll` returns a store, so Solid's fine-grained dependency tracking only re-runs computations that read changed fields.
 
 React's `useAll` follows React's own re-render model and returns a fresh array each tick; the granularity benefit there comes from React's diffing, not from in-place reconciliation.
 
@@ -189,7 +196,7 @@ React's `useAll` follows React's own re-render model and returns a fresh array e
 
 Pass `undefined` instead of a query to skip evaluation. This is useful when building dynamic queries.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-conditional-query-react
@@ -203,6 +210,11 @@ Pass `undefined` instead of a query to skip evaluation. This is useful when buil
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/ConditionalQueryExample.svelte#reading-conditional-query-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/ConditionalQueryExample.tsx
     </include>
   </Tab>
 </Tabs>
