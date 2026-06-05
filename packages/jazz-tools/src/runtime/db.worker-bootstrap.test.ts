@@ -35,6 +35,8 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
 
     reportFollowerPortAttached(): void {}
 
+    reportSchemaReady(): void {}
+
     async shutdown(): Promise<void> {}
   }
 

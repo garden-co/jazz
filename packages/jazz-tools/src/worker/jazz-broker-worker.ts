@@ -24,6 +24,7 @@ type TabState = BrowserBrokerCandidate & {
   appId: string;
   dbName: string;
   fingerprint: string;
+  schemaFingerprint: string | null;
   port: MessagePort;
   lastPongAt: number;
 };
@@ -65,6 +66,7 @@ let namespace: {
   forceTakeoverTimeoutMs: number;
   brokerPingIntervalMs: number;
   brokerPongTimeoutMs: number;
+  schemaFingerprint: string | null;
 } | null = null;
 let leader: LeaderState | null = null;
 let currentTerm = 0;
@@ -112,6 +114,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
         message.brokerPongTimeoutMs,
         DEFAULT_BROKER_PONG_TIMEOUT_MS,
       ),
+      schemaFingerprint: null,
     };
   }
 
@@ -135,6 +138,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     appId: message.appId,
     dbName: message.dbName,
     fingerprint: message.fingerprint,
+    schemaFingerprint: null,
     visibility: message.visibility,
     lastVisibleAt: message.visibility === "visible" ? now : 0,
     port,
@@ -187,6 +191,9 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
     case "follower-port-attached":
       if (!leader || leader.tabId !== tabId || leader.term !== message.term) return;
       markFollowerPortAttached(message.followerTabId, message.term);
+      return;
+    case "schema-ready":
+      handleSchemaReady(tabId, message.schemaFingerprint);
       return;
     case "leader-failed":
       if (resetState?.promotedTerm === message.term) {
@@ -292,6 +299,48 @@ function resetIfIdle(): void {
   resetState = null;
   replacementElectionInFlight = false;
   stopBrokerPingTimer();
+}
+
+function handleSchemaReady(tabId: string, schemaFingerprint: string): void {
+  if (!namespace) return;
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+
+  if (!namespace.schemaFingerprint) {
+    namespace.schemaFingerprint = schemaFingerprint;
+  }
+
+  if (namespace.schemaFingerprint !== schemaFingerprint) {
+    rejectTabForSchemaMismatch(tabId, schemaFingerprint);
+    return;
+  }
+
+  tab.schemaFingerprint = schemaFingerprint;
+  if (leader?.ready) {
+    assignFollowerPorts(leader);
+  }
+}
+
+function rejectTabForSchemaMismatch(tabId: string, schemaFingerprint: string): void {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+
+  post(tab.port, {
+    type: "unsupported",
+    brokerEpoch,
+    reason: "incompatible persistent browser schema",
+  });
+  tab.port.close();
+  tabs.delete(tabId);
+
+  if (leader?.tabId === tabId) {
+    const cleared = clearLeader(leader.term, `schema mismatch: ${schemaFingerprint}`, {
+      demoteLeader: false,
+      removeLeaderTab: false,
+    });
+    scheduleReplacementElection(cleared);
+  }
+  resetIfIdle();
 }
 
 function announceLeaderReady(nextLeader: LeaderState): void {
@@ -670,6 +719,12 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
 
   for (const follower of tabs.values()) {
     if (follower.tabId === nextLeader.tabId) continue;
+    if (
+      namespace?.schemaFingerprint &&
+      follower.schemaFingerprint !== namespace.schemaFingerprint
+    ) {
+      continue;
+    }
     const key = followerAttachmentKey(follower.tabId, nextLeader.term);
     if (pendingFollowerAttachments.has(key)) continue;
     if (attachedFollowerPorts.has(key)) continue;

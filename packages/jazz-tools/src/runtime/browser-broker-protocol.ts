@@ -62,6 +62,11 @@ export interface BrowserBrokerFollowerPortAttachedMessage {
   followerTabId: string;
 }
 
+export interface BrowserBrokerSchemaReadyMessage {
+  type: "schema-ready";
+  schemaFingerprint: string;
+}
+
 export interface BrowserBrokerStorageResetRequestMessage {
   type: "storage-reset-request";
   requestId: string;
@@ -89,6 +94,7 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerLeaderReadyMessage
   | BrowserBrokerLeaderFailedMessage
   | BrowserBrokerFollowerPortAttachedMessage
+  | BrowserBrokerSchemaReadyMessage
   | BrowserBrokerStorageResetRequestMessage
   | BrowserBrokerStorageResetReadyMessage
   | BrowserBrokerShutdownMessage

@@ -79,6 +79,7 @@ export class BrowserBrokerClient {
   private leaderTabId: string | null = null;
   private term = 0;
   private closed = false;
+  private closedError: Error | null = null;
   private reconnecting = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
@@ -110,6 +111,9 @@ export class BrowserBrokerClient {
   }
 
   async waitForRole(role: BrowserBrokerRole, timeoutMs = 5_000): Promise<void> {
+    if (this.closed) {
+      throw this.closedError ?? new Error("Browser broker client closed");
+    }
     if (this.role === role && this.leaderTabId !== null) {
       return;
     }
@@ -162,9 +166,17 @@ export class BrowserBrokerClient {
     });
   }
 
+  reportSchemaReady(schemaFingerprint: string): void {
+    if (this.closed || !this.port) return;
+    this.port.postMessage({
+      type: "schema-ready",
+      schemaFingerprint,
+    });
+  }
+
   async requestStorageReset(requestId: string): Promise<void> {
     if (this.closed) {
-      throw new Error("Browser broker client closed");
+      throw this.closedError ?? new Error("Browser broker client closed");
     }
     const completion = new Promise<void>((resolve, reject) => {
       const waiters = this.resetWaiters.get(requestId) ?? [];
@@ -181,6 +193,7 @@ export class BrowserBrokerClient {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.closedError = new Error("Browser broker client closed");
     this.port?.postMessage({ type: "shutdown" });
     this.port?.close();
     for (const waiter of this.roleWaiters) {
@@ -327,9 +340,10 @@ export class BrowserBrokerClient {
         return;
       case "unsupported":
         this.closed = true;
+        this.closedError = new Error(message.reason);
         this.port?.close();
-        this.rejectRoleWaiters(new Error(message.reason));
-        this.rejectResetWaiters(new Error(message.reason));
+        this.rejectRoleWaiters(this.closedError);
+        this.rejectResetWaiters(this.closedError);
         return;
     }
   }
@@ -366,8 +380,9 @@ export class BrowserBrokerClient {
       }
     } catch (reconnectError) {
       this.closed = true;
-      this.rejectRoleWaiters(toError(reconnectError));
-      this.rejectResetWaiters(toError(reconnectError));
+      this.closedError = toError(reconnectError);
+      this.rejectRoleWaiters(this.closedError);
+      this.rejectResetWaiters(this.closedError);
     } finally {
       this.reconnecting = false;
     }
