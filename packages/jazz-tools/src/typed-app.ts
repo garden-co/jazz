@@ -1092,75 +1092,39 @@ export interface Query<
   TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
   TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = any,
   TSchema extends SchemaLike = SchemaLike,
-> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, false> {
+  TRequired extends boolean = false,
+> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
-  ): Query<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
     ...columns: [NewSelection, ...NewSelection[]]
-  ): Query<TTable, TInclude, NewSelection, TSchema>;
+  ): Query<TTable, TInclude, NewSelection, TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
-  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema>;
-  requireIncludes(): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;
+  requireIncludes(): Query<TTable, TInclude, TSelection, TSchema, true>;
   orderBy(
     column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>>,
     direction?: "asc" | "desc",
-  ): Query<TTable, TInclude, TSelection, TSchema>;
-  limit(n: number): Query<TTable, TInclude, TSelection, TSchema>;
-  offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
-  includeDeleted(): Query<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  limit(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  offset(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  includeDeleted(): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
   ): Query<
     RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
     {},
     DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
+    TSchema,
+    TRequired
   >;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): Query<TTable, TInclude, TSelection, TSchema>;
-}
-
-export interface RequiredQuery<
-  TTable extends string,
-  TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
-  TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = any,
-  TSchema extends SchemaLike = SchemaLike,
-> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, true> {
-  where(
-    conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
-  ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
-    ...columns: [NewSelection, ...NewSelection[]]
-  ): RequiredQuery<TTable, TInclude, NewSelection, TSchema>;
-  include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
-    relations: NewInclude,
-  ): RequiredQuery<TTable, TInclude & NewInclude, TSelection, TSchema>;
-  requireIncludes(): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  orderBy(
-    column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>>,
-    direction?: "asc" | "desc",
-  ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  limit(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  includeDeleted(): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
-    relation: TRelation,
-  ): RequiredQuery<
-    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
-    {},
-    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
-  >;
-  gather(options: {
-    start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
-    step: (ctx: { current: string }) => QueryBuilder<unknown>;
-    maxDepth?: number;
-  }): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
 
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
@@ -1211,13 +1175,11 @@ export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit 
 export type TableMetaOf<TTable> =
   TTable extends Table<infer TTableName, infer TSchema>
     ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-    : TTable extends Query<infer TTableName, any, any, infer TSchema>
+    : TTable extends Query<infer TTableName, any, any, infer TSchema, any>
       ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-      : TTable extends RequiredQuery<infer TTableName, any, any, infer TSchema>
-        ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-        : TTable extends TypedTableQueryBuilder<infer TMeta, any, any, any>
-          ? TMeta
-          : never;
+      : TTable extends TypedTableQueryBuilder<infer TMeta, any, any, any>
+        ? TMeta
+        : never;
 export type WhereOf<TQuery> = TQuery extends { where(input: infer TWhere): unknown }
   ? TWhere
   : never;
