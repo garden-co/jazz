@@ -31,6 +31,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         receiver
     }
 
+    fn complete_empty_batch(&mut self, batch_id: BatchId) {
+        self.completed_empty_batches.insert(batch_id);
+        self.durability
+            .record_batch_ack(batch_id, DurabilityTier::GlobalServer);
+    }
+
     fn batch_wait_outcome(
         fate: Option<&BatchFate>,
         tier: DurabilityTier,
@@ -95,6 +101,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let Some(batch_id) = write_context.batch_id() else {
             return Ok(());
         };
+
+        if self.completed_empty_batches.contains(&batch_id) {
+            return Err(RuntimeError::WriteError(format!(
+                "batch {batch_id:?} is already sealed"
+            )));
+        }
 
         if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
             if record.mode != mode {
@@ -737,6 +749,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(Self::completed_batch_wait_receiver(outcome));
         }
 
+        if self.completed_empty_batches.contains(&batch_id) {
+            return Ok(Self::completed_batch_wait_receiver(Ok(())));
+        }
+
         let record = self.local_batch_record_for_wait(batch_id)?;
         if let Some(outcome) = Self::batch_wait_outcome(record.latest_fate.as_ref(), tier) {
             if outcome.is_err() {
@@ -853,6 +869,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     pub fn discard_local_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
         self.local_batch_record_cache.remove(&batch_id);
+        let had_completed_empty_batch = self.completed_empty_batches.remove(&batch_id);
         let had_record = self
             .storage
             .load_local_batch_record(batch_id)
@@ -865,7 +882,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.durability.forget_batch(batch_id);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(had_record)
+        Ok(had_record || had_completed_empty_batch)
     }
 
     pub fn seal_batch(&mut self, batch_id: BatchId) -> Result<(), RuntimeError> {
@@ -879,12 +896,22 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     RuntimeError::WriteError(format!("load local batch record: {err}"))
                 })?
             else {
-                return Err(RuntimeError::WriteError(format!(
-                    "missing local batch record for {batch_id:?}"
-                )));
+                self.complete_empty_batch(batch_id);
+                return Ok(());
             };
             record
         };
+
+        if record.members.is_empty() {
+            self.complete_empty_batch(batch_id);
+            self.storage
+                .delete_local_batch_record(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("delete empty local batch record: {err}"))
+                })?;
+            self.mark_storage_write_pending_flush();
+            return Ok(());
+        }
 
         if record.sealed {
             self.local_batch_record_cache.insert(batch_id, record);

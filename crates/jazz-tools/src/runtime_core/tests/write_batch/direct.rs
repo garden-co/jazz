@@ -206,6 +206,45 @@ fn rc_delete_sync() {
 }
 
 #[test]
+fn rc_sealing_empty_batch_completes_waits_without_local_record() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+
+    core.seal_batch(batch_id).unwrap();
+
+    assert_eq!(
+        core.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "empty batches should not persist a replayable local batch record"
+    );
+    assert_eq!(
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "empty batches should not persist a sealed submission"
+    );
+
+    let mut receiver = core
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+        .unwrap();
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
+
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let error = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .expect_err("sealed empty batch should not accept later writes");
+    assert!(
+        error.to_string().contains("already sealed"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
