@@ -1,4 +1,5 @@
 import type { Session } from "../runtime/context.js";
+import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
@@ -39,7 +40,21 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {
-  return trackPromise(createJazzClientInternal(config));
+  const key = JSON.stringify(config);
+  const holder = {};
+  const shared = acquireClient(key, () => createJazzClientInternal(config), holder);
+  return trackPromise(
+    shared.then((client) => ({
+      db: client.db,
+      get session() {
+        return client.session;
+      },
+      manager: client.manager,
+      shutdown() {
+        return releaseClient(key, holder);
+      },
+    })),
+  );
 }
 
 async function createExtensionJazzClientInternal(): Promise<JazzClient> {
