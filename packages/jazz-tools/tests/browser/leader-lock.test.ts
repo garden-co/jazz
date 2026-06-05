@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createNavigatorLocksLeaderLockStrategy } from "../../src/runtime/leader-lock.js";
+import {
+  createNavigatorLocksLeaderLockStrategy,
+  monitorWebLockRelease,
+  stealAndReleaseWebLock,
+  tryAcquireWebLock,
+} from "../../src/runtime/leader-lock.js";
 
 function uniqueLockName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -38,4 +43,95 @@ describe("leader-lock browser integration", () => {
     expect(leaseAfterRelease).not.toBeNull();
     leaseAfterRelease!.release();
   });
+
+  it("supports fail-fast acquisition through the shared Web Locks helper", async () => {
+    const lockName = uniqueLockName("leader-lock-helper");
+    const leaseA = await tryAcquireWebLock(lockName);
+    expect(leaseA).not.toBeNull();
+
+    const leaseWhileHeld = await tryAcquireWebLock(lockName);
+    expect(leaseWhileHeld).toBeNull();
+
+    leaseA!.release();
+
+    const leaseAfterRelease = await waitForLease(() => tryAcquireWebLock(lockName), 1000);
+    expect(leaseAfterRelease).not.toBeNull();
+    leaseAfterRelease!.release();
+  });
+
+  it("monitors an unexpected lock release and releases the monitor grant", async () => {
+    const lockName = uniqueLockName("leader-lock-monitor");
+    const lease = await tryAcquireWebLock(lockName);
+    expect(lease).not.toBeNull();
+
+    const grants: string[] = [];
+    const monitor = monitorWebLockRelease(lockName, {
+      onGranted: () => {
+        grants.push(lockName);
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(grants).toEqual([]);
+
+    lease!.release();
+
+    await waitForCondition(() => grants.length === 1, 1000, "monitor was not granted");
+    monitor.cancel();
+
+    const reacquired = await waitForLease(() => tryAcquireWebLock(lockName), 1000);
+    expect(reacquired).not.toBeNull();
+    reacquired!.release();
+  });
+
+  it("cancels a queued monitor without reporting a release", async () => {
+    const lockName = uniqueLockName("leader-lock-monitor-cancel");
+    const lease = await tryAcquireWebLock(lockName);
+    expect(lease).not.toBeNull();
+
+    const grants: string[] = [];
+    const monitor = monitorWebLockRelease(lockName, {
+      onGranted: () => {
+        grants.push(lockName);
+      },
+    });
+    monitor.cancel();
+    lease!.release();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(grants).toEqual([]);
+
+    const reacquired = await waitForLease(() => tryAcquireWebLock(lockName), 1000);
+    expect(reacquired).not.toBeNull();
+    reacquired!.release();
+  });
+
+  it("steals and immediately releases a stuck lock only when explicitly requested", async () => {
+    const lockName = uniqueLockName("leader-lock-steal");
+    const lease = await tryAcquireWebLock(lockName);
+    expect(lease).not.toBeNull();
+
+    const blocked = await tryAcquireWebLock(lockName);
+    expect(blocked).toBeNull();
+
+    await stealAndReleaseWebLock(lockName);
+
+    const reacquired = await waitForLease(() => tryAcquireWebLock(lockName), 1000);
+    expect(reacquired).not.toBeNull();
+    reacquired!.release();
+    lease!.release();
+  });
 });
+
+async function waitForCondition(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(message);
+}
