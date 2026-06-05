@@ -2038,16 +2038,15 @@ export class Db {
   /**
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
-   * This clears the primary namespace plus any active follower fallback namespaces for the same
-   * browser app/database. It does not touch localStorage-based local-first auth state.
+   * This clears the brokered primary namespace for the same browser app/database. It does not touch
+   * localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
    * - Can be initiated from either leader or follower tabs
-   * - Coordinates worker shutdown over the tab sync channel before deleting OPFS files
+   * - Coordinates worker shutdown through the SharedWorker broker before deleting OPFS files
    * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS files, respawns workers
-   * - If deletion fails, all participating tabs still respawn their workers before surfacing the error
+   * - Tears down worker + clients, deletes OPFS files, and reconnects participating tabs
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {

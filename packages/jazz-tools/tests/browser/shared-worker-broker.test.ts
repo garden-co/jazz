@@ -245,6 +245,40 @@ describe("SharedWorker browser broker", () => {
     expect(second.snapshot().leaderTabId).toBe("tab-b");
   });
 
+  it("steals a stuck migration compatibility lock before promoting a replacement", async () => {
+    const dbName = uniqueName("broker-compat-force-takeover");
+    const first = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-a", "fingerprint-a", {
+        forceTakeoverTimeoutMs: 50,
+      }),
+    );
+    clients.push(first);
+
+    const secondReadyTerms: number[] = [];
+    const secondFailures: string[] = [];
+    const second = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
+        forceTakeoverTimeoutMs: 50,
+        reportFailures: true,
+        onReady: (term) => secondReadyTerms.push(term),
+        onFailure: (term, reason) => secondFailures.push(`${term}:${reason}`),
+      }),
+    );
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    await second.waitForRole("follower", 2000);
+
+    await first.shutdown();
+
+    await waitFor(
+      () => secondReadyTerms.some((term) => term > 1),
+      4000,
+      `stuck compatibility lock should be stolen before replacement promotion; ready: ${secondReadyTerms.join(", ")}; failures: ${secondFailures.join(", ")}`,
+    );
+    expect(second.snapshot().leaderTabId).toBe("tab-b");
+  });
+
   it("does not repeatedly promote a candidate blocked by the migration compatibility lock", async () => {
     const dbName = uniqueName("broker-compat-blocked");
     const compatibilityLockName = `jazz-leader-lock:broker-test-app:${dbName}`;
