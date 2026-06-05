@@ -29,6 +29,20 @@ function tabValue(value: string) {
   return value.toLowerCase().replace(/\s/, "-");
 }
 
+// Tabs in different groups can represent the same framework: a Next.js project
+// is a React project, a SvelteKit project is a Svelte project, and so on. When a
+// group sync delivers a value a block doesn't have, it falls back to the
+// equivalent it does have (see syncFromGroup) rather than blanking out. Values
+// are compared as `tabValue(...)` (lower-cased).
+const EQUIVALENT_TABS: string[][] = [
+  ["react", "next.js"],
+  ["svelte", "sveltekit"],
+];
+
+function equivalentTabValues(value: string): string[] {
+  return EQUIVALENT_TABS.find((group) => group.includes(value)) ?? [value];
+}
+
 function fragmentValue(value: string) {
   return value
     .toLowerCase()
@@ -79,15 +93,26 @@ export function Tabs({
       if (next) syncGroup(groupId, tabValue(next), persist);
     };
 
+    const syncFromGroup = (next: string) => {
+      const values = itemValues.map(tabValue);
+      // Prefer a direct match; otherwise map to an equivalent framework
+      // (e.g. "Next.js" → "React") so a sibling selection carries over instead
+      // of blanking this block out.
+      const match = values.includes(next)
+        ? next
+        : equivalentTabValues(next).find((value) => values.includes(value));
+      if (match) setValue(match);
+    };
+
     const listeners = groupListeners.get(groupId) ?? new Set<(value: string) => void>();
-    listeners.add(setValue);
+    listeners.add(syncFromGroup);
     groupListeners.set(groupId, listeners);
 
     applyHash();
     window.addEventListener("hashchange", applyHash);
 
     return () => {
-      listeners.delete(setValue);
+      listeners.delete(syncFromGroup);
       window.removeEventListener("hashchange", applyHash);
     };
   }, [groupId, itemValues, persist]);
