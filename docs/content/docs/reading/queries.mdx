@@ -4,7 +4,6 @@ description: One-shot queries, subscriptions, framework hooks, Suspense integrat
 reviewedAt: "437c86c7e"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 ## One-shot queries
@@ -151,10 +150,7 @@ Each framework has a reactive binding that re-renders when query results change.
 
 `useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
-<Callout type="info">
-  Different framework? Vue, Solid, and per-framework guides live in [Supported
-  Frameworks](/docs/reference/supported-frameworks/overview).
-</Callout>
+<OtherFrameworks />
 
 <Tabs groupId="jazz-framework" items={["React", "Svelte"]} persist updateAnchor>
   <Tab value="React">

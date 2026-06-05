@@ -4,8 +4,6 @@ description: "How and when to use Jazz's auth modes, and how to manage JWT auth 
 reviewedAt: "2e983ef11"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
 Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
 | Mode          | What it does                                                                | When to use it                                   |
@@ -31,10 +29,7 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 
 </Callout>
 
-<Callout type="info">
-  Different framework? Vue, Solid, and per-framework guides live in [Supported
-  Frameworks](/docs/reference/supported-frameworks/overview).
-</Callout>
+<OtherFrameworks />
 
 <Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">

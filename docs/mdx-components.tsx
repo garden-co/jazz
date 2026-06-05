@@ -10,6 +10,7 @@ import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
 import { Graph, Sequence } from "./components/mdx/diagram";
 import { WriteTierDiagram } from "./components/mdx/write-tier-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
+import { OtherFrameworks } from "./components/mdx/other-frameworks";
 
 function SlideCodeCell({ children, title }: { children: ReactNode; title: string }) {
   return (
@@ -35,6 +36,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Sequence,
     WriteTierDiagram,
     JazzLogo,
+    OtherFrameworks,
     SlideCodeCell,
     ...components,
   };

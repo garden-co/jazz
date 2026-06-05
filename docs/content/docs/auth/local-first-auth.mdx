@@ -4,8 +4,6 @@ description: "Authenticate users without a server using self-signed tokens, and 
 reviewedAt: "c5f0807b6"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
 Local-first auth lets users start using your app immediately without signing up. Jazz generates a secret on the client, derives a stable account ID from it, and uses self-signed tokens to prove the user owns that account. The secret itself effectively _is_ the account.
 
 This secret (and therefore the account) lives wherever the user uses the app. To log in from other devices, the user needs to use the same secret.
@@ -31,10 +29,7 @@ You can also combine modes: let local-first users read and experiment, but requi
 
 Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
-<Callout type="info">
-  Different framework? Vue, Solid, and per-framework guides live in [Supported
-  Frameworks](/docs/reference/supported-frameworks/overview).
-</Callout>
+<OtherFrameworks />
 
 <Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
