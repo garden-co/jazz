@@ -290,7 +290,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-11: surfaces subscription errors via the error ref", () => {
+  it("surfaces subscription errors via the error ref", () => {
     let capturedOnError: ((err: unknown) => void) | undefined;
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "pending" as const },
@@ -316,7 +316,7 @@ describe("vue/useAll", () => {
     scope.stop();
   });
 
-  it("VU-ALL-13: useAllSuspense exposes data and error but omits loading", async () => {
+  it("useAllSuspense exposes data and error but omits loading", async () => {
     const alice = { id: "1", name: "Alice" };
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "fulfilled" as const, data: [alice] },
