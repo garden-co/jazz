@@ -730,7 +730,7 @@ export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Scoped<DbTransaction>;
+export type TransactionScope = Scoped<DbTransaction>;
 
 /**
  * Direct batches group a set of writes that should become visible together on batch commit,
@@ -748,7 +748,7 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
 /**
  * Batch object available inside {@link Db.batch}'s callback.
  */
-export type DbBatchScope = Scoped<DbDirectBatch>;
+export type BatchScope = Scoped<DbDirectBatch>;
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -1820,7 +1820,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
+      (client) => client.beginTransaction(context?.session, context?.attribution),
     );
   }
 
@@ -1832,11 +1832,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => Promise<TResult>,
+    callback: (tx: TransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: DbTransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInBatch(
@@ -1859,7 +1859,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(context?.session, context?.attribution),
+      (client) => client.beginBatch(context?.session, context?.attribution),
     );
   }
 
@@ -1871,11 +1871,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   batch<TResult>(
-    callback: (batch: DbBatchScope) => Promise<TResult>,
+    callback: (batch: BatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
   batch<TResult>(
-    callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginBatch();
     return runInBatch(

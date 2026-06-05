@@ -345,8 +345,8 @@ describe("JazzClient mutation durability split", () => {
     );
     const { client } = makeClient({ insert, update });
 
-    client.beginTransactionInternal().upsert("todos", values, { id: externalId });
-    client.beginBatchInternal().upsert("todos", values, { id: externalId });
+    client.beginTransaction().upsert("todos", values, { id: externalId });
+    client.beginBatch().upsert("todos", values, { id: externalId });
 
     expect(update).toHaveBeenCalledTimes(2);
     expect(update.mock.calls[0]?.[0]).toBe(externalId);
@@ -371,11 +371,11 @@ describe("JazzClient mutation durability split", () => {
     const values = { done: { type: "Boolean" as const, value: true } };
 
     expect(() =>
-      client.beginTransactionInternal().upsert("todos", values, { id: "todo-missing-title" }),
+      client.beginTransaction().upsert("todos", values, { id: "todo-missing-title" }),
     ).toThrow(validationError);
-    expect(() =>
-      client.beginBatchInternal().upsert("todos", values, { id: "todo-missing-title" }),
-    ).toThrow(validationError);
+    expect(() => client.beginBatch().upsert("todos", values, { id: "todo-missing-title" })).toThrow(
+      validationError,
+    );
 
     expect(update).not.toHaveBeenCalled();
   });
