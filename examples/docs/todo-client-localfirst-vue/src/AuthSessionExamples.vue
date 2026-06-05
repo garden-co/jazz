@@ -14,7 +14,7 @@ const sessionUserId = computed(() => session.value?.user_id ?? null);
 // #endregion auth-session-vue-user-id
 
 // #region auth-session-vue-query
-const ownedTodos = useAll(
+const { data: ownedTodos } = useAll(
   computed(() =>
     sessionUserId.value ? app.todos.where({ owner_id: sessionUserId.value }) : undefined,
   ),

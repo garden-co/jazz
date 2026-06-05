@@ -1,4 +1,3 @@
-import { onDestroy } from "svelte";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { applyDelta } from "../reconcile-array.js";
@@ -41,14 +40,11 @@ export class QuerySubscription<T extends { id: string }> {
   loading: boolean = $state(true);
   error: Error | null = $state(null);
 
-  #unsubscribe: (() => void) | null = null;
-
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
     options?: MaybeGetter<QueryOptions | undefined>,
   ) {
     const ctx = getJazzContext();
-    this.current = resolve(options)?.tier ? undefined : [];
 
     $effect(() => {
       const resolvedQuery = resolve(query);
@@ -67,6 +63,11 @@ export class QuerySubscription<T extends { id: string }> {
       this.loading = true;
       this.error = null;
 
+      // Capture the unsubscribe in a local and return it directly, so the
+      // effect's own teardown (on re-run and on root/component destroy) owns
+      // the lifecycle. No shared mutable field to clobber, and no onDestroy —
+      // which lets the class be used inside `$effect.root` and `.svelte.ts`.
+      let unsubscribe: (() => void) | null = null;
       try {
         const key = manager.makeQueryKey(resolvedQuery, resolvedOptions);
         const entry = manager.getCacheEntry<T>(key);
@@ -77,10 +78,11 @@ export class QuerySubscription<T extends { id: string }> {
           this.loading = false;
         }
 
-        this.#unsubscribe = entry.subscribe({
+        unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
             this.current = data;
             this.loading = false;
+            this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
             if (this.current) {
@@ -94,6 +96,11 @@ export class QuerySubscription<T extends { id: string }> {
             this.current = undefined;
             this.loading = false;
           },
+          onReset: () => {
+            this.current = undefined;
+            this.error = null;
+            this.loading = true;
+          },
         });
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));
@@ -101,19 +108,8 @@ export class QuerySubscription<T extends { id: string }> {
       }
 
       return () => {
-        this.#cleanup();
+        unsubscribe?.();
       };
     });
-
-    onDestroy(() => {
-      this.#cleanup();
-    });
-  }
-
-  #cleanup() {
-    if (this.#unsubscribe) {
-      this.#unsubscribe();
-      this.#unsubscribe = null;
-    }
   }
 }

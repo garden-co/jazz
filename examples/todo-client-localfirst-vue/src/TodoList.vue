@@ -6,7 +6,7 @@ import { app } from "./lib/schema.js";
 
 const db = useDb();
 // #region reading-reactive-vue
-const todos = useAll(app.todos);
+const { data: todos } = useAll(app.todos);
 // #endregion reading-reactive-vue
 const session = useSession();
 const sessionUserId = computed(() => session.value?.user_id ?? null);

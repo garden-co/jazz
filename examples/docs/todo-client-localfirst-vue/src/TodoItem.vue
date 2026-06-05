@@ -6,7 +6,7 @@ import { app } from "../schema.js";
 const props = defineProps<{ id: string }>();
 
 const db = useDb();
-const todos = useAll(() => app.todos.where({ id: props.id }).limit(1));
+const { data: todos } = useAll(() => app.todos.where({ id: props.id }).limit(1));
 const todo = computed(() => todos.value?.[0]);
 </script>
 

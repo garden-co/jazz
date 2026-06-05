@@ -205,9 +205,9 @@ const stopsQuery = computed(() => {
     .limit(12);
   return canEdit.value ? base : confirmed;
 });
-const stopsData = useAll(stopsQuery);
+const { data: stopsData } = useAll(stopsQuery);
 
-const bandsData = useAll(app.bands.limit(1));
+const { data: bandsData } = useAll(app.bands.limit(1));
 
 const firstBandId = computed(() => {
   const bands = bandsData.value;
