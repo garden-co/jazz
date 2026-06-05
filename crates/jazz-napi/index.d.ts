@@ -18,6 +18,7 @@ export declare class NapiRuntime {
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
   insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any, writeContextJson?: string | undefined | null): any
+  upsert(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   delete(objectId: string, writeContextJson?: string | undefined | null): any
   restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void

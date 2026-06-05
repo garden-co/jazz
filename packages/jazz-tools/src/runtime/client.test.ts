@@ -37,6 +37,7 @@ function makeFakeRuntime() {
       },
     ),
     update: vi.fn(() => ({ batchId: "batch-update" })),
+    upsert: vi.fn(() => ({ batchId: "batch-upsert" })),
     delete: vi.fn(() => ({ batchId: "batch-delete" })),
     query:
       vi.fn<

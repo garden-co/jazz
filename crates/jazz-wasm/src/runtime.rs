@@ -1576,6 +1576,36 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    /// Create or update a row using a caller-supplied ObjectId.
+    #[wasm_bindgen]
+    pub fn upsert(
+        &self,
+        table: &str,
+        object_id: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::upsert", tier = self.tier_label, table, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut core = self.core.borrow_mut();
+        let batch_id = core
+            .upsert_with_id(table, oid, named_values, write_context.as_ref())
+            .map_err(|e| JsError::new(&format!("Upsert failed: {:?}", e)))?;
+
+        tracing::debug!(object_id, "upserted");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(

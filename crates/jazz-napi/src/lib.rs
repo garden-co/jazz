@@ -691,6 +691,32 @@ impl NapiRuntime {
         }))
     }
 
+    #[napi]
+    pub fn upsert(
+        &self,
+        table: String,
+        object_id: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        write_context_json: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let batch_id = core
+            .upsert_with_id(&table, oid, values.0, write_context.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Upsert failed: {:?}", e)))?;
+
+        Ok(serde_json::json!({
+            "batchId": batch_id.to_string(),
+        }))
+    }
+
     #[napi(js_name = "delete")]
     pub fn delete_row(
         &self,
