@@ -34,11 +34,15 @@ type LeaderState = {
   ready: boolean;
   tabLockName: string | null;
   workerLockName: string | null;
+  compatibilityLockName: string | null;
   tabLockMonitor: WebLockMonitor | null;
   workerLockMonitor: WebLockMonitor | null;
 };
 
-type ClearedLeaderState = Pick<LeaderState, "tabId" | "term" | "tabLockName" | "workerLockName">;
+type ClearedLeaderState = Pick<
+  LeaderState,
+  "tabId" | "term" | "tabLockName" | "workerLockName" | "compatibilityLockName"
+>;
 
 type ResetState = {
   requestId: string;
@@ -168,6 +172,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       leader.ready = true;
       leader.tabLockName = message.tabLockName;
       leader.workerLockName = message.workerLockName;
+      leader.compatibilityLockName = message.compatibilityLockName ?? null;
       announceLeaderReady(leader);
       startLeaderLockMonitors(leader);
       if (resetState?.promotedTerm === message.term) {
@@ -263,6 +268,7 @@ function electIfNeeded(): void {
     ready: false,
     tabLockName: null,
     workerLockName: null,
+    compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
@@ -364,6 +370,7 @@ function clearLeader(
     term: current.term,
     tabLockName: current.tabLockName,
     workerLockName: current.workerLockName,
+    compatibilityLockName: current.compatibilityLockName,
   };
 }
 
@@ -479,6 +486,7 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     ready: false,
     tabLockName: null,
     workerLockName: null,
+    compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
@@ -616,24 +624,28 @@ async function waitForPreviousLeaderLocks(
     return;
   }
 
-  if (await acquireAndReleaseLocks(previousLeader.tabLockName, previousLeader.workerLockName)) {
+  const lockNames = [
+    previousLeader.tabLockName,
+    previousLeader.workerLockName,
+    previousLeader.compatibilityLockName,
+  ].filter((lockName): lockName is string => lockName !== null);
+
+  if (await acquireAndReleaseLocks(lockNames)) {
     return;
   }
 
   await sleep(namespace?.forceTakeoverTimeoutMs ?? DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS);
-  await stealAndReleaseWebLock(previousLeader.tabLockName).catch(() => undefined);
-  await stealAndReleaseWebLock(previousLeader.workerLockName).catch(() => undefined);
+  for (const lockName of lockNames) {
+    await stealAndReleaseWebLock(lockName).catch(() => undefined);
+  }
 }
 
-async function acquireAndReleaseLocks(
-  tabLockName: string,
-  workerLockName: string,
-): Promise<boolean> {
-  const tabLease = await tryAcquireWebLock(tabLockName);
-  const workerLease = await tryAcquireWebLock(workerLockName);
-  tabLease?.release();
-  workerLease?.release();
-  return tabLease !== null && workerLease !== null;
+async function acquireAndReleaseLocks(lockNames: readonly string[]): Promise<boolean> {
+  const leases = await Promise.all(lockNames.map((lockName) => tryAcquireWebLock(lockName)));
+  for (const lease of leases) {
+    lease?.release();
+  }
+  return leases.every((lease) => lease !== null);
 }
 
 function assignFollowerPorts(nextLeader: LeaderState): void {
