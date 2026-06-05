@@ -44,7 +44,6 @@ import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import {
   MessagePortRuntimeBridge,
   WorkerBridge,
-  type PeerSyncBatch,
   type WorkerBridgeOptions,
 } from "./worker-bridge.js";
 import type { AuthFailureReason } from "./sync-transport.js";
@@ -62,7 +61,6 @@ import {
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
-import type { LeaderRole, LeaderSnapshot, TabLeaderElection } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "./worker-bridge.js";
 import {
   normalizeBuiltQuery,
@@ -79,16 +77,6 @@ import {
 } from "./runtime-config.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
-  isTabSyncMessage,
-  resolveBroadcastChannelCtor,
-  type BroadcastChannelLike,
-  type FollowerCloseMessage,
-  type FollowerSyncMessage,
-  type LeaderSyncMessage,
-  type TabSyncMessage,
-} from "./tab-sync-protocol.js";
-import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
-import {
   installWasmTeardownTrapSuppressor,
   isWasmTeardownInProgress,
   isWasmTeardownTrap,
@@ -98,6 +86,7 @@ import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "./browser
 import {
   createBrowserBrokerFingerprint,
   createRuntimeSourceIdentity,
+  type BrowserBrokerRole,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
 import { tryAcquireWebLock, type LeaderLockLease } from "./leader-lock.js";
@@ -825,17 +814,11 @@ export class Db {
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
   private workerDbName: string | null = null;
-  private leaderElection: TabLeaderElection | null = null;
-  private leaderElectionUnsubscribe: (() => void) | null = null;
-  private tabRole: LeaderRole = "follower";
+  private tabRole: BrowserBrokerRole = "follower";
   private tabId: string | null = null;
   private currentLeaderTabId: string | null = null;
   private currentLeaderTerm = 0;
-  private syncChannel: BroadcastChannelLike | null = null;
-  private readonly leaderPeerIds = new Set<string>();
-  private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
-  private storageReset: StorageResetCoordinator | null = null;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -859,9 +842,6 @@ export class Db {
    */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
-  private readonly onSyncChannelMessage = (event: MessageEvent): void => {
-    this.handleSyncChannelMessage(event.data);
-  };
   private readonly onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
     const hidden = document.visibilityState === "hidden";
@@ -1023,8 +1003,6 @@ export class Db {
 
     try {
       db.attachLifecycleHooks();
-      db.openSyncChannel();
-      db.storageReset = new StorageResetCoordinator(db.createStorageResetHost());
       const broker = await BrowserBrokerClient.connect({
         appId: config.appId,
         dbName: db.primaryDbName,
@@ -1057,7 +1035,6 @@ export class Db {
       await db.waitForInitialBrokerPromotion();
       return db;
     } catch (error) {
-      db.closeSyncChannel();
       db.detachLifecycleHooks();
       db.releaseBrokerLeadershipResources();
       await db.brokerClient?.shutdown();
@@ -1179,11 +1156,7 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
-    this.leaderPeerIds.clear();
-    bridge.onPeerSync((batch) => {
-      this.handleWorkerPeerSync(batch);
-    });
-    this.applyBridgeRoutingForCurrentLeader(bridge, false);
+    bridge.setServerPayloadForwarder(null);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
     });
@@ -1613,46 +1586,6 @@ export class Db {
     compatibilityLockLease?.release();
   }
 
-  private adoptLeaderSnapshot(snapshot: LeaderSnapshot): void {
-    this.tabRole = snapshot.role;
-    this.tabId = snapshot.tabId;
-    this.currentLeaderTabId = snapshot.leaderTabId;
-    this.currentLeaderTerm = snapshot.term;
-  }
-
-  private openSyncChannel(): void {
-    if (this.syncChannel || !this.primaryDbName) return;
-    const ChannelCtor = resolveBroadcastChannelCtor();
-    if (!ChannelCtor) {
-      return;
-    }
-
-    const channelName = `jazz-tab-sync:${this.config.appId}:${this.primaryDbName}`;
-    this.syncChannel = new ChannelCtor(channelName);
-    this.syncChannel.addEventListener("message", this.onSyncChannelMessage);
-  }
-
-  private closeSyncChannel(): void {
-    if (!this.syncChannel) return;
-    this.syncChannel.removeEventListener("message", this.onSyncChannelMessage);
-    this.syncChannel.close();
-    this.syncChannel = null;
-  }
-
-  private postSyncChannelMessage(message: TabSyncMessage): void {
-    this.syncChannel?.postMessage(message);
-  }
-
-  private async resumeWorker(): Promise<void> {
-    if (this.worker || this.isShuttingDown) {
-      return;
-    }
-    if (this.brokerClient && this.tabRole !== "leader") {
-      return;
-    }
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
-  }
-
   private attachLifecycleHooks(): void {
     if (this.lifecycleHooksAttached) return;
     if (typeof window === "undefined" || typeof document === "undefined") return;
@@ -1691,207 +1624,6 @@ export class Db {
       event,
       sentAtMs: Date.now(),
     });
-  }
-
-  private handleSyncChannelMessage(raw: unknown): void {
-    if (this.isShuttingDown || !this.tabId) return;
-    if (!isTabSyncMessage(raw)) return;
-
-    if (this.storageReset?.handleSyncChannelMessage(raw)) {
-      return;
-    }
-
-    switch (raw.type) {
-      case "follower-sync":
-        this.handleFollowerSync(raw);
-        return;
-      case "leader-sync":
-        this.handleLeaderSync(raw);
-        return;
-      case "follower-close":
-        this.handleFollowerClose(raw);
-        return;
-    }
-  }
-
-  private handleFollowerSync(message: FollowerSyncMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    if (!this.leaderPeerIds.has(message.fromTabId)) {
-      this.leaderPeerIds.add(message.fromTabId);
-      this.workerBridge.openPeer(message.fromTabId);
-    }
-    this.workerBridge.sendPeerSync(message.fromTabId, message.term, message.payload);
-  }
-
-  private handleLeaderSync(message: LeaderSyncMessage): void {
-    if (this.tabRole !== "follower") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toTabId !== this.tabId) return;
-    if (!this.currentLeaderTabId || message.fromLeaderTabId !== this.currentLeaderTabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    for (const payload of message.payload) {
-      this.workerBridge.applyIncomingServerPayload(payload);
-    }
-  }
-
-  private handleFollowerClose(message: FollowerCloseMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-    if (!this.leaderPeerIds.has(message.fromTabId)) return;
-
-    this.leaderPeerIds.delete(message.fromTabId);
-    this.workerBridge.closePeer(message.fromTabId);
-  }
-
-  private handleWorkerPeerSync(batch: PeerSyncBatch): void {
-    if (this.isShuttingDown) return;
-    if (this.tabRole !== "leader") return;
-    if (!this.tabId) return;
-    if (batch.term !== this.currentLeaderTerm) return;
-
-    this.postSyncChannelMessage({
-      type: "leader-sync",
-      fromLeaderTabId: this.tabId,
-      toTabId: batch.peerId,
-      term: batch.term,
-      payload: batch.payload,
-    });
-  }
-
-  private sendFollowerClose(leaderTabId: string | null, term: number): void {
-    if (this.brokerClient) return;
-    if (!leaderTabId || !this.tabId) return;
-    if (leaderTabId === this.tabId) return;
-
-    this.postSyncChannelMessage({
-      type: "follower-close",
-      fromTabId: this.tabId,
-      toLeaderTabId: leaderTabId,
-      term,
-    });
-  }
-
-  private applyBridgeRoutingForCurrentLeader(
-    bridge: WorkerBridge,
-    replayConnection: boolean,
-  ): void {
-    if (this.brokerClient) {
-      bridge.setServerPayloadForwarder(null);
-      this.activeRemoteLeaderTabId = null;
-      if (replayConnection) {
-        bridge.replayServerConnection();
-      }
-      return;
-    }
-
-    if (this.tabRole === "leader") {
-      bridge.setServerPayloadForwarder(null);
-      this.activeRemoteLeaderTabId = null;
-    } else {
-      bridge.setServerPayloadForwarder((payload) => {
-        if (!this.tabId || !this.currentLeaderTabId) return;
-        if (this.currentLeaderTabId === this.tabId) return;
-
-        this.postSyncChannelMessage({
-          type: "follower-sync",
-          fromTabId: this.tabId,
-          toLeaderTabId: this.currentLeaderTabId,
-          term: this.currentLeaderTerm,
-          payload: [payload],
-        });
-      });
-      this.activeRemoteLeaderTabId = this.currentLeaderTabId;
-    }
-
-    if (replayConnection) {
-      bridge.replayServerConnection();
-    }
-  }
-
-  private onLeaderElectionChange(snapshot: LeaderSnapshot): void {
-    if (this.isShuttingDown || !this.primaryDbName) return;
-
-    const previousRole = this.tabRole;
-    const previousLeaderTabId = this.currentLeaderTabId;
-    const previousTerm = this.currentLeaderTerm;
-    this.adoptLeaderSnapshot(snapshot);
-
-    if (previousRole === "follower" && previousLeaderTabId !== this.currentLeaderTabId) {
-      this.sendFollowerClose(previousLeaderTabId, previousTerm);
-    }
-
-    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
-    const dbNameChanged = nextDbName !== this.workerDbName;
-    this.workerDbName = nextDbName;
-
-    // No bridge means no runtime server edge exists yet.
-    if (!this.workerBridge) return;
-
-    this.enqueueWorkerReconfigure(async () => {
-      if (this.isShuttingDown) return;
-      if (dbNameChanged) {
-        await this.restartWorkerWithCurrentDbName();
-        return;
-      }
-
-      if (this.workerBridge) {
-        this.applyBridgeRoutingForCurrentLeader(this.workerBridge, true);
-      }
-    });
-  }
-
-  private enqueueWorkerReconfigure(task: () => Promise<void>): void {
-    this.workerReconfigure = this.workerReconfigure.then(task).catch((error) => {
-      console.error("[db] Worker reconfigure failed:", error);
-    });
-  }
-
-  private async restartWorkerWithCurrentDbName(): Promise<void> {
-    const currentWorker = this.worker;
-    if (!currentWorker) return;
-
-    // If bridge init is in flight, wait before tearing down.
-    if (this.bridgeReady) {
-      await this.bridgeReady;
-    }
-
-    if (this.workerBridge) {
-      try {
-        await this.workerBridge.shutdown();
-      } catch {
-        // Best effort
-      }
-      this.workerBridge = null;
-    }
-    this.bridgeReady = null;
-
-    currentWorker.terminate();
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
-
-    // Re-attach immediately for existing client runtime(s) so subscriptions replay.
-    const first = this.clients.entries().next();
-    if (!first.done) {
-      const [schemaJson, client] = first.value;
-      this.attachWorkerBridge(schemaJson, client);
-      if (this.bridgeReady) {
-        await this.bridgeReady;
-      }
-    }
-  }
-
-  private currentWorkerNamespace(): string {
-    const driver = resolveStorageDriver(this.config.driver);
-    if (driver.type !== "persistent") {
-      throw new Error("Worker namespace is only available for driver.type='persistent'");
-    }
-    return this.workerDbName ?? driver.dbName ?? this.config.appId;
   }
 
   private async deleteBrokerStorageFiles(): Promise<void> {
@@ -1981,40 +1713,11 @@ export class Db {
     }
     this.clients.clear();
     this.clientSchemas.clear();
-    this.leaderPeerIds.clear();
-    this.activeRemoteLeaderTabId = null;
 
     if (currentWorker) {
       currentWorker.terminate();
     }
     this.worker = null;
-  }
-
-  private createStorageResetHost(): StorageResetHost {
-    return {
-      isShuttingDown: () => this.isShuttingDown,
-      getTabId: () => this.tabId,
-      getTabRole: () => this.tabRole,
-      getCurrentLeaderTabId: () => this.currentLeaderTabId,
-      getCurrentLeaderTerm: () => this.currentLeaderTerm,
-      hasSyncChannel: () => this.syncChannel !== null,
-      getPrimaryDbName: () => this.primaryDbName,
-      getCurrentWorkerNamespace: () => this.currentWorkerNamespace(),
-      postSyncChannelMessage: (message) => this.postSyncChannelMessage(message),
-      ensureBridgeReady: async () => {
-        if (this.bridgeReady) await this.bridgeReady;
-      },
-      shutdownWorkerAndClients: () => this.shutdownWorkerAndClientsForStorageReset(),
-      resumeWorker: () => this.resumeWorker(),
-    };
-  }
-
-  private static resolveWorkerDbNameForSnapshot(
-    primaryDbName: string,
-    snapshot: LeaderSnapshot,
-  ): string {
-    if (snapshot.role === "leader") return primaryDbName;
-    return `${primaryDbName}__fallback__${snapshot.tabId}`;
   }
 
   private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
@@ -2358,16 +2061,12 @@ export class Db {
       return;
     }
 
-    const coordinator = this.storageReset;
-    if (!coordinator) {
-      throw new Error("deleteClientStorage() requires an initialized storage-reset coordinator.");
+    const brokerClient = this.brokerClient;
+    if (!brokerClient) {
+      throw new Error("deleteClientStorage() requires an initialized browser broker.");
     }
     const operation = this.workerReconfigure.then(async () => {
-      if (this.brokerClient) {
-        await this.brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
-        return;
-      }
-      await coordinator.requestReset();
+      await brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
     });
 
     this.workerReconfigure = operation.then(
@@ -2623,22 +2322,9 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
-    this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
-    this.activeRemoteLeaderTabId = null;
-    this.leaderPeerIds.clear();
     this.closePendingLeaderFollowerPorts();
     this.closeFollowerPortState(new Error("Db shutdown"));
-    this.closeSyncChannel();
     this.detachLifecycleHooks();
-
-    if (this.leaderElectionUnsubscribe) {
-      this.leaderElectionUnsubscribe();
-      this.leaderElectionUnsubscribe = null;
-    }
-    if (this.leaderElection) {
-      this.leaderElection.stop();
-      this.leaderElection = null;
-    }
 
     let shutdownError: unknown = null;
 
@@ -2673,6 +2359,7 @@ export class Db {
       await client.shutdown();
     }
     this.clients.clear();
+    this.clientSchemas.clear();
 
     if (this.worker) {
       this.worker.terminate();
