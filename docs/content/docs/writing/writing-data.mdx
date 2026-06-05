@@ -4,6 +4,8 @@ description: Insert, update, and delete APIs with local-first execution, framewo
 reviewedAt: "4059cdef"
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
 ## Local-first writes
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
@@ -23,30 +25,20 @@ See [Files & Blobs](/docs/writing/files-and-blobs) for more details.
 
 Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
 
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
-  persist
-  updateAnchor
->
+<Callout type="info">
+  Different framework? Vue, Solid, and per-framework guides live in [Supported
+  Frameworks](/docs/reference/supported-frameworks/overview).
+</Callout>
+
+<Tabs groupId="jazz-framework" items={["React", "Svelte", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/GetDbExample.tsx#writing-get-db-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/GetDbExample.vue#writing-get-db-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/GetDbExample.svelte#writing-get-db-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/GetDbExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

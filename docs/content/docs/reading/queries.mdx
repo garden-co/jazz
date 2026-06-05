@@ -4,6 +4,7 @@ description: One-shot queries, subscriptions, framework hooks, Suspense integrat
 reviewedAt: "437c86c7e"
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 ## One-shot queries
@@ -137,7 +138,7 @@ magic columns.
 
 ## Framework hooks
 
-Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
+Each framework has a reactive binding that re-renders when query results change. See [Supported Frameworks](/docs/reference/supported-frameworks/overview) for side-by-side examples.
 
 | Framework  | API                            | Notes                                |
 | ---------- | ------------------------------ | ------------------------------------ |
@@ -150,25 +151,20 @@ Each framework has a reactive binding that re-renders when query results change.
 
 `useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
+<Callout type="info">
+  Different framework? Vue, Solid, and per-framework guides live in [Supported
+  Frameworks](/docs/reference/supported-frameworks/overview).
+</Callout>
+
+<Tabs groupId="jazz-framework" items={["React", "Svelte"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-loading-state-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/LiveQueryExample.vue#reading-loading-state-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/LiveQueryExample.svelte#reading-loading-state-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/LiveQueryExample.tsx
     </include>
   </Tab>
 </Tabs>
@@ -196,25 +192,15 @@ React's `useAll` follows React's own re-render model and returns a fresh array e
 
 Pass `undefined` instead of a query to skip evaluation. This is useful when building dynamic queries.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Svelte"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-conditional-query-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/ConditionalQueryExample.vue#reading-conditional-query-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/ConditionalQueryExample.svelte#reading-conditional-query-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/ConditionalQueryExample.tsx
     </include>
   </Tab>
 </Tabs>

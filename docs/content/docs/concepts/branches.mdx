@@ -4,6 +4,8 @@ description: How Jazz uses branches to isolate data across environments, schema 
 reviewedAt: "4059cdef"
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
 Every row version in Jazz belongs to a **branch**&hairsp;—&hairsp;a named, independent view of your
 data. Some branches are merged automatically at query time (schema versions), while others are
 fully isolated (environments and user branches). This makes it easy to keep development data
@@ -27,30 +29,20 @@ The schema hash is derived automatically from your current schema definition.
 
 By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a different branch, set `env` and/or `userBranch` when creating your database context:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Callout type="info">
+  Different framework? Vue, Solid, and per-framework guides live in [Supported
+  Frameworks](/docs/reference/supported-frameworks/overview).
+</Callout>
+
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/branch-snippets.tsx#branch-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/BranchExample.vue#branch-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/BranchExample.svelte#branch-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/BranchExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

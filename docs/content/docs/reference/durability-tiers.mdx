@@ -4,6 +4,7 @@ description: "API reference for read and write durability tiers: the options tha
 reviewedAt: "f6535a533"
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 <DurabilityTiersTable />
@@ -36,9 +37,14 @@ These options apply to:
 - `useAll(query, options?)` (Vue)
 - `useAll(() => ({ query, options }))` (Solid)
 
+<Callout type="info">
+  Different framework? Vue, Solid, and per-framework guides live in [Supported
+  Frameworks](/docs/reference/supported-frameworks/overview).
+</Callout>
+
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript", "Rust"]}
+  items={["React", "Svelte", "Expo", "TypeScript", "Rust"]}
   persist
   updateAnchor
 >
@@ -47,19 +53,9 @@ These options apply to:
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-tier-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/docs-snippets.ts#reading-tier-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/docs-snippets.ts#reading-tier-solid
     </include>
   </Tab>
   <Tab value="Expo">
