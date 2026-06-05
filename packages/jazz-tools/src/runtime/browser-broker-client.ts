@@ -71,20 +71,19 @@ interface BrowserBrokerSharedWorkerOptions {
 }
 
 export class BrowserBrokerClient {
-  private readonly worker: SharedWorker;
-  private readonly port: MessagePort;
   private readonly options: BrowserBrokerClientOptions;
+  private worker: SharedWorker | null = null;
+  private port: MessagePort | null = null;
   private brokerEpoch: string | null = null;
   private role: BrowserBrokerRole = "follower";
   private leaderTabId: string | null = null;
   private term = 0;
   private closed = false;
+  private reconnecting = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
 
-  private constructor(worker: SharedWorker, options: BrowserBrokerClientOptions) {
-    this.worker = worker;
-    this.port = worker.port;
+  private constructor(options: BrowserBrokerClientOptions) {
     this.options = options;
   }
 
@@ -95,17 +94,8 @@ export class BrowserBrokerClient {
       throw new Error(formatUnsupportedBrowserBrokerError(missing));
     }
 
-    const SharedWorkerCtor = globalLike.SharedWorker as SharedWorkerConstructor;
-    const worker = new SharedWorkerCtor(
-      new URL("../worker/jazz-broker-worker.js", import.meta.url),
-      {
-        type: "module",
-        name: `jazz-broker:${options.appId}:${options.dbName}`,
-      },
-    );
-
-    const client = new BrowserBrokerClient(worker, options);
-    await client.start();
+    const client = new BrowserBrokerClient(options);
+    await client.connectToBroker();
     return client;
   }
 
@@ -139,7 +129,7 @@ export class BrowserBrokerClient {
   }
 
   reportLeaderReady(input: BrowserBrokerLeaderReadyInput): void {
-    if (this.closed) return;
+    if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "leader-ready",
       term: input.term,
@@ -150,7 +140,7 @@ export class BrowserBrokerClient {
   }
 
   reportLeaderFailed(term: number, reason: string): void {
-    if (this.closed) return;
+    if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "leader-failed",
       term,
@@ -159,12 +149,12 @@ export class BrowserBrokerClient {
   }
 
   reportVisibility(visibility: BrowserBrokerVisibility): void {
-    if (this.closed) return;
+    if (this.closed || !this.port) return;
     this.port.postMessage({ type: "visibility", visibility });
   }
 
   reportFollowerPortAttached(followerTabId: string, term: number): void {
-    if (this.closed) return;
+    if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "follower-port-attached",
       followerTabId,
@@ -181,7 +171,7 @@ export class BrowserBrokerClient {
       waiters.push({ resolve, reject });
       this.resetWaiters.set(requestId, waiters);
     });
-    this.port.postMessage({
+    this.port?.postMessage({
       type: "storage-reset-request",
       requestId,
     });
@@ -191,8 +181,8 @@ export class BrowserBrokerClient {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.port.postMessage({ type: "shutdown" });
-    this.worker.port.close();
+    this.port?.postMessage({ type: "shutdown" });
+    this.port?.close();
     for (const waiter of this.roleWaiters) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error("Browser broker client closed"));
@@ -201,9 +191,14 @@ export class BrowserBrokerClient {
     this.rejectResetWaiters(new Error("Browser broker client closed"));
   }
 
-  private async start(): Promise<void> {
-    this.port.addEventListener("message", this.onMessage);
-    this.port.start();
+  private async connectToBroker(): Promise<void> {
+    const worker = this.createSharedWorker();
+    const port = worker.port;
+    this.worker = worker;
+    this.port = port;
+
+    port.addEventListener("message", this.onMessage);
+    port.start();
 
     const hello = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -213,7 +208,7 @@ export class BrowserBrokerClient {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.port.removeEventListener("message", onHello);
+        port.removeEventListener("message", onHello);
       };
 
       const onHello = (event: MessageEvent) => {
@@ -229,10 +224,10 @@ export class BrowserBrokerClient {
         }
       };
 
-      this.port.addEventListener("message", onHello);
+      port.addEventListener("message", onHello);
     });
 
-    this.port.postMessage({
+    port.postMessage({
       type: "hello",
       tabId: this.options.tabId,
       appId: this.options.appId,
@@ -247,6 +242,15 @@ export class BrowserBrokerClient {
     await hello;
   }
 
+  private createSharedWorker(): SharedWorker {
+    const globalLike = this.options.globalLike ?? (globalThis as BrowserBrokerCapabilityGlobal);
+    const SharedWorkerCtor = globalLike.SharedWorker as SharedWorkerConstructor;
+    return new SharedWorkerCtor(new URL("../worker/jazz-broker-worker.js", import.meta.url), {
+      type: "module",
+      name: `jazz-broker:${this.options.appId}:${this.options.dbName}`,
+    });
+  }
+
   private readonly onMessage = (event: MessageEvent): void => {
     this.handleControlMessage(event.data as BrowserBrokerControlMessage);
   };
@@ -254,6 +258,7 @@ export class BrowserBrokerClient {
   private handleControlMessage(message: BrowserBrokerControlMessage): void {
     if (!message || typeof message !== "object") return;
     if (this.brokerEpoch && message.brokerEpoch !== this.brokerEpoch) {
+      void this.reconnectAfterBrokerEpochChange(message.brokerEpoch);
       return;
     }
 
@@ -264,7 +269,7 @@ export class BrowserBrokerClient {
       case "broker-ping":
         this.options.onBrokerPing?.();
         if (this.shouldRespondToBrokerPing()) {
-          this.port.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
+          this.port?.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
         }
         return;
       case "become-leader":
@@ -322,10 +327,49 @@ export class BrowserBrokerClient {
         return;
       case "unsupported":
         this.closed = true;
-        this.worker.port.close();
+        this.port?.close();
         this.rejectRoleWaiters(new Error(message.reason));
         this.rejectResetWaiters(new Error(message.reason));
         return;
+    }
+  }
+
+  private async reconnectAfterBrokerEpochChange(nextBrokerEpoch: string): Promise<void> {
+    if (this.closed || this.reconnecting) return;
+    this.reconnecting = true;
+
+    const previousRole = this.role;
+    const previousTerm = this.term;
+    const previousPort = this.port;
+    const error = new Error(
+      `Browser broker epoch changed from ${this.brokerEpoch} to ${nextBrokerEpoch}`,
+    );
+
+    this.brokerEpoch = null;
+    this.role = "follower";
+    this.leaderTabId = null;
+    this.term = 0;
+    this.rejectResetWaiters(error);
+
+    previousPort?.removeEventListener("message", this.onMessage);
+    previousPort?.close();
+
+    try {
+      if (previousRole === "leader" && previousTerm > 0) {
+        await this.options.onDemote?.(previousTerm);
+      } else if (previousRole === "follower" && previousTerm > 0) {
+        this.options.onCloseFollowerPort?.(previousTerm);
+      }
+
+      if (!this.closed) {
+        await this.connectToBroker();
+      }
+    } catch (reconnectError) {
+      this.closed = true;
+      this.rejectRoleWaiters(toError(reconnectError));
+      this.rejectResetWaiters(toError(reconnectError));
+    } finally {
+      this.reconnecting = false;
     }
   }
 
@@ -353,7 +397,7 @@ export class BrowserBrokerClient {
     success: boolean,
     errorMessage?: string,
   ): void {
-    if (this.closed) return;
+    if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "storage-reset-ready",
       requestId,
@@ -400,4 +444,8 @@ export class BrowserBrokerClient {
 
 function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

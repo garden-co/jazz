@@ -37,6 +37,7 @@ type LeaderState = {
   compatibilityLockName: string | null;
   tabLockMonitor: WebLockMonitor | null;
   workerLockMonitor: WebLockMonitor | null;
+  compatibilityLockMonitor: WebLockMonitor | null;
 };
 
 type ClearedLeaderState = Pick<
@@ -271,6 +272,7 @@ function electIfNeeded(): void {
     compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
+    compatibilityLockMonitor: null,
   };
 
   post(tab.port, {
@@ -323,6 +325,16 @@ function startLeaderLockMonitors(nextLeader: LeaderState): void {
       handleLeaderLockReleased(nextLeader.term, stringifyError(error));
     },
   });
+  if (nextLeader.compatibilityLockName) {
+    nextLeader.compatibilityLockMonitor = monitorWebLockRelease(nextLeader.compatibilityLockName, {
+      onGranted: () => {
+        handleLeaderLockReleased(nextLeader.term, "compatibility-lock-released");
+      },
+      onError: (error) => {
+        handleLeaderLockReleased(nextLeader.term, stringifyError(error));
+      },
+    });
+  }
 }
 
 function handleLeaderLockReleased(term: number, reason: string): void {
@@ -379,6 +391,8 @@ function cancelLeaderMonitors(current: LeaderState): void {
   current.tabLockMonitor = null;
   current.workerLockMonitor?.cancel();
   current.workerLockMonitor = null;
+  current.compatibilityLockMonitor?.cancel();
+  current.compatibilityLockMonitor = null;
 }
 
 function startStorageReset(requestId: string): void {
@@ -489,6 +503,7 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
+    compatibilityLockMonitor: null,
   };
 
   post(tab.port, {

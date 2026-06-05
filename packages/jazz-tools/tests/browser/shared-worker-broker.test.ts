@@ -105,6 +105,7 @@ describe("SharedWorker browser broker", () => {
       brokerPingIntervalMs?: number;
       brokerPongTimeoutMs?: number;
       onReady?: (term: number) => void;
+      onDemote?: (term: number) => void;
       onFailure?: (term: number, reason: string) => void;
       reportFailures?: boolean;
     } = {},
@@ -114,6 +115,7 @@ describe("SharedWorker browser broker", () => {
       forceTakeoverTimeoutMs: options.forceTakeoverTimeoutMs,
       brokerPingIntervalMs: options.brokerPingIntervalMs,
       brokerPongTimeoutMs: options.brokerPongTimeoutMs,
+      onDemote: options.onDemote,
       onBecomeLeader: async (client, term) => {
         try {
           const locks = await acquireLeaderLocks(dbName, {
@@ -243,6 +245,34 @@ describe("SharedWorker browser broker", () => {
       "stuck tab and worker locks should be stolen so the follower can report leader-ready",
     );
     expect(second.snapshot().leaderTabId).toBe("tab-b");
+  });
+
+  it("promotes a replacement when the migration compatibility lock is released", async () => {
+    const dbName = uniqueName("broker-compat-lock-release");
+    const first = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-a", "fingerprint-a", {
+        onDemote: () => {
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+        },
+      }),
+    );
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    await second.waitForRole("follower", 2000);
+
+    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+
+    await second.waitForRole("leader", 4000);
+    expect(second.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-b",
+      leaderTabId: "tab-b",
+      term: 2,
+    });
   });
 
   it("steals a stuck migration compatibility lock before promoting a replacement", async () => {
