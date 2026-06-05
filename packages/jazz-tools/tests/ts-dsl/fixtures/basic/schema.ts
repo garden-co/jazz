@@ -23,6 +23,8 @@ export const schema = {
       title: s.string(),
       done: s.boolean().default(false),
       tags: s.array(s.string()).default([]),
+      checkpoints: s.array(s.int()).default([]),
+      flags: s.array(s.boolean()).default([]),
       projectId: s.ref("projects"),
       ownerId: s.ref("users").optional(),
       assigneesIds: s.array(s.ref("users")).default([]),

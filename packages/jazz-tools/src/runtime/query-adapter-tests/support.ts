@@ -37,6 +37,34 @@ export const basicSchema: WasmSchema = {
         column_type: { type: "Array", element: { type: "Text" } },
         nullable: false,
       },
+      {
+        name: "checkpoints",
+        column_type: { type: "Array", element: { type: "Integer" } },
+        nullable: false,
+      },
+      {
+        name: "flags",
+        column_type: { type: "Array", element: { type: "Boolean" } },
+        nullable: false,
+      },
+      {
+        name: "reviewers",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+      },
+      {
+        name: "status_history",
+        column_type: {
+          type: "Array",
+          element: { type: "Enum", variants: ["done", "in_progress", "todo"] },
+        },
+        nullable: false,
+      },
+      {
+        name: "reviewed_at",
+        column_type: { type: "Array", element: { type: "Timestamp" } },
+        nullable: false,
+      },
       { name: "metadata", column_type: { type: "Json" }, nullable: true },
       { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
     ],

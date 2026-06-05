@@ -20,6 +20,8 @@ export function insertTodo(db: Db, data: Partial<Todo>): Todo {
     title: data.title ?? "Test Todo",
     done: data.done ?? false,
     tags: data.tags ?? [],
+    checkpoints: data.checkpoints ?? [],
+    flags: data.flags ?? [],
     projectId: data.projectId ?? insertProject(db).id,
     ownerId: data.ownerId,
     assigneesIds: data.assigneesIds ?? [],
