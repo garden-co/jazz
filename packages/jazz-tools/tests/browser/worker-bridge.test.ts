@@ -19,7 +19,6 @@ import {
   uniqueDbName,
   waitForCondition,
   waitForQuery,
-  waitForWorkerMessageType,
   withTimeout,
 } from "./support.js";
 import {
@@ -354,6 +353,10 @@ describe("Worker Bridge with OPFS", () => {
       return role;
     }
     return null;
+  }
+
+  function getPrivateWorker(db: Db): Worker | null {
+    return (db as unknown as { worker?: Worker | null }).worker ?? null;
   }
 
   async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
@@ -2175,6 +2178,13 @@ describe("Worker Bridge with OPFS", () => {
     );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
+    await waitForCondition(
+      async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
+      8000,
+      "Broker should keep exactly one dedicated worker for the elected leader",
+    );
+    expect(getTabRole(follower)).toBe("follower");
+
     const receivedByLeader: string[] = [];
     const unsubscribe = leader.subscribeAll(
       allTodos as QueryBuilder<Todo & { id: string }>,
@@ -2206,6 +2216,46 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     unsubscribe();
+  });
+
+  it("syncs a follower opened after the leader is already ready", async () => {
+    const dbName = uniqueDbName("late-follower-route");
+    const leader = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+
+    leader.insert(todos, { title: "Created before second tab", done: false });
+    await waitForCondition(
+      async () => {
+        const rows = await leader.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === "Created before second tab");
+      },
+      8000,
+      "Leader should persist the initial row before opening the follower",
+    );
+    await waitForCondition(
+      async () => getTabRole(leader) === "leader" && getPrivateWorker(leader) !== null,
+      8000,
+      "Leader should be durable-ready before the follower connects",
+    );
+
+    const follower = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    await waitForCondition(
+      async () => getTabRole(follower) === "follower" && getPrivateWorker(follower) === null,
+      8000,
+      "Late second tab should join as a follower without spawning a worker",
+    );
+
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === "Created before second tab");
+      },
+      8000,
+      "Late follower should receive rows through the leader data port",
+    );
   });
 
   it("fails over to follower after leader shutdown", async () => {

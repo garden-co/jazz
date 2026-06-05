@@ -1,8 +1,45 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { loadWasmModuleMock } = vi.hoisted(() => ({
-  loadWasmModuleMock: vi.fn().mockResolvedValue({}) as any,
-}));
+const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = vi.hoisted(() => {
+  const loadWasmModuleMock = vi.fn().mockResolvedValue({}) as any;
+  const tryAcquireWebLockMock = vi.fn(async () => ({ release: vi.fn() }));
+  const connectMock = vi.fn(async (options: any) => {
+    const client = new FakeBrowserBrokerClient(options);
+    await options.onBecomeLeader?.(client, 1);
+    return client;
+  });
+
+  class FakeBrowserBrokerClient {
+    static connect = connectMock;
+    private readonly options: any;
+
+    constructor(options: any) {
+      this.options = options;
+    }
+
+    snapshot() {
+      return {
+        brokerEpoch: "test-broker",
+        role: "leader" as const,
+        tabId: this.options.tabId,
+        leaderTabId: this.options.tabId,
+        term: 1,
+      };
+    }
+
+    reportLeaderReady(): void {}
+
+    reportLeaderFailed(): void {}
+
+    reportVisibility(): void {}
+
+    reportFollowerPortAttached(): void {}
+
+    async shutdown(): Promise<void> {}
+  }
+
+  return { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient };
+});
 
 const { FakeTabLeaderElection } = vi.hoisted(() => ({
   FakeTabLeaderElection: class {
@@ -50,6 +87,22 @@ vi.mock("./tab-leader-election.js", async (importOriginal) => {
   };
 });
 
+vi.mock("./browser-broker-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./browser-broker-client.js")>();
+  return {
+    ...actual,
+    BrowserBrokerClient: FakeBrowserBrokerClient,
+  };
+});
+
+vi.mock("./leader-lock.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./leader-lock.js")>();
+  return {
+    ...actual,
+    tryAcquireWebLock: tryAcquireWebLockMock,
+  };
+});
+
 import { Db, type DbConfig } from "./db.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 
@@ -65,6 +118,8 @@ async function createWorkerDb(config: DbConfig): Promise<Db> {
 
 afterEach(() => {
   loadWasmModuleMock.mockClear();
+  tryAcquireWebLockMock.mockClear();
+  FakeBrowserBrokerClient.connect.mockClear();
 
   if (originalWindow === undefined) {
     delete (globalThis as Record<string, unknown>).window;

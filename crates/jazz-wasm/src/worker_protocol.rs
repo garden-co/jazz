@@ -138,6 +138,14 @@ pub enum WorkerToMainWire {
         term: u32,
         payloads: Vec<ByteBuf>,
     },
+    FollowerPortAttached {
+        peer_id: String,
+        term: u32,
+    },
+    FollowerPortClosed {
+        peer_id: String,
+        term: u32,
+    },
     /// Encoded `LocalBatchRecord` storage rows for Rust-side main-runtime
     /// hydration.
     LocalBatchRecordsSync {
@@ -237,6 +245,28 @@ pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
                     .and_then(|v| v.as_string())
                     .unwrap_or_else(|| "worker shim error (no message)".to_string());
                 ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message })
+            }
+            "follower-port-attached" => {
+                let peer_id = Reflect::get(value, &JsValue::from_str("peerId"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let term = Reflect::get(value, &JsValue::from_str("term"))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                ParsedWorkerToMain::Wire(WorkerToMainWire::FollowerPortAttached { peer_id, term })
+            }
+            "follower-port-closed" => {
+                let peer_id = Reflect::get(value, &JsValue::from_str("peerId"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let term = Reflect::get(value, &JsValue::from_str("term"))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                ParsedWorkerToMain::Wire(WorkerToMainWire::FollowerPortClosed { peer_id, term })
             }
             other => ParsedWorkerToMain::UnknownJsObject(other.to_string()),
         };
