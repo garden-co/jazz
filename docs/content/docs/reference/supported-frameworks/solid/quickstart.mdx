@@ -1,0 +1,71 @@
+---
+title: Quickstart
+description: Build a local-first to-do app with Jazz and Solid, step by step.
+---
+
+Build a local-first to-do app with Jazz and Solid. For the full set of options and the other
+frameworks, see [Install](/docs/install/client).
+
+## Create a project
+
+```bash title="Terminal"
+pnpm create vite my-jazz-app --template solid-ts
+cd my-jazz-app
+pnpm install
+```
+
+## Install
+
+```bash title="Terminal"
+pnpm add jazz-tools@alpha
+```
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Generate one on
+[Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`).
+
+<GenerateAppId />
+
+## Define your schema
+
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
+</include>
+
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
+
+## Set up your app
+
+Create the basic structure for your app with Jazz and a to-do list.
+
+<include cwd lang="tsx" meta='title="src/App.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/App.tsx
+</include>
+
+## Add a to-do
+
+Use `db.insert` to create a new row.
+
+<include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/quickstart-add.tsx
+</include>
+
+## Display and edit a to-do
+
+Display a to-do with toggle and delete controls.
+
+<include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/quickstart-item.tsx
+</include>
+
+## List to-dos
+
+Subscribe to a query to get real-time updates as data changes, regardless of where the change
+originates.
+
+<include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/quickstart-list.tsx
+</include>

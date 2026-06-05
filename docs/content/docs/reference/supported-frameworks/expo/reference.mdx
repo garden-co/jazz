@@ -1,0 +1,55 @@
+---
+title: Reference
+description: Expo and bare React Native binding reference for Jazz.
+---
+
+Jazz's React Native bindings live in `jazz-tools/react-native`. `JazzProvider`, `useDb`,
+`useSession`, and `useAll` work exactly as they do in
+[React](/docs/reference/supported-frameworks/react/reference)&hairsp;—&hairsp;that page is the
+reference for the component API. This page covers what is specific to native.
+
+## Packages
+
+- `jazz-tools/react-native`&hairsp;—&hairsp;the provider and hooks (`JazzProvider`, `useDb`,
+  `useSession`, `useAll`). This is all a bare React Native app needs.
+- `jazz-tools/expo`&hairsp;—&hairsp;Expo's local-first auth: `ExpoAuthSecretStore` (backed by
+  `expo-secure-store`) and `useLocalFirstAuth`.
+- `jazz-rn`&hairsp;—&hairsp;the native runtime. It is mandatory alongside `jazz-tools` in any
+  React Native app.
+
+<Callout type="info">
+  Bare React Native (no Expo) is supported directly: import the provider and hooks from
+  `jazz-tools/react-native` and supply your own secret store. The `jazz-tools/expo` package is only
+  the Expo-flavoured local-first auth on top.
+</Callout>
+
+## Native runtime
+
+React Native uses a separate native runtime adapter&hairsp;—&hairsp;no web worker and no OPFS.
+Local persistence is provided by the native embedded backend rather than browser storage. See
+[Internals](/docs/reference/internals#react-native).
+
+## Provider setup
+
+Wrap your app in `JazzProvider` from `jazz-tools/react-native`. See
+[Client setup](/docs/getting-started/client-setup).
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
+</include>
+
+## Local-first auth
+
+`useLocalFirstAuth()` from `jazz-tools/expo` loads the device secret from secure storage (or
+generates one on first run). See [Local-first auth](/docs/auth/local-first-auth).
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo
+</include>
+
+## Query subscriptions, writes, and sessions
+
+`useAll`, `useDb`, and `useSession` behave identically to React. See the
+[React Reference](/docs/reference/supported-frameworks/react/reference) for those, plus
+[Reading Data](/docs/reading/queries), [Writing Data](/docs/writing/writing-data), and
+[Sessions](/docs/auth/sessions).
