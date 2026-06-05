@@ -229,6 +229,8 @@ export interface UpsertOptions extends TimestampOverrideOptions {
 
 export interface UpdateOptions extends TimestampOverrideOptions {}
 
+export interface DeleteOptions extends TimestampOverrideOptions {}
+
 export interface RestoreOptions extends TimestampOverrideOptions {}
 
 /**
@@ -829,9 +831,9 @@ abstract class BatchHandleBase {
     const row = this.client.createInternal(
       table,
       values,
+      options,
       this.session,
       this.attribution,
-      options,
       this.batchContext,
     );
     this.markTouchedRow(row.id);
@@ -844,9 +846,9 @@ abstract class BatchHandleBase {
       table,
       objectId,
       values,
+      options,
       this.session,
       this.attribution,
-      options,
       this.batchContext,
     );
     this.markTouchedRow(row.id);
@@ -858,10 +860,9 @@ abstract class BatchHandleBase {
     this.client.upsertInternal(
       table,
       values,
-      options.id,
+      options,
       this.session,
       this.attribution,
-      options.updatedAt,
       this.batchContext,
     );
     this.markTouchedRow(options.id);
@@ -872,6 +873,7 @@ abstract class BatchHandleBase {
     this.client.updateInternal(
       objectId,
       updates,
+      undefined,
       this.session,
       this.attribution,
       this.batchContext,
@@ -881,13 +883,19 @@ abstract class BatchHandleBase {
 
   delete(objectId: string): void {
     this.ensureActive();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+    this.client.deleteInternal(
+      objectId,
+      undefined,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
     this.markTouchedRow(objectId);
   }
 
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     this.ensureActive();
-    return this.client.queryInternal(query, this.session, this.queryOptions(options));
+    return this.client.query(query, this.queryOptions(options), this.session);
   }
 }
 
@@ -1362,100 +1370,26 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues, options?: CreateOptions): WriteResult<Row> {
-    return this.createHandleInternal(table, values, undefined, undefined, options);
-  }
-
-  createHandleInternal(
+  create(
     table: string,
     values: InsertValues,
-    session?: Session,
-    attribution?: string,
     options?: CreateOptions,
-    batchContext?: BatchWriteContext,
+    session?: Session,
+    attribution?: string,
   ): WriteResult<Row> {
-    const row = this.createInternal(table, values, session, attribution, options, batchContext);
+    const row = this.createInternal(table, values, options, session, attribution);
     return new WriteResult(row, row.batchId, this);
   }
 
   /**
-   * Restore a soft-deleted row with a caller-supplied id without waiting for durability.
-   */
-  restore(
-    table: string,
-    objectId: string,
-    values: InsertValues,
-    options?: RestoreOptions,
-  ): WriteResult<Row> {
-    return this.restoreHandleInternal(table, objectId, values, undefined, undefined, options);
-  }
-
-  restoreHandleInternal(
-    table: string,
-    objectId: string,
-    values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: RestoreOptions,
-    batchContext?: BatchWriteContext,
-  ): WriteResult<Row> {
-    const row = this.restoreInternal(
-      table,
-      objectId,
-      values,
-      session,
-      attribution,
-      options,
-      batchContext,
-    );
-    return new WriteResult(row, row.batchId, this);
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id without waiting for durability.
-   */
-  upsert(table: string, values: InsertValues, options: UpsertOptions): WriteHandle {
-    return this.upsertHandleInternal(
-      table,
-      values,
-      options.id,
-      undefined,
-      undefined,
-      options.updatedAt,
-    );
-  }
-
-  upsertHandleInternal(
-    table: string,
-    values: InsertValues,
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    updatedAt?: number,
-    batchContext?: BatchWriteContext,
-  ): WriteHandle {
-    const result = this.upsertInternal(
-      table,
-      values,
-      objectId,
-      session,
-      attribution,
-      updatedAt,
-      batchContext,
-    );
-    return new WriteHandle(result.batchId, this);
-  }
-
-  /**
-   * Insert a new row into a table with an optional session for policy checks.
    * @internal
    */
   createInternal(
     table: string,
     values: InsertValues,
+    options?: CreateOptions,
     session?: Session,
     attribution?: string,
-    options?: CreateOptions,
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
@@ -1477,16 +1411,30 @@ export class JazzClient {
   }
 
   /**
-   * Restore a soft-deleted row with an optional session for policy checks.
+   * Restore a soft-deleted row with a caller-supplied id without waiting for durability.
+   */
+  restore(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    options?: RestoreOptions,
+    session?: Session,
+    attribution?: string,
+  ): WriteResult<Row> {
+    const row = this.restoreInternal(table, objectId, values, options, session, attribution);
+    return new WriteResult(row, row.batchId, this);
+  }
+
+  /**
    * @internal
    */
   restoreInternal(
     table: string,
     objectId: string,
     values: InsertValues,
+    options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-    options?: RestoreOptions,
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
@@ -1508,28 +1456,37 @@ export class JazzClient {
   }
 
   /**
-   * Create or update a row with a caller-supplied id, optionally scoped to a session.
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert(
+    table: string,
+    values: InsertValues,
+    options: UpsertOptions,
+    session?: Session,
+    attribution?: string,
+  ): WriteHandle {
+    const result = this.upsertInternal(table, values, options, session, attribution);
+    return new WriteHandle(result.batchId, this);
+  }
+
+  /**
    * @internal
    */
   upsertInternal(
     table: string,
     values: InsertValues,
-    objectId: string,
+    options: UpsertOptions,
     session?: Session,
     attribution?: string,
-    updatedAt?: number,
     batchContext?: BatchWriteContext,
   ): DirectMutationResult {
     try {
       const created = this.createInternal(
         table,
         values,
+        options,
         session,
         attribution,
-        {
-          id: objectId,
-          updatedAt,
-        },
         batchContext,
       );
       return { batchId: created.batchId };
@@ -1539,14 +1496,15 @@ export class JazzClient {
       }
     }
 
-    return this.updateInternal(
-      objectId,
+    const result = this.updateInternal(
+      options.id,
       values as Record<string, Value>,
+      options.updatedAt,
       session,
       attribution,
       batchContext,
-      updatedAt,
     );
+    return result;
   }
 
   /**
@@ -1556,23 +1514,16 @@ export class JazzClient {
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.queryInternal(query, this.resolvedSession ?? undefined, options);
-  }
-
-  /**
-   * Internal query with optional session and read durability options.
-   * @internal
-   */
-  async queryInternal(
+  async query(
     query: string | QueryInput,
-    session?: Session,
     options?: InternalQueryExecutionOptions,
+    session?: Session,
     runtimeSchema?: WasmSchema,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);
-    const sessionJson = session ? JSON.stringify(session) : undefined;
+    const effectiveSession = session ?? this.resolvedSession;
+    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
@@ -1590,47 +1541,34 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): WriteHandle {
-    return this.updateHandleInternal(
-      objectId,
-      updates,
-      undefined,
-      undefined,
-      undefined,
-      options?.updatedAt,
-    );
-  }
-
-  updateHandleInternal(
+  update(
     objectId: string,
     updates: Record<string, Value>,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
   ): WriteHandle {
     const result = this.updateInternal(
       objectId,
       updates,
+      options?.updatedAt,
       session,
       attribution,
-      batchContext,
-      updatedAt,
+      undefined,
     );
     return new WriteHandle(result.batchId, this);
   }
 
   /**
-   * Update a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
   updateInternal(
     objectId: string,
     updates: Record<string, Value>,
+    updatedAt?: number,
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-    updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1645,31 +1583,25 @@ export class JazzClient {
   /**
    * Delete a row by ID without waiting for durability.
    */
-  delete(objectId: string): WriteHandle {
-    return this.deleteHandleInternal(objectId);
-  }
-
-  deleteHandleInternal(
+  delete(
     objectId: string,
+    options?: DeleteOptions,
     session?: Session,
     attribution?: string,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
+    const result = this.deleteInternal(objectId, options?.updatedAt, session, attribution);
     return new WriteHandle(result.batchId, this);
   }
 
   /**
-   * Delete a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
   deleteInternal(
     objectId: string,
+    updatedAt?: number,
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
-    updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1693,40 +1625,21 @@ export class JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
-  ): number {
-    return this.subscribeInternal(
-      query,
-      callback,
-      this.resolvedSession ?? undefined,
-      options,
-      undefined,
-    );
-  }
-
-  /**
-   * Internal subscribe with optional session and read durability options.
-   *
-   * Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
-   * a handle synchronously (zero work), then `executeSubscription` is deferred
-   * via the scheduler so compilation + first tick run outside the caller's
-   * synchronous stack (e.g. outside a React render).
-   *
-   * @internal
-   */
-  subscribeInternal(
-    query: string | QueryInput,
-    callback: SubscriptionCallback,
     session?: Session,
-    options?: QueryExecutionOptions,
     runtimeSchema?: WasmSchema,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const sessionJson = session ? JSON.stringify(session) : undefined;
+    const effectiveSession = session ?? this.resolvedSession;
+    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
 
+    // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
+    // a handle synchronously (zero work), then `executeSubscription` is deferred
+    // via the scheduler so compilation + first tick run outside the caller's
+    // synchronous stack (e.g. outside a React render).
     const handle = this.runtime.createSubscription(
       queryJson,
       sessionJson,

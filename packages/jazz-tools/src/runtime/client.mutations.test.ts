@@ -162,9 +162,9 @@ describe("JazzClient mutation durability split", () => {
     const updates = { done: { type: "Boolean" as const, value: true } };
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
-    client.createInternal("todos", insertValues, undefined, "alice");
-    client.updateInternal("row-1", updates, undefined, "alice");
-    client.deleteInternal("row-1", undefined, "alice");
+    client.create("todos", insertValues, undefined, undefined, "alice");
+    client.update("row-1", updates, undefined, undefined, "alice");
+    client.delete("row-1", undefined, undefined, "alice");
 
     expect(insertCalls).toEqual([["todos", insertValues, attributedContext, undefined]]);
     expect(updateCalls).toEqual([["row-1", updates, attributedContext]]);
@@ -256,7 +256,7 @@ describe("JazzClient mutation durability split", () => {
     };
     const insertValues = { title: { type: "Text" as const, value: "Attributed" } };
 
-    client.createInternal("todos", insertValues, session, "alice");
+    client.create("todos", insertValues, undefined, session, "alice");
 
     expect(insertCalls).toEqual([
       [
