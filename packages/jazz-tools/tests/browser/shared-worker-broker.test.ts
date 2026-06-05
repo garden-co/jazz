@@ -334,4 +334,74 @@ describe("SharedWorker browser broker", () => {
     );
     expect(second.snapshot().leaderTabId).toBe("tab-b");
   });
+
+  it("coordinates storage reset and promotes a reset leader", async () => {
+    const dbName = uniqueName("broker-storage-reset");
+    const requestId = `reset-${dbName}`;
+    const resetBegunByTab: string[] = [];
+    const resetPromotions: Array<{ tabId: string; requestId: string; term: number }> = [];
+    const clientByTabId = new Map<string, BrowserBrokerClient>();
+
+    function createResetAwareOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        onStorageResetBegin: async (receivedRequestId) => {
+          resetBegunByTab.push(`${tabId}:${receivedRequestId}`);
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+        },
+        onBecomeLeader: async (client, term, resetRequestId) => {
+          if (resetRequestId) {
+            resetPromotions.push({ tabId, requestId: resetRequestId, term });
+          }
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            term,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, term, port) => {
+          port.close();
+          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, term);
+        },
+        onUseFollowerPort: (_leaderTabId, _term, port) => {
+          port.close();
+        },
+      };
+    }
+
+    const first = await BrowserBrokerClient.connect(createResetAwareOptions("tab-a"));
+    clientByTabId.set("tab-a", first);
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createResetAwareOptions("tab-b"));
+    clientByTabId.set("tab-b", second);
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    await second.waitForRole("follower", 2000);
+
+    const reset = second.requestStorageReset(requestId);
+    reset.catch(() => undefined);
+
+    await waitFor(
+      () =>
+        resetBegunByTab.includes(`tab-a:${requestId}`) &&
+        resetBegunByTab.includes(`tab-b:${requestId}`),
+      2000,
+      "broker should ask every connected tab to prepare storage reset",
+    );
+
+    await reset;
+
+    expect(resetPromotions).toContainEqual(
+      expect.objectContaining({
+        requestId,
+      }),
+    );
+    expect(second.snapshot().term).toBeGreaterThan(1);
+  });
 });
