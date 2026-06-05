@@ -32,6 +32,9 @@ export interface BrowserBrokerHelloMessage {
   dbName: string;
   fingerprint: string;
   visibility: BrowserBrokerVisibility;
+  forceTakeoverTimeoutMs?: number;
+  brokerPingIntervalMs?: number;
+  brokerPongTimeoutMs?: number;
 }
 
 export interface BrowserBrokerVisibilityMessage {

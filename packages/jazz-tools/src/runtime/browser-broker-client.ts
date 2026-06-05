@@ -28,9 +28,18 @@ export interface BrowserBrokerClientOptions {
   tabId: string;
   fingerprint: string;
   visibility: BrowserBrokerVisibility;
+  forceTakeoverTimeoutMs?: number;
+  brokerPingIntervalMs?: number;
+  brokerPongTimeoutMs?: number;
   globalLike?: BrowserBrokerCapabilityGlobal;
+  respondToBrokerPings?: boolean | (() => boolean);
+  onBrokerPing?: () => void;
   onBecomeLeader?: (client: BrowserBrokerClient, term: number) => void | Promise<void>;
   onDemote?: (term: number) => void | Promise<void>;
+  onAttachFollowerPort?: (followerTabId: string, term: number, port: MessagePort) => void;
+  onUseFollowerPort?: (leaderTabId: string, term: number, port: MessagePort) => void;
+  onFollowerReady?: (leaderTabId: string, term: number) => void;
+  onCloseFollowerPort?: (term: number) => void;
 }
 
 type RoleWaiter = {
@@ -52,6 +61,7 @@ interface BrowserBrokerSharedWorkerOptions {
 }
 
 export class BrowserBrokerClient {
+  private readonly worker: SharedWorker;
   private readonly port: MessagePort;
   private readonly options: BrowserBrokerClientOptions;
   private brokerEpoch: string | null = null;
@@ -61,8 +71,9 @@ export class BrowserBrokerClient {
   private closed = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
 
-  private constructor(port: MessagePort, options: BrowserBrokerClientOptions) {
-    this.port = port;
+  private constructor(worker: SharedWorker, options: BrowserBrokerClientOptions) {
+    this.worker = worker;
+    this.port = worker.port;
     this.options = options;
   }
 
@@ -82,7 +93,7 @@ export class BrowserBrokerClient {
       },
     );
 
-    const client = new BrowserBrokerClient(worker.port, options);
+    const client = new BrowserBrokerClient(worker, options);
     await client.start();
     return client;
   }
@@ -127,16 +138,42 @@ export class BrowserBrokerClient {
     });
   }
 
+  reportLeaderFailed(term: number, reason: string): void {
+    if (this.closed) return;
+    this.port.postMessage({
+      type: "leader-failed",
+      term,
+      reason,
+    });
+  }
+
   reportVisibility(visibility: BrowserBrokerVisibility): void {
     if (this.closed) return;
     this.port.postMessage({ type: "visibility", visibility });
+  }
+
+  reportFollowerPortAttached(followerTabId: string, term: number): void {
+    if (this.closed) return;
+    this.port.postMessage({
+      type: "follower-port-attached",
+      followerTabId,
+      term,
+    });
+  }
+
+  requestStorageReset(requestId: string): void {
+    if (this.closed) return;
+    this.port.postMessage({
+      type: "storage-reset-request",
+      requestId,
+    });
   }
 
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.port.postMessage({ type: "shutdown" });
-    this.port.close();
+    this.worker.port.close();
     for (const waiter of this.roleWaiters) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error("Browser broker client closed"));
@@ -182,6 +219,9 @@ export class BrowserBrokerClient {
       dbName: this.options.dbName,
       fingerprint: this.options.fingerprint,
       visibility: this.options.visibility,
+      forceTakeoverTimeoutMs: this.options.forceTakeoverTimeoutMs,
+      brokerPingIntervalMs: this.options.brokerPingIntervalMs,
+      brokerPongTimeoutMs: this.options.brokerPongTimeoutMs,
     });
 
     await hello;
@@ -202,14 +242,16 @@ export class BrowserBrokerClient {
         this.brokerEpoch = message.brokerEpoch;
         return;
       case "broker-ping":
-        this.port.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
+        this.options.onBrokerPing?.();
+        if (this.shouldRespondToBrokerPing()) {
+          this.port.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
+        }
         return;
       case "become-leader":
         this.term = message.term;
-        this.role = "leader";
-        this.leaderTabId = this.options.tabId;
-        this.resolveRoleWaiters();
-        void this.options.onBecomeLeader?.(this, message.term);
+        void Promise.resolve(this.options.onBecomeLeader?.(this, message.term)).catch((error) => {
+          this.reportLeaderFailed(message.term, stringifyError(error));
+        });
         return;
       case "demote":
         if (message.term !== this.term) return;
@@ -224,7 +266,29 @@ export class BrowserBrokerClient {
         this.role = message.leaderTabId === this.options.tabId ? "leader" : "follower";
         this.resolveRoleWaiters();
         return;
+      case "attach-follower-port":
+        if (message.term !== this.term) return;
+        this.options.onAttachFollowerPort?.(message.followerTabId, message.term, message.port);
+        return;
+      case "use-follower-port":
+        this.term = message.term;
+        this.leaderTabId = message.leaderTabId;
+        this.role = "follower";
+        this.options.onUseFollowerPort?.(message.leaderTabId, message.term, message.port);
+        return;
+      case "follower-ready":
+        this.term = message.term;
+        this.leaderTabId = message.leaderTabId;
+        this.role = "follower";
+        this.options.onFollowerReady?.(message.leaderTabId, message.term);
+        this.resolveRoleWaiters();
+        return;
+      case "close-follower-port":
+        this.options.onCloseFollowerPort?.(message.term);
+        return;
       case "unsupported":
+        this.closed = true;
+        this.worker.port.close();
         this.rejectRoleWaiters(new Error(message.reason));
         return;
     }
@@ -248,4 +312,16 @@ export class BrowserBrokerClient {
     }
     this.roleWaiters.clear();
   }
+
+  private shouldRespondToBrokerPing(): boolean {
+    const respond = this.options.respondToBrokerPings;
+    if (typeof respond === "function") {
+      return respond();
+    }
+    return respond !== false;
+  }
+}
+
+function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -44,6 +44,11 @@ export interface PeerSyncBatch {
   payload: Uint8Array[];
 }
 
+export interface FollowerPortEvent {
+  peerId: string;
+  term: number;
+}
+
 interface WasmBridgeHandle {
   init(): Promise<{ clientId: string }>;
   updateAuth(jwtToken?: string | null): void;
@@ -77,6 +82,8 @@ interface RuntimeWithWorkerBridge extends Runtime {
 interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  onFollowerPortAttached?: (event: FollowerPortEvent) => void;
+  onFollowerPortClosed?: (event: FollowerPortEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
@@ -223,6 +230,16 @@ export class WorkerBridge {
 
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.listeners.onAuthFailure = listener;
+    this.bridge?.setListeners(this.listeners);
+  }
+
+  onFollowerPortAttached(listener: (event: FollowerPortEvent) => void): void {
+    this.listeners.onFollowerPortAttached = listener;
+    this.bridge?.setListeners(this.listeners);
+  }
+
+  onFollowerPortClosed(listener: (event: FollowerPortEvent) => void): void {
+    this.listeners.onFollowerPortClosed = listener;
     this.bridge?.setListeners(this.listeners);
   }
 

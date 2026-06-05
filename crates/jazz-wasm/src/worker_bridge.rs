@@ -434,6 +434,9 @@ impl WasmWorkerBridge {
         let mut slots = self.inner.listeners.borrow_mut();
         slots.on_peer_sync = read_optional_function(&listeners, "onPeerSync");
         slots.on_auth_failure = read_optional_function(&listeners, "onAuthFailure");
+        slots.on_follower_port_attached =
+            read_optional_function(&listeners, "onFollowerPortAttached");
+        slots.on_follower_port_closed = read_optional_function(&listeners, "onFollowerPortClosed");
     }
 
     /// Get the worker-assigned client id (post-init), or `null`.
@@ -612,6 +615,8 @@ enum BridgeState {
 struct Listeners {
     on_peer_sync: Option<Function>,
     on_auth_failure: Option<Function>,
+    on_follower_port_attached: Option<Function>,
+    on_follower_port_closed: Option<Function>,
 }
 
 struct BridgeInner {
@@ -996,6 +1001,24 @@ impl BridgeInner {
                     let _ = Reflect::set(&batch, &"term".into(), &JsValue::from_f64(term as f64));
                     let _ = Reflect::set(&batch, &"payload".into(), &payload_array);
                     let _ = cb.call1(&JsValue::NULL, &batch.into());
+                }
+            }
+            WorkerToMainWire::FollowerPortAttached { peer_id, term } => {
+                let cb = self.listeners.borrow().on_follower_port_attached.clone();
+                if let Some(cb) = cb {
+                    let event = Object::new();
+                    let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
+                    let _ = Reflect::set(&event, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = cb.call1(&JsValue::NULL, &event.into());
+                }
+            }
+            WorkerToMainWire::FollowerPortClosed { peer_id, term } => {
+                let cb = self.listeners.borrow().on_follower_port_closed.clone();
+                if let Some(cb) = cb {
+                    let event = Object::new();
+                    let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
+                    let _ = Reflect::set(&event, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = cb.call1(&JsValue::NULL, &event.into());
                 }
             }
             WorkerToMainWire::Sync { payloads } => {
