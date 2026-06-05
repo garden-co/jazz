@@ -70,7 +70,7 @@ afterEach(() => {
 });
 
 describe("react-core/useAll", () => {
-  it("RC-ALL-01: an inline query does not resubscribe across re-renders", () => {
+  it("an inline query does not resubscribe across re-renders", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-01");
     let force!: (n: number) => void;
 
@@ -93,7 +93,7 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(1);
   });
 
-  it("RC-ALL-02: renders rows and reflects later deltas", () => {
+  it("renders rows and reflects later deltas", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-02");
 
     function List() {
@@ -129,7 +129,7 @@ describe("react-core/useAll", () => {
     expect(container.textContent).toBe("firstsecond");
   });
 
-  it("RC-ALL-03: StrictMode does not open a duplicate subscription", () => {
+  it("StrictMode does not open a duplicate subscription", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-03");
 
     function List() {
@@ -148,7 +148,7 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(1);
   });
 
-  it("RC-ALL-04: server render reads the seeded snapshot without subscribing", () => {
+  it("server render reads the seeded snapshot without subscribing", () => {
     const { client, manager, subscribeCalls } = makeHarness("rc-all-04");
     const query = makeQuery();
     manager.makeQueryKey(query, undefined, [{ id: "1", title: "seeded" }]);
@@ -174,7 +174,7 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it("RC-ALL-05: a failed subscription leaves non-suspense useAll undefined and does not throw", () => {
+  it("a failed subscription leaves non-suspense useAll undefined and does not throw", () => {
     const { client } = makeHarness("rc-all-05", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
@@ -193,7 +193,7 @@ describe("react-core/useAll", () => {
     expect(container.textContent).toBe("no-data");
   });
 
-  it("RC-ALL-06: useAllSuspense throws a failed subscription to the error boundary", () => {
+  it("useAllSuspense throws a failed subscription to the error boundary", () => {
     const { client } = makeHarness("rc-all-06", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
