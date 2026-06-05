@@ -12,10 +12,7 @@ import CreateJazzClientReference from "../../partials/create-jazz-client-referen
 
 Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
-<Callout type="info">
-  Different framework? Vue, Solid, and per-framework setup guides live in [Supported
-  Frameworks](/docs/reference/supported-frameworks/overview).
-</Callout>
+<OtherFrameworks />
 
 <Tabs
   groupId="jazz-framework"

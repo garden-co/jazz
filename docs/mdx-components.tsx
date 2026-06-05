@@ -11,6 +11,7 @@ import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
 import { Graph, Sequence } from "./components/mdx/diagram";
 import { WriteTierDiagram } from "./components/mdx/write-tier-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
+import { OtherFrameworks } from "./components/mdx/other-frameworks";
 
 type CodeBlockPreProps = CodeBlockProps & {
   custom?: string | null;
@@ -62,6 +63,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Sequence,
     WriteTierDiagram,
     JazzLogo,
+    OtherFrameworks,
     SlideCodeCell,
     ...components,
   };

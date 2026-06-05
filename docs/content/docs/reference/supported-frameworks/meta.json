@@ -1,4 +1,4 @@
 {
   "title": "Supported Frameworks",
-  "pages": ["overview", "react", "expo", "svelte", "vue", "solid", "typescript"]
+  "pages": ["overview", "react", "svelte", "expo", "typescript", "vue", "solid"]
 }
