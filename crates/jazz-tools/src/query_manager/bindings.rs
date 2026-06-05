@@ -25,6 +25,7 @@ use crate::sync_manager::{DurabilityTier, QueryPropagation};
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
+    transaction_batch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,16 +201,11 @@ impl TryFrom<WriteContextPayloadWire> for WriteContext {
     type Error = String;
 
     fn try_from(value: WriteContextPayloadWire) -> Result<Self, Self::Error> {
-        let batch_mode = match value.batch_mode.as_deref() {
-            None => None,
-            Some("direct") | Some("Direct") => Some(BatchMode::Direct),
-            Some("transactional") | Some("Transactional") => Some(BatchMode::Transactional),
-            Some(other) => {
-                return Err(format!(
-                    "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
-                ));
-            }
-        };
+        let batch_mode = value
+            .batch_mode
+            .as_deref()
+            .map(parse_batch_mode_input)
+            .transpose()?;
         let batch_id = value
             .batch_id
             .as_deref()
@@ -258,6 +254,16 @@ pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
         .map_err(|err: String| format!("Invalid BatchId: {err}"))
 }
 
+pub fn parse_batch_mode_input(batch_mode: &str) -> Result<BatchMode, String> {
+    match batch_mode {
+        "direct" | "Direct" => Ok(BatchMode::Direct),
+        "transactional" | "Transactional" => Ok(BatchMode::Transactional),
+        other => Err(format!(
+            "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
+        )),
+    }
+}
+
 pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
         DurabilityTier::Local => "local",
@@ -266,7 +272,7 @@ pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     }
 }
 
-fn serialize_batch_mode(mode: BatchMode) -> &'static str {
+pub fn serialize_batch_mode(mode: BatchMode) -> &'static str {
     match mode {
         BatchMode::Direct => "direct",
         BatchMode::Transactional => "transactional",
@@ -339,12 +345,13 @@ pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDura
 pub fn parse_read_durability_options(
     tier: Option<&str>,
     options_json: Option<&str>,
-) -> Result<(ReadDurabilityOptions, QueryPropagation), String> {
+) -> Result<(ReadDurabilityOptions, QueryPropagation, Option<BatchId>), String> {
     let parsed_tier = tier.map(parse_durability_tier).transpose()?;
     let Some(raw) = options_json else {
         return Ok((
             default_read_durability_options(parsed_tier),
             QueryPropagation::Full,
+            None,
         ));
     };
 
@@ -369,12 +376,19 @@ pub fn parse_read_durability_options(
         )),
     }?;
 
+    let transaction_batch_id = options
+        .transaction_batch_id
+        .as_deref()
+        .map(parse_batch_id_input)
+        .transpose()?;
+
     Ok((
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
         },
         propagation,
+        transaction_batch_id,
     ))
 }
 
@@ -470,6 +484,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use crate::row_histories::BatchId;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -569,7 +584,7 @@ mod tests {
 
     #[test]
     fn read_durability_options_default_to_full_and_immediate() {
-        let (durability, propagation) =
+        let (durability, propagation, transaction_batch_id) =
             parse_read_durability_options(Some("local"), None).expect("parse options");
 
         assert_eq!(
@@ -581,6 +596,18 @@ mod tests {
             crate::query_manager::manager::LocalUpdates::Immediate
         );
         assert_eq!(propagation, crate::sync_manager::QueryPropagation::Full);
+        assert_eq!(transaction_batch_id, None);
+    }
+
+    #[test]
+    fn read_durability_options_parse_transaction_batch_id() {
+        let batch_id = BatchId::new();
+        let options_json = format!(r#"{{"transaction_batch_id":"{batch_id}"}}"#);
+
+        let (_, _, parsed_batch_id) =
+            parse_read_durability_options(None, Some(&options_json)).expect("parse options");
+
+        assert_eq!(parsed_batch_id, Some(batch_id));
     }
 
     #[test]

@@ -127,8 +127,9 @@ declare module "jazz-wasm" {
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
     replayBatchRejection(batchId: string, code: string, reason: string): void;
-    discardLocalBatch(batchId: string): boolean;
-    sealBatch(batchId: string): void;
+    beginBatch(batchMode: "direct" | "transactional"): string;
+    rollbackBatch(batchId: string): boolean;
+    commitBatch(batchId: string): void;
     waitForBatch(batchId: string, tier: string): Promise<void>;
     query(
       queryJson: string,

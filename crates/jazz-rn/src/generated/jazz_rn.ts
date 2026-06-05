@@ -770,10 +770,12 @@ export interface RnRuntimeInterface {
    * Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
    */
   batchedTick() /*throws*/ : void;
+  beginBatch(batchMode: string) /*throws*/ : string;
   /**
    * Flush and close the underlying storage, releasing filesystem locks.
    */
   close() /*throws*/ : void;
+  commitBatch(batchId: string) /*throws*/ : void;
   /**
    * Connect to a Jazz server over WebSocket.
    *
@@ -838,6 +840,7 @@ export interface RnRuntimeInterface {
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
+    optionsJson: string | undefined,
     asyncOpts_?: { signal: AbortSignal }
   ) /*throws*/ : Promise<string>;
   restore(
@@ -846,7 +849,7 @@ export interface RnRuntimeInterface {
     valuesJson: string,
     writeContextJson: string | undefined
   ) /*throws*/ : string;
-  sealBatch(batchId: string) /*throws*/ : void;
+  rollbackBatch(batchId: string) /*throws*/ : boolean;
   subscribe(
     queryJson: string,
     callback: SubscriptionCallback,
@@ -935,6 +938,24 @@ export class RnRuntime
     );
   }
 
+  beginBatch(batchMode: string): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchMode),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
   /**
    * Flush and close the underlying storage, releasing filesystem locks.
    */
@@ -946,6 +967,22 @@ export class RnRuntime
       /*caller:*/ (callStatus) => {
         nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_close(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  commitBatch(batchId: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_commit_batch(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(batchId),
           callStatus
         );
       },
@@ -1192,6 +1229,7 @@ export class RnRuntime
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
+    optionsJson: string | undefined,
     asyncOpts_?: { signal: AbortSignal }
   ): Promise<string> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
@@ -1203,7 +1241,8 @@ export class RnRuntime
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(queryJson),
             FfiConverterOptionalString.lower(sessionJson),
-            FfiConverterOptionalString.lower(tier)
+            FfiConverterOptionalString.lower(tier),
+            FfiConverterOptionalString.lower(optionsJson)
           );
         },
         /*pollFunc:*/ nativeModule()
@@ -1255,19 +1294,21 @@ export class RnRuntime
     );
   }
 
-  sealBatch(batchId: string): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterString.lower(batchId),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
+  rollbackBatch(batchId: string): boolean /*throws*/ {
+    return FfiConverterBool.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
     );
   }
 
@@ -1578,11 +1619,27 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_batch() !==
+    9001
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_begin_batch'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close() !==
     17169
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_close'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_commit_batch() !==
+    6108
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_commit_batch'
     );
   }
   if (
@@ -1675,7 +1732,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query() !==
-    42271
+    21861
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_query'
@@ -1690,11 +1747,11 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch() !==
-    59278
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch() !==
+    18093
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_seal_batch'
+      'uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch'
     );
   }
   if (

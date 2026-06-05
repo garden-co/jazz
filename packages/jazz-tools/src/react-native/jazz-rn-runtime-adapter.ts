@@ -1,5 +1,6 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
+  BatchMode,
   DirectInsertResult,
   DirectMutationResult,
   MutationErrorEvent,
@@ -48,6 +49,8 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
+  beginBatch(batchMode: BatchMode): string;
+  rollbackBatch(batchId: string): boolean;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
@@ -61,6 +64,7 @@ export interface JazzRnRuntimeBinding {
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
+    optionsJson: string | undefined,
   ): Promise<string>;
   createSubscription(
     queryJson: string,
@@ -76,7 +80,7 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
-  sealBatch(batchId: string): void;
+  commitBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -169,6 +173,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  beginBatch(batch_mode: BatchMode): string {
+    try {
+      return this.binding.beginBatch(batch_mode);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   insert(
     table: string,
     values: InsertValues,
@@ -256,12 +268,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     query_json: string,
     session_json?: string | null,
     tier?: string | null,
+    options_json?: string | null,
   ): Promise<any> {
     try {
       const rowsJson = await this.binding.query(
         query_json,
         session_json ?? undefined,
         tier ?? undefined,
+        options_json ?? undefined,
       );
       return JSON.parse(rowsJson);
     } catch (error) {
@@ -383,9 +397,17 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  sealBatch(batch_id: string): void {
+  commitBatch(batch_id: string): void {
     try {
-      this.binding.sealBatch(batch_id);
+      this.binding.commitBatch(batch_id);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  rollbackBatch(batch_id: string): boolean {
+    try {
+      return this.binding.rollbackBatch(batch_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

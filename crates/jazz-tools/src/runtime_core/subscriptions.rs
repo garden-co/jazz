@@ -317,7 +317,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.query_with_overlay_rows(query, session, durability, propagation, HashMap::new())
     }
 
-    pub fn query_with_local_overlay(
+    pub fn query_with_local_batch(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        batch_id: Option<BatchId>,
+    ) -> Result<QueryFuture, RuntimeError> {
+        let Some(batch_id) = batch_id else {
+            return Ok(self.query_with_propagation(query, session, durability, propagation));
+        };
+
+        self.ensure_batch_is_open(batch_id)?;
+
+        match self.batch_query_overlay(batch_id)? {
+            Some(overlay) => {
+                Ok(self.query_with_local_overlay(query, session, durability, propagation, overlay))
+            }
+            None => Ok(self.query_with_propagation(query, session, durability, propagation)),
+        }
+    }
+
+    pub(crate) fn query_with_local_overlay(
         &mut self,
         query: Query,
         session: Option<Session>,

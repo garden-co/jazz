@@ -44,9 +44,11 @@ export function mockMutation(batchId = "batch-id"): DirectMutationResult {
 }
 
 export const runtimeBatchRecordStubs = {
+  beginBatch: (batchMode: "direct" | "transactional") => `batch-${batchMode}`,
   upsert: () => mockMutation("upsert-batch-id"),
-  sealBatch: () => {},
+  commitBatch: () => {},
   waitForBatch: async () => {},
+  rollbackBatch: () => false,
   onMutationError: () => {},
 };
 

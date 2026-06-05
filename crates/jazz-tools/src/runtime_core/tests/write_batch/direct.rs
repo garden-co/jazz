@@ -78,7 +78,7 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
     let ((row_id, _row_values), batch_id) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
     let sealed_submission = core
         .storage()
         .load_sealed_batch_submission(batch_id)
@@ -210,7 +210,7 @@ fn rc_sealing_empty_batch_completes_waits_without_local_record() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     assert_eq!(
         core.storage().load_local_batch_record(batch_id).unwrap(),
@@ -245,10 +245,58 @@ fn rc_sealing_empty_batch_completes_waits_without_local_record() {
 }
 
 #[test]
+fn rc_rolled_back_batch_rejects_later_operations() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    core.rollback_batch(batch_id).unwrap();
+
+    let expected_error = format!("Write error: batch {batch_id} has already been rolled back");
+
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+
+    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(rollback_err, expected_error);
+
+    let write_err = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(write_err, expected_error);
+
+    let query_err = match core.query_with_local_batch(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        Some(batch_id),
+    ) {
+        Ok(_) => panic!("query should reject rolled back batch"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(query_err, expected_error);
+}
+
+#[test]
 fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
-    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
 
     let ((row_id, _), _) = core
         .insert(
@@ -290,7 +338,7 @@ fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
         crate::row_histories::RowState::StagingPending
     );
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     let visible_row = core
         .storage()
@@ -375,7 +423,7 @@ fn rc_worker_direct_batch_persists_batch_fate_on_seal() {
         "open direct batches should not persist replayable durability records before seal"
     );
 
-    s.b.seal_batch(batch_id).unwrap();
+    s.b.commit_batch(batch_id).unwrap();
 
     let branch_name = s.b.schema_manager().branch_name();
     match s
@@ -436,7 +484,7 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
         )
         .unwrap();
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     let submission = core
         .storage()
@@ -461,6 +509,51 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
         err.contains("already sealed"),
         "expected sealed-batch error, got {err:?}"
     );
+}
+
+#[test]
+fn rc_committed_batch_rejects_later_handle_operations() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.commit_batch(batch_id).unwrap();
+
+    let expected_error = format!("Write error: batch {batch_id} is already committed");
+
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+
+    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(rollback_err, expected_error);
+
+    let write_err = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(write_err, expected_error);
+
+    let query_err = match core.query_with_local_batch(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        Some(batch_id),
+    ) {
+        Ok(_) => panic!("query should reject committed batch"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(query_err, expected_error);
 }
 
 #[test]

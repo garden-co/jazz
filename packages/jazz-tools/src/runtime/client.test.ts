@@ -4,7 +4,6 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
-  WriteHandle,
   PersistedWriteRejectedError,
 } from "./client.js";
 import type { AppContext } from "./context.js";
@@ -12,33 +11,51 @@ import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
+  let nextBatchNumber = 0;
+
+  function batchIdFromWriteContext(writeContextJson?: string | null): string | undefined {
+    if (!writeContextJson) {
+      return undefined;
+    }
+    const writeContext = JSON.parse(writeContextJson) as { batch_id?: unknown };
+    return typeof writeContext.batch_id === "string" ? writeContext.batch_id : undefined;
+  }
+
   const runtime = {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(
       (table: string, values: any, writeContextJson?: string | null, objectId?: string | null) => {
-        const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+        const batchId = batchIdFromWriteContext(writeContextJson);
         return {
           id: objectId ?? "todo-batch-query",
           values: [],
-          batchId: writeContext.batch_id ?? "batch-query",
+          batchId: batchId ?? "batch-query",
         };
       },
     ),
     restore: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
-        const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+        const batchId = batchIdFromWriteContext(writeContextJson);
         return {
           id: objectId,
           values: [],
-          batchId: writeContext.batch_id ?? "batch-query",
+          batchId: batchId ?? "batch-query",
         };
       },
     ),
-    update: vi.fn(() => ({ batchId: "batch-update" })),
-    upsert: vi.fn(() => ({ batchId: "batch-upsert" })),
-    delete: vi.fn(() => ({ batchId: "batch-delete" })),
+    update: vi.fn((objectId: string, values: any, writeContextJson?: string | null) => ({
+      batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-update",
+    })),
+    upsert: vi.fn(
+      (table: string, objectId: string, values: any, writeContextJson?: string | null) => ({
+        batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-upsert",
+      }),
+    ),
+    delete: vi.fn((objectId: string, writeContextJson?: string | null) => ({
+      batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-delete",
+    })),
     query:
       vi.fn<
         (
@@ -72,8 +89,13 @@ function makeFakeRuntime() {
     onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
       mutationErrorCallback = callback;
     }),
-    sealBatch: vi.fn<(batch_id: string) => void>(),
+    beginBatch: vi.fn<Runtime["beginBatch"]>((batchMode) => {
+      nextBatchNumber += 1;
+      return `batch-${batchMode}-${nextBatchNumber}`;
+    }),
+    commitBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
+    rollbackBatch: vi.fn<Runtime["rollbackBatch"]>(() => false),
     returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
@@ -310,90 +332,7 @@ describe("JazzClient runtime schema caching", () => {
   });
 });
 
-describe("JazzClient transactions", () => {
-  it("returns a completed write handle when committing an empty transaction", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-
-    const committed = client.beginTransaction().commit();
-
-    expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBeDefined();
-    expect(runtime.sealBatch).toHaveBeenCalledWith(committed.batchId);
-    await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-  });
-
-  it("rolls back an open transaction without sealing the batch", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const tx = client.beginTransaction();
-
-    tx.rollback();
-
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
-    expect(() => tx.commit()).toThrow(/rolled back/i);
-    expect(() => tx.rollback()).toThrow(/rolled back/i);
-  });
-
-  it("rejects rollback after a transaction has been committed", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const tx = client.beginTransaction();
-
-    tx.commit();
-
-    expect(() => tx.rollback()).toThrow(/committed/i);
-  });
-
-  it("rejects commit after a transaction has already been committed", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const tx = client.beginTransaction();
-
-    tx.commit();
-
-    expect(() => tx.commit()).toThrow(/committed/i);
-  });
-
-  it("returns a completed write handle when committing an empty batch", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-
-    const committed = client.beginBatch().commit();
-
-    expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBeDefined();
-    expect(runtime.sealBatch).toHaveBeenCalledWith(committed.batchId);
-    await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-  });
-
-  it("rolls back an open batch without sealing the batch", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const batch = client.beginBatch();
-
-    batch.rollback();
-
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
-    expect(() => batch.commit()).toThrow(/rolled back/i);
-    expect(() => batch.rollback()).toThrow(/rolled back/i);
-    expect(() =>
-      batch.create("todos", {
-        title: { type: "Text", value: "Nope" },
-      }),
-    ).toThrow(/rolled back/i);
-  });
-
-  it("rejects rollback after a batch has been committed", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const batch = client.beginBatch();
-
-    batch.commit();
-
-    expect(() => batch.rollback()).toThrow(/committed/i);
-  });
-
+describe("JazzClient batch query plumbing", () => {
   it("supports raw reads scoped to the open batch", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([{ id: "todo-batch-query", values: [] }]);
@@ -410,10 +349,7 @@ describe("JazzClient transactions", () => {
     const optionsJson = runtime.query.mock.calls[0][3];
     expect(JSON.parse(optionsJson as string)).toMatchObject({
       local_updates: "deferred",
-      transaction_overlay: {
-        batch_id: batch.batchId(),
-        row_ids: ["todo-batch-query"],
-      },
+      transaction_batch_id: batch.batchId,
     });
   });
 });

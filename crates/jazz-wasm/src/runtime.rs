@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use jazz_tools::binding_support::parse_external_object_id;
+use jazz_tools::binding_support::{parse_batch_mode_input, parse_external_object_id};
 use js_sys::Function;
 use js_sys::Uint8Array;
 #[cfg(target_arch = "wasm32")]
@@ -87,21 +87,20 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::batch_fate::LocalBatchRecord;
-use jazz_tools::binding_support::parse_batch_id_input;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::binding_support::serialize_mutation_error_event;
+use jazz_tools::binding_support::{parse_batch_id_input, parse_read_durability_options};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
 #[cfg(target_arch = "wasm32")]
+use jazz_tools::runtime_core::ReadDurabilityOptions;
+#[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{MutationErrorCallback, RejectedBatchAcknowledgedCallback};
-use jazz_tools::runtime_core::{
-    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
-};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -110,6 +109,7 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
+#[cfg(target_arch = "wasm32")]
 use jazz_tools::sync_manager::QueryPropagation;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::sync_manager::{ClientId, InboxEntry, Source};
@@ -190,92 +190,6 @@ fn parse_write_context_json(
     }
 }
 
-#[derive(Debug, serde::Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-    transaction_overlay: Option<QueryTransactionOverlayWire>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct QueryTransactionOverlayWire {
-    batch_id: String,
-    branch_name: String,
-    row_ids: Vec<String>,
-}
-
-fn parse_read_durability_options(
-    tier: Option<String>,
-    options_json: Option<String>,
-) -> Result<
-    (
-        ReadDurabilityOptions,
-        QueryPropagation,
-        Option<QueryLocalOverlay>,
-    ),
-    JsError,
-> {
-    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
-    let Some(raw) = options_json else {
-        return Ok((
-            ReadDurabilityOptions {
-                tier: parsed_tier,
-                local_updates: LocalUpdates::Immediate,
-            },
-            QueryPropagation::Full,
-            None,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
-        .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(JsError::new(&format!(
-            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
-            other
-        ))),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(LocalUpdates::Immediate),
-        Some("deferred") => Ok(LocalUpdates::Deferred),
-        Some(other) => Err(JsError::new(&format!(
-            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
-            other
-        ))),
-    }?;
-
-    let transaction_overlay = match options.transaction_overlay {
-        None => None,
-        Some(overlay) => Some(QueryLocalOverlay {
-            batch_id: parse_batch_id_input(&overlay.batch_id)
-                .map_err(|err| JsError::new(&format!("Invalid query batch id: {err}")))?,
-            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
-            row_ids: overlay
-                .row_ids
-                .into_iter()
-                .map(|row_id| {
-                    parse_external_object_id(Some(&row_id))
-                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
-                        .map_err(|err| JsError::new(&format!("Invalid query row id: {err}")))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        }),
-    };
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-        transaction_overlay,
-    ))
-}
-
 #[cfg(target_arch = "wasm32")]
 fn parse_subscription_inputs(
     query_json: &str,
@@ -293,8 +207,9 @@ fn parse_subscription_inputs(
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation, _overlay) =
-        parse_read_durability_options(settled_tier, options_json)?;
+    let (durability, propagation, _transaction_batch_id) =
+        parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
+            .map_err(|err| JsError::new(&err))?;
     Ok((query, session, durability, propagation))
 }
 
@@ -1507,17 +1422,20 @@ impl WasmRuntime {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, overlay) =
-            parse_read_durability_options(settled_tier, options_json)?;
+        let (durability, propagation, transaction_batch_id) =
+            parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
+                .map_err(|err| JsError::new(&err))?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            match overlay {
-                Some(overlay) => {
-                    core.query_with_local_overlay(query, session, durability, propagation, overlay)
-                }
-                None => core.query_with_propagation(query, session, durability, propagation),
-            }
+            core.query_with_local_batch(
+                query,
+                session,
+                durability,
+                propagation,
+                transaction_batch_id,
+            )
+            .map_err(|e| JsError::new(&format!("Query setup failed: {e}")))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1666,6 +1584,12 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    #[wasm_bindgen(js_name = beginBatch)]
+    pub fn begin_batch(&self, batch_mode: &str) -> Result<String, JsError> {
+        let batch_mode = parse_batch_mode_input(batch_mode).map_err(|err| JsError::new(&err))?;
+        Ok(self.core.borrow_mut().begin_batch(batch_mode).to_string())
+    }
+
     /// Wait for a batch to settle at the requested durability tier.
     #[wasm_bindgen(js_name = waitForBatch)]
     pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
@@ -1730,20 +1654,20 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = discardLocalBatch)]
-    pub fn discard_local_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+    #[wasm_bindgen(js_name = rollbackBatch)]
+    pub fn rollback_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
-        core.discard_local_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Discard local batch failed: {e}")))
+        core.rollback_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Rollback batch failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = sealBatch)]
-    pub fn seal_batch(&self, batch_id: &str) -> Result<(), JsError> {
+    #[wasm_bindgen(js_name = commitBatch)]
+    pub fn commit_batch(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
-        core.seal_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
+        core.commit_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Commit batch failed: {e}")))
     }
 
     // =========================================================================
