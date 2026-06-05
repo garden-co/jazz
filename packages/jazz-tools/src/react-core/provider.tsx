@@ -72,12 +72,32 @@ function releaseClient(configKey: string, holder: object): void {
   void registryReleaseClient(configKey, holder);
 }
 
+// Refresh latch keyed on the client, not the component. The client is a
+// module-singleton, so a remount or a second provider would otherwise each
+// hold their own latch and double-fire the JWT refresh on an "expired" event.
+const authRefreshLatches = new WeakMap<object, { inFlight: boolean }>();
+
+// Ceiling on how long the latch stays held for a single refresh. A caller whose
+// `onJWTExpired` never settles must not wedge the latch forever — after this we
+// release it so a later "expired" event can retry.
+const JWT_REFRESH_TIMEOUT_MS = 30_000;
+
+function getAuthRefreshLatch(client: object): { inFlight: boolean } {
+  let latch = authRefreshLatches.get(client);
+  if (!latch) {
+    latch = { inFlight: false };
+    authRefreshLatches.set(client, latch);
+  }
+  return latch;
+}
+
 function useAuthSubscription(
   client: CoreJazzClient,
   onJWTExpired: JwtRefreshFn | undefined,
 ): number {
-  // Latch serializes concurrent "expired" rejections into one refresh call.
-  const inFlight = useRef(false);
+  // Client-scoped latch serializes concurrent "expired" rejections into one
+  // refresh call across every provider/remount sharing this client.
+  const latch = getAuthRefreshLatch(client);
   // Refcell keeps the callback fresh without re-subscribing when callers pass
   // an inline function that changes every render.
   const callbackRef = useRef(onJWTExpired);
@@ -95,22 +115,34 @@ function useAuthSubscription(
       if (state.error !== "expired") return;
       const fn = callbackRef.current;
       if (!fn) return;
-      if (inFlight.current) return;
-      inFlight.current = true;
+      if (latch.inFlight) return;
+      latch.inFlight = true;
+
+      // Release exactly once — whichever of settle or timeout comes first. The
+      // `settled` guard also stops a refresh that resolves *after* timing out
+      // from applying a now-stale token.
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        latch.inFlight = false;
+      };
+      const timeoutId = setTimeout(release, JWT_REFRESH_TIMEOUT_MS);
 
       Promise.resolve()
         .then(() => fn())
         .then((newToken) => {
-          if (newToken) {
+          if (!settled && newToken) {
             client.db.updateAuthToken(newToken);
           }
         })
         .catch(() => {})
         .finally(() => {
-          inFlight.current = false;
+          clearTimeout(timeoutId);
+          release();
         });
     });
-  }, [client]);
+  }, [client, latch]);
 
   return authRev;
 }

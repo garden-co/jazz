@@ -151,12 +151,12 @@ Used across the app: `App.vue`, `StopDetail`, `StopCreateForm`, `TourCalendar`, 
 
 ![bg right:38% 85%](screenshots/03-logged-in-globe.png)
 
-`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns a deeply reactive ref that stays in sync with the live local database — nested rows and relations included. Every write (from any user, anywhere) triggers a Vue re-render automatically.
+`useAll` is a **Vue-specific** composable that wraps `db.subscribeAll`. It returns `{ data, error, loading }`, where `data` is a deeply reactive ref that stays in sync with the live local database — nested rows and relations included. Every write (from any user, anywhere) triggers a Vue re-render automatically.
 
 **[`src/App.vue`](../src/App.vue)**
 
 ```typescript
-const stopsData = useAll(
+const { data: stopsData } = useAll(
   app.stops
     .where({ date: { gte: today, lte: threeWeeks } })
     .include({ venue: true })
@@ -193,7 +193,7 @@ const stopsQuery = computed(() => {
     .limit(12);
   return canEdit ? base : confirmed;
 });
-const stopsData = useAll(stopsQuery);
+const { data: stopsData } = useAll(stopsQuery);
 ```
 
 One composable, two audiences. The server-side row-level policies (shown later) enforce this. The client-side query is just a convenience for filtering.
@@ -275,7 +275,7 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
   import { app } from "../../schema.js";
 
   const db = useDb();
-  const venues = useAll(app.venues); // live venue list, no props needed
+  const { data: venues } = useAll(app.venues); // live venue list, no props needed
 
   function submit() {
     const { value: venue } = db.insert(app.venues, {
@@ -308,7 +308,7 @@ No `await`. The insert returns immediately because writes hit the local DB first
 
 ```typescript
 const db = useDb();
-const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
+const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
 
 // Upload: binary file → Jazz file → link to band
 async function onFileSelected(event: Event) {

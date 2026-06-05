@@ -5,11 +5,13 @@ import { app } from "../schema.js";
 
 // #region reading-reactive-hooks-vue
 const db = useDb();
-const todos = useAll(app.todos);
+const { data: todos } = useAll(app.todos);
 // #endregion reading-reactive-hooks-vue
 
 // #region reading-filtering-vue
-const incompleteTodos = useAll(app.todos.where({ done: false }).orderBy("title", "asc").limit(50));
+const { data: incompleteTodos } = useAll(
+  app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
+);
 // #endregion reading-filtering-vue
 
 // #region writing-use-db-vue
