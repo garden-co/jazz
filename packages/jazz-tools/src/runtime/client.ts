@@ -1375,9 +1375,6 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): WriteResult<Row> {
     const row = this.createInternal(table, values, session, attribution, options, batchContext);
-    if (!batchContext) {
-      this.sealBatch(row.batchId);
-    }
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -1411,9 +1408,6 @@ export class JazzClient {
       options,
       batchContext,
     );
-    if (!batchContext) {
-      this.sealBatch(row.batchId);
-    }
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -1449,9 +1443,6 @@ export class JazzClient {
       updatedAt,
       batchContext,
     );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1626,9 +1617,6 @@ export class JazzClient {
       batchContext,
       updatedAt,
     );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1669,9 +1657,6 @@ export class JazzClient {
     updatedAt?: number,
   ): WriteHandle {
     const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
