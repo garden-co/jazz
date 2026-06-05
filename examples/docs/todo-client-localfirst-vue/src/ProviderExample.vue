@@ -2,7 +2,7 @@
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
 const client = createJazzClient({
-  appId: "my-app",
+  appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
 });
 </script>
 

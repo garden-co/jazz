@@ -10,7 +10,7 @@ export function ProviderExample() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
       }}
       fallback={<p>Loading...</p>}
     >

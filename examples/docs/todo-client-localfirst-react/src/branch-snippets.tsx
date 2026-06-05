@@ -9,7 +9,7 @@ export function BranchApp() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
         env: "prod",
         userBranch: "staging",
       }}
