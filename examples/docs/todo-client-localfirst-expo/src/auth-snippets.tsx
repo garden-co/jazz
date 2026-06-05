@@ -8,7 +8,7 @@ function TodoApp() {
 }
 
 // #region auth-localfirst-expo
-export function LocalFirstAuthExpoApp() {
+export function LocalFirstAuthApp() {
   const { secret, isLoading } = useLocalFirstAuth();
 
   if (isLoading || !secret) return null;
@@ -16,7 +16,7 @@ export function LocalFirstAuthExpoApp() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
         secret,
       }}
     >
