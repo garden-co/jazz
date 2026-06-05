@@ -1009,39 +1009,6 @@ export class JazzClient {
   }
 
   /**
-   * Connect to Jazz with the given context.
-   *
-   * @param context Application context with driver and schema
-   * @returns Connected JazzClient instance
-   */
-  static async connect(
-    context: AppContext,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
-  ): Promise<JazzClient> {
-    // Load WASM module dynamically
-    const wasmModule = await loadWasmModule(context.runtimeSources);
-
-    // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
-      schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      resolveNodeTier(context.tier),
-    );
-
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    return client;
-  }
-
-  /**
    * Create client synchronously with a pre-loaded WASM module.
    *
    * Use this after loading WASM via `loadWasmModule()` to avoid
