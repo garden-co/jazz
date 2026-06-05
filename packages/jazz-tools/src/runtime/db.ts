@@ -805,6 +805,7 @@ export class Db {
   private followerReady: Promise<void> | null = null;
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
+  private brokerSchemaFingerprint: string | null = null;
   private brokerResetSchema: WasmSchema | null = null;
   private readonly pendingLeaderFollowerPorts = new Map<
     string,
@@ -1063,6 +1064,7 @@ export class Db {
     // Use the canonical schema JSON as the client cache key, but memoize it by
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
+    this.reportBrokerSchemaReady(key);
 
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
@@ -1301,6 +1303,21 @@ export class Db {
       return "anonymous";
     }
     return `${session.authMode}:${session.user_id}`;
+  }
+
+  private reportBrokerSchemaReady(schemaFingerprint: string): void {
+    if (!this.brokerClient) return;
+
+    if (this.brokerSchemaFingerprint && this.brokerSchemaFingerprint !== schemaFingerprint) {
+      throw new Error(
+        "Persistent browser broker mode does not support multiple schemas in one Db instance.",
+      );
+    }
+
+    if (this.brokerSchemaFingerprint === schemaFingerprint) return;
+
+    this.brokerSchemaFingerprint = schemaFingerprint;
+    this.brokerClient.reportSchemaReady(schemaFingerprint);
   }
 
   private adoptBrokerSnapshot(snapshot: BrowserBrokerClientSnapshot): void {
@@ -1713,6 +1730,7 @@ export class Db {
     }
     this.clients.clear();
     this.clientSchemas.clear();
+    this.brokerSchemaFingerprint = null;
 
     if (currentWorker) {
       currentWorker.terminate();

@@ -175,6 +175,22 @@ describe("SharedWorker browser broker", () => {
     ).rejects.toThrow("incompatible persistent browser configuration");
   });
 
+  it("rejects a tab that reports a mismatched schema fingerprint", async () => {
+    const dbName = uniqueName("broker-schema-fingerprint");
+    const first = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-a"));
+    clients.push(first);
+    first.reportSchemaReady("schema-a");
+    await first.waitForRole("leader", 2000);
+
+    const second = await BrowserBrokerClient.connect(createOptions(dbName, "tab-b"));
+    clients.push(second);
+    second.reportSchemaReady("schema-b");
+
+    await expect(second.waitForRole("leader", 250)).rejects.toThrow(
+      "incompatible persistent browser schema",
+    );
+  });
+
   it("fails fast when required browser APIs are unavailable", async () => {
     await expect(
       BrowserBrokerClient.connect({
