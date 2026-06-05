@@ -234,11 +234,7 @@ describe("JazzClient runtime helpers", () => {
     expect(queryCalls[0]![3]).toBe(
       JSON.stringify({
         local_updates: "deferred",
-        transaction_overlay: {
-          batch_id: writeContext.batch_id,
-          branch_name: writeContext.target_branch_name,
-          row_ids: ["00000000-0000-0000-0000-000000000001"],
-        },
+        transaction_batch_id: writeContext.batch_id,
       }),
     );
   });

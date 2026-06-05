@@ -3,7 +3,7 @@ import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runti
 import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
-  const sealBatch = overrides.sealBatch ?? vi.fn();
+  const commitBatch = overrides.commitBatch ?? vi.fn();
   return {
     batchedTick: vi.fn(),
     close: vi.fn(),
@@ -20,6 +20,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     waitForBatch: vi.fn(async () => undefined),
+    beginBatch: vi.fn((batchMode) => `batch-${batchMode}`),
+    rollbackBatch: vi.fn(() => true),
     insert: vi.fn((_table, _valuesJson, writeContextJson) =>
       JSON.stringify({
         id: "row-1",
@@ -45,7 +47,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
       JSON.stringify({ batchId: writeContextJson ? "batch-upsert-2" : "batch-upsert-1" }),
     ),
     ...overrides,
-    sealBatch,
+    commitBatch,
   };
 }
 
@@ -67,6 +69,9 @@ describe("JazzRnRuntimeAdapter", () => {
   it("serializes mutation payloads and parses query responses", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    expect(adapter.beginBatch("transactional")).toBe("batch-transactional");
+    expect(adapter.rollbackBatch("batch-transactional")).toBe(true);
 
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
     expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
@@ -523,7 +528,7 @@ describe("JazzRnRuntimeAdapter", () => {
       onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
         capturedMutationError = callback;
       }),
-      sealBatch: vi.fn(),
+      commitBatch: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
@@ -543,7 +548,7 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       }),
     );
-    adapter.sealBatch("batch-1");
+    adapter.commitBatch("batch-1");
 
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
@@ -558,6 +563,6 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       },
     });
-    expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.commitBatch).toHaveBeenCalledWith("batch-1");
   });
 });

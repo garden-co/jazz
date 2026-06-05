@@ -126,7 +126,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-tx");
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-tx"),
+      batchId: "batch-tx",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -187,7 +187,7 @@ describe("Db transactions", () => {
       batchId: "batch-tx-fast-path",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-tx-fast-path"),
+      batchId: "batch-tx-fast-path",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
@@ -247,7 +247,7 @@ describe("Db transactions", () => {
       batchId: "batch-session-tx",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-session-tx"),
+      batchId: "batch-session-tx",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -294,7 +294,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-callback");
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-callback"),
+      batchId: "batch-callback",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -343,7 +343,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-callback-rejected"),
+      batchId: "batch-callback-rejected",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -381,7 +381,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-thrown",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-callback-thrown"),
+      batchId: "batch-callback-thrown",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -420,7 +420,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-callback-rejected"),
+      batchId: "batch-callback-rejected",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -461,7 +461,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-callback-rejected"),
+      batchId: "batch-callback-rejected",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -491,7 +491,7 @@ describe("Db transactions", () => {
   it("routes typed transaction upserts through the runtime transaction", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-upsert-tx"),
+      batchId: "batch-upsert-tx",
       create: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -529,7 +529,7 @@ describe("Db transactions", () => {
       batchId: "batch-async-callback",
     } as Row;
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-async-callback"),
+      batchId: "batch-async-callback",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -581,7 +581,7 @@ describe("Db transactions", () => {
     } as Row;
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-closed"),
+      batchId: "batch-closed",
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-closed");
         return runtimeRow;
@@ -644,7 +644,7 @@ describe("Db transactions", () => {
       ],
     };
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-read"),
+      batchId: "batch-read",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -684,7 +684,7 @@ describe("Db transactions", () => {
     const query = todoQuery();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-read-closed"),
+      batchId: "batch-read-closed",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -724,7 +724,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-rollback"),
+      batchId: "batch-rollback",
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-rollback");
         return {} as Row;
@@ -774,7 +774,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-commit-before-rollback"),
+      batchId: "batch-commit-before-rollback",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -813,7 +813,7 @@ describe("Db transactions", () => {
   it("delegates terminal transaction errors to runtime operations", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-runtime-rolled-back"),
+      batchId: "batch-runtime-rolled-back",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -846,7 +846,7 @@ describe("Db transactions", () => {
   it("delegates terminal write errors to runtime transaction operations", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-runtime-write-rolled-back"),
+      batchId: "batch-runtime-write-rolled-back",
       create: vi.fn(() => {
         throw new Error("runtime write rejected after rollback");
       }),
@@ -884,7 +884,7 @@ describe("Db transactions", () => {
       _schema: todoSchema(),
     };
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-cross-client"),
+      batchId: "batch-cross-client",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -931,7 +931,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-direct", "direct");
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct"),
+      batchId: "batch-direct",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -994,7 +994,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-fast-path",
     } as Row;
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-fast-path"),
+      batchId: "batch-direct-fast-path",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
@@ -1051,7 +1051,7 @@ describe("Db transactions", () => {
       ],
     };
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-read"),
+      batchId: "batch-direct-read",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -1100,7 +1100,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-callback",
     } as Row;
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-callback"),
+      batchId: "batch-direct-callback",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -1143,7 +1143,7 @@ describe("Db transactions", () => {
   it("does not commit a callback batch when the callback rejects", async () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-callback-rejected"),
+      batchId: "batch-direct-callback-rejected",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -1171,7 +1171,7 @@ describe("Db transactions", () => {
   it("routes typed direct batch upserts through the runtime batch", () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-upsert-direct"),
+      batchId: "batch-upsert-direct",
       create: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -1211,7 +1211,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-async-callback",
     } as Row;
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-async-callback"),
+      batchId: "batch-direct-async-callback",
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -1276,7 +1276,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-rollback"),
+      batchId: "batch-direct-rollback",
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-rollback");
         return {
@@ -1333,7 +1333,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-commit-before-rollback"),
+      batchId: "batch-direct-commit-before-rollback",
       create: vi.fn(),
       update: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-commit-before-rollback");
@@ -1375,7 +1375,7 @@ describe("Db transactions", () => {
   it("rolls back a callback batch when the callback throws after a write", () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-direct-thrown-callback"),
+      batchId: "batch-direct-thrown-callback",
       create: vi.fn(() => ({
         id: "todo-direct-thrown-callback",
         values: [
@@ -1421,7 +1421,7 @@ describe("Db transactions", () => {
       _schema: todoSchema(),
     };
     const runtimeBatch = {
-      batchId: vi.fn(() => "batch-cross-client-direct"),
+      batchId: "batch-cross-client-direct",
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),

@@ -580,7 +580,7 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
   }
 
   batchId(): string {
-    return this.requireRuntimeHandle("batchId").batchId();
+    return this.requireRuntimeHandle("batchId").batchId;
   }
 
   /**

@@ -41,10 +41,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
-    generate_id as generate_binding_id, parse_batch_id_input,
+    generate_id as generate_binding_id, parse_batch_id_input, parse_batch_mode_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_mutation_error_event, subscription_delta_to_json,
+    parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
+    parse_write_context_input, query_rows_can_be_schema_aligned, serialize_mutation_error_event,
+    subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -53,8 +54,8 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
-    MutationErrorCallback, QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler,
-    SubscriptionDelta, SubscriptionHandle,
+    MutationErrorCallback, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
+    SubscriptionHandle,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
@@ -144,90 +145,6 @@ impl FromNapiValue for FfiRecordArg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-    transaction_overlay: Option<QueryTransactionOverlayWire>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct QueryTransactionOverlayWire {
-    batch_id: String,
-    branch_name: String,
-    row_ids: Vec<String>,
-}
-
-fn parse_read_durability_options(
-    tier: Option<String>,
-    options_json: Option<String>,
-) -> napi::Result<(
-    ReadDurabilityOptions,
-    QueryPropagation,
-    Option<QueryLocalOverlay>,
-)> {
-    let parsed_tier = tier
-        .as_deref()
-        .map(parse_binding_tier)
-        .transpose()
-        .map_err(napi::Error::from_reason)?;
-    let Some(raw) = options_json else {
-        return Ok((
-            ReadDurabilityOptions {
-                tier: parsed_tier,
-                local_updates: jazz_tools::query_manager::manager::LocalUpdates::Immediate,
-            },
-            QueryPropagation::Full,
-            None,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
-        .map_err(|err| napi::Error::from_reason(format!("Invalid query options JSON: {err}")))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid propagation '{other}'. Must be 'full' or 'local-only'."
-        ))),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(jazz_tools::query_manager::manager::LocalUpdates::Immediate),
-        Some("deferred") => Ok(jazz_tools::query_manager::manager::LocalUpdates::Deferred),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid localUpdates '{other}'. Must be 'immediate' or 'deferred'."
-        ))),
-    }?;
-
-    let overlay = match options.transaction_overlay {
-        None => None,
-        Some(overlay) => Some(QueryLocalOverlay {
-            batch_id: parse_batch_id_input(&overlay.batch_id).map_err(napi::Error::from_reason)?,
-            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
-            row_ids: overlay
-                .row_ids
-                .into_iter()
-                .map(|row_id| {
-                    parse_external_object_id(Some(&row_id))
-                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
-                        .map_err(napi::Error::from_reason)
-                })
-                .collect::<napi::Result<Vec<_>>>()?,
-        }),
-    };
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-        overlay,
-    ))
-}
-
 fn parse_node_durability_tiers(tier: Option<&str>) -> napi::Result<Vec<DurabilityTier>> {
     let Some(raw) = tier else {
         return Ok(Vec::new());
@@ -278,7 +195,9 @@ fn parse_subscription_inputs(
 )> {
     let query = parse_query(query_json)?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation, _overlay) = parse_read_durability_options(tier, options_json)?;
+    let (durability, propagation, _transaction_batch_id) =
+        parse_read_durability_options(tier.as_deref(), options_json.as_deref())
+            .map_err(napi::Error::from_reason)?;
     Ok((query, session, durability, propagation))
 }
 
@@ -793,26 +712,36 @@ impl NapiRuntime {
         Ok(())
     }
 
-    #[napi(js_name = "discardLocalBatch")]
-    pub fn discard_local_batch(&self, batch_id: String) -> napi::Result<bool> {
+    #[napi(js_name = "rollbackBatch")]
+    pub fn rollback_batch(&self, batch_id: String) -> napi::Result<bool> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.discard_local_batch(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Discard local batch failed: {e}")))
+        core.rollback_batch(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Rollback batch failed: {e}")))
     }
 
-    #[napi(js_name = "sealBatch")]
-    pub fn seal_batch(&self, batch_id: String) -> napi::Result<()> {
+    #[napi(js_name = "beginBatch")]
+    pub fn begin_batch(&self, batch_mode: String) -> napi::Result<String> {
+        let batch_mode = parse_batch_mode_input(&batch_mode).map_err(napi::Error::from_reason)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.begin_batch(batch_mode).to_string())
+    }
+
+    #[napi(js_name = "commitBatch")]
+    pub fn commit_batch(&self, batch_id: String) -> napi::Result<()> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.seal_batch(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Seal batch failed: {e}")))
+        core.commit_batch(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Commit batch failed: {e}")))
     }
 
     #[napi(js_name = "waitForBatch", ts_return_type = "Promise<void>")]
@@ -854,7 +783,9 @@ impl NapiRuntime {
         let query_for_alignment = query.clone();
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, overlay) = parse_read_durability_options(tier, options_json)?;
+        let (durability, propagation, transaction_batch_id) =
+            parse_read_durability_options(tier.as_deref(), options_json.as_deref())
+                .map_err(napi::Error::from_reason)?;
 
         let (future, runtime_schema) = {
             let mut core = self
@@ -862,16 +793,14 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             (
-                match overlay {
-                    Some(overlay) => core.query_with_local_overlay(
-                        query,
-                        session,
-                        durability,
-                        propagation,
-                        overlay,
-                    ),
-                    None => core.query_with_propagation(query, session, durability, propagation),
-                },
+                core.query_with_local_batch(
+                    query,
+                    session,
+                    durability,
+                    propagation,
+                    transaction_batch_id,
+                )
+                .map_err(|e| napi::Error::from_reason(format!("Query setup failed: {e}")))?,
                 core.current_schema().clone(),
             )
         };

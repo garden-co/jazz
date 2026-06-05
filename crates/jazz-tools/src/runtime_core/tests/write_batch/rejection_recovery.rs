@@ -326,7 +326,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
 
     s.b.storage_mut()
         .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
@@ -656,7 +656,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    alice.seal_batch(batch_id).unwrap();
+    alice.commit_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     let worker_outbox = worker.sync_sender().take();
@@ -880,7 +880,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    alice.seal_batch(batch_id).unwrap();
+    alice.commit_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     for entry in worker.sync_sender().take() {
@@ -997,7 +997,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
 //     assert_eq!(history_rows.len(), 1);
 //     let batch_id = history_rows[0].batch_id;
 
-//     alice.seal_batch(batch_id).unwrap();
+//     alice.commit_batch(batch_id).unwrap();
 //     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
 //     for entry in worker.sync_sender().take() {
@@ -1231,7 +1231,7 @@ fn rc_transactional_rejected_replay_record_keeps_sealed_submission_mode() {
         .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     core.storage_mut()
         .delete_local_batch_record(batch_id)

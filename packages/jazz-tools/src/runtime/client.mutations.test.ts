@@ -12,6 +12,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteCalls: Array<[string, string | undefined]> = [];
 
   const runtimeBase: Runtime = {
+    beginBatch: (batchMode) => `batch-${batchMode}`,
     insert: (
       table: string,
       values: Record<string, unknown>,
@@ -66,7 +67,8 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    sealBatch: vi.fn(),
+    commitBatch: vi.fn(),
+    rollbackBatch: () => false,
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };

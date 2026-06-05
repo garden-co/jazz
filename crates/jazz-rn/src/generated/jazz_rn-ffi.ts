@@ -48,8 +48,18 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_batch(
+    ptr: bigint,
+    batchMode: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_close(
     ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_commit_batch(
+    ptr: bigint,
+    batchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_connect(
@@ -116,7 +126,8 @@ interface NativeModuleInterface {
     ptr: bigint,
     queryJson: Uint8Array,
     sessionJson: Uint8Array,
-    tier: Uint8Array
+    tier: Uint8Array,
+    optionsJson: Uint8Array
   ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_restore(
     ptr: bigint,
@@ -126,11 +137,11 @@ interface NativeModuleInterface {
     writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
     ptr: bigint,
     batchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
+  ): number;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
     ptr: bigint,
     queryJson: Uint8Array,
@@ -336,7 +347,9 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_commit_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
@@ -350,7 +363,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_restore(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;

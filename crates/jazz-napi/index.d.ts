@@ -22,8 +22,9 @@ export declare class NapiRuntime {
   delete(objectId: string, writeContextJson?: string | undefined | null): any
   restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void
-  discardLocalBatch(batchId: string): boolean
-  sealBatch(batchId: string): void
+  rollbackBatch(batchId: string): boolean
+  beginBatch(batchMode: string): string
+  commitBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
   subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
