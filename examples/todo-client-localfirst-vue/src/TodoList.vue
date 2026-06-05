@@ -9,7 +9,7 @@ const db = useDb();
 const { data: todos } = useAll(app.todos);
 // #endregion reading-reactive-vue
 const session = useSession();
-const sessionUserId = computed(() => session?.user_id ?? null);
+const sessionUserId = computed(() => session.value?.user_id ?? null);
 const title = ref("");
 
 function handleSubmit(e: Event) {
