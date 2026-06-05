@@ -131,11 +131,10 @@ describe("TS Upsert API", () => {
     ).toThrow("Cannot set required field 'title' to null");
   });
 
-  it("does not fall back to update when upsert insert shape validation fails", async () => {
-    const todo = insertTodo(db, { title: "Test Todo" });
-
-    expect(() => db.upsert(app.todos, { done: true }, { id: todo.id })).toThrow(
-      'Insert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
+  it("fails when trying to insert a row with missing required fields", async () => {
+    const id = "00000000-0000-0000-0000-000000000000";
+    expect(() => db.upsert(app.todos, { done: true }, { id })).toThrow(
+      'Upsert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
     );
   });
 
@@ -171,7 +170,7 @@ describe("TS Upsert API", () => {
     db.delete(app.projects, project.id);
 
     expect(() => db.upsert(app.projects, { name: "Restored Project" }, { id: project.id })).toThrow(
-      `Insert failed: WriteError("row already deleted: ${project.id}")`,
+      `Upsert failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
 });

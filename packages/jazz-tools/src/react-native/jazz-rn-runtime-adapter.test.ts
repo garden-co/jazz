@@ -41,6 +41,9 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     update: vi.fn((_objectId, _valuesJson, writeContextJson) =>
       JSON.stringify({ batchId: writeContextJson ? "batch-update-2" : "batch-update-1" }),
     ),
+    upsert: vi.fn((_table, _objectId, _valuesJson, writeContextJson) =>
+      JSON.stringify({ batchId: writeContextJson ? "batch-upsert-2" : "batch-upsert-1" }),
+    ),
     ...overrides,
     sealBatch,
   };
@@ -85,6 +88,14 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
     expect(binding.update).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      undefined,
+    );
+
+    adapter.upsert("todos", "row-1", { done: { type: "Boolean", value: true } });
+    expect(binding.upsert).toHaveBeenCalledWith(
+      "todos",
       "row-1",
       JSON.stringify({ done: { type: "Boolean", value: true } }),
       undefined,

@@ -117,6 +117,12 @@ declare module "jazz-wasm" {
       values: unknown,
       writeContextJson?: string | null,
     ): { batchId: string };
+    upsert(
+      table: string,
+      objectId: string,
+      values: InsertValues,
+      writeContextJson?: string | null,
+    ): { batchId: string };
     delete(objectId: string, writeContextJson?: string | null): { batchId: string };
     hydrateLocalBatchRecordStorageRow(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;

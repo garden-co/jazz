@@ -603,6 +603,35 @@ impl RnRuntime {
         })
     }
 
+    pub fn upsert(
+        &self,
+        table: String,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("upsert", || {
+            let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
+                message: e.to_string(),
+            })?;
+            let oid = ObjectId::from_uuid(uuid);
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let batch_id = core
+                .upsert_with_id(&table, oid, named_values, write_context.as_ref())
+                .map_err(runtime_err)?;
+            serde_json::to_string(&serde_json::json!({
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("upsert serialization failed: {e}"),
+            })
+        })
+    }
+
     #[uniffi::method(name = "delete")]
     pub fn delete_row(
         &self,

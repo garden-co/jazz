@@ -54,6 +54,12 @@ export interface Runtime {
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
+  upsert(
+    table: string,
+    object_id: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectMutationResult;
   delete(object_id: string, write_context_json?: string | null): DirectMutationResult;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   sealBatch(batch_id: string): void;
@@ -532,11 +538,6 @@ function normalizeSubscriptionCallbackArgs(
 
   console.error("Invalid subscription callback arguments", args);
   return undefined;
-}
-
-function shouldFallbackToUpsertUpdate(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
 
 type BatchWriteContext = {
@@ -1480,31 +1481,14 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
   ): DirectMutationResult {
-    try {
-      const created = this.createInternal(
-        table,
-        values,
-        options,
-        session,
-        attribution,
-        batchContext,
-      );
-      return { batchId: created.batchId };
-    } catch (error) {
-      if (!shouldFallbackToUpsertUpdate(error)) {
-        throw error;
-      }
-    }
-
-    const result = this.updateInternal(
-      options.id,
-      values as Record<string, Value>,
-      options.updatedAt,
-      session,
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
       attribution,
       batchContext,
+      options.updatedAt,
     );
-    return result;
+    return this.runtime.upsert(table, options.id, values, writeContext);
   }
 
   /**

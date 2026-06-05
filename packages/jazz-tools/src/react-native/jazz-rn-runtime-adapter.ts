@@ -42,6 +42,12 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
+  upsert(
+    table: string,
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
@@ -208,6 +214,25 @@ export class JazzRnRuntimeAdapter implements Runtime {
   ): DirectMutationResult {
     try {
       const resultJson = this.binding.update(
+        object_id,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+      );
+      return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  upsert(
+    table: string,
+    object_id: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectMutationResult {
+    try {
+      const resultJson = this.binding.upsert(
+        table,
         object_id,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
