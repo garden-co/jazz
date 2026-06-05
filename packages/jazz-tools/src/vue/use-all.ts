@@ -16,6 +16,17 @@ export interface UseAllResult<T extends { id: string }> {
   loading: Ref<boolean>;
 }
 
+/**
+ * Result of {@link useAllSuspense}. Like {@link UseAllResult} but without
+ * `loading`: the suspense variant only returns once the first result (or error)
+ * has resolved, so a `loading` flag would carry no information at the point of
+ * use.
+ */
+export interface UseAllSuspenseResult<T extends { id: string }> {
+  data: Ref<T[] | undefined>;
+  error: Ref<Error | null>;
+}
+
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
@@ -125,18 +136,20 @@ export function useAll<T extends { id: string }>(
  * @param query - the database query (e.g. `app.todos.where({ done: false })`)
  * @param options - optional query execution options
  *
- * @returns the same reactive `{ data, error, loading }` as {@link useAll}
+ * @returns reactive `{ data, error }`. Unlike {@link useAll}, there is no
+ *   `loading` flag: the promise only resolves once the first result is
+ *   available, so the query is never loading at the point of use.
  */
 export async function useAllSuspense<T extends { id: string }>(
   query: QueryBuilder<T>,
   options?: QueryOptions,
-): Promise<UseAllResult<T>> {
+): Promise<UseAllSuspenseResult<T>> {
   const { manager } = useJazzClient();
-  const result = useAll<T>(query, options);
+  const { data, error } = useAll<T>(query, options);
 
   const key = manager.makeQueryKey(query, options);
   const entry = manager.getCacheEntry<T>(key);
   await entry.promise;
 
-  return result;
+  return { data, error };
 }
