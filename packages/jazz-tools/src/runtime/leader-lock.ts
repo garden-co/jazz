@@ -9,7 +9,12 @@ export interface LeaderLockStrategy {
 interface LockManagerLike {
   request<T>(
     name: string,
-    options: { mode?: "exclusive" | "shared"; ifAvailable?: boolean },
+    options: {
+      mode?: "exclusive" | "shared";
+      ifAvailable?: boolean;
+      steal?: boolean;
+      signal?: AbortSignal;
+    },
     callback: (lock: unknown | null) => Promise<T> | T,
   ): Promise<T>;
 }
@@ -65,4 +70,111 @@ export function createNavigatorLocksLeaderLockStrategy(
       return await acquiredPromise;
     },
   };
+}
+
+export async function tryAcquireWebLock(
+  lockName: string,
+  lockManager: LockManagerLike | null = resolveNavigatorLocks(),
+): Promise<LeaderLockLease | null> {
+  if (!lockManager) return null;
+
+  let resolveAcquired: ((lease: LeaderLockLease | null) => void) | null = null;
+  const acquiredPromise = new Promise<LeaderLockLease | null>((resolve) => {
+    resolveAcquired = resolve;
+  });
+
+  let releaseLock: (() => void) | null = null;
+  const heldUntilReleased = new Promise<void>((resolve) => {
+    releaseLock = () => resolve();
+  });
+
+  void lockManager
+    .request(lockName, { mode: "exclusive", ifAvailable: true }, async (lock) => {
+      if (!lock) {
+        resolveAcquired?.(null);
+        resolveAcquired = null;
+        return;
+      }
+
+      resolveAcquired?.({
+        release: () => {
+          if (!releaseLock) return;
+          releaseLock();
+          releaseLock = null;
+        },
+      });
+      resolveAcquired = null;
+      await heldUntilReleased;
+    })
+    .catch(() => {
+      resolveAcquired?.(null);
+      resolveAcquired = null;
+    });
+
+  return await acquiredPromise;
+}
+
+export interface WebLockMonitor {
+  cancel(): void;
+}
+
+export interface WebLockMonitorOptions {
+  onGranted(): void;
+  onError?(error: unknown): void;
+  lockManager?: LockManagerLike | null;
+}
+
+export function monitorWebLockRelease(
+  lockName: string,
+  options: WebLockMonitorOptions,
+): WebLockMonitor {
+  const lockManager =
+    options.lockManager === undefined ? resolveNavigatorLocks() : options.lockManager;
+  if (!lockManager) {
+    queueMicrotask(() => options.onError?.(new Error("Web Locks are unavailable")));
+    return { cancel() {} };
+  }
+
+  const controller = new AbortController();
+  let cancelled = false;
+
+  void lockManager
+    .request(lockName, { mode: "exclusive", signal: controller.signal }, (lock) => {
+      if (lock && !cancelled) {
+        options.onGranted();
+      }
+      return undefined;
+    })
+    .catch((error) => {
+      if (cancelled || isAbortError(error)) {
+        return;
+      }
+      options.onError?.(error);
+    });
+
+  return {
+    cancel() {
+      if (cancelled) return;
+      cancelled = true;
+      controller.abort();
+    },
+  };
+}
+
+export async function stealAndReleaseWebLock(
+  lockName: string,
+  lockManager: LockManagerLike | null = resolveNavigatorLocks(),
+): Promise<void> {
+  if (!lockManager) {
+    throw new Error("Web Locks are unavailable");
+  }
+
+  await lockManager.request(lockName, { mode: "exclusive", steal: true }, () => undefined);
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "InvalidStateError")
+  );
 }
