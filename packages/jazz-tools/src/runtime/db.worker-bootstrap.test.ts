@@ -41,49 +41,11 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
   return { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient };
 });
 
-const { FakeTabLeaderElection } = vi.hoisted(() => ({
-  FakeTabLeaderElection: class {
-    start(): void {}
-
-    stop(): void {}
-
-    snapshot() {
-      return {
-        role: "leader" as const,
-        tabId: "tab-alice",
-        leaderTabId: "tab-alice",
-        term: 1,
-      };
-    }
-
-    waitForInitialLeader(): Promise<{
-      role: "leader";
-      tabId: string;
-      leaderTabId: string;
-      term: number;
-    }> {
-      return Promise.resolve(this.snapshot());
-    }
-
-    onChange(): () => void {
-      return () => {};
-    }
-  },
-}));
-
 vi.mock("./client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./client.js")>();
   return {
     ...actual,
     loadWasmModule: loadWasmModuleMock,
-  };
-});
-
-vi.mock("./tab-leader-election.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./tab-leader-election.js")>();
-  return {
-    ...actual,
-    TabLeaderElection: FakeTabLeaderElection,
   };
 });
 
@@ -109,6 +71,7 @@ import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
+const originalBroadcastChannel = (globalThis as Record<string, unknown>).BroadcastChannel;
 
 async function createWorkerDb(config: DbConfig): Promise<Db> {
   const runtimeModule = new WasmRuntimeModule();
@@ -137,6 +100,12 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>).Worker;
   } else {
     (globalThis as Record<string, unknown>).Worker = originalWorker;
+  }
+
+  if (originalBroadcastChannel === undefined) {
+    delete (globalThis as Record<string, unknown>).BroadcastChannel;
+  } else {
+    (globalThis as Record<string, unknown>).BroadcastChannel = originalBroadcastChannel;
   }
 });
 
@@ -267,6 +236,58 @@ describe("Db worker runtime bootstrap", () => {
     expect(loadWasmModuleMock).toHaveBeenCalledTimes(1);
     expect(spawnedWorkerUrls).toHaveLength(1);
     expect(spawnedWorkerUrls[0]).toMatch(/worker\/jazz-worker\.js$/);
+  });
+
+  it("does not open a BroadcastChannel in persistent browser broker mode", async () => {
+    const openedChannels: string[] = [];
+
+    class FakeBroadcastChannel extends EventTarget {
+      name: string;
+
+      constructor(name: string) {
+        super();
+        this.name = name;
+        openedChannels.push(name);
+      }
+
+      postMessage(): void {}
+
+      close(): void {}
+    }
+
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+    (globalThis as Record<string, unknown>).BroadcastChannel = FakeBroadcastChannel;
+
+    const db = await createWorkerDb({
+      appId: "worker-bootstrap-no-broadcast-channel",
+      driver: { type: "persistent", dbName: "worker-bootstrap-no-broadcast-channel" },
+    });
+
+    await db.shutdown();
+
+    expect(openedChannels).toEqual([]);
   });
 
   it("includes a fallbackWasmUrl in bridge options when no runtimeSources are provided", async () => {
