@@ -1,12 +1,14 @@
 # mini-jazz-sqlite - Subscription Reconciliation Spec Deviations
 
 **Date:** 2026-06-04
+**Last updated:** 2026-06-05
 **Compared spec:** `docs/superpowers/specs/2026-06-03-mini-jazz-sqlite-subscription-reconciliation-protocol.md`
 **Compared implementation:** current `mini-jazz-sqlite` subscription protocol implementation
 
 This document records where the implementation differs from the written
 subscription reconciliation spec. It only covers subscription download sync, not
-client upload sync.
+client upload sync. Deviations are about the `mini-jazz-sqlite` core unless a
+section explicitly calls out the `mini-sqlite-todo-yew` example server.
 
 ## Material Deviations
 
@@ -72,7 +74,7 @@ The current runtime export is synchronous, so this is probably fine for the
 prototype, but the code does not enforce the spec's stronger snapshot rule with
 a storage transaction or database snapshot identifier.
 
-### 5. `last_applied_cursor` is carried but not used for replay repair
+### 5. ACK and cursor semantics are split across several states
 
 The spec keeps both:
 
@@ -81,12 +83,20 @@ last_applied_cursor = which server Data cursor did I already apply?
 reconciliation      = which row heads do I currently have for this query?
 ```
 
-The implementation carries `last_applied_cursor` in `ReplaySubscription`, but
-the upstream replay path ignores it when deciding what to send. Replay repair is
-driven by the reconciliation sketch.
+The implementation carries `last_applied_cursor` in `ReplaySubscription`, and
+the downstream side updates it after applying `Data`. However, the upstream
+replay path ignores the client-provided `last_applied_cursor` when deciding what
+to send. Replay repair is driven by the reconciliation sketch.
 
-ACK tracking records the cursor associated with `message_id`, but the server
-does not trust or validate the cursor field sent by the client ACK.
+On the upstream side, `ActiveSubscription.last_applied_cursor` is also updated
+when the server sends subscription data, not when the client ACKs it. ACK
+tracking is separate: `pending_messages` maps `message_id` to the sent cursor,
+and `last_acknowledged` advances only when an ACK arrives.
+
+The server does not trust or validate the cursor field sent by the client ACK;
+it uses the cursor remembered for the acknowledged `message_id`. Local
+`Settled` is emitted immediately after `Data` for `SettlementTier::Local`, so it
+is not gated by the ACK.
 
 ### 6. Live refresh uses reconciliation machinery
 
@@ -190,6 +200,25 @@ multi-branch authoritative reconciliation pass.
 
 This is consistent with the current runtime shape, but weaker than the
 branch-aware protocol shape in the spec.
+
+### 14. The example server adds a debounced live-refresh broadcast path
+
+The protocol spec describes subscription reconciliation at the core
+connection/session layer. The `mini-sqlite-todo-yew` example server adds extra
+live fan-out behavior around that core:
+
+- upload-originating changes are broadcast to other WebSocket connections
+- the broadcast path sleeps for `SUBSCRIPTION_REFRESH_DEBOUNCE`, currently 50 ms,
+  to coalesce nearby changes
+- when the uploaded transaction can be exported, the example server can push the
+  exported upload bundle directly to peers
+- it refreshes active subscriptions when the upload bundle is incomplete or when
+  no direct push bundle is available
+
+This is useful for two-browser demo sync, but it is not specified by the
+subscription reconciliation protocol. It can create multiple server messages for
+one local write and makes observed live-update latency depend partly on the
+example-server debounce and broadcast plan.
 
 ## Provisional Spec Items Not Implemented
 

@@ -4,9 +4,9 @@ use mini_sqlite_todo_yew::browser_runtime::{
     BrowserRuntime, BrowserRuntimeConfig, BrowserRuntimeStatus, SubscriptionId,
 };
 use mini_sqlite_todo_yew::browser_telemetry::{
-    emit_span, new_trace_context, BrowserTelemetryConfig,
+    emit_log, new_sync_log_context, BrowserTelemetryConfig,
 };
-use mini_sqlite_todo_yew::native_sync::{NativeSyncProbe, NativeTraceContext};
+use mini_sqlite_todo_yew::native_sync::{NativeSyncLogContext, NativeSyncProbe};
 use mini_sqlite_todo_yew::query_builder::QueryBuilder;
 use mini_sqlite_todo_yew::runtime_config::{selected_native_sync_url, NATIVE_SYNC_URL_STORAGE_KEY};
 use mini_sqlite_todo_yew::todo_query::{
@@ -107,7 +107,7 @@ impl TodoRuntime {
                     TodoQueryState::default().page_hydration_query(),
                 ],
                 native_sync_url: native_sync_url(),
-                native_sync_tracing: true,
+                native_sync_logging: true,
                 browser_telemetry: browser_telemetry.clone(),
             },
             Callback::from({
@@ -148,7 +148,7 @@ impl TodoRuntime {
     pub fn add(&self, title: String) {
         let (browser, current_rows) = self.browser_and_current_rows();
         let id = format!("todo-{}-{}", Date::now() as u64, current_rows);
-        let trace_context = self.start_sync_probe("insert", &id);
+        let sync_context = self.start_sync_log_probe("insert", &id);
         if let Err(error) = (|| {
             browser.insert_row(
                 "todos",
@@ -160,8 +160,7 @@ impl TodoRuntime {
                 ]),
             )?;
             browser.refresh_subscriptions()?;
-            browser
-                .sync_queries_with_trace_context(vec![todo_ids_query(vec![id])], trace_context)?;
+            browser.sync_queries_with_sync_context(vec![todo_ids_query(vec![id])], sync_context)?;
             Ok(())
         })() {
             self.set_error(error);
@@ -182,12 +181,11 @@ impl TodoRuntime {
 
     pub fn delete(&self, id: String) {
         let browser = self.browser();
-        let trace_context = self.start_sync_probe("delete", &id);
+        let sync_context = self.start_sync_log_probe("delete", &id);
         if let Err(error) = (|| {
             browser.delete_row("todos", &id)?;
             browser.refresh_subscriptions()?;
-            browser
-                .sync_queries_with_trace_context(vec![todo_ids_query(vec![id])], trace_context)?;
+            browser.sync_queries_with_sync_context(vec![todo_ids_query(vec![id])], sync_context)?;
             Ok(())
         })() {
             self.set_error(error);
@@ -407,25 +405,33 @@ impl TodoRuntime {
         inner.emit();
     }
 
-    fn start_sync_probe(&self, operation: &str, row_id: &str) -> NativeTraceContext {
+    fn start_sync_log_probe(&self, operation: &str, row_id: &str) -> NativeSyncLogContext {
         let (client_id, browser_telemetry) = self
             .with_inner(|inner| Ok((inner.client_id.clone(), inner.browser_telemetry.clone())))
             .unwrap_or_else(|_| ("browser-yew-unknown".to_owned(), None));
         let probe_id = format!("sync-probe-{operation}-{}-{}", Date::now() as u64, row_id);
-        let trace_context = new_trace_context(NativeSyncProbe {
+        let sync_context = new_sync_log_context(NativeSyncProbe {
             probe_id,
             operation: operation.to_owned(),
             table: "todos".to_owned(),
             row_id: row_id.to_owned(),
             origin_browser_id: client_id,
         });
-        emit_span(
+        let body = json!({
+            "event": "todo.action.start",
+            "operation": operation,
+            "table": "todos",
+            "row_id": row_id,
+        })
+        .to_string();
+        emit_log(
             browser_telemetry.as_ref(),
             "todo.action.start",
-            Some(&trace_context),
+            Some(&sync_context),
+            &body,
             [("sync.phase", "local_action")],
         );
-        trace_context
+        sync_context
     }
 
     fn update_query(&self, update: impl FnOnce(&mut TodoQueryState)) {

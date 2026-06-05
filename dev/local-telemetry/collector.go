@@ -128,6 +128,9 @@ func buildConfigMap(host string, port int, dataDir string, retentionDays int) ma
 		"service": map[string]any{
 			"telemetry": map[string]any{
 				"logs": map[string]any{"level": "info"},
+				"metrics": map[string]any{
+					"level": "none",
+				},
 			},
 			"pipelines": map[string]any{
 				"traces": map[string]any{

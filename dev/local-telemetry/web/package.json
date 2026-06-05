@@ -2,9 +2,10 @@
   "name": "local-telemetry-viewer",
   "version": "0.0.0",
   "private": true,
-  "description": "Embedded sync-flow viewer for the dev/local-telemetry collector. Sources are bundled in-process by the Go binary via esbuild — this package exists for type-checking and dependency hoisting only.",
+  "description": "Embedded sync session log viewer for the dev/local-telemetry collector. Sources are bundled in-process by the Go binary via esbuild; this package exists for type-checking and dependency hoisting only.",
   "type": "module",
   "scripts": {
+    "test": "tsc -p tsconfig.json --rootDir src --outDir .test-build && node test/sessionLogTable.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

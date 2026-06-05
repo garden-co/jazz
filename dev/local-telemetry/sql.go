@@ -155,6 +155,19 @@ func refreshViews(ctx context.Context, db *sql.DB, dataDir string) {
 	for _, s := range []string{"traces", "logs", "metrics"} {
 		matches, _ := filepath.Glob(filepath.Join(dataDir, s+"*.jsonl"))
 		if len(matches) == 0 {
+			raw := fmt.Sprintf(
+				"CREATE OR REPLACE VIEW raw_%s AS SELECT NULL::JSON AS doc WHERE false",
+				s,
+			)
+			if _, err := db.ExecContext(ctx, raw); err != nil {
+				log.Printf("empty raw_%s view: %v", s, err)
+				continue
+			}
+			if stmt, ok := flatViewSQL[s]; ok {
+				if _, err := db.ExecContext(ctx, stmt); err != nil {
+					log.Printf("empty flat %s view: %v", s, err)
+				}
+			}
 			continue
 		}
 		glob := filepath.Join(dataDir, s+"*.jsonl")

@@ -1,9 +1,9 @@
-use crate::native_sync::{NativeSyncProbe, NativeTraceContext};
+use crate::native_sync::{NativeSyncLogContext, NativeSyncProbe, SyncLogRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-const TRACE_SCOPE_NAME: &str = "mini_sqlite_todo_yew::browser_telemetry";
+const LOG_SCOPE_NAME: &str = "mini_sqlite_todo_yew::browser_telemetry";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserTelemetryConfig {
@@ -14,65 +14,52 @@ pub struct BrowserTelemetryConfig {
     pub deployment_environment: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpanKind {
-    Internal,
-}
-
-impl SpanKind {
-    fn otlp_value(self) -> i64 {
-        match self {
-            Self::Internal => 1,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrowserTelemetrySpan {
-    trace_id: String,
-    span_id: String,
-    parent_span_id: String,
-    name: String,
-    kind: SpanKind,
-    start_time_unix_nano: u64,
-    end_time_unix_nano: u64,
+pub struct BrowserTelemetryLog {
+    time_unix_nano: u64,
+    observed_time_unix_nano: u64,
+    event_name: String,
+    body: String,
     attributes: BTreeMap<String, String>,
 }
 
-impl BrowserTelemetrySpan {
-    pub fn from_trace_context<const N: usize>(
-        name: &str,
-        kind: SpanKind,
-        start_time_unix_nano: u64,
-        end_time_unix_nano: u64,
-        trace_context: &NativeTraceContext,
+impl BrowserTelemetryLog {
+    pub fn new<const N: usize>(
+        event_name: &str,
+        time_unix_nano: u64,
+        sync_context: Option<&NativeSyncLogContext>,
+        body: &str,
         attributes: [(&str, &str); N],
-    ) -> Option<Self> {
-        let parsed = ParsedTraceparent::parse(&trace_context.traceparent)?;
-        let mut span_attributes = BTreeMap::new();
-        if let Some(probe) = &trace_context.probe {
-            record_probe_attributes(&mut span_attributes, probe);
-        }
+    ) -> Self {
+        let mut log_attributes = BTreeMap::new();
+        record_context_attributes(&mut log_attributes, sync_context);
         for (key, value) in attributes {
-            span_attributes.insert(key.to_owned(), value.to_owned());
+            log_attributes.insert(key.to_owned(), value.to_owned());
         }
 
-        Some(Self {
-            trace_id: parsed.trace_id,
-            span_id: parsed.span_id,
-            parent_span_id: parsed.parent_span_id,
-            name: name.to_owned(),
-            kind,
-            start_time_unix_nano,
-            end_time_unix_nano,
-            attributes: span_attributes,
-        })
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            event_name: event_name.to_owned(),
+            body: body.to_owned(),
+            attributes: log_attributes,
+        }
+    }
+
+    pub fn from_sync_record(time_unix_nano: u64, record: &SyncLogRecord) -> Self {
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            event_name: record.event_name.to_owned(),
+            body: record.body.clone(),
+            attributes: record.attributes.clone(),
+        }
     }
 }
 
-pub fn otlp_trace_payload(config: &BrowserTelemetryConfig, span: BrowserTelemetrySpan) -> Value {
+pub fn otlp_log_payload(config: &BrowserTelemetryConfig, log: BrowserTelemetryLog) -> Value {
     json!({
-        "resourceSpans": [{
+        "resourceLogs": [{
             "resource": {
                 "attributes": [
                     string_attribute("service.name", &config.service_name),
@@ -82,19 +69,20 @@ pub fn otlp_trace_payload(config: &BrowserTelemetryConfig, span: BrowserTelemetr
                     string_attribute("browser.instance.id", &config.browser_instance_id),
                 ]
             },
-            "scopeSpans": [{
+            "scopeLogs": [{
                 "scope": {
-                    "name": TRACE_SCOPE_NAME,
+                    "name": LOG_SCOPE_NAME,
                 },
-                "spans": [{
-                    "traceId": span.trace_id,
-                    "spanId": span.span_id,
-                    "parentSpanId": span.parent_span_id,
-                    "name": span.name,
-                    "kind": span.kind.otlp_value(),
-                    "startTimeUnixNano": span.start_time_unix_nano.to_string(),
-                    "endTimeUnixNano": span.end_time_unix_nano.to_string(),
-                    "attributes": span.attributes
+                "logRecords": [{
+                    "timeUnixNano": log.time_unix_nano.to_string(),
+                    "observedTimeUnixNano": log.observed_time_unix_nano.to_string(),
+                    "severityNumber": 9,
+                    "severityText": "INFO",
+                    "eventName": log.event_name,
+                    "body": {
+                        "stringValue": log.body,
+                    },
+                    "attributes": log.attributes
                         .iter()
                         .map(|(key, value)| string_attribute(key, value))
                         .collect::<Vec<_>>(),
@@ -102,6 +90,21 @@ pub fn otlp_trace_payload(config: &BrowserTelemetryConfig, span: BrowserTelemetr
             }]
         }]
     })
+}
+
+fn record_context_attributes(
+    attributes: &mut BTreeMap<String, String>,
+    sync_context: Option<&NativeSyncLogContext>,
+) {
+    let Some(sync_context) = sync_context else {
+        return;
+    };
+    if let Some(session_id) = &sync_context.session_id {
+        attributes.insert("sync.session_id".to_owned(), session_id.clone());
+    }
+    if let Some(probe) = &sync_context.probe {
+        record_probe_attributes(attributes, probe);
+    }
 }
 
 fn record_probe_attributes(attributes: &mut BTreeMap<String, String>, probe: &NativeSyncProbe) {
@@ -124,56 +127,10 @@ fn string_attribute(key: &str, value: &str) -> Value {
     })
 }
 
-struct ParsedTraceparent {
-    trace_id: String,
-    span_id: String,
-    parent_span_id: String,
-}
-
-impl ParsedTraceparent {
-    fn parse(traceparent: &str) -> Option<Self> {
-        let mut parts = traceparent.split('-');
-        let version = parts.next()?;
-        let trace_id = parts.next()?;
-        let parent_span_id = parts.next()?;
-        let trace_flags = parts.next()?;
-        if parts.next().is_some()
-            || version != "00"
-            || trace_id.len() != 32
-            || parent_span_id.len() != 16
-            || trace_flags.len() != 2
-            || trace_id == "00000000000000000000000000000000"
-            || parent_span_id == "0000000000000000"
-            || !trace_id.chars().all(|value| value.is_ascii_hexdigit())
-            || !parent_span_id
-                .chars()
-                .all(|value| value.is_ascii_hexdigit())
-            || !trace_flags.chars().all(|value| value.is_ascii_hexdigit())
-        {
-            return None;
-        }
-
-        Some(Self {
-            trace_id: trace_id.to_owned(),
-            span_id: new_span_id(),
-            parent_span_id: parent_span_id.to_owned(),
-        })
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn new_span_id() -> String {
-    "0000000000000001".to_owned()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn new_span_id() -> String {
-    let random = (js_sys::Math::random() * u64::MAX as f64) as u64;
-    let span_id = format!("{random:016x}");
-    if span_id == "0000000000000000" {
-        "0000000000000001".to_owned()
-    } else {
-        span_id
+pub fn new_sync_log_context(probe: NativeSyncProbe) -> NativeSyncLogContext {
+    NativeSyncLogContext {
+        session_id: None,
+        probe: Some(probe),
     }
 }
 
@@ -183,58 +140,53 @@ pub fn unix_nano_now() -> u64 {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn new_trace_context(probe: NativeSyncProbe) -> NativeTraceContext {
-    NativeTraceContext {
-        traceparent: format!("00-{}-{}-01", new_trace_id(), new_span_id()),
-        probe: Some(probe),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn new_trace_id() -> String {
-    let high = js_sys::Date::now() as u64;
-    let low = (js_sys::Math::random() * u64::MAX as f64) as u64;
-    let trace_id = format!("{high:016x}{low:016x}");
-    if trace_id == "00000000000000000000000000000000" {
-        "00000000000000000000000000000001".to_owned()
-    } else {
-        trace_id
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn emit_span<const N: usize>(
+pub fn emit_log<const N: usize>(
     config: Option<&BrowserTelemetryConfig>,
-    name: &str,
-    trace_context: Option<&NativeTraceContext>,
+    event_name: &str,
+    sync_context: Option<&NativeSyncLogContext>,
+    body: &str,
     attributes: [(&str, &str); N],
 ) {
     let Some(config) = config else {
         return;
     };
-    let Some(trace_context) = trace_context else {
-        return;
-    };
-    let start = unix_nano_now();
-    let Some(span) = BrowserTelemetrySpan::from_trace_context(
-        name,
-        SpanKind::Internal,
-        start,
-        start.saturating_add(1_000_000),
-        trace_context,
-        attributes,
-    ) else {
-        return;
-    };
-    send_otlp_trace(config, span);
+    let log = BrowserTelemetryLog::new(event_name, unix_nano_now(), sync_context, body, attributes);
+    send_otlp_log(config, log);
 }
 
 #[cfg(target_arch = "wasm32")]
-fn send_otlp_trace(config: &BrowserTelemetryConfig, span: BrowserTelemetrySpan) {
+pub fn emit_sync_log_records(config: Option<&BrowserTelemetryConfig>, records: &[SyncLogRecord]) {
+    let Some(config) = config else {
+        return;
+    };
+    for record in records {
+        send_otlp_log(
+            config,
+            BrowserTelemetryLog::from_sync_record(unix_nano_now(), record),
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn emit_log<const N: usize>(
+    _config: Option<&BrowserTelemetryConfig>,
+    _event_name: &str,
+    _sync_context: Option<&NativeSyncLogContext>,
+    _body: &str,
+    _attributes: [(&str, &str); N],
+) {
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn emit_sync_log_records(_config: Option<&BrowserTelemetryConfig>, _records: &[SyncLogRecord]) {
+}
+
+#[cfg(target_arch = "wasm32")]
+fn send_otlp_log(config: &BrowserTelemetryConfig, log: BrowserTelemetryLog) {
     use js_sys::{Function, Object, Reflect};
     use wasm_bindgen::{JsCast, JsValue};
 
-    let payload = otlp_trace_payload(config, span).to_string();
+    let payload = otlp_log_payload(config, log).to_string();
     let init = Object::new();
     let headers = Object::new();
     let _ = Reflect::set(
@@ -258,20 +210,24 @@ fn send_otlp_trace(config: &BrowserTelemetryConfig, span: BrowserTelemetrySpan) 
     let Ok(fetch) = Reflect::get(&global, &JsValue::from_str("fetch")) else {
         return;
     };
-    let Ok(fetch) = fetch.dyn_into::<Function>() else {
+    let Some(fetch) = fetch.dyn_ref::<Function>() else {
         return;
     };
-    let _ = fetch.call2(&global, &JsValue::from_str(&trace_endpoint(config)), &init);
+    let _ = fetch.call2(
+        &global,
+        &JsValue::from_str(&logs_endpoint(&config.endpoint)),
+        &init,
+    );
 }
 
 #[cfg(target_arch = "wasm32")]
-fn trace_endpoint(config: &BrowserTelemetryConfig) -> String {
-    let endpoint = config.endpoint.trim().trim_end_matches('/');
-    if endpoint.ends_with("/v1/traces") {
+fn logs_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if endpoint.ends_with("/v1/logs") {
         endpoint.to_owned()
-    } else if let Some(base) = endpoint.strip_suffix("/v1/logs") {
-        format!("{base}/v1/traces")
+    } else if let Some(base) = endpoint.strip_suffix("/v1/traces") {
+        format!("{base}/v1/logs")
     } else {
-        format!("{endpoint}/v1/traces")
+        format!("{endpoint}/v1/logs")
     }
 }

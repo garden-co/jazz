@@ -11,7 +11,7 @@ your app  ──OTLP/HTTP:4318──▶  local-telemetry  ──fileexporter─�
                                       │                                         ▲
                                       ▼                                         │
                                  http :4319 ◀────── DuckDB views ───────────────┘
-                                 GET  /            → viewer (Sync Flow UI)
+                                 GET  /            → viewer (Sync Sessions UI)
                                  POST /sql         → {query} → {columns, rows}
                                  GET  /health      → "ok"
 ```
@@ -68,25 +68,27 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/json \
 
 ### 2. Open the viewer
 
-<http://127.0.0.1:4319/> — a table of `sync.send`/`sync.recv` spans with
-window, payload, and layer filters. Rows are clickable to expand the
-`payload_json` blob. The page polls the SQL endpoint every 3 s (react-query),
-no websocket.
+<http://127.0.0.1:4319/> - a session explorer for mini-sqlite todo sync logs.
+`#/sessions` lists recent sessions grouped by `sync.session_id`;
+`#/sessions/<session-id>` opens a table of logs for that session. Expanding a
+row shows the full log `body` JSON so protocol messages, including row values,
+stay visible. The page loads data through the SQL endpoint and does not
+auto-refresh.
 
 ### 3. Query directly
 
 ```sh
 curl -s -X POST http://127.0.0.1:4319/sql \
   -H 'Content-Type: application/json' \
-  -d '{"query":"SELECT name, service_name, duration_ns FROM spans ORDER BY start_time_unix_nano DESC LIMIT 10"}'
+  -d '{"query":"SELECT service_name, json_extract_string(body, '\''$.stringValue'\'') AS body_json FROM logs ORDER BY time_unix_nano DESC LIMIT 10"}'
 ```
 
 Response shape:
 
 ```json
 {
-  "columns": ["name", "service_name", "duration_ns"],
-  "rows": [["do-thing", "alice-service", 1000000000]]
+  "columns": ["service_name", "body_json"],
+  "rows": [["mini-sqlite-todo-yew-server", "{\"event\":\"sync.message\"}"]]
 }
 ```
 
@@ -138,7 +140,7 @@ dev/local-telemetry/
 │   ├── tsconfig.json
 │   └── src/             TSX sources (//go:embed-ed by ui.go)
 │       ├── index.html   import-map + #root
-│       └── main.tsx, App.tsx, Flow.tsx, flowRows.ts, api.ts
+│       └── main.tsx, App.tsx, SessionExplorer.tsx, sessionRows.ts, api.ts
 └── data/                JSONL output (gitignored)
 ```
 

@@ -1,58 +1,59 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type React from "react";
-import { FlowList } from "./Flow.js";
+import { parseSessionRoute, sessionListHash } from "./route.js";
+import { SessionDetailPage, SessionListPage } from "./SessionExplorer.js";
 
 export function App() {
   const [minutes, setMinutes] = useState(30);
+  const route = useHashRoute();
 
   return (
     <div style={styles.app}>
       <header style={styles.header}>
-        <h1 style={styles.title}>Sync Flow</h1>
-        <label style={styles.timeWindow}>
-          <span style={styles.fieldLabel}>Window (min)</span>
-          <input
-            type="number"
-            min={1}
-            value={minutes}
-            onChange={(event) => setMinutes(Math.max(1, Number(event.target.value) || 1))}
-            style={styles.smallInput}
-          />
-        </label>
+        <h1 style={styles.title}>Sync Sessions</h1>
       </header>
 
       <main>
-        <FlowList minutes={minutes} />
+        {route.page === "session" ? (
+          <SessionDetailPage sessionId={route.sessionId} />
+        ) : (
+          <SessionListPage minutes={minutes} onMinutesChange={setMinutes} />
+        )}
       </main>
     </div>
   );
 }
 
+function useHashRoute() {
+  const [route, setRoute] = useState(() => parseSessionRoute(window.location.hash));
+
+  useEffect(() => {
+    if (!window.location.hash) {
+      window.history.replaceState(null, "", sessionListHash());
+      setRoute(parseSessionRoute(window.location.hash));
+    }
+    const onHashChange = () => setRoute(parseSessionRoute(window.location.hash));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  return route;
+}
+
 const styles: Record<string, React.CSSProperties> = {
   app: {
     fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif",
-    padding: 16,
-    maxWidth: 1400,
-    margin: "0 auto",
+    minHeight: "100vh",
     color: "#1f2937",
+    background: "#f3f4f6",
   },
   header: {
     display: "flex",
     alignItems: "center",
-    gap: 24,
-    flexWrap: "wrap",
-    borderBottom: "1px solid #e5e7eb",
-    paddingBottom: 8,
-    marginBottom: 16,
+    borderBottom: "1px solid #d1d5db",
+    padding: "0 12px",
+    height: 41,
+    background: "#ffffff",
   },
   title: { fontSize: 18, margin: 0, marginRight: "auto" },
-  timeWindow: { display: "flex", alignItems: "center", gap: 8 },
-  fieldLabel: { fontSize: 11, color: "#6b7280", textTransform: "uppercase" },
-  smallInput: {
-    padding: "4px 8px",
-    border: "1px solid #d1d5db",
-    borderRadius: 4,
-    fontSize: 14,
-    width: 70,
-  },
 };

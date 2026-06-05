@@ -6,8 +6,9 @@ use mini_jazz_sqlite::{
     sync::{ReadRecord, RowDataUpdate},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-const TRACE_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
+const LOG_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
 const SUMMARY_ITEM_LIMIT: usize = 8;
 const SUMMARY_MAX_CHARS: usize = 512;
 
@@ -21,8 +22,9 @@ pub struct NativeSyncProbe {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeTraceContext {
-    pub traceparent: String,
+pub struct NativeSyncLogContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<NativeSyncProbe>,
 }
@@ -31,14 +33,14 @@ pub struct NativeTraceContext {
 pub struct NativeClientFrame {
     pub client_messages: Vec<ClientMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_context: Option<NativeTraceContext>,
+    pub sync_context: Option<NativeSyncLogContext>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeServerFrame {
     pub server_messages: Vec<ServerMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_context: Option<NativeTraceContext>,
+    pub sync_context: Option<NativeSyncLogContext>,
 }
 
 pub fn encode_client_frame(client_messages: Vec<ClientMessage>) -> Result<String, String> {
@@ -47,11 +49,11 @@ pub fn encode_client_frame(client_messages: Vec<ClientMessage>) -> Result<String
 
 pub fn encode_client_frame_with_context(
     client_messages: Vec<ClientMessage>,
-    trace_context: Option<NativeTraceContext>,
+    sync_context: Option<NativeSyncLogContext>,
 ) -> Result<String, String> {
     serde_json::to_string(&NativeClientFrame {
         client_messages,
-        trace_context,
+        sync_context,
     })
     .map_err(|error| error.to_string())
 }
@@ -66,11 +68,11 @@ pub fn encode_server_frame(server_messages: Vec<ServerMessage>) -> Result<String
 
 pub fn encode_server_frame_with_context(
     server_messages: Vec<ServerMessage>,
-    trace_context: Option<NativeTraceContext>,
+    sync_context: Option<NativeSyncLogContext>,
 ) -> Result<String, String> {
     serde_json::to_string(&NativeServerFrame {
         server_messages,
-        trace_context,
+        sync_context,
     })
     .map_err(|error| error.to_string())
 }
@@ -79,154 +81,297 @@ pub fn decode_server_frame(encoded: &str) -> Result<NativeServerFrame, String> {
     serde_json::from_str(encoded).map_err(|error| error.to_string())
 }
 
-pub fn trace_client_messages(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncLogRecord {
+    pub event_name: &'static str,
+    pub body: String,
+    pub attributes: BTreeMap<String, String>,
+}
+
+impl SyncLogRecord {
+    pub fn attribute(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).map(String::as_str)
+    }
+}
+
+pub fn client_sync_log_records(
     direction: &'static str,
-    trace_context: Option<&NativeTraceContext>,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
+    messages: &[ClientMessage],
+) -> Vec<SyncLogRecord> {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let summary = client_message_summary(message);
+            sync_log_record(
+                direction,
+                sync_context,
+                connection_id,
+                index,
+                messages.len(),
+                summary,
+                message,
+            )
+        })
+        .collect()
+}
+
+pub fn server_sync_log_records(
+    direction: &'static str,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
+    messages: &[ServerMessage],
+) -> Vec<SyncLogRecord> {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let summary = server_message_summary(message);
+            sync_log_record(
+                direction,
+                sync_context,
+                connection_id,
+                index,
+                messages.len(),
+                summary,
+                message,
+            )
+        })
+        .collect()
+}
+
+pub fn log_client_messages(
+    direction: &'static str,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
     messages: &[ClientMessage],
 ) {
-    for (index, message) in messages.iter().enumerate() {
-        let summary = client_message_summary(message);
-        trace_sync_message(direction, trace_context, index, messages.len(), summary);
+    for record in client_sync_log_records(direction, sync_context, connection_id, messages) {
+        emit_sync_log_record(&record);
     }
 }
 
-pub fn trace_server_messages(
+pub fn log_server_messages(
     direction: &'static str,
-    trace_context: Option<&NativeTraceContext>,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
     messages: &[ServerMessage],
 ) {
-    for (index, message) in messages.iter().enumerate() {
-        let summary = server_message_summary(message);
-        trace_sync_message(direction, trace_context, index, messages.len(), summary);
+    for record in server_sync_log_records(direction, sync_context, connection_id, messages) {
+        emit_sync_log_record(&record);
     }
 }
 
-fn trace_sync_message(
+fn sync_log_record<T: Serialize>(
     direction: &'static str,
-    trace_context: Option<&NativeTraceContext>,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
     index: usize,
     count: usize,
     summary: SyncMessageSummary,
-) {
-    let span = tracing::info_span!(
-        target: TRACE_TARGET,
-        "sync.message",
-        sync_direction = direction,
-        sync_message_kind = summary.kind,
-        sync_message_index = index,
-        sync_message_count = count,
-        sync_subscription_count = summary.subscription_count,
-        sync_data_record_count = summary.data_record_count,
-        sync_read_record_count = summary.read_record_count,
-        sync_bundle_row_count = summary.bundle_row_count,
-        sync_bundle_tx_count = summary.bundle_tx_count,
-        sync_tx_id = tracing::field::Empty,
-        sync_tx_status = tracing::field::Empty,
-        sync_tx_rejection_code = tracing::field::Empty,
-        sync_tx_global_epoch = tracing::field::Empty,
-        sync_tx_conflict_mode = tracing::field::Empty,
-        sync_branch_id = tracing::field::Empty,
-        sync_subscription_id = tracing::field::Empty,
-        sync_message_id = tracing::field::Empty,
-        sync_cursor = tracing::field::Empty,
-        sync_settlement_tier = tracing::field::Empty,
-        sync_error_code = tracing::field::Empty,
-        sync_retry_hint = tracing::field::Empty,
-        sync_close_reason = tracing::field::Empty,
-        sync_data_records = tracing::field::Empty,
-        sync_read_records = tracing::field::Empty,
-        sync_bundle_tx_ids = tracing::field::Empty,
+    message: &T,
+) -> SyncLogRecord {
+    let body = serde_json::json!({
+        "event": "sync.message",
+        "direction": direction,
+        "message_kind": summary.kind,
+        "message_index": index,
+        "message_count": count,
+        "message": message,
+    })
+    .to_string();
+    let mut attributes = sync_log_attributes(
+        direction,
+        sync_context,
+        connection_id,
+        index,
+        count,
+        &summary,
     );
-    record_summary_fields(&span, &summary);
-    #[cfg(target_arch = "wasm32")]
-    let _ = trace_context;
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(parent) = trace_context.and_then(parent_context_from_traceparent) {
-        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-
-        let _ = span.set_parent(parent);
+    attributes.insert("sync.event".to_owned(), "sync.message".to_owned());
+    SyncLogRecord {
+        event_name: "sync.message",
+        body,
+        attributes,
     }
-    let _entered = span.enter();
 }
 
-fn record_summary_fields(span: &tracing::Span, summary: &SyncMessageSummary) {
-    record_field(span, "sync_tx_id", summary.tx_id.as_deref());
-    record_field(span, "sync_tx_status", summary.tx_status.as_deref());
-    record_field(
-        span,
-        "sync_tx_rejection_code",
+fn sync_log_attributes(
+    direction: &'static str,
+    sync_context: Option<&NativeSyncLogContext>,
+    connection_id: Option<u64>,
+    index: usize,
+    count: usize,
+    summary: &SyncMessageSummary,
+) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::new();
+    attributes.insert("sync.direction".to_owned(), direction.to_owned());
+    attributes.insert("sync.message_kind".to_owned(), summary.kind.to_owned());
+    attributes.insert("sync.message_index".to_owned(), index.to_string());
+    attributes.insert("sync.message_count".to_owned(), count.to_string());
+    attributes.insert(
+        "sync.subscription_count".to_owned(),
+        summary.subscription_count.to_string(),
+    );
+    attributes.insert(
+        "sync.data_record_count".to_owned(),
+        summary.data_record_count.to_string(),
+    );
+    attributes.insert(
+        "sync.read_record_count".to_owned(),
+        summary.read_record_count.to_string(),
+    );
+    attributes.insert(
+        "sync.bundle_row_count".to_owned(),
+        summary.bundle_row_count.to_string(),
+    );
+    attributes.insert(
+        "sync.bundle_tx_count".to_owned(),
+        summary.bundle_tx_count.to_string(),
+    );
+    if let Some(connection_id) = connection_id {
+        attributes.insert("sync.connection_id".to_owned(), connection_id.to_string());
+    }
+    if let Some(context) = sync_context {
+        if let Some(session_id) = &context.session_id {
+            attributes.insert("sync.session_id".to_owned(), session_id.clone());
+        }
+        if let Some(probe) = &context.probe {
+            attributes.insert("sync.probe.id".to_owned(), probe.probe_id.clone());
+            attributes.insert("sync.operation".to_owned(), probe.operation.clone());
+            attributes.insert("sync.table".to_owned(), probe.table.clone());
+            attributes.insert("sync.row_id".to_owned(), probe.row_id.clone());
+            attributes.insert(
+                "sync.origin_browser_id".to_owned(),
+                probe.origin_browser_id.clone(),
+            );
+        }
+    }
+    insert_optional(&mut attributes, "sync.tx_id", summary.tx_id.as_deref());
+    insert_optional(
+        &mut attributes,
+        "sync.tx_status",
+        summary.tx_status.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.tx_rejection_code",
         summary.tx_rejection_code.as_deref(),
     );
-    record_field(
-        span,
-        "sync_tx_global_epoch",
+    insert_optional(
+        &mut attributes,
+        "sync.tx_global_epoch",
         summary.tx_global_epoch.as_deref(),
     );
-    record_field(
-        span,
-        "sync_tx_conflict_mode",
+    insert_optional(
+        &mut attributes,
+        "sync.tx_conflict_mode",
         summary.tx_conflict_mode.as_deref(),
     );
-    record_field(span, "sync_branch_id", summary.branch_id.as_deref());
-    record_field(
-        span,
-        "sync_subscription_id",
+    insert_optional(
+        &mut attributes,
+        "sync.branch_id",
+        summary.branch_id.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.subscription_id",
         summary.subscription_id.as_deref(),
     );
-    record_field(span, "sync_message_id", summary.message_id.as_deref());
-    record_field(span, "sync_cursor", summary.cursor.as_deref());
-    record_field(
-        span,
-        "sync_settlement_tier",
+    insert_optional(
+        &mut attributes,
+        "sync.message_id",
+        summary.message_id.as_deref(),
+    );
+    insert_optional(&mut attributes, "sync.cursor", summary.cursor.as_deref());
+    insert_optional(
+        &mut attributes,
+        "sync.settlement_tier",
         summary.settlement_tier.as_deref(),
     );
-    record_field(span, "sync_error_code", summary.error_code.as_deref());
-    record_field(span, "sync_retry_hint", summary.retry_hint.as_deref());
-    record_field(span, "sync_close_reason", summary.close_reason.as_deref());
-    record_field(span, "sync_data_records", summary.data_records.as_deref());
-    record_field(span, "sync_read_records", summary.read_records.as_deref());
-    record_field(span, "sync_bundle_tx_ids", summary.bundle_tx_ids.as_deref());
+    insert_optional(
+        &mut attributes,
+        "sync.error_code",
+        summary.error_code.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.retry_hint",
+        summary.retry_hint.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.close_reason",
+        summary.close_reason.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.data_records",
+        summary.data_records.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.read_records",
+        summary.read_records.as_deref(),
+    );
+    insert_optional(
+        &mut attributes,
+        "sync.bundle_tx_ids",
+        summary.bundle_tx_ids.as_deref(),
+    );
+    attributes
 }
 
-fn record_field(span: &tracing::Span, name: &'static str, value: Option<&str>) {
+fn insert_optional(attributes: &mut BTreeMap<String, String>, key: &str, value: Option<&str>) {
     if let Some(value) = value {
-        span.record(name, value);
+        attributes.insert(key.to_owned(), value.to_owned());
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn parent_context_from_traceparent(
-    trace_context: &NativeTraceContext,
-) -> Option<opentelemetry::Context> {
-    use opentelemetry::trace::{
-        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
-    };
-
-    let mut parts = trace_context.traceparent.split('-');
-    let version = parts.next()?;
-    let trace_id = parts.next()?;
-    let span_id = parts.next()?;
-    let trace_flags = parts.next()?;
-
-    if parts.next().is_some()
-        || version != "00"
-        || trace_id.len() != 32
-        || span_id.len() != 16
-        || trace_flags.len() != 2
-    {
-        return None;
-    }
-
-    let trace_id = TraceId::from_hex(trace_id).ok()?;
-    let span_id = SpanId::from_hex(span_id).ok()?;
-    if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-        return None;
-    }
-
-    let trace_flags = TraceFlags::new(u8::from_str_radix(trace_flags, 16).ok()?);
-    let span_context =
-        SpanContext::new(trace_id, span_id, trace_flags, true, TraceState::default());
-    Some(opentelemetry::Context::new().with_remote_span_context(span_context))
+fn emit_sync_log_record(record: &SyncLogRecord) {
+    let attr = |key: &str| record.attribute(key).unwrap_or("");
+    tracing::info!(
+        name: "sync.message",
+        target: LOG_TARGET,
+        {
+            sync.session_id = attr("sync.session_id"),
+            sync.connection_id = attr("sync.connection_id"),
+            sync.direction = attr("sync.direction"),
+            sync.message_kind = attr("sync.message_kind"),
+            sync.message_index = attr("sync.message_index"),
+            sync.message_count = attr("sync.message_count"),
+            sync.subscription_count = attr("sync.subscription_count"),
+            sync.data_record_count = attr("sync.data_record_count"),
+            sync.read_record_count = attr("sync.read_record_count"),
+            sync.bundle_row_count = attr("sync.bundle_row_count"),
+            sync.bundle_tx_count = attr("sync.bundle_tx_count"),
+            sync.tx_id = attr("sync.tx_id"),
+            sync.tx_status = attr("sync.tx_status"),
+            sync.tx_rejection_code = attr("sync.tx_rejection_code"),
+            sync.tx_global_epoch = attr("sync.tx_global_epoch"),
+            sync.tx_conflict_mode = attr("sync.tx_conflict_mode"),
+            sync.branch_id = attr("sync.branch_id"),
+            sync.subscription_id = attr("sync.subscription_id"),
+            sync.message_id = attr("sync.message_id"),
+            sync.cursor = attr("sync.cursor"),
+            sync.settlement_tier = attr("sync.settlement_tier"),
+            sync.error_code = attr("sync.error_code"),
+            sync.retry_hint = attr("sync.retry_hint"),
+            sync.close_reason = attr("sync.close_reason"),
+            sync.data_records = attr("sync.data_records"),
+            sync.read_records = attr("sync.read_records"),
+            sync.bundle_tx_ids = attr("sync.bundle_tx_ids"),
+            sync.probe.id = attr("sync.probe.id"),
+            sync.operation = attr("sync.operation"),
+            sync.table = attr("sync.table"),
+            sync.row_id = attr("sync.row_id"),
+            sync.origin_browser_id = attr("sync.origin_browser_id"),
+        },
+        "{}",
+        record.body.as_str()
+    );
 }
 
 #[derive(Debug)]
@@ -537,9 +682,9 @@ mod tests {
     }
 
     #[test]
-    fn native_sync_frames_propagate_trace_context() {
-        let context = NativeTraceContext {
-            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+    fn native_sync_frames_propagate_sync_log_context() {
+        let context = NativeSyncLogContext {
+            session_id: Some("server-session-1".to_owned()),
             probe: Some(NativeSyncProbe {
                 probe_id: "probe-1".to_owned(),
                 operation: "insert".to_owned(),
@@ -555,7 +700,7 @@ mod tests {
         )
         .unwrap();
         let decoded = decode_client_frame(&encoded).unwrap();
-        assert_eq!(decoded.trace_context, Some(context.clone()));
+        assert_eq!(decoded.sync_context, Some(context.clone()));
 
         let encoded = encode_server_frame_with_context(
             vec![ServerMessage::Close(CloseReason::ClientClosed)],
@@ -563,15 +708,15 @@ mod tests {
         )
         .unwrap();
         let decoded = decode_server_frame(&encoded).unwrap();
-        assert_eq!(decoded.trace_context, Some(context));
+        assert_eq!(decoded.sync_context, Some(context));
     }
 
     #[test]
-    fn client_upload_summary_includes_debug_correlation_without_row_values() {
+    fn client_upload_log_record_includes_full_protocol_payload() {
         let mut values = BTreeMap::new();
         values.insert("title".to_owned(), json!("Buy milk"));
 
-        let summary = client_message_summary(&ClientMessage::UploadTx {
+        let message = ClientMessage::UploadTx {
             tx: ClientTx {
                 tx_id: "tx-insert".to_owned(),
                 branch_id: Some("main".to_owned()),
@@ -592,21 +737,46 @@ mod tests {
                 reason: 7,
                 observed_tx_id: Some("tx-before".to_owned()),
             }],
-        });
+        };
+        let records = client_sync_log_records(
+            "server.receive",
+            Some(&NativeSyncLogContext {
+                session_id: Some("server-session-1".to_owned()),
+                probe: None,
+            }),
+            Some(7),
+            &[message],
+        );
 
-        assert_eq!(summary.tx_id.as_deref(), Some("tx-insert"));
-        assert_eq!(summary.branch_id.as_deref(), Some("main"));
-        assert_eq!(summary.tx_conflict_mode.as_deref(), Some("mergeable"));
-        assert_eq!(summary.data_records.as_deref(), Some("todos:todo-1:insert"));
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
         assert_eq!(
-            summary.read_records.as_deref(),
+            record.attribute("sync.session_id"),
+            Some("server-session-1")
+        );
+        assert_eq!(record.attribute("sync.connection_id"), Some("7"));
+        assert_eq!(record.attribute("sync.direction"), Some("server.receive"));
+        assert_eq!(
+            record.attribute("sync.message_kind"),
+            Some("client.upload_tx")
+        );
+        assert_eq!(record.attribute("sync.tx_id"), Some("tx-insert"));
+        assert_eq!(record.attribute("sync.branch_id"), Some("main"));
+        assert_eq!(record.attribute("sync.tx_conflict_mode"), Some("mergeable"));
+        assert_eq!(
+            record.attribute("sync.data_records"),
+            Some("todos:todo-1:insert")
+        );
+        assert_eq!(
+            record.attribute("sync.read_records"),
             Some("todos:todo-1:reason=7:observed=tx-before")
         );
-        assert!(!format!("{summary:?}").contains("Buy milk"));
+        assert!(record.body.contains("client.upload_tx"));
+        assert!(record.body.contains("Buy milk"));
     }
 
     #[test]
-    fn server_status_and_data_summaries_include_protocol_correlation() {
+    fn server_data_log_record_includes_full_protocol_payload() {
         let status = server_message_summary(&ServerMessage::TxStatus {
             tx_id: "tx-delete".to_owned(),
             status: TxStatusKind::Rejected {
@@ -619,7 +789,7 @@ mod tests {
         assert_eq!(status.tx_rejection_code.as_deref(), Some("policy_denied"));
         assert!(!format!("{status:?}").contains("not allowed"));
 
-        let data = server_message_summary(&ServerMessage::Data {
+        let message = ServerMessage::Data {
             message_id: MessageId(42),
             subscription_id: Some(SubscriptionId::new("todos")),
             cursor: ReplayCursor(9),
@@ -635,18 +805,34 @@ mod tests {
                 created_by: "alice".to_owned(),
                 updated_by: "alice".to_owned(),
             }),
-        });
-        assert_eq!(data.message_id.as_deref(), Some("42"));
-        assert_eq!(data.subscription_id.as_deref(), Some("todos"));
-        assert_eq!(data.cursor.as_deref(), Some("9"));
-        assert_eq!(data.bundle_tx_ids.as_deref(), Some("tx-delete"));
-        assert_eq!(data.data_records.as_deref(), Some("todos:todo-1:delete"));
-        assert_eq!(data.read_record_count, 1);
+        };
+        let records = server_sync_log_records(
+            "client.receive",
+            Some(&NativeSyncLogContext {
+                session_id: Some("server-session-1".to_owned()),
+                probe: None,
+            }),
+            None,
+            &[message],
+        );
+
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.attribute("sync.message_id"), Some("42"));
+        assert_eq!(record.attribute("sync.subscription_id"), Some("todos"));
+        assert_eq!(record.attribute("sync.cursor"), Some("9"));
+        assert_eq!(record.attribute("sync.bundle_tx_ids"), Some("tx-delete"));
         assert_eq!(
-            data.read_records.as_deref(),
+            record.attribute("sync.data_records"),
+            Some("todos:todo-1:delete")
+        );
+        assert_eq!(record.attribute("sync.read_record_count"), Some("1"));
+        assert_eq!(
+            record.attribute("sync.read_records"),
             Some("todos:todo-1:reason=8:observed=tx-insert")
         );
-        assert!(!format!("{data:?}").contains("Buy milk"));
+        assert!(record.body.contains("server.data"));
+        assert!(record.body.contains("Buy milk"));
     }
 
     fn bundle_with_row(row: RowDataUpdate) -> Bundle {

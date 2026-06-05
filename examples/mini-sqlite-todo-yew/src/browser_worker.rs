@@ -1,18 +1,16 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 #[cfg(target_arch = "wasm32")]
-use crate::browser_telemetry::{emit_span, BrowserTelemetryConfig};
+use crate::browser_telemetry::{emit_log, emit_sync_log_records, BrowserTelemetryConfig};
 #[cfg(target_arch = "wasm32")]
 use crate::native_sync::{
-    decode_server_frame, encode_client_frame_with_context, trace_client_messages,
-    trace_server_messages, NativeTraceContext,
+    client_sync_log_records, decode_server_frame, encode_client_frame_with_context,
+    server_sync_log_records, NativeSyncLogContext,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::worker_bridge::WorkerResponder;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::{browser_telemetry::BrowserTelemetryConfig, native_sync::NativeTraceContext};
-#[cfg(target_arch = "wasm32")]
-use js_sys::{Date, Math};
+use crate::{browser_telemetry::BrowserTelemetryConfig, native_sync::NativeSyncLogContext};
 use mini_jazz_sqlite::connection::UpstreamConnectionManager;
 #[cfg(target_arch = "wasm32")]
 use mini_jazz_sqlite::protocol::{ClientHello, SessionId, SUPPORTED_PROTOCOL_VERSION};
@@ -44,7 +42,7 @@ pub enum RuntimeWorkerInput {
         hydrate_queries: Vec<BuiltQuery>,
         client_messages: Vec<ClientMessage>,
         native_sync_url: Option<String>,
-        native_sync_tracing: bool,
+        native_sync_logging: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         browser_telemetry: Option<BrowserTelemetryConfig>,
     },
@@ -53,13 +51,13 @@ pub enum RuntimeWorkerInput {
         bundles: Vec<Bundle>,
         client_messages: Vec<ClientMessage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     },
     Protocol {
         request_id: RuntimeRequestId,
         client_messages: Vec<ClientMessage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     },
     ExportQuery {
         request_id: RuntimeRequestId,
@@ -90,20 +88,20 @@ pub enum RuntimeWorkerOutput {
         server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     },
     Protocol {
         request_id: RuntimeRequestId,
         server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     },
     Pushed {
         server_messages: Vec<ServerMessage>,
         storage_stats: BrowserStorageStats,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     },
     Exported {
         request_id: RuntimeRequestId,
@@ -195,13 +193,12 @@ struct NativeSync {
     node_id: String,
     schema_fingerprint: String,
     policy_fingerprint: String,
-    tracing_enabled: bool,
-    trace_id: String,
-    next_span_id: u64,
+    logging_enabled: bool,
+    server_session_id: Option<String>,
     ready: bool,
     sent_hello: bool,
     pending_client_messages: Vec<ClientMessage>,
-    pending_trace_context: Option<NativeTraceContext>,
+    pending_sync_context: Option<NativeSyncLogContext>,
     browser_telemetry: Option<BrowserTelemetryConfig>,
     #[cfg(target_arch = "wasm32")]
     socket: WebSocket,
@@ -239,7 +236,7 @@ impl BrowserRuntimeWorker {
                 hydrate_queries,
                 client_messages,
                 native_sync_url,
-                native_sync_tracing,
+                native_sync_logging,
                 browser_telemetry,
             } => {
                 spawn_local(async move {
@@ -270,7 +267,7 @@ impl BrowserRuntimeWorker {
                                         native_node_id.clone(),
                                         runtime.local_schema_fingerprint(),
                                         runtime.local_policy_fingerprint(),
-                                        native_sync_tracing,
+                                        native_sync_logging,
                                         browser_telemetry.clone(),
                                     ) {
                                         Ok(sync) => Some(sync),
@@ -318,7 +315,7 @@ impl BrowserRuntimeWorker {
                 request_id,
                 bundles,
                 client_messages,
-                trace_context,
+                sync_context,
             } => {
                 let Some(runtime) = self.runtime.as_mut() else {
                     return runtime_not_ready(request_id);
@@ -334,10 +331,10 @@ impl BrowserRuntimeWorker {
                     request_id,
                     bundles,
                     client_messages,
-                    trace_context.clone(),
+                    sync_context.clone(),
                 );
                 if let Err(message) =
-                    self.send_native_client_messages(native_client_messages, trace_context.clone())
+                    self.send_native_client_messages(native_client_messages, sync_context.clone())
                 {
                     return RuntimeWorkerOutput::Error {
                         request_id: Some(request_id),
@@ -349,7 +346,7 @@ impl BrowserRuntimeWorker {
             RuntimeWorkerInput::Protocol {
                 request_id,
                 client_messages,
-                trace_context,
+                sync_context,
             } => {
                 let Some(runtime) = self.runtime.as_mut() else {
                     return runtime_not_ready(request_id);
@@ -364,10 +361,10 @@ impl BrowserRuntimeWorker {
                     upstream_connection_manager,
                     request_id,
                     client_messages,
-                    trace_context.clone(),
+                    sync_context.clone(),
                 );
                 if let Err(message) =
-                    self.send_native_client_messages(native_client_messages, trace_context.clone())
+                    self.send_native_client_messages(native_client_messages, sync_context.clone())
                 {
                     return RuntimeWorkerOutput::Error {
                         request_id: Some(request_id),
@@ -417,7 +414,7 @@ impl BrowserRuntimeWorker {
     fn send_native_client_messages(
         &mut self,
         client_messages: Vec<ClientMessage>,
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     ) -> Result<(), String> {
         if client_messages.is_empty() {
             return Ok(());
@@ -425,7 +422,7 @@ impl BrowserRuntimeWorker {
         let Some(sync) = self.native_sync.as_mut() else {
             return Ok(());
         };
-        sync.send_or_buffer(client_messages, trace_context)
+        sync.send_or_buffer(client_messages, sync_context)
     }
 }
 
@@ -486,7 +483,7 @@ fn apply_bundles(
     request_id: RuntimeRequestId,
     bundles: Vec<Bundle>,
     client_messages: Vec<ClientMessage>,
-    trace_context: Option<NativeTraceContext>,
+    sync_context: Option<NativeSyncLogContext>,
 ) -> RuntimeWorkerOutput {
     match apply_and_refresh(
         runtime,
@@ -498,7 +495,7 @@ fn apply_bundles(
             request_id,
             server_messages,
             storage_stats,
-            trace_context,
+            sync_context,
         },
         Err(message) => RuntimeWorkerOutput::Error {
             request_id: Some(request_id),
@@ -528,7 +525,7 @@ fn protocol_messages(
     upstream_connection_manager: &mut UpstreamConnectionManager,
     request_id: RuntimeRequestId,
     client_messages: Vec<ClientMessage>,
-    trace_context: Option<NativeTraceContext>,
+    sync_context: Option<NativeSyncLogContext>,
 ) -> RuntimeWorkerOutput {
     match pump_upstream_connection_manager(runtime, upstream_connection_manager, client_messages) {
         Ok(server_messages) => {
@@ -545,7 +542,7 @@ fn protocol_messages(
                 request_id,
                 server_messages,
                 storage_stats,
-                trace_context,
+                sync_context,
             }
         }
         Err(message) => RuntimeWorkerOutput::Error {
@@ -697,7 +694,7 @@ impl NativeSync {
         node_id: String,
         schema_fingerprint: String,
         policy_fingerprint: String,
-        tracing_enabled: bool,
+        logging_enabled: bool,
         browser_telemetry: Option<BrowserTelemetryConfig>,
     ) -> Result<Self, String> {
         let socket =
@@ -736,32 +733,48 @@ impl NativeSync {
                         return;
                     }
                 };
-                let tracing_enabled = worker
+                let logging_enabled = worker
                     .borrow()
                     .native_sync
                     .as_ref()
-                    .is_some_and(|sync| sync.tracing_enabled);
-                if tracing_enabled {
-                    trace_server_messages(
-                        "client.receive",
-                        frame.trace_context.as_ref(),
-                        &frame.server_messages,
-                    );
-                }
+                    .is_some_and(|sync| sync.logging_enabled);
                 let browser_telemetry = worker
                     .borrow()
                     .native_sync
                     .as_ref()
                     .and_then(|sync| sync.browser_telemetry.clone());
-                emit_span(
+                if logging_enabled {
+                    let records = server_sync_log_records(
+                        "client.receive",
+                        frame.sync_context.as_ref(),
+                        None,
+                        &frame.server_messages,
+                    );
+                    emit_sync_log_records(browser_telemetry.as_ref(), &records);
+                }
+                let remote_frame_body = serde_json::json!({
+                    "event": "sync.client.remote_frame_received",
+                    "message_count": frame.server_messages.len(),
+                })
+                .to_string();
+                emit_log(
                     browser_telemetry.as_ref(),
                     "sync.client.remote_frame_received",
-                    frame.trace_context.as_ref(),
+                    frame.sync_context.as_ref(),
+                    &remote_frame_body,
                     [("sync.phase", "remote_frame_received")],
                 );
-                let trace_context = frame.trace_context.clone();
+                let sync_context = frame.sync_context.clone();
                 let output = {
                     let mut worker = worker.borrow_mut();
+                    if let Some(session_id) = sync_context
+                        .as_ref()
+                        .and_then(|context| context.session_id.clone())
+                    {
+                        if let Some(sync) = worker.native_sync.as_mut() {
+                            sync.server_session_id = Some(session_id);
+                        }
+                    }
                     let result = {
                         let worker = &mut *worker;
                         let (Some(runtime), Some(upstream_connection_manager)) = (
@@ -782,10 +795,17 @@ impl NativeSync {
                                 .native_sync
                                 .as_ref()
                                 .and_then(|sync| sync.browser_telemetry.clone());
-                            emit_span(
+                            let applied_body = serde_json::json!({
+                                "event": "sync.client.remote_bundle_applied",
+                                "client_message_count": client_messages.len(),
+                                "main_server_message_count": main_server_messages.len(),
+                            })
+                            .to_string();
+                            emit_log(
                                 browser_telemetry.as_ref(),
                                 "sync.client.remote_bundle_applied",
-                                trace_context.as_ref(),
+                                sync_context.as_ref(),
+                                &applied_body,
                                 [("sync.phase", "remote_bundle_applied")],
                             );
                             if let Some(sync) = worker.native_sync.as_mut() {
@@ -802,7 +822,7 @@ impl NativeSync {
                             RuntimeWorkerOutput::Pushed {
                                 server_messages: main_server_messages,
                                 storage_stats,
-                                trace_context,
+                                sync_context,
                             }
                         }
                         Err(message) => RuntimeWorkerOutput::Error {
@@ -843,13 +863,12 @@ impl NativeSync {
             node_id,
             schema_fingerprint,
             policy_fingerprint,
-            tracing_enabled,
-            trace_id: new_trace_id(),
-            next_span_id: 1,
+            logging_enabled,
+            server_session_id: None,
             ready: false,
             sent_hello: false,
             pending_client_messages: Vec::new(),
-            pending_trace_context: None,
+            pending_sync_context: None,
             browser_telemetry,
             socket,
             _onopen: onopen,
@@ -862,14 +881,14 @@ impl NativeSync {
     fn send_or_buffer(
         &mut self,
         client_messages: Vec<ClientMessage>,
-        trace_context: Option<NativeTraceContext>,
+        sync_context: Option<NativeSyncLogContext>,
     ) -> Result<(), String> {
         if client_messages.is_empty() {
             return Ok(());
         }
         self.pending_client_messages.extend(client_messages);
-        if trace_context.is_some() {
-            self.pending_trace_context = trace_context;
+        if sync_context.is_some() {
+            self.pending_sync_context = sync_context;
         }
         self.flush_pending()
     }
@@ -895,20 +914,33 @@ impl NativeSync {
             if client_messages.is_empty() {
                 return Ok(());
             }
-            let trace_context = self
-                .pending_trace_context
+            let sync_context = self
+                .pending_sync_context
                 .take()
-                .or_else(|| self.next_trace_context());
-            if self.tracing_enabled {
-                trace_client_messages("client.send", trace_context.as_ref(), &client_messages);
+                .or_else(|| self.next_sync_context());
+            let sync_context = self.with_server_session(sync_context);
+            if self.logging_enabled {
+                let records = client_sync_log_records(
+                    "client.send",
+                    sync_context.as_ref(),
+                    None,
+                    &client_messages,
+                );
+                emit_sync_log_records(self.browser_telemetry.as_ref(), &records);
             }
-            emit_span(
+            let sent_body = serde_json::json!({
+                "event": "sync.client.frame_sent",
+                "message_count": client_messages.len(),
+            })
+            .to_string();
+            emit_log(
                 self.browser_telemetry.as_ref(),
                 "sync.client.frame_sent",
-                trace_context.as_ref(),
+                sync_context.as_ref(),
+                &sent_body,
                 [("sync.phase", "client_frame_sent")],
             );
-            let encoded = encode_client_frame_with_context(client_messages, trace_context)?;
+            let encoded = encode_client_frame_with_context(client_messages, sync_context)?;
             self.socket
                 .send_with_str(&encoded)
                 .map_err(|error| format!("send native sync frame: {error:?}"))?;
@@ -917,28 +949,27 @@ impl NativeSync {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn next_trace_context(&mut self) -> Option<NativeTraceContext> {
-        if !self.tracing_enabled {
+    fn next_sync_context(&mut self) -> Option<NativeSyncLogContext> {
+        if !self.logging_enabled {
             return None;
         }
-        let span_id = self.next_span_id;
-        self.next_span_id = self.next_span_id.saturating_add(1);
-        Some(NativeTraceContext {
-            traceparent: format!("00-{}-{span_id:016x}-01", self.trace_id),
+        Some(NativeSyncLogContext {
+            session_id: self.server_session_id.clone(),
             probe: None,
         })
     }
-}
 
-#[cfg(target_arch = "wasm32")]
-fn new_trace_id() -> String {
-    let high = Date::now() as u64;
-    let low = (Math::random() * u64::MAX as f64) as u64;
-    let trace_id = format!("{high:016x}{low:016x}");
-    if trace_id == "00000000000000000000000000000000" {
-        "00000000000000000000000000000001".to_owned()
-    } else {
-        trace_id
+    #[cfg(target_arch = "wasm32")]
+    fn with_server_session(
+        &self,
+        mut sync_context: Option<NativeSyncLogContext>,
+    ) -> Option<NativeSyncLogContext> {
+        if let Some(context) = sync_context.as_mut() {
+            if context.session_id.is_none() {
+                context.session_id = self.server_session_id.clone();
+            }
+        }
+        sync_context
     }
 }
 
@@ -1018,7 +1049,7 @@ mod tests {
             }],
             client_messages: Vec::new(),
             native_sync_url: Some("ws://127.0.0.1:8787/sync".to_owned()),
-            native_sync_tracing: true,
+            native_sync_logging: true,
             browser_telemetry: None,
         };
 
@@ -1071,7 +1102,7 @@ mod tests {
                     reconciliation: None,
                 }],
             }],
-            trace_context: None,
+            sync_context: None,
         };
 
         let decoded: RuntimeWorkerInput = serde_round_trip(&message);
@@ -1089,7 +1120,7 @@ mod tests {
             client_messages: vec![mini_jazz_sqlite::protocol::ClientMessage::Close(
                 mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
             )],
-            trace_context: None,
+            sync_context: None,
         };
 
         let decoded: RuntimeWorkerInput = serde_round_trip(&message);
@@ -1105,7 +1136,7 @@ mod tests {
                 mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
             )],
             storage_stats: BrowserStorageStats::default(),
-            trace_context: None,
+            sync_context: None,
         };
         let decoded: RuntimeWorkerOutput = serde_round_trip(&output);
 
@@ -1119,7 +1150,7 @@ mod tests {
                 mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
             )],
             storage_stats: BrowserStorageStats::default(),
-            trace_context: None,
+            sync_context: None,
         };
         let decoded: RuntimeWorkerOutput = serde_round_trip(&output);
 
@@ -1279,7 +1310,7 @@ mod tests {
                     reconciliation: None,
                 },
             ],
-            trace_context: None,
+            sync_context: None,
         });
 
         let RuntimeWorkerOutput::Protocol {

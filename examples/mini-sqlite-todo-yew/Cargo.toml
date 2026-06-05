@@ -51,12 +51,14 @@ sqlite-wasm-vfs = "0.2"
 axum = { version = "0.7", features = ["ws"] }
 dotenvy = "0.15"
 futures-util = "0.3"
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", features = [
+opentelemetry = { version = "0.32", features = ["logs"] }
+opentelemetry-appender-tracing = "0.32"
+opentelemetry-otlp = { version = "0.32", features = [
   "http-json",
+  "logs",
   "reqwest-blocking-client",
 ] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["logs", "rt-tokio"] }
 tokio = { version = "1", features = ["full"] }
-tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+uuid = { version = "1", features = ["v4"] }

@@ -20,17 +20,15 @@ use mini_jazz_sqlite::{
 #[cfg(not(target_arch = "wasm32"))]
 use mini_sqlite_todo_yew::{
     native_sync::{
-        decode_client_frame, encode_server_frame_with_context, trace_client_messages,
-        trace_server_messages, NativeTraceContext,
+        decode_client_frame, encode_server_frame_with_context, log_client_messages,
+        log_server_messages, NativeSyncLogContext,
     },
     todo_schema::todo_schema,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use opentelemetry::trace::TracerProvider as _;
-#[cfg(not(target_arch = "wasm32"))]
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 #[cfg(not(target_arch = "wasm32"))]
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
     net::SocketAddr,
@@ -45,6 +43,8 @@ use std::{
 use tokio::sync::broadcast;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+#[cfg(not(target_arch = "wasm32"))]
+use uuid::Uuid;
 
 #[cfg(not(target_arch = "wasm32"))]
 const SUBSCRIPTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -53,7 +53,7 @@ const SUBSCRIPTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 const SERVICE_NAME: &str = "mini-sqlite-todo-yew-server";
 
 #[cfg(not(target_arch = "wasm32"))]
-const SYNC_TRACE_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
+const SYNC_LOG_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
@@ -62,14 +62,15 @@ struct AppState {
     changes: broadcast::Sender<SyncChange>,
     next_connection_id: Arc<AtomicU64>,
     user: String,
-    sync_tracing_enabled: bool,
+    sync_logging_enabled: bool,
+    sync_session_id: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 struct SyncChange {
     origin_connection_id: u64,
-    trace_context: Option<NativeTraceContext>,
+    sync_context: Option<NativeSyncLogContext>,
     bundles: Vec<Bundle>,
     requires_subscription_refresh: bool,
 }
@@ -86,13 +87,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("mini-sqlite-todo-yew-server.sqlite3"));
     let user = std::env::var("MINI_SQLITE_TODO_USER").unwrap_or_else(|_| "alice".to_owned());
-    let sync_tracing_endpoint = sync_tracing_endpoint();
-    let sync_tracing_enabled = sync_tracing_enabled() && sync_tracing_endpoint.is_some();
-    let _sync_tracing = init_sync_tracing(if sync_tracing_enabled {
-        sync_tracing_endpoint
-    } else {
-        None
-    })?;
+    let sync_session_id = Uuid::new_v4().to_string();
+    let sync_logging_endpoint = sync_logging_endpoint();
+    let sync_logging_enabled = sync_logging_enabled() && sync_logging_endpoint.is_some();
+    let _sync_logging = init_sync_logging(
+        if sync_logging_enabled {
+            sync_logging_endpoint
+        } else {
+            None
+        },
+        &sync_session_id,
+    )?;
     let runtime = Runtime::open_with_schema(
         Storage::File(db_path.clone()),
         "mini-sqlite-todo-yew-native",
@@ -104,7 +109,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         changes: broadcast::channel(64).0,
         next_connection_id: Arc::new(AtomicU64::new(1)),
         user,
-        sync_tracing_enabled,
+        sync_logging_enabled,
+        sync_session_id,
     };
 
     let app = Router::new()
@@ -146,7 +152,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     );
     let (mut sender, mut receiver) = socket.split();
     let mut changes = state.changes.subscribe();
-    let mut last_trace_context = None::<NativeTraceContext>;
+    let mut last_sync_context = None::<NativeSyncLogContext>;
     let mut next_push_message_id = u64::MAX;
 
     loop {
@@ -171,16 +177,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         break;
                     }
                 };
-                if state.sync_tracing_enabled {
-                    trace_client_messages(
+                let sync_context = sync_context_with_session(
+                    &state.sync_session_id,
+                    frame.sync_context,
+                );
+                if state.sync_logging_enabled {
+                    log_client_messages(
                         "server.receive",
-                        frame.trace_context.as_ref(),
+                        Some(&sync_context),
+                        Some(connection_id),
                         &frame.client_messages,
                     );
                 }
-                if frame.trace_context.is_some() {
-                    last_trace_context = frame.trace_context.clone();
-                }
+                last_sync_context = Some(sync_context.clone());
                 let upload_tx_ids = frame.client_messages.iter().filter_map(upload_tx_id).collect::<Vec<_>>();
                 let should_notify = !upload_tx_ids.is_empty();
                 let (server_messages, upload_bundles) = {
@@ -196,15 +205,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     };
                     let upload_bundles = upload_tx_ids
                         .iter()
-                        .filter_map(|tx_id| export_upload_bundle(&runtime, tx_id))
+                        .filter_map(|tx_id| export_upload_bundle(&runtime, &state.sync_session_id, tx_id))
                         .collect::<Vec<_>>();
                     (server_messages, upload_bundles)
                 };
                 if !server_messages.is_empty() && send_server_messages(
                     &mut sender,
                     server_messages,
-                    state.sync_tracing_enabled,
-                    last_trace_context.as_ref(),
+                    state.sync_logging_enabled,
+                    &state.sync_session_id,
+                    connection_id,
+                    last_sync_context.as_ref(),
                 ).await.is_err() {
                     break;
                 }
@@ -212,7 +223,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     let requires_subscription_refresh = upload_bundles.len() != upload_tx_ids.len();
                     let _ = state.changes.send(SyncChange {
                         origin_connection_id: connection_id,
-                        trace_context: frame.trace_context.clone(),
+                        sync_context: Some(sync_context),
                         bundles: upload_bundles,
                         requires_subscription_refresh,
                     });
@@ -224,13 +235,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         continue;
                     }
                     Ok(change) => {
-                        let mut refresh_trace_context = change.trace_context;
+                        let mut refresh_sync_context = change.sync_context;
                         let mut push_bundles = change.bundles;
                         let mut requires_subscription_refresh = change.requires_subscription_refresh;
                         tokio::time::sleep(SUBSCRIPTION_REFRESH_DEBOUNCE).await;
                         while let Ok(change) = changes.try_recv() {
                             keep_refresh_change(
-                                &mut refresh_trace_context,
+                                &mut refresh_sync_context,
                                 &mut push_bundles,
                                 &mut requires_subscription_refresh,
                                 connection_id,
@@ -241,14 +252,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             !push_bundles.is_empty(),
                             requires_subscription_refresh,
                         );
-                        trace_change_broadcast_plan(
+                        log_change_broadcast_plan(
+                            &state.sync_session_id,
                             &plan,
                             push_bundles.len(),
                             requires_subscription_refresh,
                         );
-                        let trace_context = selected_refresh_trace_context(
-                            &refresh_trace_context,
-                            &last_trace_context,
+                        let sync_context = selected_refresh_sync_context(
+                            &refresh_sync_context,
+                            &last_sync_context,
                         )
                         .cloned();
                         if plan.send_push_bundles {
@@ -257,8 +269,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             if !server_messages.is_empty() && send_server_messages(
                                 &mut sender,
                                 server_messages,
-                                state.sync_tracing_enabled,
-                                trace_context.as_ref(),
+                                state.sync_logging_enabled,
+                                &state.sync_session_id,
+                                connection_id,
+                                sync_context.as_ref(),
                             ).await.is_err() {
                                 break;
                             }
@@ -279,19 +293,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             if !server_messages.is_empty() && send_server_messages(
                                 &mut sender,
                                 server_messages,
-                                state.sync_tracing_enabled,
-                                trace_context.as_ref(),
+                                state.sync_logging_enabled,
+                                &state.sync_session_id,
+                                connection_id,
+                                sync_context.as_ref(),
                             ).await.is_err() {
                                 break;
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let mut refresh_trace_context = None;
+                        let mut refresh_sync_context = None;
                         tokio::time::sleep(SUBSCRIPTION_REFRESH_DEBOUNCE).await;
                         while let Ok(change) = changes.try_recv() {
-                            keep_refresh_trace_context(
-                                &mut refresh_trace_context,
+                            keep_refresh_sync_context(
+                                &mut refresh_sync_context,
                                 connection_id,
                                 change,
                             );
@@ -311,10 +327,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if !server_messages.is_empty() && send_server_messages(
                             &mut sender,
                             server_messages,
-                            state.sync_tracing_enabled,
-                            selected_refresh_trace_context(
-                                &refresh_trace_context,
-                                &last_trace_context,
+                            state.sync_logging_enabled,
+                            &state.sync_session_id,
+                            connection_id,
+                            selected_refresh_sync_context(
+                                &refresh_sync_context,
+                                &last_sync_context,
                             ),
                         ).await.is_err() {
                             break;
@@ -328,29 +346,40 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn selected_refresh_trace_context<'a>(
-    refresh_trace_context: &'a Option<NativeTraceContext>,
-    last_trace_context: &'a Option<NativeTraceContext>,
-) -> Option<&'a NativeTraceContext> {
-    refresh_trace_context
-        .as_ref()
-        .or(last_trace_context.as_ref())
+fn selected_refresh_sync_context<'a>(
+    refresh_sync_context: &'a Option<NativeSyncLogContext>,
+    last_sync_context: &'a Option<NativeSyncLogContext>,
+) -> Option<&'a NativeSyncLogContext> {
+    refresh_sync_context.as_ref().or(last_sync_context.as_ref())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn keep_refresh_trace_context(
-    refresh_trace_context: &mut Option<NativeTraceContext>,
+fn sync_context_with_session(
+    sync_session_id: &str,
+    sync_context: Option<NativeSyncLogContext>,
+) -> NativeSyncLogContext {
+    let mut sync_context = sync_context.unwrap_or(NativeSyncLogContext {
+        session_id: None,
+        probe: None,
+    });
+    sync_context.session_id = Some(sync_session_id.to_owned());
+    sync_context
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_refresh_sync_context(
+    refresh_sync_context: &mut Option<NativeSyncLogContext>,
     connection_id: u64,
     change: SyncChange,
 ) {
-    if change.origin_connection_id != connection_id && change.trace_context.is_some() {
-        *refresh_trace_context = change.trace_context;
+    if change.origin_connection_id != connection_id && change.sync_context.is_some() {
+        *refresh_sync_context = change.sync_context;
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn keep_refresh_change(
-    refresh_trace_context: &mut Option<NativeTraceContext>,
+    refresh_sync_context: &mut Option<NativeSyncLogContext>,
     push_bundles: &mut Vec<Bundle>,
     requires_subscription_refresh: &mut bool,
     connection_id: u64,
@@ -359,8 +388,8 @@ fn keep_refresh_change(
     if change.origin_connection_id == connection_id {
         return;
     }
-    if change.trace_context.is_some() {
-        *refresh_trace_context = change.trace_context;
+    if change.sync_context.is_some() {
+        *refresh_sync_context = change.sync_context;
     }
     push_bundles.extend(change.bundles);
     *requires_subscription_refresh |= change.requires_subscription_refresh;
@@ -385,58 +414,87 @@ fn change_broadcast_plan(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn export_upload_bundle(runtime: &Runtime, tx_id: &str) -> Option<Bundle> {
+fn export_upload_bundle(runtime: &Runtime, sync_session_id: &str, tx_id: &str) -> Option<Bundle> {
     match runtime.export_transaction(tx_id) {
         Ok(bundle) => {
-            trace_upload_bundle_export(tx_id, "ok", None, Some(&bundle));
+            log_upload_bundle_export(sync_session_id, tx_id, "ok", None, Some(&bundle));
             Some(bundle)
         }
         Err(error) => {
             let message = error.to_string();
-            trace_upload_bundle_export(tx_id, "error", Some(message.as_str()), None);
+            log_upload_bundle_export(
+                sync_session_id,
+                tx_id,
+                "error",
+                Some(message.as_str()),
+                None,
+            );
             None
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn trace_upload_bundle_export(
+fn log_upload_bundle_export(
+    sync_session_id: &str,
     tx_id: &str,
     status: &'static str,
     error: Option<&str>,
     bundle: Option<&Bundle>,
 ) {
-    let span = tracing::info_span!(
-        target: SYNC_TRACE_TARGET,
-        "sync.server.upload_bundle_export",
-        sync_tx_id = tx_id,
-        sync_export_status = status,
-        sync_export_error = tracing::field::Empty,
-        sync_bundle_tx_count = bundle.map(|bundle| bundle.txs.len()).unwrap_or_default(),
-        sync_bundle_row_count = bundle.map(|bundle| bundle.rows.len()).unwrap_or_default(),
-        sync_bundle_history_count = bundle.map(|bundle| bundle.history.len()).unwrap_or_default(),
+    let body = serde_json::json!({
+        "event": "sync.server.upload_bundle_export",
+        "tx_id": tx_id,
+        "status": status,
+        "error": error,
+        "bundle": bundle,
+    })
+    .to_string();
+    tracing::info!(
+        name: "sync.server.upload_bundle_export",
+        target: SYNC_LOG_TARGET,
+        {
+            sync.session_id = sync_session_id,
+            sync.tx_id = tx_id,
+            sync.export_status = status,
+            sync.export_error = error.unwrap_or(""),
+            sync.bundle_tx_count = bundle.map(|bundle| bundle.txs.len()).unwrap_or_default(),
+            sync.bundle_row_count = bundle.map(|bundle| bundle.rows.len()).unwrap_or_default(),
+            sync.bundle_history_count = bundle.map(|bundle| bundle.history.len()).unwrap_or_default(),
+        },
+        "{}",
+        body.as_str()
     );
-    if let Some(error) = error {
-        span.record("sync_export_error", error);
-    }
-    let _entered = span.enter();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn trace_change_broadcast_plan(
+fn log_change_broadcast_plan(
+    sync_session_id: &str,
     plan: &ChangeBroadcastPlan,
     push_bundle_count: usize,
     requires_subscription_refresh: bool,
 ) {
-    let span = tracing::info_span!(
-        target: SYNC_TRACE_TARGET,
-        "sync.server.change_broadcast_plan",
-        sync_push_bundle_count = push_bundle_count,
-        sync_requires_subscription_refresh = requires_subscription_refresh,
-        sync_send_push_bundles = plan.send_push_bundles,
-        sync_refresh_active_subscriptions = plan.refresh_active_subscriptions,
+    let body = serde_json::json!({
+        "event": "sync.server.change_broadcast_plan",
+        "push_bundle_count": push_bundle_count,
+        "requires_subscription_refresh": requires_subscription_refresh,
+        "send_push_bundles": plan.send_push_bundles,
+        "refresh_active_subscriptions": plan.refresh_active_subscriptions,
+    })
+    .to_string();
+    tracing::info!(
+        name: "sync.server.change_broadcast_plan",
+        target: SYNC_LOG_TARGET,
+        {
+            sync.session_id = sync_session_id,
+            sync.push_bundle_count = push_bundle_count,
+            sync.requires_subscription_refresh = requires_subscription_refresh,
+            sync.send_push_bundles = plan.send_push_bundles,
+            sync.refresh_active_subscriptions = plan.refresh_active_subscriptions,
+        },
+        "{}",
+        body.as_str()
     );
-    let _entered = span.enter();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -468,38 +526,46 @@ fn upload_tx_id(message: &ClientMessage) -> Option<String> {
 async fn send_server_messages(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     server_messages: Vec<ServerMessage>,
-    sync_tracing_enabled: bool,
-    trace_context: Option<&NativeTraceContext>,
+    sync_logging_enabled: bool,
+    sync_session_id: &str,
+    connection_id: u64,
+    sync_context: Option<&NativeSyncLogContext>,
 ) -> Result<(), ()> {
-    if sync_tracing_enabled {
-        trace_server_messages("server.send", trace_context, &server_messages);
+    let sync_context = sync_context_with_session(sync_session_id, sync_context.cloned());
+    if sync_logging_enabled {
+        log_server_messages(
+            "server.send",
+            Some(&sync_context),
+            Some(connection_id),
+            &server_messages,
+        );
     }
-    let encoded = encode_server_frame_with_context(server_messages, trace_context.cloned())
-        .map_err(|_| ())?;
+    let encoded =
+        encode_server_frame_with_context(server_messages, Some(sync_context)).map_err(|_| ())?;
     sender.send(Message::Text(encoded)).await.map_err(|_| ())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sync_tracing_enabled() -> bool {
-    std::env::var("MINI_SQLITE_TODO_SYNC_TRACE")
+fn sync_logging_enabled() -> bool {
+    std::env::var("MINI_SQLITE_TODO_SYNC_LOG")
         .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "off" | "OFF"))
         .unwrap_or(true)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct SyncTracingGuard {
-    provider: Option<SdkTracerProvider>,
+struct SyncLoggingGuard {
+    provider: Option<SdkLoggerProvider>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl SyncTracingGuard {
+impl SyncLoggingGuard {
     fn disabled() -> Self {
         Self { provider: None }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Drop for SyncTracingGuard {
+impl Drop for SyncLoggingGuard {
     fn drop(&mut self) {
         if let Some(provider) = self.provider.take() {
             let _ = provider.shutdown();
@@ -508,22 +574,30 @@ impl Drop for SyncTracingGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn init_sync_tracing(
+fn init_sync_logging(
     endpoint: Option<String>,
-) -> Result<SyncTracingGuard, Box<dyn std::error::Error>> {
+    sync_session_id: &str,
+) -> Result<SyncLoggingGuard, Box<dyn std::error::Error>> {
     let Some(endpoint) = endpoint else {
-        return Ok(SyncTracingGuard::disabled());
+        return Ok(SyncLoggingGuard::disabled());
     };
-    let filter = tracing_subscriber::EnvFilter::new("mini_sqlite_todo_yew::native_sync=info");
-    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
+    let filter = tracing_subscriber::EnvFilter::new("mini_sqlite_todo_yew::native_sync=info")
+        .add_directive("hyper=off".parse()?)
+        .add_directive("opentelemetry=off".parse()?)
+        .add_directive("reqwest=off".parse()?);
+    let log_exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpJson)
-        .with_endpoint(normalize_otlp_traces_endpoint(&endpoint))
+        .with_endpoint(normalize_otlp_logs_endpoint(&endpoint))
         .build()?;
-    let provider = SdkTracerProvider::builder()
+    let provider = SdkLoggerProvider::builder()
         .with_resource(
             opentelemetry_sdk::Resource::builder()
                 .with_service_name(SERVICE_NAME)
+                .with_attribute(opentelemetry::KeyValue::new(
+                    "sync.session_id",
+                    sync_session_id.to_owned(),
+                ))
                 .with_attribute(opentelemetry::KeyValue::new(
                     "service.version",
                     env!("CARGO_PKG_VERSION"),
@@ -534,23 +608,23 @@ fn init_sync_tracing(
                 ))
                 .build(),
         )
-        .with_batch_exporter(span_exporter)
+        .with_batch_exporter(log_exporter)
         .build();
-    let tracer = provider.tracer(SERVICE_NAME);
-    let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let log_layer =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider);
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(trace_layer)
+        .with(log_layer)
         .try_init()?;
 
-    Ok(SyncTracingGuard {
+    Ok(SyncLoggingGuard {
         provider: Some(provider),
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sync_tracing_endpoint() -> Option<String> {
+fn sync_logging_endpoint() -> Option<String> {
     std::env::var("MINI_SQLITE_TODO_OTLP_ENDPOINT")
         .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
         .ok()
@@ -559,14 +633,14 @@ fn sync_tracing_endpoint() -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn normalize_otlp_traces_endpoint(endpoint: &str) -> String {
+fn normalize_otlp_logs_endpoint(endpoint: &str) -> String {
     let endpoint = endpoint.trim().trim_end_matches('/');
-    if endpoint.ends_with("/v1/traces") {
+    if endpoint.ends_with("/v1/logs") {
         endpoint.to_owned()
-    } else if let Some(base) = endpoint.strip_suffix("/v1/logs") {
-        format!("{base}/v1/traces")
+    } else if let Some(base) = endpoint.strip_suffix("/v1/traces") {
+        format!("{base}/v1/logs")
     } else {
-        format!("{endpoint}/v1/traces")
+        format!("{endpoint}/v1/logs")
     }
 }
 
@@ -600,37 +674,37 @@ mod tests {
     }
 
     #[test]
-    fn reads_sync_tracing_endpoint_from_env() {
+    fn reads_sync_logging_endpoint_from_env() {
         let _lock = env_lock();
         std::env::set_var("MINI_SQLITE_TODO_OTLP_ENDPOINT", " http://127.0.0.1:4318 ");
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         assert_eq!(
-            sync_tracing_endpoint().as_deref(),
+            sync_logging_endpoint().as_deref(),
             Some("http://127.0.0.1:4318")
         );
         std::env::remove_var("MINI_SQLITE_TODO_OTLP_ENDPOINT");
     }
 
     #[test]
-    fn normalizes_otlp_trace_endpoint() {
+    fn normalizes_otlp_log_endpoint() {
         assert_eq!(
-            normalize_otlp_traces_endpoint("http://127.0.0.1:54418"),
-            "http://127.0.0.1:54418/v1/traces"
+            normalize_otlp_logs_endpoint("http://127.0.0.1:54418"),
+            "http://127.0.0.1:54418/v1/logs"
         );
         assert_eq!(
-            normalize_otlp_traces_endpoint("http://127.0.0.1:54418/v1/logs"),
-            "http://127.0.0.1:54418/v1/traces"
+            normalize_otlp_logs_endpoint("http://127.0.0.1:54418/v1/logs"),
+            "http://127.0.0.1:54418/v1/logs"
         );
         assert_eq!(
-            normalize_otlp_traces_endpoint("http://127.0.0.1:54418/v1/traces"),
-            "http://127.0.0.1:54418/v1/traces"
+            normalize_otlp_logs_endpoint("http://127.0.0.1:54418/v1/traces"),
+            "http://127.0.0.1:54418/v1/logs"
         );
     }
 
     #[test]
-    fn refresh_uses_origin_trace_context_before_socket_last_context() {
-        let origin = NativeTraceContext {
-            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+    fn refresh_uses_origin_sync_context_before_socket_last_context() {
+        let origin = NativeSyncLogContext {
+            session_id: Some("server-session-origin".to_owned()),
             probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
                 probe_id: "probe-insert".to_owned(),
                 operation: "insert".to_owned(),
@@ -639,21 +713,21 @@ mod tests {
                 origin_browser_id: "browser-a".to_owned(),
             }),
         };
-        let stale = NativeTraceContext {
-            traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_owned(),
+        let stale = NativeSyncLogContext {
+            session_id: Some("server-session-stale".to_owned()),
             probe: None,
         };
         let change = SyncChange {
             origin_connection_id: 7,
-            trace_context: Some(origin.clone()),
+            sync_context: Some(origin.clone()),
             bundles: Vec::new(),
             requires_subscription_refresh: false,
         };
 
         let stale = Some(stale);
         let selected =
-            selected_refresh_trace_context(&change.trace_context, &stale).expect("trace context");
-        assert_eq!(selected.traceparent, origin.traceparent);
+            selected_refresh_sync_context(&change.sync_context, &stale).expect("sync context");
+        assert_eq!(selected.session_id, origin.session_id);
         assert_eq!(
             selected.probe.as_ref().map(|probe| probe.probe_id.as_str()),
             Some("probe-insert")
@@ -661,9 +735,9 @@ mod tests {
     }
 
     #[test]
-    fn refresh_updates_to_latest_drained_remote_trace_context() {
-        let insert = NativeTraceContext {
-            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+    fn refresh_updates_to_latest_drained_remote_sync_context() {
+        let insert = NativeSyncLogContext {
+            session_id: Some("server-session".to_owned()),
             probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
                 probe_id: "probe-insert".to_owned(),
                 operation: "insert".to_owned(),
@@ -672,8 +746,8 @@ mod tests {
                 origin_browser_id: "browser-a".to_owned(),
             }),
         };
-        let delete = NativeTraceContext {
-            traceparent: "00-bbf92f3577b34da6a3ce929d0e0e4736-10f067aa0ba902b7-01".to_owned(),
+        let delete = NativeSyncLogContext {
+            session_id: Some("server-session".to_owned()),
             probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
                 probe_id: "probe-delete".to_owned(),
                 operation: "delete".to_owned(),
@@ -682,28 +756,28 @@ mod tests {
                 origin_browser_id: "browser-a".to_owned(),
             }),
         };
-        let own_change = NativeTraceContext {
-            traceparent: "00-ccf92f3577b34da6a3ce929d0e0e4736-20f067aa0ba902b7-01".to_owned(),
+        let own_change = NativeSyncLogContext {
+            session_id: Some("server-session".to_owned()),
             probe: None,
         };
         let mut selected = Some(insert);
 
-        keep_refresh_trace_context(
+        keep_refresh_sync_context(
             &mut selected,
             9,
             SyncChange {
                 origin_connection_id: 7,
-                trace_context: Some(delete),
+                sync_context: Some(delete),
                 bundles: Vec::new(),
                 requires_subscription_refresh: false,
             },
         );
-        keep_refresh_trace_context(
+        keep_refresh_sync_context(
             &mut selected,
             9,
             SyncChange {
                 origin_connection_id: 9,
-                trace_context: Some(own_change),
+                sync_context: Some(own_change),
                 bundles: Vec::new(),
                 requires_subscription_refresh: false,
             },
@@ -720,8 +794,8 @@ mod tests {
 
     #[test]
     fn drained_remote_changes_keep_bundles_for_direct_pushes() {
-        let delete = NativeTraceContext {
-            traceparent: "00-bbf92f3577b34da6a3ce929d0e0e4736-10f067aa0ba902b7-01".to_owned(),
+        let delete = NativeSyncLogContext {
+            session_id: Some("server-session".to_owned()),
             probe: Some(mini_sqlite_todo_yew::native_sync::NativeSyncProbe {
                 probe_id: "probe-delete".to_owned(),
                 operation: "delete".to_owned(),
@@ -730,8 +804,8 @@ mod tests {
                 origin_browser_id: "browser-a".to_owned(),
             }),
         };
-        let own_change = NativeTraceContext {
-            traceparent: "00-ccf92f3577b34da6a3ce929d0e0e4736-20f067aa0ba902b7-01".to_owned(),
+        let own_change = NativeSyncLogContext {
+            session_id: Some("server-session".to_owned()),
             probe: None,
         };
         let mut selected = None;
@@ -745,7 +819,7 @@ mod tests {
             9,
             SyncChange {
                 origin_connection_id: 7,
-                trace_context: Some(delete),
+                sync_context: Some(delete),
                 bundles: vec![test_bundle("remote-delete")],
                 requires_subscription_refresh: false,
             },
@@ -757,7 +831,7 @@ mod tests {
             9,
             SyncChange {
                 origin_connection_id: 9,
-                trace_context: Some(own_change),
+                sync_context: Some(own_change),
                 bundles: vec![test_bundle("own-insert")],
                 requires_subscription_refresh: false,
             },
