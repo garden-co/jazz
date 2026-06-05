@@ -41,6 +41,22 @@ describe("TS Query API", () => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("can read deleted rows with includeDeleted", async () => {
+      const project = insertProject(db, "Deleted Project");
+      db.delete(app.projects, project.id);
+
+      const defaultResult = await db.one(app.projects.where({ id: { eq: project.id } }));
+      expect(defaultResult).toBeNull();
+
+      const deletedResult = await db.one(
+        app.projects.includeDeleted().where({ id: { eq: project.id } }),
+      );
+
+      assert(deletedResult, "Deleted row is not defined");
+      expectTypeOf(deletedResult).branded.toEqualTypeOf<Project>();
+      expect(deletedResult).toEqual(project);
+    });
+
     it("filters nullable columns with isNull:true", async () => {
       const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",

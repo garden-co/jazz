@@ -815,6 +815,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
       requireIncludes: builder.requireIncludes,
     }),
     relation_ir: relation,
+    ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
   };
 
