@@ -53,6 +53,7 @@ pub struct InitPayloadFields {
     pub jwt_token: Option<String>,
     pub admin_secret: Option<String>,
     pub fallback_wasm_url: Option<String>,
+    pub worker_lock_name: Option<String>,
     pub log_level: Option<String>,
     pub telemetry_collector_url: Option<String>,
 }

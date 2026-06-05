@@ -33,6 +33,7 @@ export interface WorkerBridgeOptions {
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
+  workerLockName?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
@@ -50,6 +51,8 @@ interface WasmBridgeHandle {
   openPeer(peerId: string): void;
   sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
   closePeer(peerId: string): void;
+  attachFollowerPort(peerId: string, term: number, port: MessagePort): void;
+  detachFollowerPort(peerId: string, term: number): void;
   setServerPayloadForwarder(
     callback:
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
@@ -68,6 +71,7 @@ interface WasmBridgeHandle {
 
 interface RuntimeWithWorkerBridge extends Runtime {
   createWorkerBridge?(worker: Worker, options: object): WasmBridgeHandle;
+  createMessagePortBridge?(port: MessagePort): WasmMessagePortBridgeHandle;
 }
 
 interface ListenerSlots {
@@ -76,6 +80,10 @@ interface ListenerSlots {
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
+
+interface WasmMessagePortBridgeHandle {
+  shutdown(): void;
+}
 
 export class WorkerBridge {
   private readonly worker: Worker;
@@ -228,5 +236,40 @@ export class WorkerBridge {
 
   closePeer(peerId: string): void {
     this.bridge?.closePeer(peerId);
+  }
+
+  attachFollowerPort(peerId: string, term: number, port: MessagePort): void {
+    this.bridge?.attachFollowerPort(peerId, term, port);
+  }
+
+  detachFollowerPort(peerId: string, term: number): void {
+    this.bridge?.detachFollowerPort(peerId, term);
+  }
+}
+
+export class MessagePortRuntimeBridge {
+  private readonly port: MessagePort;
+  private readonly runtime: Runtime;
+  private bridge: WasmMessagePortBridgeHandle | null = null;
+
+  constructor(port: MessagePort, runtime: Runtime) {
+    this.port = port;
+    this.runtime = runtime;
+  }
+
+  init(): void {
+    if (this.bridge) return;
+    const create = (this.runtime as RuntimeWithWorkerBridge).createMessagePortBridge;
+    if (typeof create !== "function") {
+      throw new Error(
+        "MessagePortRuntimeBridge requires a WasmRuntime with `createMessagePortBridge`",
+      );
+    }
+    this.bridge = create.call(this.runtime, this.port);
+  }
+
+  shutdown(): void {
+    this.bridge?.shutdown();
+    this.bridge = null;
   }
 }

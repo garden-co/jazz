@@ -42,8 +42,14 @@ type RoleWaiter = {
 
 type SharedWorkerConstructor = new (
   scriptURL: string | URL,
-  options?: string | SharedWorkerOptions,
+  options?: string | BrowserBrokerSharedWorkerOptions,
 ) => SharedWorker;
+
+interface BrowserBrokerSharedWorkerOptions {
+  type?: WorkerType;
+  name?: string;
+  credentials?: RequestCredentials;
+}
 
 export class BrowserBrokerClient {
   private readonly port: MessagePort;

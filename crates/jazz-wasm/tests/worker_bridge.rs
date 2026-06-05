@@ -25,7 +25,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
-use web_sys::Worker;
+use web_sys::{MessagePort, Worker};
 
 use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use jazz_tools::row_histories::BatchId;
@@ -549,6 +549,68 @@ fn peer_open_send_close_emit_postcard_binary() {
         }
         other => panic!("expected PeerClose, got {other:?}"),
     }
+}
+
+#[wasm_bindgen_test]
+fn follower_port_attach_detach_emit_js_control_messages() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+    let port_obj = Object::new();
+    let port: MessagePort = port_obj.clone().unchecked_into();
+
+    bridge.attach_follower_port("tab-b", 11, port);
+
+    let posted = fw.posted.borrow();
+    let attach = posted.last().expect("attach message posted");
+    assert_eq!(
+        Reflect::get(attach, &"type".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .as_deref(),
+        Some("attach-follower-port")
+    );
+    assert_eq!(
+        Reflect::get(attach, &"peerId".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .as_deref(),
+        Some("tab-b")
+    );
+    assert_eq!(
+        Reflect::get(attach, &"term".into())
+            .ok()
+            .and_then(|v| v.as_f64()),
+        Some(11.0)
+    );
+    assert!(Reflect::get(attach, &"port".into()).unwrap() == JsValue::from(port_obj));
+    drop(posted);
+
+    bridge.detach_follower_port("tab-b", 11);
+
+    let posted = fw.posted.borrow();
+    let detach = posted.last().expect("detach message posted");
+    assert_eq!(
+        Reflect::get(detach, &"type".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .as_deref(),
+        Some("detach-follower-port")
+    );
+    assert_eq!(
+        Reflect::get(detach, &"peerId".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .as_deref(),
+        Some("tab-b")
+    );
+    assert_eq!(
+        Reflect::get(detach, &"term".into())
+            .ok()
+            .and_then(|v| v.as_f64()),
+        Some(11.0)
+    );
 }
 
 #[wasm_bindgen_test]

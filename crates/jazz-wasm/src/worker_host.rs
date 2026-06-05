@@ -49,7 +49,7 @@ use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{DedicatedWorkerGlobalScope, MessageEvent, MessagePort};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -79,6 +79,8 @@ struct PeerRouting {
     peer_client_by_peer_id: HashMap<String, String>,
     peer_id_by_client: HashMap<String, String>,
     peer_terms: HashMap<String, u32>,
+    peer_targets: HashMap<String, JsValue>,
+    peer_port_message_closures: HashMap<String, Closure<dyn FnMut(MessageEvent)>>,
 }
 
 impl Default for PeerRouting {
@@ -88,6 +90,8 @@ impl Default for PeerRouting {
             peer_client_by_peer_id: HashMap::new(),
             peer_id_by_client: HashMap::new(),
             peer_terms: HashMap::new(),
+            peer_targets: HashMap::new(),
+            peer_port_message_closures: HashMap::new(),
         }
     }
 }
@@ -167,6 +171,9 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     let global = global_worker_scope();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let data = event.data();
+        if handle_follower_port_control(&data) {
+            return;
+        }
         match parse_main_to_worker(&data) {
             Ok(msg) => handle_main_message(msg),
             Err(e) => post_to_main(&WorkerToMainWire::Error {
@@ -437,7 +444,43 @@ fn close_peer(peer_id: &str) {
             guard.peer_id_by_client.remove(&client);
         }
         guard.peer_terms.remove(peer_id);
+        if let Some(target) = guard.peer_targets.remove(peer_id) {
+            close_message_target(&target);
+        }
+        guard.peer_port_message_closures.remove(peer_id);
     });
+}
+
+fn attach_follower_port(peer_id: String, term: u32, port: MessagePort) {
+    let Some(runtime) = RUNTIME.with(|cell| cell.borrow().clone()) else {
+        return;
+    };
+    if ensure_peer_client(&runtime, &peer_id).is_err() {
+        return;
+    }
+
+    let port_target: JsValue = port.clone().into();
+    let peer_for_message = peer_id.clone();
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let data = event.data();
+        match parse_main_to_worker(&data) {
+            Ok(message) => process_follower_port_message(&peer_for_message, message),
+            Err(error) => tracing::warn!("malformed follower port message: {error}"),
+        }
+    });
+    port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    port.start();
+
+    PEER_ROUTING.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        guard.peer_terms.insert(peer_id.clone(), term);
+        guard.peer_targets.insert(peer_id.clone(), port_target);
+        guard
+            .peer_port_message_closures
+            .insert(peer_id.clone(), on_message);
+    });
+
+    post_follower_port_attached(&peer_id, term);
 }
 
 // =============================================================================
@@ -458,6 +501,9 @@ fn make_peer_routing_lookup() -> Function {
             let obj = Object::new();
             let _ = Reflect::set(&obj, &"peerId".into(), &JsValue::from_str(peer_id));
             let _ = Reflect::set(&obj, &"term".into(), &JsValue::from_f64(term as f64));
+            if let Some(target) = guard.peer_targets.get(peer_id) {
+                let _ = Reflect::set(&obj, &"target".into(), target);
+            }
             obj.into()
         })
     })
@@ -675,6 +721,40 @@ fn process_main_message(msg: MainToWorkerMessage) {
     }
 }
 
+fn process_follower_port_message(peer_id: &str, msg: MainToWorkerMessage) {
+    let runtime = RUNTIME.with(|cell| cell.borrow().clone());
+    let Some(rt) = runtime.as_ref() else { return };
+
+    match msg {
+        MainToWorkerMessage::Wire(MainToWorkerWire::Sync { payloads }) => {
+            route_peer_payloads(rt, peer_id, payloads);
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::PeerSync { payloads, .. }) => {
+            route_peer_payloads(rt, peer_id, payloads);
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::PeerClose { .. }) => close_peer(peer_id),
+        MainToWorkerMessage::Init(_)
+        | MainToWorkerMessage::Unknown(_)
+        | MainToWorkerMessage::Wire(_) => {}
+    }
+}
+
+fn route_peer_payloads(runtime: &Rc<WasmRuntime>, peer_id: &str, payloads: Vec<ByteBuf>) {
+    match ensure_peer_client(runtime, peer_id) {
+        Ok(client) => {
+            for payload in payloads {
+                let arr = Uint8Array::from(payload.as_ref());
+                if let Err(err) = runtime.on_sync_message_received_from_client(&client, arr.into())
+                {
+                    tracing::warn!("follower-port route: {err:?}");
+                }
+            }
+            runtime.batched_tick();
+        }
+        Err(err) => tracing::warn!("ensure follower port peer client: {err}"),
+    }
+}
+
 fn build_reconnect_auth() -> (Option<String>, String) {
     HOST.with(|cell| {
         let guard = cell.borrow();
@@ -812,6 +892,11 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         g.peer_client_by_peer_id.clear();
         g.peer_id_by_client.clear();
         g.peer_terms.clear();
+        for target in g.peer_targets.values() {
+            close_message_target(target);
+        }
+        g.peer_targets.clear();
+        g.peer_port_message_closures.clear();
         g.main_client_id = None;
     });
 
@@ -844,6 +929,71 @@ fn post_to_main(msg: &WorkerToMainWire) {
     };
     let global = global_worker_scope();
     let _ = global.post_message_with_transfer(&value, transfer.as_ref());
+}
+
+fn post_follower_port_attached(peer_id: &str, term: u32) {
+    let message = Object::new();
+    let _ = Reflect::set(
+        &message,
+        &"type".into(),
+        &JsValue::from_str("follower-port-attached"),
+    );
+    let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+    let _ = Reflect::set(&message, &"term".into(), &JsValue::from_f64(term as f64));
+    let global = global_worker_scope();
+    let _ = global.post_message(&message);
+}
+
+fn handle_follower_port_control(value: &JsValue) -> bool {
+    let Some(type_str) = Reflect::get(value, &"type".into())
+        .ok()
+        .and_then(|v| v.as_string())
+    else {
+        return false;
+    };
+
+    match type_str.as_str() {
+        "attach-follower-port" => {
+            let Some(peer_id) = Reflect::get(value, &"peerId".into())
+                .ok()
+                .and_then(|v| v.as_string())
+            else {
+                return true;
+            };
+            let term = Reflect::get(value, &"term".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as u32;
+            let Some(port) = Reflect::get(value, &"port".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<MessagePort>().ok())
+            else {
+                return true;
+            };
+            attach_follower_port(peer_id, term, port);
+            true
+        }
+        "detach-follower-port" => {
+            if let Some(peer_id) = Reflect::get(value, &"peerId".into())
+                .ok()
+                .and_then(|v| v.as_string())
+            {
+                close_peer(&peer_id);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn close_message_target(target: &JsValue) {
+    let Ok(close_fn) = Reflect::get(target, &"close".into()) else {
+        return;
+    };
+    let Ok(close_fn) = close_fn.dyn_into::<Function>() else {
+        return;
+    };
+    let _ = close_fn.call0(target);
 }
 
 /// Serialise a JS-shaped `JsValue` to JSON. Returns `"null"` on failure.

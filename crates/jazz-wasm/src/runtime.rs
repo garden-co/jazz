@@ -825,6 +825,10 @@ impl SyncSender for RustOutboxSender {
         let (Some(peer_id), Some(term)) = (peer_id, term) else {
             return;
         };
+        let target_override = match js_sys::Reflect::get(&routing_value, &"target".into()) {
+            Ok(v) if !v.is_null() && !v.is_undefined() => Some(v),
+            _ => None,
+        };
 
         // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
         // and post the Uint8Array with the underlying ArrayBuffer transferred.
@@ -845,8 +849,12 @@ impl SyncSender for RustOutboxSender {
         let transferables = js_sys::Array::new();
         transferables.push(&arr.buffer().into());
 
-        let target = inner.target.borrow();
-        let _ = post_message_with_transfer(&target, &arr, &transferables);
+        if let Some(target) = target_override {
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        } else {
+            let target = inner.target.borrow();
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1498,6 +1506,15 @@ impl WasmRuntime {
         options: JsValue,
     ) -> Result<crate::worker_bridge::WasmWorkerBridge, JsError> {
         crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createMessagePortBridge)]
+    pub fn create_message_port_bridge(
+        &self,
+        port: web_sys::MessagePort,
+    ) -> Result<crate::worker_bridge::WasmMessagePortBridge, JsError> {
+        crate::worker_bridge::WasmMessagePortBridge::attach(port, self)
     }
 
     /// Bridge/host shutdown: replace the active sync sender with a noop so
