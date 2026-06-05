@@ -30,36 +30,37 @@ The implementation reuses the existing `Bundle` type and adds `rows` and
 `history`, `reads`, and `query_reads`.
 
 On the exact reconciliation path, the implementation currently emits empty
-`history`, `reads`, and `query_reads`. On fallback paths, it can still send the
-legacy full query export with history and repair metadata.
+`history`, `reads`, and `query_reads`. Missing or unsupported reconciliation is
+rejected before any subscription `Data` is emitted.
 
-### 2. Missing reconciliation falls back to legacy full export
+### 2. Missing or unsupported reconciliation is rejected
 
-The spec says subscription data should not send all history, and the fallback
-should be the full readable current query result at a server snapshot.
+The spec says subscription data should not send all history. It also describes a
+snapshot-oriented repair path for reconciliation gaps.
 
-The implementation does this instead:
+The implementation rejects malformed or unsupported subscription reconciliation
+requests instead of repairing them with `export_query(query)`:
 
 - `reconciliation: Some(RowHeads/Exact)` sends only `rows`, `obfuscated`, `txs`,
   and `branches`
-- `reconciliation: None` calls `export_query(query)`
-- `reconciliation.set != RowHeads` also calls `export_query(query)`
+- `reconciliation: None` returns a retryable scoped `ServerMessage::Error` with
+  code `missing_reconciliation`
+- any set or algorithm other than `RowHeads/Exact` returns a retryable scoped
+  `ServerMessage::Error` with code `unsupported_reconciliation`
 
-`export_query(query)` is the old query-scoped bundle path. It can include
-history rows, read records, query read records, policy dependency history, and
-query-scope repair rows.
+Rejected subscription requests do not emit `Data` or `Settled`, and they do not
+activate the subscription. General hydration/export APIs still use
+`export_query(query)`, but the subscription download path does not fall back to a
+legacy full query export.
 
-This can happen for older clients, client-side reconciliation construction
-errors, or unsupported reconciliation sets.
-
-### 3. `PolicyDeps` is type-only
+### 3. `PolicyDeps` is type-only and rejected
 
 The spec says `PolicyDeps` is role-gated and only for trusted edge/server peers.
 
 The implementation defines `ReconcileSet::PolicyDeps`, but there is no
-role-gated policy dependency reconciliation path. A non-`RowHeads` sketch falls
-back to `export_query(query)` instead of being handled as a dedicated request or
-denied as a policy-dependency request.
+role-gated policy dependency reconciliation path. A non-`RowHeads` sketch is
+rejected with `unsupported_reconciliation` instead of being handled as a
+dedicated policy-dependency request.
 
 ### 4. The server cursor is not a real storage snapshot cursor
 
@@ -165,19 +166,15 @@ The implementation rejects `Edge` and `Global` subscription requests with
 `unsupported_settlement_tier`. Only `SettlementTier::Local` is supported for
 subscription settlement right now.
 
-### 11. Reconciliation construction errors are swallowed
+### 11. Reconciliation construction errors surface locally
 
-The downstream connection manager computes local reconciliation with:
+The downstream connection manager must compute local reconciliation before
+sending `Subscribe` or `Replay`.
 
-```rust
-runtime.subscription_reconciliation_for_query(&query).ok()
-```
-
-If local sketch construction fails, the client silently sends no reconciliation.
-The server then falls back to legacy full query export.
-
-The spec does not define this error path, but this behavior weakens the "do not
-send all history on subscription" invariant.
+If local sketch construction fails, the client-side subscription or replay call
+returns that error instead of sending `reconciliation: None`. The spec does not
+define this local error path, but surfacing the error preserves the "do not send
+all history on subscription" invariant.
 
 ### 12. No canonical item encoding exists yet
 

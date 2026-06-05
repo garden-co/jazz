@@ -120,6 +120,153 @@ fn connection_rejects_unsupported_edge_subscription_tier() {
 }
 
 #[test]
+fn connection_upstream_rejects_subscribe_without_reconciliation() {
+    let harness = Harness::new();
+    let tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Draft protocol", false, "project-1")
+        .unwrap();
+
+    let subscription_id = SubscriptionId::new("open-todos");
+    let (mut downstream_conn, mut upstream_conn) = in_memory_connection_pair();
+    let mut upstream = UpstreamSession::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+
+    downstream_conn.send_client_message(ClientMessage::Hello(ClientHello {
+        protocol_version: ProtocolVersion(2),
+        session_id: SessionId::new("tab-session"),
+        node_id: "alice-tab".to_owned(),
+        schema_fingerprint: tab.local_schema_fingerprint(),
+        policy_fingerprint: tab.local_policy_fingerprint(),
+    }));
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    drain_server_messages(&mut downstream_conn);
+
+    downstream_conn.send_client_message(ClientMessage::Subscribe {
+        subscription_id: subscription_id.clone(),
+        query: open_todos_query(),
+        requested_tier: SettlementTier::Local,
+        reconciliation: None,
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+
+    let messages = drain_server_messages(&mut downstream_conn);
+    assert_retryable_subscription_error(&messages, &subscription_id, "missing_reconciliation");
+    assert_no_subscription_data_or_settled(&messages);
+    assert!(!upstream.has_active_subscription(&subscription_id));
+}
+
+#[test]
+fn connection_upstream_rejects_replay_without_reconciliation() {
+    let harness = Harness::new();
+    let tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Draft protocol", false, "project-1")
+        .unwrap();
+
+    let subscription_id = SubscriptionId::new("open-todos");
+    let (mut downstream_conn, mut upstream_conn) = in_memory_connection_pair();
+    let mut upstream = UpstreamSession::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+
+    downstream_conn.send_client_message(ClientMessage::Hello(ClientHello {
+        protocol_version: ProtocolVersion(2),
+        session_id: SessionId::new("tab-session"),
+        node_id: "alice-tab".to_owned(),
+        schema_fingerprint: tab.local_schema_fingerprint(),
+        policy_fingerprint: tab.local_policy_fingerprint(),
+    }));
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    drain_server_messages(&mut downstream_conn);
+
+    downstream_conn.send_client_message(ClientMessage::Replay {
+        subscriptions: vec![ReplaySubscription {
+            subscription_id: subscription_id.clone(),
+            query: open_todos_query(),
+            requested_tier: SettlementTier::Local,
+            last_applied_cursor: None,
+            reconciliation: None,
+        }],
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+
+    let messages = drain_server_messages(&mut downstream_conn);
+    assert_retryable_subscription_error(&messages, &subscription_id, "missing_reconciliation");
+    assert_no_subscription_data_or_settled(&messages);
+    assert!(!upstream.has_active_subscription(&subscription_id));
+}
+
+#[test]
+fn connection_upstream_rejects_unsupported_reconciliation_set() {
+    let harness = Harness::new();
+    let tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Draft protocol", false, "project-1")
+        .unwrap();
+
+    let subscribe_id = SubscriptionId::new("open-todos-subscribe");
+    let replay_id = SubscriptionId::new("open-todos-replay");
+    let (mut downstream_conn, mut upstream_conn) = in_memory_connection_pair();
+    let mut upstream = UpstreamSession::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+
+    downstream_conn.send_client_message(ClientMessage::Hello(ClientHello {
+        protocol_version: ProtocolVersion(2),
+        session_id: SessionId::new("tab-session"),
+        node_id: "alice-tab".to_owned(),
+        schema_fingerprint: tab.local_schema_fingerprint(),
+        policy_fingerprint: tab.local_policy_fingerprint(),
+    }));
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    drain_server_messages(&mut downstream_conn);
+
+    downstream_conn.send_client_message(ClientMessage::Subscribe {
+        subscription_id: subscribe_id.clone(),
+        query: open_todos_query(),
+        requested_tier: SettlementTier::Local,
+        reconciliation: Some(policy_deps_reconciliation()),
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    let messages = drain_server_messages(&mut downstream_conn);
+    assert_retryable_subscription_error(&messages, &subscribe_id, "unsupported_reconciliation");
+    assert_no_subscription_data_or_settled(&messages);
+    assert!(!upstream.has_active_subscription(&subscribe_id));
+
+    downstream_conn.send_client_message(ClientMessage::Replay {
+        subscriptions: vec![ReplaySubscription {
+            subscription_id: replay_id.clone(),
+            query: open_todos_query(),
+            requested_tier: SettlementTier::Local,
+            last_applied_cursor: None,
+            reconciliation: Some(policy_deps_reconciliation()),
+        }],
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    let messages = drain_server_messages(&mut downstream_conn);
+    assert_retryable_subscription_error(&messages, &replay_id, "unsupported_reconciliation");
+    assert_no_subscription_data_or_settled(&messages);
+    assert!(!upstream.has_active_subscription(&replay_id));
+}
+
+#[test]
 fn connection_manager_subscribe_sends_local_row_head_reconciliation() {
     let harness = Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();
@@ -211,6 +358,8 @@ fn connection_manager_subscribe_sends_only_missing_rows_when_row_head_reconciles
         panic!("expected reconciled data and settled");
     };
     assert!(bundle.history.is_empty());
+    assert!(bundle.reads.is_empty());
+    assert!(bundle.query_reads.is_empty());
     assert_eq!(
         bundle
             .rows
@@ -1336,7 +1485,7 @@ fn connection_upstream_unsubscribe_removes_subscription_after_handshake() {
         subscription_id: subscription_id.clone(),
         query: open_todos_query(),
         requested_tier: SettlementTier::Local,
-        reconciliation: None,
+        reconciliation: Some(empty_row_heads()),
     });
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
     assert!(upstream.has_active_subscription(&subscription_id));
@@ -1630,7 +1779,7 @@ fn connection_replay_subscription_carries_reconciliation() {
             subscription_id.clone(),
             query.clone(),
             SettlementTier::Local,
-            Some(reconciliation.clone()),
+            reconciliation.clone(),
         )
         .unwrap();
     upstream_conn.receive_client_message();
@@ -1823,13 +1972,13 @@ fn connection_upstream_replay_prunes_omitted_subscription_state() {
         subscription_id: dropped_subscription_id.clone(),
         query: todos_query.clone(),
         requested_tier: SettlementTier::Local,
-        reconciliation: None,
+        reconciliation: Some(empty_row_heads()),
     });
     downstream_conn.send_client_message(ClientMessage::Subscribe {
         subscription_id: kept_subscription_id.clone(),
         query: projects_query.clone(),
         requested_tier: SettlementTier::Local,
-        reconciliation: None,
+        reconciliation: Some(empty_row_heads()),
     });
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
     drain_server_messages(&mut downstream_conn);
@@ -1840,7 +1989,7 @@ fn connection_upstream_replay_prunes_omitted_subscription_state() {
             query: projects_query,
             requested_tier: SettlementTier::Local,
             last_applied_cursor: None,
-            reconciliation: None,
+            reconciliation: Some(empty_row_heads()),
         }],
     });
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
@@ -1854,7 +2003,7 @@ fn connection_upstream_replay_prunes_omitted_subscription_state() {
         subscription_id: dropped_subscription_id.clone(),
         query: todos_query,
         requested_tier: SettlementTier::Local,
-        reconciliation: None,
+        reconciliation: Some(empty_row_heads()),
     });
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
 
@@ -3338,11 +3487,11 @@ fn upstream_refresh_reexports_snapshot_rows_for_active_subscriptions() {
     let server_bundle = server
         .export_subscription_reconciliation(
             query.clone(),
-            Some(ReconciliationSketch {
+            ReconciliationSketch {
                 set: ReconcileSet::RowHeads,
                 algorithm: ReconcileAlgorithm::Exact,
                 row_heads: Vec::new(),
-            }),
+            },
         )
         .unwrap();
     assert!(!server_bundle.rows.is_empty());
@@ -3354,6 +3503,14 @@ fn upstream_refresh_reexports_snapshot_rows_for_active_subscriptions() {
         .unwrap();
 
     let server_messages = upstream.refresh_active_subscriptions(&worker).unwrap();
+    let [ServerMessage::Data { bundle, .. }, ServerMessage::Settled { .. }] =
+        server_messages.as_slice()
+    else {
+        panic!("expected subscription data and settled from refresh");
+    };
+    assert!(bundle.history.is_empty());
+    assert!(bundle.reads.is_empty());
+    assert!(bundle.query_reads.is_empty());
     let client_messages = downstream.receive(&mut tab, server_messages).unwrap();
 
     assert!(client_messages.iter().any(|message| {
@@ -3607,20 +3764,24 @@ fn connection_manager_upstream_reports_scoped_query_errors() {
         .receive(&mut worker, downstream.open().unwrap())
         .unwrap();
     downstream.receive(&mut tab, server_messages).unwrap();
-    let (subscription, client_messages) = downstream
-        .subscribe(&tab, bad_query, SettlementTier::Local)
-        .unwrap();
+    let subscription = SubscriptionId::new("bad-query");
+    let client_messages = vec![ClientMessage::Subscribe {
+        subscription_id: subscription.clone(),
+        query: bad_query,
+        requested_tier: SettlementTier::Local,
+        reconciliation: Some(empty_row_heads()),
+    }];
     let server_messages = upstream.receive(&mut worker, client_messages).unwrap();
 
     let [ServerMessage::Error(error)] = server_messages.as_slice() else {
         panic!("expected one scoped error");
     };
     assert_eq!(error.code, "query_rejected");
-    assert_eq!(error.subscription_id.as_ref(), Some(subscription.id()));
+    assert_eq!(error.subscription_id.as_ref(), Some(&subscription));
 }
 
 #[test]
-fn connection_manager_downstream_surfaces_scoped_query_errors() {
+fn connection_manager_subscribe_surfaces_local_reconciliation_errors() {
     let harness = Harness::new();
     let mut tab = harness.memory("alice-tab", "alice").unwrap();
     let mut worker = harness.memory("alice-worker", "alice").unwrap();
@@ -3648,13 +3809,11 @@ fn connection_manager_downstream_surfaces_scoped_query_errors() {
         .receive(&mut worker, downstream.open().unwrap())
         .unwrap();
     downstream.receive(&mut tab, server_messages).unwrap();
-    let (_, client_messages) = downstream
+    let err = downstream
         .subscribe(&tab, bad_query, SettlementTier::Local)
-        .unwrap();
-    let server_messages = upstream.receive(&mut worker, client_messages).unwrap();
-    let err = downstream.receive(&mut tab, server_messages).unwrap_err();
+        .unwrap_err();
 
-    assert!(err.to_string().contains("query_rejected"));
+    assert!(err.to_string().contains("unknown table missing_table"));
 }
 
 fn open_todos_query() -> BuiltQuery {
@@ -3679,6 +3838,56 @@ fn sorted_row_ids(rows: Vec<mini_jazz_sqlite::RowView>) -> Vec<String> {
     let mut ids = row_ids(rows);
     ids.sort();
     ids
+}
+
+fn empty_row_heads() -> ReconciliationSketch {
+    ReconciliationSketch {
+        set: ReconcileSet::RowHeads,
+        algorithm: ReconcileAlgorithm::Exact,
+        row_heads: Vec::new(),
+    }
+}
+
+fn policy_deps_reconciliation() -> ReconciliationSketch {
+    ReconciliationSketch {
+        set: ReconcileSet::PolicyDeps,
+        algorithm: ReconcileAlgorithm::Exact,
+        row_heads: Vec::new(),
+    }
+}
+
+fn assert_retryable_subscription_error(
+    messages: &[ServerMessage],
+    subscription_id: &SubscriptionId,
+    code: &str,
+) {
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                ServerMessage::Error(error)
+                    if error.code == code
+                        && error.subscription_id.as_ref() == Some(subscription_id)
+                        && error.retry_hint == RetryHint::Retryable
+            )
+        }),
+        "expected retryable {code} error for subscription {subscription_id:?}, got {messages:?}"
+    );
+}
+
+fn assert_no_subscription_data_or_settled(messages: &[ServerMessage]) {
+    assert!(
+        !messages.iter().any(|message| {
+            matches!(
+                message,
+                ServerMessage::Data {
+                    subscription_id: Some(_),
+                    ..
+                } | ServerMessage::Settled { .. }
+            )
+        }),
+        "expected no subscription data or settled frames, got {messages:?}"
+    );
 }
 
 fn upload_tx_ids(messages: &[ClientMessage]) -> Vec<String> {

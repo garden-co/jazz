@@ -160,7 +160,7 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        let reconciliation = runtime.subscription_reconciliation_for_query(&query).ok();
+        let reconciliation = runtime.subscription_reconciliation_for_query(&query)?;
         self.session.subscribe_with_reconciliation(
             &mut batch,
             id,
@@ -180,7 +180,7 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        self.session.refresh_subscription_reconciliations(runtime);
+        self.session.refresh_subscription_reconciliations(runtime)?;
         self.session.replay(&mut batch)?;
         Ok(batch.into_client_messages())
     }
@@ -299,9 +299,8 @@ impl DownstreamConnectionManager {
     ) -> Result<()> {
         let pending = std::mem::take(&mut self.pending_subscriptions);
         for (subscription_id, subscription) in pending {
-            let reconciliation = runtime
-                .subscription_reconciliation_for_query(&subscription.query)
-                .ok();
+            let reconciliation =
+                runtime.subscription_reconciliation_for_query(&subscription.query)?;
             self.session.subscribe_with_reconciliation(
                 batch,
                 subscription_id,

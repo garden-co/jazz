@@ -701,7 +701,7 @@ mod tests {
             .unwrap();
         worker.delete_row("todos", "todo-00").unwrap();
         let bundle = worker
-            .export_subscription_reconciliation(all_page.page_query(), Some(reconciliation))
+            .export_subscription_reconciliation(all_page.page_query(), reconciliation)
             .unwrap();
         assert!(bundle
             .rows

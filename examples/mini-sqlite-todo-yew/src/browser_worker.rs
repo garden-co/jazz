@@ -1099,7 +1099,7 @@ mod tests {
                     },
                     requested_tier: mini_jazz_sqlite::protocol::SettlementTier::Local,
                     last_applied_cursor: None,
-                    reconciliation: None,
+                    reconciliation: Some(empty_reconciliation()),
                 }],
             }],
             sync_context: None,
@@ -1184,7 +1184,7 @@ mod tests {
                     offset: None,
                 },
                 requested_tier: SettlementTier::Local,
-                reconciliation: None,
+                reconciliation: Some(empty_reconciliation()),
             },
             ClientMessage::UploadTx {
                 tx: ClientTx {
@@ -1307,7 +1307,7 @@ mod tests {
                     subscription_id: subscription_id.clone(),
                     query,
                     requested_tier: SettlementTier::Local,
-                    reconciliation: None,
+                    reconciliation: Some(empty_reconciliation()),
                 },
             ],
             sync_context: None,
@@ -1406,5 +1406,13 @@ mod tests {
         T: Serialize + DeserializeOwned,
     {
         serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
+    }
+
+    fn empty_reconciliation() -> mini_jazz_sqlite::protocol::ReconciliationSketch {
+        mini_jazz_sqlite::protocol::ReconciliationSketch {
+            set: mini_jazz_sqlite::protocol::ReconcileSet::RowHeads,
+            algorithm: mini_jazz_sqlite::protocol::ReconcileAlgorithm::Exact,
+            row_heads: Vec::new(),
+        }
     }
 }

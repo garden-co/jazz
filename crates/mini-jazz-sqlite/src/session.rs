@@ -1,9 +1,9 @@
 use crate::connection::{DownstreamEndpoint, UpstreamEndpoint};
 use crate::protocol::{
     ClientHello, ClientMessage, CloseReason, MessageId, ProtocolCapabilities, ProtocolError,
-    ProtocolVersion, ReconciliationSketch, ReplayCursor, ReplaySubscription, RetryHint,
-    ServerHello, ServerMessage, SessionId, SettlementTier, SubscriptionId, TxStatusKind,
-    SUPPORTED_PROTOCOL_VERSION,
+    ProtocolVersion, ReconcileAlgorithm, ReconcileSet, ReconciliationSketch, ReplayCursor,
+    ReplaySubscription, RetryHint, ServerHello, ServerMessage, SessionId, SettlementTier,
+    SubscriptionId, TxStatusKind, SUPPORTED_PROTOCOL_VERSION,
 };
 use crate::{BuiltQuery, Error, Result, Runtime};
 use serde_json::json;
@@ -14,7 +14,7 @@ struct ActiveSubscription {
     query: BuiltQuery,
     requested_tier: SettlementTier,
     last_applied_cursor: Option<ReplayCursor>,
-    reconciliation: Option<ReconciliationSketch>,
+    reconciliation: ReconciliationSketch,
 }
 
 pub struct DownstreamSession {
@@ -99,7 +99,13 @@ impl DownstreamSession {
         query: BuiltQuery,
         requested_tier: SettlementTier,
     ) -> Result<()> {
-        self.subscribe_with_reconciliation(conn, subscription_id, query, requested_tier, None)
+        self.subscribe_with_reconciliation(
+            conn,
+            subscription_id,
+            query,
+            requested_tier,
+            empty_row_head_reconciliation(),
+        )
     }
 
     pub fn subscribe_with_reconciliation(
@@ -108,7 +114,7 @@ impl DownstreamSession {
         subscription_id: SubscriptionId,
         query: BuiltQuery,
         requested_tier: SettlementTier,
-        reconciliation: Option<ReconciliationSketch>,
+        reconciliation: ReconciliationSketch,
     ) -> Result<()> {
         ensure_open(self.closed)?;
         ensure_handshake(self.upstream_hello.is_some())?;
@@ -130,7 +136,7 @@ impl DownstreamSession {
             subscription_id,
             query,
             requested_tier,
-            reconciliation,
+            reconciliation: Some(reconciliation),
         });
         Ok(())
     }
@@ -146,19 +152,19 @@ impl DownstreamSession {
                 query: subscription.query.clone(),
                 requested_tier: subscription.requested_tier,
                 last_applied_cursor: subscription.last_applied_cursor,
-                reconciliation: subscription.reconciliation.clone(),
+                reconciliation: Some(subscription.reconciliation.clone()),
             })
             .collect();
         conn.send_client_message(ClientMessage::Replay { subscriptions });
         Ok(())
     }
 
-    pub fn refresh_subscription_reconciliations(&mut self, runtime: &Runtime) {
+    pub fn refresh_subscription_reconciliations(&mut self, runtime: &Runtime) -> Result<()> {
         for subscription in self.active_subscriptions.values_mut() {
-            subscription.reconciliation = runtime
-                .subscription_reconciliation_for_query(&subscription.query)
-                .ok();
+            subscription.reconciliation =
+                runtime.subscription_reconciliation_for_query(&subscription.query)?;
         }
+        Ok(())
     }
 
     pub fn close(&mut self, conn: &mut impl DownstreamEndpoint, reason: CloseReason) -> Result<()> {
@@ -682,7 +688,7 @@ impl UpstreamSession {
                 subscription_id,
                 query,
                 requested_tier,
-                reconciliation,
+                Some(reconciliation),
             )?;
         }
         Ok(())
@@ -745,9 +751,33 @@ impl UpstreamSession {
         requested_tier: SettlementTier,
         reconciliation: Option<ReconciliationSketch>,
     ) -> Result<()> {
-        let bundle =
-            runtime.export_subscription_reconciliation(query.clone(), reconciliation.clone())?;
-        let next_reconciliation = runtime.subscription_reconciliation_for_query(&query).ok();
+        let Some(reconciliation) = reconciliation else {
+            self.send_protocol_error(
+                conn,
+                "missing_reconciliation",
+                "subscription reconciliation is required",
+                Some(subscription_id),
+                None,
+                RetryHint::Retryable,
+            );
+            return Ok(());
+        };
+        if reconciliation.set != ReconcileSet::RowHeads
+            || reconciliation.algorithm != ReconcileAlgorithm::Exact
+        {
+            self.send_protocol_error(
+                conn,
+                "unsupported_reconciliation",
+                "only exact row-head subscription reconciliation is supported",
+                Some(subscription_id),
+                None,
+                RetryHint::Retryable,
+            );
+            return Ok(());
+        }
+
+        let bundle = runtime.export_subscription_reconciliation(query.clone(), reconciliation)?;
+        let next_reconciliation = runtime.subscription_reconciliation_for_query(&query)?;
         let cursor = self.next_cursor();
         let message_id = self.next_message_id();
         self.active_subscriptions.insert(
@@ -854,4 +884,12 @@ fn ensure_handshake(established: bool) -> Result<()> {
         return Err(Error::new("handshake is not established"));
     }
     Ok(())
+}
+
+fn empty_row_head_reconciliation() -> ReconciliationSketch {
+    ReconciliationSketch {
+        set: ReconcileSet::RowHeads,
+        algorithm: ReconcileAlgorithm::Exact,
+        row_heads: Vec::new(),
+    }
 }

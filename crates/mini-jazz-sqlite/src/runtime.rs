@@ -20,7 +20,7 @@ use crate::types::{
 };
 use crate::{
     branch, effective, policy, projection, query, query_predicate, read_set, schema, stats,
-    storage, tx, users, Result, Storage,
+    storage, tx, users, Error, Result, Storage,
 };
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
@@ -3479,13 +3479,12 @@ impl Runtime {
     pub fn export_subscription_reconciliation(
         &self,
         query: BuiltQuery,
-        reconciliation: Option<ReconciliationSketch>,
+        reconciliation: ReconciliationSketch,
     ) -> Result<Bundle> {
-        let Some(reconciliation) = reconciliation else {
-            return self.export_query(query);
-        };
-        if reconciliation.set != ReconcileSet::RowHeads {
-            return self.export_query(query);
+        if reconciliation.set != ReconcileSet::RowHeads
+            || reconciliation.algorithm != ReconcileAlgorithm::Exact
+        {
+            return Err(Error::new("unsupported reconciliation"));
         }
 
         let branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
