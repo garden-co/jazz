@@ -173,4 +173,35 @@ describe("TS Upsert API", () => {
       `Upsert failed: WriteError("row already deleted: ${project.id}")`,
     );
   });
+
+  it("can use caller-supplied updatedAt on new-row upsert", async () => {
+    const id = "00000000-0000-0000-0000-000000000000";
+    const updatedAt = 1_704_067_200_123_000;
+    db.upsert(app.projects, { name: "Backfilled Project" }, { id, updatedAt });
+
+    const project = await db.one(app.projects.select("name", "$updatedAt").where({ id }));
+
+    expect(project).toEqual({
+      id: project?.id,
+      name: "Backfilled Project",
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
+
+  it("can use caller-supplied updatedAt on existing-row upsert", async () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const originalProject = insertProject(db, "Test Project");
+
+    db.upsert(app.projects, { name: "Backfilled Project" }, { id: originalProject.id, updatedAt });
+
+    const project = await db.one(
+      app.projects.select("name", "$updatedAt").where({ id: { eq: originalProject.id } }),
+    );
+
+    expect(project).toEqual({
+      id: originalProject.id,
+      name: "Backfilled Project",
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
 });
