@@ -1539,6 +1539,11 @@ fn connection_ignores_ack_after_close() {
         )
         .unwrap();
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    assert_eq!(
+        upstream.last_sent_cursor(&subscription_id),
+        Some(ReplayCursor(1))
+    );
+    assert_eq!(upstream.last_acknowledged_cursor(&subscription_id), None);
     downstream
         .close(&mut downstream_conn, CloseReason::ClientClosed)
         .unwrap();
@@ -1618,6 +1623,11 @@ fn connection_ack_tracking_never_moves_cursor_backwards() {
         )
         .unwrap();
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    assert_eq!(
+        upstream.last_sent_cursor(&subscription_id),
+        Some(ReplayCursor(1))
+    );
+    assert_eq!(upstream.last_acknowledged_cursor(&subscription_id), None);
 
     downstream_conn.send_client_message(ClientMessage::Ack {
         message_id: MessageId(1),
@@ -1722,6 +1732,11 @@ fn connection_ack_tracking_keeps_highest_cursor_when_acks_arrive_out_of_order() 
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
     downstream.replay(&mut downstream_conn).unwrap();
     upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    assert_eq!(
+        upstream.last_sent_cursor(&subscription_id),
+        Some(ReplayCursor(2))
+    );
+    assert_eq!(upstream.last_acknowledged_cursor(&subscription_id), None);
 
     downstream_conn.send_client_message(ClientMessage::Ack {
         message_id: MessageId(2),

@@ -10,10 +10,18 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
-struct ActiveSubscription {
+struct DownstreamActiveSubscription {
     query: BuiltQuery,
     requested_tier: SettlementTier,
     last_applied_cursor: Option<ReplayCursor>,
+    reconciliation: ReconciliationSketch,
+}
+
+#[derive(Clone, Debug)]
+struct UpstreamActiveSubscription {
+    query: BuiltQuery,
+    requested_tier: SettlementTier,
+    last_sent_cursor: Option<ReplayCursor>,
     reconciliation: ReconciliationSketch,
 }
 
@@ -21,7 +29,7 @@ pub struct DownstreamSession {
     hello: ClientHello,
     awaiting_server_hello: bool,
     upstream_hello: Option<ServerHello>,
-    active_subscriptions: BTreeMap<SubscriptionId, ActiveSubscription>,
+    active_subscriptions: BTreeMap<SubscriptionId, DownstreamActiveSubscription>,
     settled: BTreeMap<(SubscriptionId, SettlementTier), ReplayCursor>,
     closed: bool,
     last_error: Option<ProtocolError>,
@@ -33,7 +41,7 @@ pub struct UpstreamSession {
     policy_fingerprint: String,
     connection_auth_user: Option<String>,
     peer_hello: Option<ClientHello>,
-    active_subscriptions: BTreeMap<SubscriptionId, ActiveSubscription>,
+    active_subscriptions: BTreeMap<SubscriptionId, UpstreamActiveSubscription>,
     pending_messages: BTreeMap<MessageId, (SubscriptionId, ReplayCursor)>,
     last_acknowledged: BTreeMap<SubscriptionId, ReplayCursor>,
     last_error: Option<ProtocolError>,
@@ -123,7 +131,7 @@ impl DownstreamSession {
         }
         self.active_subscriptions.insert(
             subscription_id.clone(),
-            ActiveSubscription {
+            DownstreamActiveSubscription {
                 query: query.clone(),
                 requested_tier,
                 last_applied_cursor: None,
@@ -658,6 +666,12 @@ impl UpstreamSession {
         self.last_acknowledged.get(subscription_id).copied()
     }
 
+    pub fn last_sent_cursor(&self, subscription_id: &SubscriptionId) -> Option<ReplayCursor> {
+        self.active_subscriptions
+            .get(subscription_id)
+            .and_then(|subscription| subscription.last_sent_cursor)
+    }
+
     pub fn refresh_active_subscriptions(
         &mut self,
         runtime: &Runtime,
@@ -782,10 +796,10 @@ impl UpstreamSession {
         let message_id = self.next_message_id();
         self.active_subscriptions.insert(
             subscription_id.clone(),
-            ActiveSubscription {
+            UpstreamActiveSubscription {
                 query,
                 requested_tier,
-                last_applied_cursor: Some(cursor),
+                last_sent_cursor: Some(cursor),
                 reconciliation: next_reconciliation,
             },
         );

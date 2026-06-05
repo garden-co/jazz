@@ -84,20 +84,22 @@ last_applied_cursor = which server Data cursor did I already apply?
 reconciliation      = which row heads do I currently have for this query?
 ```
 
-The implementation carries `last_applied_cursor` in `ReplaySubscription`, and
-the downstream side updates it after applying `Data`. However, the upstream
-replay path ignores the client-provided `last_applied_cursor` when deciding what
-to send. Replay repair is driven by the reconciliation sketch.
+The implementation now keeps downstream and upstream subscription state
+separate. Downstream state carries `last_applied_cursor`, which advances after a
+`Data` bundle is applied locally and is sent back in `ReplaySubscription`.
+Upstream state carries `last_sent_cursor`, which advances when the server sends
+subscription `Data`.
 
-On the upstream side, `ActiveSubscription.last_applied_cursor` is also updated
-when the server sends subscription data, not when the client ACKs it. ACK
-tracking is separate: `pending_messages` maps `message_id` to the sent cursor,
-and `last_acknowledged` advances only when an ACK arrives.
+ACK tracking is a third state: `pending_messages` maps `message_id` to the sent
+cursor, and `last_acknowledged` advances only when an ACK arrives.
 
 The server does not trust or validate the cursor field sent by the client ACK;
 it uses the cursor remembered for the acknowledged `message_id`. Local
 `Settled` is emitted immediately after `Data` for `SettlementTier::Local`, so it
 is not gated by the ACK.
+
+The remaining deviation is that upstream replay repair is still driven by the
+reconciliation sketch, not by the client-provided `last_applied_cursor`.
 
 ### 6. Live refresh uses reconciliation machinery
 
