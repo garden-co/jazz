@@ -1848,15 +1848,6 @@ export class JazzClient {
   }
 
   /**
-   * Disconnect from the Jazz server and drop the Rust transport handle.
-   *
-   * No-op if the underlying runtime does not support disconnect().
-   */
-  disconnectTransport(): void {
-    this.runtime.disconnect?.();
-  }
-
-  /**
    * Get the current schema.
    */
   getSchema(): WasmSchema {
