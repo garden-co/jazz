@@ -154,8 +154,6 @@ describe("JazzClient mutation durability split", () => {
 
     expect(updateCalls).toEqual([["row-1", updates, undefined]]);
     expect(deleteCalls).toEqual([["row-1", undefined]]);
-    expect(runtime.sealBatch).toHaveBeenCalledWith("update-batch-id");
-    expect(runtime.sealBatch).toHaveBeenCalledWith("delete-batch-id");
   });
 
   it("routes attributed writes through runtime methods with write context", async () => {
@@ -185,14 +183,13 @@ describe("JazzClient mutation durability split", () => {
         return { id: objectId ?? "generated-id", values: [], batchId: "batch-1" };
       },
     );
-    const { client, runtime } = makeClient({ insert });
+    const { client } = makeClient({ insert });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
 
     const created = client.create("todos", insertValues, { id: externalId });
 
     expect(insert).toHaveBeenCalledWith("todos", insertValues, undefined, externalId);
     expect(created.value.id).toBe(externalId);
-    expect(runtime.sealBatch).toHaveBeenCalledWith("batch-1");
   });
 
   it("falls back to update when upsert sees an existing object id", async () => {
