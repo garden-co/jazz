@@ -4,6 +4,8 @@ description: "Authenticate users without a server using self-signed tokens, and 
 reviewedAt: "c5f0807b6"
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
 Local-first auth lets users start using your app immediately without signing up. Jazz generates a secret on the client, derives a stable account ID from it, and uses self-signed tokens to prove the user owns that account. The secret itself effectively _is_ the account.
 
 This secret (and therefore the account) lives wherever the user uses the app. To log in from other devices, the user needs to use the same secret.
@@ -29,22 +31,17 @@ You can also combine modes: let local-first users read and experiment, but requi
 
 Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Callout type="info">
+  Different framework? Vue, Solid, and per-framework guides live in [Supported
+  Frameworks](/docs/reference/supported-frameworks/overview).
+</Callout>
+
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
     `useLocalFirstAuth()` also exposes `login` and `signOut` for switching or clearing accounts.
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
-    </include>
   </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
@@ -52,13 +49,6 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
     </include>
     `LocalFirstAuth` from `jazz-tools/svelte` also exposes `login` and `signOut` for switching or
     clearing accounts.
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
-    </include>
-    `useLocalFirstAuth()` from `jazz-tools/solid` also exposes `login` and `signOut` for switching
-    or clearing accounts.
   </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="jazz-client.ts"'>
@@ -99,30 +89,15 @@ keeps the same Jazz account.
   the risk of insecure storage is high.
 </Callout>
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-backup
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-backup
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-backup
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-backup
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -135,30 +110,15 @@ keeps the same Jazz account.
 To restore, decode the user-provided passphrase back into a secret and hand it back to your
 local-first auth flow:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-restore
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-restore
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-restore
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-restore
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -202,30 +162,15 @@ the original device, so it doesn't help after a loss.
 
 Create the passkey from the current local-first secret:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-backup
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-passkey-backup
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-backup
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-backup
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -237,30 +182,15 @@ Create the passkey from the current local-first secret:
 
 Restore by reading the secret back from the passkey:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-restore
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-passkey-restore
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-restore
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-restore
     </include>
   </Tab>
   <Tab value="TypeScript">
