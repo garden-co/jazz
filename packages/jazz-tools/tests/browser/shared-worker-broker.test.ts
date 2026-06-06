@@ -30,9 +30,9 @@ function createOptions(
     tabId,
     fingerprint,
     visibility: "visible",
-    onBecomeLeader: async (client, term) => {
+    onBecomeLeader: async (client, leadershipId) => {
       client.reportLeaderReady({
-        term,
+        leadershipId,
         tabLockName: `jazz-leader-tab:broker-test-app:${dbName}`,
         workerLockName: `jazz-leader-worker:broker-test-app:${dbName}`,
         compatibilityLockName: `jazz-leader-lock:broker-test-app:${dbName}`,
@@ -104,9 +104,9 @@ describe("SharedWorker browser broker", () => {
       forceTakeoverTimeoutMs?: number;
       brokerPingIntervalMs?: number;
       brokerPongTimeoutMs?: number;
-      onReady?: (term: number) => void;
-      onDemote?: (term: number) => void;
-      onFailure?: (term: number, reason: string) => void;
+      onReady?: (leadershipId: number) => void;
+      onDemote?: (leadershipId: number) => void;
+      onFailure?: (leadershipId: number, reason: string) => void;
       reportFailures?: boolean;
     } = {},
   ): Parameters<typeof BrowserBrokerClient.connect>[0] {
@@ -116,21 +116,21 @@ describe("SharedWorker browser broker", () => {
       brokerPingIntervalMs: options.brokerPingIntervalMs,
       brokerPongTimeoutMs: options.brokerPongTimeoutMs,
       onDemote: options.onDemote,
-      onBecomeLeader: async (client, term) => {
+      onBecomeLeader: async (client, leadershipId) => {
         try {
           const locks = await acquireLeaderLocks(dbName, {
             compatibility: options.compatibility ?? true,
           });
-          options.onReady?.(term);
+          options.onReady?.(leadershipId);
           client.reportLeaderReady({
-            term,
+            leadershipId,
             ...locks,
           });
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
-          options.onFailure?.(term, reason);
+          options.onFailure?.(leadershipId, reason);
           if (options.reportFailures) {
-            client.reportLeaderFailed(term, reason);
+            client.reportLeaderFailed(leadershipId, reason);
             return;
           }
           throw error;
@@ -139,7 +139,7 @@ describe("SharedWorker browser broker", () => {
     };
   }
 
-  it("shares one broker epoch and elects one leader for a namespace", async () => {
+  it("shares one broker instance and elects one leader for a namespace", async () => {
     const dbName = uniqueName("broker-election");
     const first = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-a"));
     clients.push(first);
@@ -149,18 +149,18 @@ describe("SharedWorker browser broker", () => {
     await first.waitForRole("leader", 2000);
     await second.waitForRole("follower", 2000);
 
-    expect(first.snapshot().brokerEpoch).toEqual(second.snapshot().brokerEpoch);
+    expect(first.snapshot().brokerInstanceId).toEqual(second.snapshot().brokerInstanceId);
     expect(first.snapshot()).toMatchObject({
       role: "leader",
       tabId: "tab-a",
       leaderTabId: "tab-a",
-      term: 1,
+      leadershipId: 1,
     });
     expect(second.snapshot()).toMatchObject({
       role: "follower",
       tabId: "tab-b",
       leaderTabId: "tab-a",
-      term: 1,
+      leadershipId: 1,
     });
   });
 
@@ -225,7 +225,7 @@ describe("SharedWorker browser broker", () => {
       role: "leader",
       tabId: "tab-b",
       leaderTabId: "tab-b",
-      term: 2,
+      leadershipId: 2,
     });
   });
 
@@ -239,13 +239,13 @@ describe("SharedWorker browser broker", () => {
     );
     clients.push(first);
 
-    const secondReadyTerms: number[] = [];
+    const secondReadyLeadershipIds: number[] = [];
     const second = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-b", "fingerprint-a", {
         compatibility: false,
         forceTakeoverTimeoutMs: 50,
         reportFailures: true,
-        onReady: (term) => secondReadyTerms.push(term),
+        onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
       }),
     );
     clients.push(second);
@@ -256,7 +256,7 @@ describe("SharedWorker browser broker", () => {
     await first.shutdown();
 
     await waitFor(
-      () => secondReadyTerms.some((term) => term > 1),
+      () => secondReadyLeadershipIds.some((leadershipId) => leadershipId > 1),
       4000,
       "stuck tab and worker locks should be stolen so the follower can report leader-ready",
     );
@@ -287,7 +287,7 @@ describe("SharedWorker browser broker", () => {
       role: "leader",
       tabId: "tab-b",
       leaderTabId: "tab-b",
-      term: 2,
+      leadershipId: 2,
     });
   });
 
@@ -300,12 +300,12 @@ describe("SharedWorker browser broker", () => {
     );
     clients.push(first);
 
-    const secondReadyTerms: number[] = [];
+    const secondReadyLeadershipIds: number[] = [];
     const second = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-b", "fingerprint-a", {
         forceTakeoverTimeoutMs: 50,
         reportFailures: true,
-        onReady: (term) => secondReadyTerms.push(term),
+        onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
       }),
     );
     clients.push(second);
@@ -316,7 +316,7 @@ describe("SharedWorker browser broker", () => {
     await first.shutdown();
 
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(secondReadyTerms.some((term) => term > 1)).toBe(false);
+    expect(secondReadyLeadershipIds.some((leadershipId) => leadershipId > 1)).toBe(false);
   });
 
   it("does not repeatedly promote a candidate blocked by the migration compatibility lock", async () => {
@@ -332,12 +332,12 @@ describe("SharedWorker browser broker", () => {
     let failureReason: string | null = null;
     const client = await BrowserBrokerClient.connect({
       ...createOptions(dbName, "tab-a"),
-      onBecomeLeader: async (broker, term) => {
+      onBecomeLeader: async (broker, leadershipId) => {
         promotionAttempts++;
         const tabLease = await tryAcquireWebLock(`jazz-leader-tab:broker-test-app:${dbName}`);
         if (!tabLease) {
           failureReason = "Unable to acquire tab lock";
-          broker.reportLeaderFailed(term, failureReason);
+          broker.reportLeaderFailed(leadershipId, failureReason);
           return;
         }
 
@@ -349,7 +349,7 @@ describe("SharedWorker browser broker", () => {
         }
 
         failureReason = `Unable to acquire ${compatibilityLockName}`;
-        broker.reportLeaderFailed(term, failureReason);
+        broker.reportLeaderFailed(leadershipId, failureReason);
       },
     });
     clients.push(client);
@@ -364,15 +364,15 @@ describe("SharedWorker browser broker", () => {
   it("replaces a promoted tab that has not reported schema before leader-ready", async () => {
     const dbName = uniqueName("broker-schema-ready-promotes");
     const promotionAttempts: string[] = [];
-    const demotedTerms: number[] = [];
+    const demotedLeadershipIds: number[] = [];
 
     const silent = await BrowserBrokerClient.connect({
       ...createOptions(dbName, "tab-a"),
       onBecomeLeader: async () => {
         promotionAttempts.push("tab-a");
       },
-      onDemote: (term) => {
-        demotedTerms.push(term);
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
       },
     });
     clients.push(silent);
@@ -398,7 +398,7 @@ describe("SharedWorker browser broker", () => {
       tabId: "tab-b",
       leaderTabId: "tab-b",
     });
-    expect(demotedTerms).toContain(1);
+    expect(demotedLeadershipIds).toContain(1);
   });
 
   it("evicts a leader tab that misses broker pongs", async () => {
@@ -423,18 +423,18 @@ describe("SharedWorker browser broker", () => {
     clients.push(silentLeader);
     await silentLeader.waitForRole("leader", 2000);
 
-    const secondReadyTerms: number[] = [];
+    const secondReadyLeadershipIds: number[] = [];
     const secondFailures: string[] = [];
-    const secondClosedTerms: number[] = [];
+    const secondClosedLeadershipIds: number[] = [];
     const second = await BrowserBrokerClient.connect({
       ...createLockingOptions(dbName, "tab-b", "fingerprint-a", {
         compatibility: false,
         forceTakeoverTimeoutMs: 50,
-        onReady: (term) => secondReadyTerms.push(term),
-        onFailure: (term, reason) => secondFailures.push(`${term}:${reason}`),
+        onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
+        onFailure: (leadershipId, reason) => secondFailures.push(`${leadershipId}:${reason}`),
         reportFailures: true,
       }),
-      onCloseFollowerPort: (term) => secondClosedTerms.push(term),
+      onCloseFollowerPort: (leadershipId) => secondClosedLeadershipIds.push(leadershipId),
     });
     clients.push(second);
 
@@ -442,9 +442,9 @@ describe("SharedWorker browser broker", () => {
     second.reportVisibility("visible");
 
     await waitFor(
-      () => secondReadyTerms.some((term) => term > 1),
+      () => secondReadyLeadershipIds.some((leadershipId) => leadershipId > 1),
       4000,
-      `leader that misses broker pongs should be evicted and replaced; pings: ${silentLeaderPings}; ready: ${secondReadyTerms.join(", ")}; closed: ${secondClosedTerms.join(", ")}; failures: ${secondFailures.join(", ")}`,
+      `leader that misses broker pongs should be evicted and replaced; pings: ${silentLeaderPings}; ready: ${secondReadyLeadershipIds.join(", ")}; closed: ${secondClosedLeadershipIds.join(", ")}; failures: ${secondFailures.join(", ")}`,
     );
     expect(second.snapshot().leaderTabId).toBe("tab-b");
   });
@@ -453,7 +453,7 @@ describe("SharedWorker browser broker", () => {
     const dbName = uniqueName("broker-storage-reset");
     const requestId = `reset-${dbName}`;
     const resetBegunByTab: string[] = [];
-    const resetPromotions: Array<{ tabId: string; requestId: string; term: number }> = [];
+    const resetPromotions: Array<{ tabId: string; requestId: string; leadershipId: number }> = [];
     const clientByTabId = new Map<string, BrowserBrokerClient>();
 
     function createResetAwareOptions(
@@ -468,21 +468,21 @@ describe("SharedWorker browser broker", () => {
           releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
           releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
         },
-        onBecomeLeader: async (client, term, resetRequestId) => {
+        onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
-            resetPromotions.push({ tabId, requestId: resetRequestId, term });
+            resetPromotions.push({ tabId, requestId: resetRequestId, leadershipId });
           }
           const locks = await acquireLeaderLocks(dbName, { compatibility: false });
           client.reportLeaderReady({
-            term,
+            leadershipId,
             ...locks,
           });
         },
-        onAttachFollowerPort: (followerTabId, term, port) => {
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
           port.close();
-          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, term);
+          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _term, port) => {
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
           port.close();
         },
       };
@@ -522,7 +522,7 @@ describe("SharedWorker browser broker", () => {
         requestId,
       }),
     );
-    expect(second.snapshot().term).toBeGreaterThan(1);
+    expect(second.snapshot().leadershipId).toBeGreaterThan(1);
   });
 
   it("continues storage reset when the promoted reset leader is evicted before ready", async () => {
@@ -545,7 +545,7 @@ describe("SharedWorker browser broker", () => {
           releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
           releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
         },
-        onBecomeLeader: async (client, term, resetRequestId) => {
+        onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
             resetPromotions.push(`${tabId}:${resetRequestId}`);
             if (tabId === "tab-b") {
@@ -555,18 +555,18 @@ describe("SharedWorker browser broker", () => {
           }
           const locks = await acquireLeaderLocks(dbName, { compatibility: false });
           client.reportLeaderReady({
-            term,
+            leadershipId,
             ...locks,
           });
         },
-        onAttachFollowerPort: (followerTabId, term, port) => {
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
           port.close();
           if (followerTabId === "tab-b") return;
           if (tabId === "tab-a") {
-            first?.reportFollowerPortAttached(followerTabId, term);
+            first?.reportFollowerPortAttached(followerTabId, leadershipId);
           }
         },
-        onUseFollowerPort: (_leaderTabId, _term, port) => {
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
           port.close();
         },
       };

@@ -11,15 +11,15 @@ const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
 const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
 
 export interface BrowserBrokerClientSnapshot {
-  brokerEpoch: string | null;
+  brokerInstanceId: string | null;
   role: BrowserBrokerRole;
   tabId: string;
   leaderTabId: string | null;
-  term: number;
+  leadershipId: number;
 }
 
 export interface BrowserBrokerLeaderReadyInput {
-  term: number;
+  leadershipId: number;
   tabLockName: string;
   workerLockName: string;
   compatibilityLockName?: string;
@@ -39,15 +39,15 @@ export interface BrowserBrokerClientOptions {
   onBrokerPing?: () => void;
   onBecomeLeader?: (
     client: BrowserBrokerClient,
-    term: number,
+    leadershipId: number,
     resetRequestId?: string,
   ) => void | Promise<void>;
-  onDemote?: (term: number) => void | Promise<void>;
-  onAttachFollowerPort?: (followerTabId: string, term: number, port: MessagePort) => void;
-  onUseFollowerPort?: (leaderTabId: string, term: number, port: MessagePort) => void;
-  onFollowerReady?: (leaderTabId: string, term: number) => void;
-  onCloseFollowerPort?: (term: number) => void;
-  onStorageResetBegin?: (requestId: string, term: number) => void | Promise<void>;
+  onDemote?: (leadershipId: number) => void | Promise<void>;
+  onAttachFollowerPort?: (followerTabId: string, leadershipId: number, port: MessagePort) => void;
+  onUseFollowerPort?: (leaderTabId: string, leadershipId: number, port: MessagePort) => void;
+  onFollowerReady?: (leaderTabId: string, leadershipId: number) => void;
+  onCloseFollowerPort?: (leadershipId: number) => void;
+  onStorageResetBegin?: (requestId: string, leadershipId: number) => void | Promise<void>;
 }
 
 type RoleWaiter = {
@@ -77,10 +77,10 @@ export class BrowserBrokerClient {
   private readonly options: BrowserBrokerClientOptions;
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
-  private brokerEpoch: string | null = null;
+  private brokerInstanceId: string | null = null;
   private role: BrowserBrokerRole = "follower";
   private leaderTabId: string | null = null;
-  private term = 0;
+  private leadershipId = 0;
   private closed = false;
   private closedError: Error | null = null;
   private reconnecting = false;
@@ -106,11 +106,11 @@ export class BrowserBrokerClient {
 
   snapshot(): BrowserBrokerClientSnapshot {
     return {
-      brokerEpoch: this.brokerEpoch,
+      brokerInstanceId: this.brokerInstanceId,
       role: this.role,
       tabId: this.options.tabId,
       leaderTabId: this.leaderTabId,
-      term: this.term,
+      leadershipId: this.leadershipId,
     };
   }
 
@@ -140,18 +140,18 @@ export class BrowserBrokerClient {
     if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "leader-ready",
-      term: input.term,
+      leadershipId: input.leadershipId,
       tabLockName: input.tabLockName,
       workerLockName: input.workerLockName,
       compatibilityLockName: input.compatibilityLockName,
     });
   }
 
-  reportLeaderFailed(term: number, reason: string): void {
+  reportLeaderFailed(leadershipId: number, reason: string): void {
     if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "leader-failed",
-      term,
+      leadershipId,
       reason,
     });
   }
@@ -161,12 +161,12 @@ export class BrowserBrokerClient {
     this.port.postMessage({ type: "visibility", visibility });
   }
 
-  reportFollowerPortAttached(followerTabId: string, term: number): void {
+  reportFollowerPortAttached(followerTabId: string, leadershipId: number): void {
     if (this.closed || !this.port) return;
     this.port.postMessage({
       type: "follower-port-attached",
       followerTabId,
-      term,
+      leadershipId,
     });
   }
 
@@ -294,66 +294,75 @@ export class BrowserBrokerClient {
 
   private handleControlMessage(message: BrowserBrokerControlMessage): void {
     if (!message || typeof message !== "object") return;
-    if (this.brokerEpoch && message.brokerEpoch !== this.brokerEpoch) {
-      void this.reconnectAfterBrokerEpochChange(message.brokerEpoch);
+    if (this.brokerInstanceId && message.brokerInstanceId !== this.brokerInstanceId) {
+      void this.reconnectAfterBrokerInstanceChange(message.brokerInstanceId);
       return;
     }
 
     switch (message.type) {
       case "broker-hello":
-        this.brokerEpoch = message.brokerEpoch;
+        this.brokerInstanceId = message.brokerInstanceId;
         this.refreshBrokerLivenessTimer();
         return;
       case "broker-ping":
         this.refreshBrokerLivenessTimer();
         this.options.onBrokerPing?.();
         if (this.shouldRespondToBrokerPing()) {
-          this.port?.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
+          this.port?.postMessage({
+            type: "broker-pong",
+            brokerInstanceId: message.brokerInstanceId,
+          });
         }
         return;
       case "become-leader":
-        this.term = message.term;
+        this.leadershipId = message.leadershipId;
         void Promise.resolve(
-          this.options.onBecomeLeader?.(this, message.term, message.resetRequestId),
+          this.options.onBecomeLeader?.(this, message.leadershipId, message.resetRequestId),
         ).catch((error) => {
-          this.reportLeaderFailed(message.term, stringifyError(error));
+          this.reportLeaderFailed(message.leadershipId, stringifyError(error));
         });
         return;
       case "demote":
-        if (message.term !== this.term) return;
+        if (message.leadershipId !== this.leadershipId) return;
         this.role = "follower";
         this.leaderTabId = null;
         this.resolveRoleWaiters();
-        void this.options.onDemote?.(message.term);
+        void this.options.onDemote?.(message.leadershipId);
         return;
       case "leader-ready":
-        this.term = message.term;
+        this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
         this.role = message.leaderTabId === this.options.tabId ? "leader" : "follower";
         this.resolveRoleWaiters();
         return;
       case "attach-follower-port":
-        if (message.term !== this.term) return;
-        this.options.onAttachFollowerPort?.(message.followerTabId, message.term, message.port);
+        if (message.leadershipId !== this.leadershipId) return;
+        this.options.onAttachFollowerPort?.(
+          message.followerTabId,
+          message.leadershipId,
+          message.port,
+        );
         return;
       case "use-follower-port":
-        this.term = message.term;
+        this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
         this.role = "follower";
-        this.options.onUseFollowerPort?.(message.leaderTabId, message.term, message.port);
+        this.options.onUseFollowerPort?.(message.leaderTabId, message.leadershipId, message.port);
         return;
       case "follower-ready":
-        this.term = message.term;
+        this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
         this.role = "follower";
-        this.options.onFollowerReady?.(message.leaderTabId, message.term);
+        this.options.onFollowerReady?.(message.leaderTabId, message.leadershipId);
         this.resolveRoleWaiters();
         return;
       case "close-follower-port":
-        this.options.onCloseFollowerPort?.(message.term);
+        this.options.onCloseFollowerPort?.(message.leadershipId);
         return;
       case "storage-reset-begin":
-        void Promise.resolve(this.options.onStorageResetBegin?.(message.requestId, message.term))
+        void Promise.resolve(
+          this.options.onStorageResetBegin?.(message.requestId, message.leadershipId),
+        )
           .then(() => {
             this.reportStorageResetReady(message.requestId, true);
           })
@@ -377,9 +386,11 @@ export class BrowserBrokerClient {
     }
   }
 
-  private async reconnectAfterBrokerEpochChange(nextBrokerEpoch: string): Promise<void> {
+  private async reconnectAfterBrokerInstanceChange(nextBrokerInstanceId: string): Promise<void> {
     await this.reconnectAfterBrokerPortFailure(
-      new Error(`Browser broker epoch changed from ${this.brokerEpoch} to ${nextBrokerEpoch}`),
+      new Error(
+        `Browser broker instance changed from ${this.brokerInstanceId} to ${nextBrokerInstanceId}`,
+      ),
     );
   }
 
@@ -388,14 +399,14 @@ export class BrowserBrokerClient {
     this.reconnecting = true;
 
     const previousRole = this.role;
-    const previousTerm = this.term;
+    const previousLeadershipId = this.leadershipId;
     const previousPort = this.port;
 
     this.stopBrokerLivenessTimer();
-    this.brokerEpoch = null;
+    this.brokerInstanceId = null;
     this.role = "follower";
     this.leaderTabId = null;
-    this.term = 0;
+    this.leadershipId = 0;
     this.rejectResetWaiters(error);
 
     if (previousPort) {
@@ -403,10 +414,10 @@ export class BrowserBrokerClient {
     }
 
     try {
-      if (previousRole === "leader" && previousTerm > 0) {
-        await this.options.onDemote?.(previousTerm);
-      } else if (previousRole === "follower" && previousTerm > 0) {
-        this.options.onCloseFollowerPort?.(previousTerm);
+      if (previousRole === "leader" && previousLeadershipId > 0) {
+        await this.options.onDemote?.(previousLeadershipId);
+      } else if (previousRole === "follower" && previousLeadershipId > 0) {
+        this.options.onCloseFollowerPort?.(previousLeadershipId);
       }
 
       if (!this.closed) {

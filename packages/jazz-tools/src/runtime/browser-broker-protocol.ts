@@ -6,6 +6,14 @@ export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
 export type BrowserBrokerVisibility = "visible" | "hidden";
 export type BrowserBrokerRole = "leader" | "follower";
 
+/**
+ * Broker protocol naming:
+ * - `brokerInstanceId` identifies one in-memory SharedWorker broker instance.
+ * - `leadershipId` identifies one leader promotion within that broker instance;
+ *   it is separate from `leaderTabId` because the same tab can become leader
+ *   multiple times across failovers.
+ */
+
 export interface BrowserBrokerCandidate {
   tabId: string;
   visibility: BrowserBrokerVisibility;
@@ -44,7 +52,7 @@ export interface BrowserBrokerVisibilityMessage {
 
 export interface BrowserBrokerLeaderReadyMessage {
   type: "leader-ready";
-  term: number;
+  leadershipId: number;
   tabLockName: string;
   workerLockName: string;
   compatibilityLockName?: string;
@@ -52,13 +60,13 @@ export interface BrowserBrokerLeaderReadyMessage {
 
 export interface BrowserBrokerLeaderFailedMessage {
   type: "leader-failed";
-  term: number;
+  leadershipId: number;
   reason: string;
 }
 
 export interface BrowserBrokerFollowerPortAttachedMessage {
   type: "follower-port-attached";
-  term: number;
+  leadershipId: number;
   followerTabId: string;
 }
 
@@ -85,7 +93,7 @@ export interface BrowserBrokerShutdownMessage {
 
 export interface BrowserBrokerPongMessage {
   type: "broker-pong";
-  brokerEpoch: string;
+  brokerInstanceId: string;
 }
 
 export type BrowserBrokerTabMessage =
@@ -100,74 +108,74 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerShutdownMessage
   | BrowserBrokerPongMessage;
 
-export interface BrokerEpochMessage {
-  brokerEpoch: string;
+export interface BrokerInstanceMessage {
+  brokerInstanceId: string;
 }
 
-export interface BrowserBrokerHelloResponse extends BrokerEpochMessage {
+export interface BrowserBrokerHelloResponse extends BrokerInstanceMessage {
   type: "broker-hello";
 }
 
-export interface BrowserBrokerPingMessage extends BrokerEpochMessage {
+export interface BrowserBrokerPingMessage extends BrokerInstanceMessage {
   type: "broker-ping";
 }
 
-export interface BrowserBrokerBecomeLeaderMessage extends BrokerEpochMessage {
+export interface BrowserBrokerBecomeLeaderMessage extends BrokerInstanceMessage {
   type: "become-leader";
-  term: number;
+  leadershipId: number;
   resetRequestId?: string;
 }
 
-export interface BrowserBrokerDemoteMessage extends BrokerEpochMessage {
+export interface BrowserBrokerDemoteMessage extends BrokerInstanceMessage {
   type: "demote";
-  term: number;
+  leadershipId: number;
 }
 
-export interface BrowserBrokerLeaderReadyAnnouncement extends BrokerEpochMessage {
+export interface BrowserBrokerLeaderReadyAnnouncement extends BrokerInstanceMessage {
   type: "leader-ready";
   leaderTabId: string;
-  term: number;
+  leadershipId: number;
 }
 
-export interface BrowserBrokerAttachFollowerPortMessage extends BrokerEpochMessage {
+export interface BrowserBrokerAttachFollowerPortMessage extends BrokerInstanceMessage {
   type: "attach-follower-port";
   followerTabId: string;
-  term: number;
+  leadershipId: number;
   port: MessagePort;
 }
 
-export interface BrowserBrokerUseFollowerPortMessage extends BrokerEpochMessage {
+export interface BrowserBrokerUseFollowerPortMessage extends BrokerInstanceMessage {
   type: "use-follower-port";
   leaderTabId: string;
-  term: number;
+  leadershipId: number;
   port: MessagePort;
 }
 
-export interface BrowserBrokerFollowerReadyMessage extends BrokerEpochMessage {
+export interface BrowserBrokerFollowerReadyMessage extends BrokerInstanceMessage {
   type: "follower-ready";
   leaderTabId: string;
-  term: number;
+  leadershipId: number;
 }
 
-export interface BrowserBrokerCloseFollowerPortMessage extends BrokerEpochMessage {
+export interface BrowserBrokerCloseFollowerPortMessage extends BrokerInstanceMessage {
   type: "close-follower-port";
-  term: number;
+  leadershipId: number;
 }
 
-export interface BrowserBrokerStorageResetBeginMessage extends BrokerEpochMessage {
+export interface BrowserBrokerStorageResetBeginMessage extends BrokerInstanceMessage {
   type: "storage-reset-begin";
   requestId: string;
-  term: number;
+  leadershipId: number;
 }
 
-export interface BrowserBrokerStorageResetFinishedMessage extends BrokerEpochMessage {
+export interface BrowserBrokerStorageResetFinishedMessage extends BrokerInstanceMessage {
   type: "storage-reset-finished";
   requestId: string;
   success: boolean;
   errorMessage?: string;
 }
 
-export interface BrowserBrokerUnsupportedMessage extends BrokerEpochMessage {
+export interface BrowserBrokerUnsupportedMessage extends BrokerInstanceMessage {
   type: "unsupported";
   reason: string;
 }

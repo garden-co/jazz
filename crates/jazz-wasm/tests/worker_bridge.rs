@@ -320,7 +320,7 @@ fn peer_sync_fires_listener() {
             .ok()
             .and_then(|v| v.as_string())
             .unwrap_or_default();
-        let term = Reflect::get(&batch, &"term".into())
+        let leadership_id = Reflect::get(&batch, &"leadershipId".into())
             .ok()
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as u32;
@@ -328,7 +328,7 @@ fn peer_sync_fires_listener() {
         let arr: js_sys::Array = payload.dyn_into().unwrap();
         captured_clone
             .borrow_mut()
-            .push((peer_id, term, arr.length() as usize));
+            .push((peer_id, leadership_id, arr.length() as usize));
     });
     let listeners = Object::new();
     Reflect::set(
@@ -341,7 +341,7 @@ fn peer_sync_fires_listener() {
 
     fw.emit_wire(&WorkerToMainWire::PeerSync {
         peer_id: "tab-b".into(),
-        term: 7,
+        leadership_id: 7,
         payloads: vec![ByteBuf::from(vec![1, 2, 3])],
     });
 
@@ -529,11 +529,11 @@ fn peer_open_send_close_emit_postcard_binary() {
     match last {
         Some(MainToWorkerWire::PeerSync {
             peer_id,
-            term,
+            leadership_id,
             payloads,
         }) => {
             assert_eq!(peer_id, "peer-α");
-            assert_eq!(term, 5);
+            assert_eq!(leadership_id, 5);
             assert_eq!(payloads.len(), 2);
             assert_eq!(&*payloads[0], &[1, 2, 3]);
             assert_eq!(&*payloads[1], &[4]);
@@ -579,7 +579,7 @@ fn follower_port_attach_detach_emit_js_control_messages() {
         Some("tab-b")
     );
     assert_eq!(
-        Reflect::get(attach, &"term".into())
+        Reflect::get(attach, &"leadershipId".into())
             .ok()
             .and_then(|v| v.as_f64()),
         Some(11.0)
@@ -606,7 +606,7 @@ fn follower_port_attach_detach_emit_js_control_messages() {
         Some("tab-b")
     );
     assert_eq!(
-        Reflect::get(detach, &"term".into())
+        Reflect::get(detach, &"leadershipId".into())
             .ok()
             .and_then(|v| v.as_f64()),
         Some(11.0)

@@ -40,13 +40,13 @@ export interface WorkerBridgeOptions {
 
 export interface PeerSyncBatch {
   peerId: string;
-  term: number;
+  leadershipId: number;
   payload: Uint8Array[];
 }
 
 export interface FollowerPortEvent {
   peerId: string;
-  term: number;
+  leadershipId: number;
 }
 
 interface WasmBridgeHandle {
@@ -54,10 +54,10 @@ interface WasmBridgeHandle {
   updateAuth(jwtToken?: string | null): void;
   sendLifecycleHint(event: string): void;
   openPeer(peerId: string): void;
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
+  sendPeerSync(peerId: string, leadershipId: number, payload: Uint8Array[]): void;
   closePeer(peerId: string): void;
-  attachFollowerPort(peerId: string, term: number, port: MessagePort): void;
-  detachFollowerPort(peerId: string, term: number): void;
+  attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void;
+  detachFollowerPort(peerId: string, leadershipId: number): void;
   setServerPayloadForwarder(
     callback:
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
@@ -248,20 +248,20 @@ export class WorkerBridge {
     this.bridge?.openPeer(peerId);
   }
 
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
-    this.bridge?.sendPeerSync(peerId, term, payload);
+  sendPeerSync(peerId: string, leadershipId: number, payload: Uint8Array[]): void {
+    this.bridge?.sendPeerSync(peerId, leadershipId, payload);
   }
 
   closePeer(peerId: string): void {
     this.bridge?.closePeer(peerId);
   }
 
-  attachFollowerPort(peerId: string, term: number, port: MessagePort): void {
-    this.bridge?.attachFollowerPort(peerId, term, port);
+  attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void {
+    this.bridge?.attachFollowerPort(peerId, leadershipId, port);
   }
 
-  detachFollowerPort(peerId: string, term: number): void {
-    this.bridge?.detachFollowerPort(peerId, term);
+  detachFollowerPort(peerId: string, leadershipId: number): void {
+    this.bridge?.detachFollowerPort(peerId, leadershipId);
   }
 }
 

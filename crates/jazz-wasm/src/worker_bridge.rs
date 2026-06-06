@@ -266,7 +266,7 @@ impl WasmWorkerBridge {
     }
 
     #[wasm_bindgen(js_name = sendPeerSync)]
-    pub fn send_peer_sync(&self, peer_id: &str, term: u32, payload: Array) {
+    pub fn send_peer_sync(&self, peer_id: &str, leadership_id: u32, payload: Array) {
         if self.inner.is_inactive() {
             return;
         }
@@ -286,7 +286,7 @@ impl WasmWorkerBridge {
             &self.inner.worker,
             &MainToWorkerWire::PeerSync {
                 peer_id: peer_id.to_string(),
-                term,
+                leadership_id,
                 payloads,
             },
         );
@@ -306,7 +306,7 @@ impl WasmWorkerBridge {
     }
 
     #[wasm_bindgen(js_name = attachFollowerPort)]
-    pub fn attach_follower_port(&self, peer_id: &str, term: u32, port: MessagePort) {
+    pub fn attach_follower_port(&self, peer_id: &str, leadership_id: u32, port: MessagePort) {
         if self.inner.is_inactive() {
             return;
         }
@@ -318,7 +318,11 @@ impl WasmWorkerBridge {
             &JsValue::from_str("attach-follower-port"),
         );
         let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
-        let _ = Reflect::set(&message, &"term".into(), &JsValue::from_f64(term as f64));
+        let _ = Reflect::set(
+            &message,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
+        );
         let _ = Reflect::set(&message, &"port".into(), port.as_ref());
 
         let transfer = Array::new();
@@ -330,7 +334,7 @@ impl WasmWorkerBridge {
     }
 
     #[wasm_bindgen(js_name = detachFollowerPort)]
-    pub fn detach_follower_port(&self, peer_id: &str, term: u32) {
+    pub fn detach_follower_port(&self, peer_id: &str, leadership_id: u32) {
         if self.inner.is_inactive() {
             return;
         }
@@ -342,7 +346,11 @@ impl WasmWorkerBridge {
             &JsValue::from_str("detach-follower-port"),
         );
         let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
-        let _ = Reflect::set(&message, &"term".into(), &JsValue::from_f64(term as f64));
+        let _ = Reflect::set(
+            &message,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
+        );
         let _ = self.inner.worker.post_message(&message);
     }
 
@@ -1013,7 +1021,7 @@ impl BridgeInner {
             }
             WorkerToMainWire::PeerSync {
                 peer_id,
-                term,
+                leadership_id,
                 payloads,
             } => {
                 let cb = self.listeners.borrow().on_peer_sync.clone();
@@ -1025,26 +1033,44 @@ impl BridgeInner {
                     }
                     let batch = Object::new();
                     let _ = Reflect::set(&batch, &"peerId".into(), &JsValue::from_str(&peer_id));
-                    let _ = Reflect::set(&batch, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = Reflect::set(
+                        &batch,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
                     let _ = Reflect::set(&batch, &"payload".into(), &payload_array);
                     let _ = cb.call1(&JsValue::NULL, &batch.into());
                 }
             }
-            WorkerToMainWire::FollowerPortAttached { peer_id, term } => {
+            WorkerToMainWire::FollowerPortAttached {
+                peer_id,
+                leadership_id,
+            } => {
                 let cb = self.listeners.borrow().on_follower_port_attached.clone();
                 if let Some(cb) = cb {
                     let event = Object::new();
                     let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
-                    let _ = Reflect::set(&event, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = Reflect::set(
+                        &event,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
                     let _ = cb.call1(&JsValue::NULL, &event.into());
                 }
             }
-            WorkerToMainWire::FollowerPortClosed { peer_id, term } => {
+            WorkerToMainWire::FollowerPortClosed {
+                peer_id,
+                leadership_id,
+            } => {
                 let cb = self.listeners.borrow().on_follower_port_closed.clone();
                 if let Some(cb) = cb {
                     let event = Object::new();
                     let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
-                    let _ = Reflect::set(&event, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = Reflect::set(
+                        &event,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
                     let _ = cb.call1(&JsValue::NULL, &event.into());
                 }
             }

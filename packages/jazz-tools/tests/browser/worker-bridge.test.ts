@@ -147,7 +147,7 @@ function summarizeWorkerMessage(
     case "peer-sync":
       return {
         peerId: data.peerId,
-        term: data.term,
+        leadershipId: data.leadershipId,
         payloadCount: Array.isArray(data.payload) ? data.payload.length : undefined,
       };
     default:
@@ -197,7 +197,7 @@ function getDbWorkerDebugState(db: Db): Record<string, unknown> {
     tabRole?: unknown;
     tabId?: unknown;
     currentLeaderTabId?: unknown;
-    currentLeaderTerm?: unknown;
+    currentLeadershipId?: unknown;
     activeRemoteLeaderTabId?: unknown;
     primaryDbName?: unknown;
     workerDbName?: unknown;
@@ -219,7 +219,7 @@ function getDbWorkerDebugState(db: Db): Record<string, unknown> {
     tabRole: anyDb.tabRole,
     tabId: anyDb.tabId,
     currentLeaderTabId: anyDb.currentLeaderTabId,
-    currentLeaderTerm: anyDb.currentLeaderTerm,
+    currentLeadershipId: anyDb.currentLeadershipId,
     activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
     primaryDbName: anyDb.primaryDbName,
     workerDbName: anyDb.workerDbName,

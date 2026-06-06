@@ -8,7 +8,7 @@ Memory-mode browser clients, Node/NAPI clients, and the public `createDb` API sh
 
 ## Architecture
 
-The browser persistent runtime gains one SharedWorker broker per `{appId, dbName}` namespace. The broker owns connected tab state, broker epoch, visibility ranking, leader terms, lock monitoring, demotion, follower-port assignment, and storage reset coordination. Tabs interact with it through a small control protocol implemented by a new `BrowserBrokerClient`.
+The browser persistent runtime gains one SharedWorker broker per `{appId, dbName}` namespace. The broker owns connected tab state, broker instance, visibility ranking, leadership IDs, lock monitoring, demotion, follower-port assignment, and storage reset coordination. Tabs interact with it through a small control protocol implemented by a new `BrowserBrokerClient`.
 
 The leader tab acquires `jazz-leader-tab:<appId>:<dbName>` and the migration compatibility lock `jazz-leader-lock:<appId>:<dbName>`, then starts the existing dedicated worker. The worker init preflight acquires `jazz-leader-worker:<appId>:<dbName>` before Rust opens OPFS. Followers do not spawn dedicated workers and do not use fallback namespaces.
 
@@ -17,8 +17,8 @@ Follower sync uses transferred `MessagePort`s. The broker creates a channel per 
 ## Components
 
 - `packages/jazz-tools/src/runtime/browser-broker-protocol.ts`: shared message types, protocol constants, validation helpers, unsupported-environment error formatting, configuration fingerprint creation, and visibility ranking.
-- `packages/jazz-tools/src/runtime/browser-broker-client.ts`: tab-side SharedWorker connection, epoch/term fencing, leader promotion/demotion handling, follower port lifecycle, storage reset request handling, ping/pong, and shutdown.
-- `packages/jazz-tools/src/worker/jazz-broker-worker.ts`: SharedWorker broker entry point. Owns registry, election, leader terms, lock monitors, follower port assignment, reset orchestration, and forced lock stealing after timeout.
+- `packages/jazz-tools/src/runtime/browser-broker-client.ts`: tab-side SharedWorker connection, broker instance/leadership ID fencing, leader promotion/demotion handling, follower port lifecycle, storage reset request handling, ping/pong, and shutdown.
+- `packages/jazz-tools/src/worker/jazz-broker-worker.ts`: SharedWorker broker entry point. Owns registry, election, leadership IDs, lock monitors, follower port assignment, reset orchestration, and forced lock stealing after timeout.
 - `packages/jazz-tools/src/runtime/leader-lock.ts`: expanded Web Locks helpers for fail-fast acquisition, abortable queued monitor requests, and exceptional steal-and-release.
 - `packages/jazz-tools/src/runtime/db.ts`: replace `TabLeaderElection`, `tab-sync-protocol`, `StorageResetCoordinator`, and follower fallback namespace usage in persistent browser mode with the broker client.
 - `packages/jazz-tools/src/runtime/worker-bridge.ts`: expose follower port attachment on the leader bridge and message-port bridge attachment on follower main runtimes.
@@ -41,7 +41,7 @@ Follower startup:
 
 1. Follower creates only its main-thread runtime.
 2. Broker waits for a durable-ready leader.
-3. Broker creates a `MessageChannel` for the follower term.
+3. Broker creates a `MessageChannel` for that leadership ID.
 4. Leader transfers its endpoint to the worker.
 5. Worker acknowledges the follower port.
 6. Broker sends `follower-ready`; follower startup and durable waits can proceed.
@@ -50,9 +50,9 @@ Follower payloads travel directly between the follower main runtime and leader w
 
 ## Failure Handling
 
-Broker-to-tab messages include `brokerEpoch`; leader-specific messages include `term`. Tabs and workers ignore stale epochs/terms and close stale follower ports.
+Broker-to-tab messages include `brokerInstanceId`; leader-specific messages include `leadershipId`. Tabs and workers ignore stale broker instances/leadership IDs and close stale follower ports.
 
-The broker monitors the leader tab lock and worker lock with abortable queued lock requests. If either monitor is granted for the current unplanned term, the broker marks the term dead, asks tabs to close follower ports, and elects a replacement. Planned demotion, shutdown, and reset cancel monitors before release.
+The broker monitors the leader tab lock and worker lock with abortable queued lock requests. If either monitor is granted for the current unplanned leadership ID, the broker marks the leadership ID dead, asks tabs to close follower ports, and elects a replacement. Planned demotion, shutdown, and reset cancel monitors before release.
 
 If demotion does not release a lock within `forceTakeoverTimeoutMs`, the broker uses Web Locks `{ steal: true }`, releases the stolen lock immediately, and continues election. It does not treat stealing as proof that old JavaScript stopped; replacement worker OPFS open failures remain explicit stale-worker/open failures.
 
@@ -64,4 +64,4 @@ If demotion does not release a lock within `forceTakeoverTimeoutMs`, the broker 
 
 Tests follow the repo instruction to prefer black-box browser integration and public API setup. Existing behavior tests are updated only where their old assertions encode replaced BroadcastChannel/fallback implementation details.
 
-Focused unit tests cover protocol validation, unsupported-environment error text, deterministic fingerprints, and visibility ranking. Browser tests cover unsupported API failure, old compatibility lock contention, single leader worker across tabs, follower no-worker startup, follower-port acknowledgement gating, follower read/write persistence through the leader worker, lock-loss failover, planned demotion/reset monitor cancellation, forced lock stealing, broker restart epoch changes, hidden-only ranking, and follower-initiated storage reset.
+Focused unit tests cover protocol validation, unsupported-environment error text, deterministic fingerprints, and visibility ranking. Browser tests cover unsupported API failure, old compatibility lock contention, single leader worker across tabs, follower no-worker startup, follower-port acknowledgement gating, follower read/write persistence through the leader worker, lock-loss failover, planned demotion/reset monitor cancellation, forced lock stealing, broker instance changes after broker restart, hidden-only ranking, and follower-initiated storage reset.

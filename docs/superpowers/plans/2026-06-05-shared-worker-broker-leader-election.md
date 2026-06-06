@@ -4,7 +4,7 @@
 
 **Goal:** Replace browser persistent BroadcastChannel leader coordination with a SharedWorker broker and direct follower data ports into the leader worker.
 
-**Architecture:** A new SharedWorker broker owns control-plane election, terms, lock monitoring, demotion, follower-port assignment, and storage reset. `Db.createWithWorker` uses a tab-side broker client; only the leader starts a dedicated OPFS worker, while followers use a main-thread runtime bridged over a broker-assigned `MessagePort`.
+**Architecture:** A new SharedWorker broker owns control-plane election, leadership IDs, lock monitoring, demotion, follower-port assignment, and storage reset. `Db.createWithWorker` uses a tab-side broker client; only the leader starts a dedicated OPFS worker, while followers use a main-thread runtime bridged over a broker-assigned `MessagePort`.
 
 **Tech Stack:** TypeScript, Vitest browser tests, Web Locks, SharedWorker, MessageChannel, Rust `wasm-bindgen`, existing Jazz postcard worker sync protocol.
 
@@ -107,8 +107,8 @@ const first = await BrowserBrokerClient.connect(testOptions("a"));
 const second = await BrowserBrokerClient.connect(testOptions("b"));
 await first.waitForRole("leader");
 await second.waitForRole("follower");
-expect(first.snapshot().brokerEpoch).toEqual(second.snapshot().brokerEpoch);
-expect(first.snapshot().term).toBe(1);
+expect(first.snapshot().brokerInstanceId).toEqual(second.snapshot().brokerInstanceId);
+expect(first.snapshot().leadershipId).toBe(1);
 ```
 
 Add mismatch and unsupported tests:
@@ -127,11 +127,11 @@ Expected: FAIL because broker client and worker do not exist.
 
 - [ ] **Step 3: Implement broker worker**
 
-Implement the SharedWorker `connect` handler, `hello` validation, fingerprint establishment, epoch generation, visibility updates, leader ranking, term increment, `become-leader`, `leader-ready`, `leader-failed`, `shutdown`, `broker-ping`, `broker-pong`, and `unsupported`. Add lock monitor state but leave data ports for Task 4.
+Implement the SharedWorker `connect` handler, `hello` validation, fingerprint establishment, broker instance generation, visibility updates, leader ranking, leadership ID increment, `become-leader`, `leader-ready`, `leader-failed`, `shutdown`, `broker-ping`, `broker-pong`, and `unsupported`. Add lock monitor state but leave data ports for Task 4.
 
 - [ ] **Step 4: Implement broker client**
 
-Implement `BrowserBrokerClient.connect`, hello handshake, message validation, stale epoch/term filtering, role snapshots, visibility reporting, ping/pong, leader promotion callback hooks, demotion hooks, and shutdown.
+Implement `BrowserBrokerClient.connect`, hello handshake, message validation, stale broker instance/leadership ID filtering, role snapshots, visibility reporting, ping/pong, leader promotion callback hooks, demotion hooks, and shutdown.
 
 - [ ] **Step 5: Include broker worker in package build**
 
@@ -167,15 +167,15 @@ Expected: FAIL because follower port attachment is not implemented.
 
 - [ ] **Step 3: Implement direct peer port routing**
 
-Extend worker-side peer routing so `peer_routing_lookup` can return `{ peerId, term, target }`. In `RustOutboxSender`, post peer-bound `WorkerToMainWire::PeerSync` to `target` when present, otherwise keep the existing main-thread target fallback.
+Extend worker-side peer routing so `peer_routing_lookup` can return `{ peerId, leadershipId, target }`. In `RustOutboxSender`, post peer-bound `WorkerToMainWire::PeerSync` to `target` when present, otherwise keep the existing main-thread target fallback.
 
 - [ ] **Step 4: Add worker host attach/detach messages**
 
-Teach `worker_host.rs` to accept JS object messages `{ type: "attach-follower-port", peerId, term, port }` and `{ type: "detach-follower-port", peerId, term }`. On attach, `start()` the port, map it to a peer client, decode incoming `MainToWorkerWire::Sync`/`PeerSync` from that port, and post `{ type: "follower-port-attached", peerId, term }` to the leader tab.
+Teach `worker_host.rs` to accept JS object messages `{ type: "attach-follower-port", peerId, leadershipId, port }` and `{ type: "detach-follower-port", peerId, leadershipId }`. On attach, `start()` the port, map it to a peer client, decode incoming `MainToWorkerWire::Sync`/`PeerSync` from that port, and post `{ type: "follower-port-attached", peerId, leadershipId }` to the leader tab.
 
 - [ ] **Step 5: Add TS bridge APIs**
 
-Add `WorkerBridge.attachFollowerPort(peerId, term, port)` and `WorkerBridge.detachFollowerPort(peerId, term)`. Add a `MessagePortRuntimeBridge` for follower main runtimes that installs the runtime sender on a `MessagePort`, decodes incoming worker payloads, and exposes `shutdown()`.
+Add `WorkerBridge.attachFollowerPort(peerId, leadershipId, port)` and `WorkerBridge.detachFollowerPort(peerId, leadershipId)`. Add a `MessagePortRuntimeBridge` for follower main runtimes that installs the runtime sender on a `MessagePort`, decodes incoming worker payloads, and exposes `shutdown()`.
 
 - [ ] **Step 6: Add worker lock preflight**
 
@@ -224,7 +224,7 @@ When role is follower, keep `worker` null, create main-thread non-durable client
 
 - [ ] **Step 6: Demote and shutdown cleanly**
 
-On demotion or shutdown, poison stale term state, close follower data ports, shut down bridge/client resources, terminate workers, release tab and compatibility lock leases, and notify broker.
+On demotion or shutdown, poison stale leadership ID state, close follower data ports, shut down bridge/client resources, terminate workers, release tab and compatibility lock leases, and notify broker.
 
 - [ ] **Step 7: Run integration tests to verify GREEN**
 
@@ -253,15 +253,15 @@ Expected: FAIL because lock monitors and forced takeover are incomplete.
 
 - [ ] **Step 3: Implement monitor lifecycle**
 
-After `leader-ready`, start abortable queued lock monitors for tab and worker locks. Cancel and mark planned releases before demotion, reset, shutdown, or replacement election. On current-term unexpected grant, release immediately, mark term dead, close follower ports, and elect.
+After `leader-ready`, start abortable queued lock monitors for tab and worker locks. Cancel and mark planned releases before demotion, reset, shutdown, or replacement election. On unexpected grant for the current leadership ID, release immediately, mark that leadership ID dead, close follower ports, and elect.
 
 - [ ] **Step 4: Implement forced takeover**
 
 Track demotion deadlines. If a lock remains held past `forceTakeoverTimeoutMs`, call `stealAndReleaseWebLock` for that lock and continue election. Never steal the old compatibility lock.
 
-- [ ] **Step 5: Implement broker liveness and epoch handling**
+- [ ] **Step 5: Implement broker liveness and broker instance handling**
 
-Send periodic `broker-ping`, require current-epoch `broker-pong`, and make tabs poison stale local state when the epoch changes or broker liveness fails before reconnecting.
+Send periodic `broker-ping`, require a `broker-pong` for the current broker instance, and make tabs poison stale local state when the broker instance changes or broker liveness fails before reconnecting.
 
 - [ ] **Step 6: Run failover tests to verify GREEN**
 
