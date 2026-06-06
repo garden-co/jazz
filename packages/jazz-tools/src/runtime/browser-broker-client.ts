@@ -323,10 +323,12 @@ export class BrowserBrokerClient {
         });
         return;
       case "demote":
-        if (message.leadershipId !== this.leadershipId) return;
-        this.role = "follower";
-        this.leaderTabId = null;
-        this.resolveRoleWaiters();
+        if (message.leadershipId > this.leadershipId) return;
+        if (message.leadershipId === this.leadershipId) {
+          this.role = "follower";
+          this.leaderTabId = null;
+          this.resolveRoleWaiters();
+        }
         void this.options.onDemote?.(message.leadershipId);
         return;
       case "leader-ready":

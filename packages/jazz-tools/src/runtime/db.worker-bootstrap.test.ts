@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = vi.hoisted(() => {
   const loadWasmModuleMock = vi.fn().mockResolvedValue({}) as any;
-  const tryAcquireWebLockMock = vi.fn(async () => ({ release: vi.fn() }));
+  const tryAcquireWebLockMock = vi.fn(async (_lockName?: string) => ({ release: vi.fn() }));
   const connectMock = vi.fn(async (options: any) => {
     const client = new FakeBrowserBrokerClient(options);
     await options.onBecomeLeader?.(client, 1);
@@ -11,19 +11,25 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
 
   class FakeBrowserBrokerClient {
     static connect = connectMock;
+    static instances: FakeBrowserBrokerClient[] = [];
     private readonly options: any;
+    private role: "leader" | "follower" = "leader";
+    private leaderTabId: string | null;
+    private leadershipId = 1;
 
     constructor(options: any) {
       this.options = options;
+      this.leaderTabId = options.tabId;
+      FakeBrowserBrokerClient.instances.push(this);
     }
 
     snapshot() {
       return {
         brokerInstanceId: "test-broker",
-        role: "leader" as const,
+        role: this.role,
         tabId: this.options.tabId,
-        leaderTabId: this.options.tabId,
-        leadershipId: 1,
+        leaderTabId: this.leaderTabId,
+        leadershipId: this.leadershipId,
       };
     }
 
@@ -38,6 +44,14 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
     reportSchemaReady(): void {}
 
     async shutdown(): Promise<void> {}
+
+    async demote(leadershipId: number): Promise<void> {
+      if (leadershipId === this.leadershipId) {
+        this.role = "follower";
+        this.leaderTabId = null;
+      }
+      await this.options.onDemote?.(leadershipId);
+    }
   }
 
   return { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient };
@@ -81,10 +95,24 @@ async function createWorkerDb(config: DbConfig): Promise<Db> {
   return await Db.createWithWorker(config, runtimeModule);
 }
 
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out: ${message}`);
+}
+
 afterEach(() => {
   loadWasmModuleMock.mockClear();
   tryAcquireWebLockMock.mockClear();
   FakeBrowserBrokerClient.connect.mockClear();
+  FakeBrowserBrokerClient.instances.splice(0);
 
   if (originalWindow === undefined) {
     delete (globalThis as Record<string, unknown>).window;
@@ -405,5 +433,76 @@ describe("Db worker runtime bootstrap", () => {
     await db.shutdown();
 
     expect(spawnedWorkerUrls).toEqual(["http://localhost:3000/custom/jazz-worker.js"]);
+  });
+
+  it("releases broker leader resources when demoted during an in-flight promotion", async () => {
+    const appId = "worker-bootstrap-demote-in-flight";
+    const dbName = "worker-bootstrap-demote-in-flight";
+    const releasedLocks: string[] = [];
+    let workerReady: (() => void) | null = null;
+    let terminatedWorkers = 0;
+
+    tryAcquireWebLockMock.mockImplementation(async (lockName?: string) => ({
+      release: vi.fn(() => {
+        if (lockName) {
+          releasedLocks.push(lockName);
+        }
+      }),
+    }));
+
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        workerReady = () => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        };
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {
+        terminatedWorkers++;
+      }
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const dbPromise = createWorkerDb({
+      appId,
+      driver: { type: "persistent", dbName },
+    });
+
+    let db: Db | null = null;
+    try {
+      await waitFor(
+        () => tryAcquireWebLockMock.mock.calls.length >= 2 && workerReady !== null,
+        200,
+        "promotion should acquire locks and start worker bootstrap",
+      );
+
+      await FakeBrowserBrokerClient.instances[0]!.demote(1);
+      workerReady!();
+      db = await dbPromise;
+
+      expect(releasedLocks).toEqual(
+        expect.arrayContaining([
+          `jazz-leader-tab:${appId}:${dbName}`,
+          `jazz-leader-lock:${appId}:${dbName}`,
+        ]),
+      );
+      expect(terminatedWorkers).toBe(1);
+      expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
+    } finally {
+      await db?.shutdown();
+    }
   });
 });

@@ -401,6 +401,57 @@ describe("SharedWorker browser broker", () => {
     expect(demotedLeadershipIds).toContain(1);
   });
 
+  it("demotes a stale candidate that reports leader-ready after being replaced", async () => {
+    const dbName = uniqueName("broker-stale-leader-ready");
+    const demotedLeadershipIds: number[] = [];
+    let reportStaleLeaderReady: (() => void) | null = null;
+
+    const staleCandidate = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async (client, leadershipId) => {
+        reportStaleLeaderReady = () => {
+          client.reportLeaderReady({
+            leadershipId,
+            tabLockName: `jazz-leader-tab:broker-test-app:${dbName}`,
+            workerLockName: `jazz-leader-worker:broker-test-app:${dbName}`,
+            compatibilityLockName: `jazz-leader-lock:broker-test-app:${dbName}`,
+          });
+        };
+      },
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
+      },
+    });
+    clients.push(staleCandidate);
+
+    await waitFor(
+      () => reportStaleLeaderReady !== null,
+      2000,
+      "first tab should receive a leader promotion",
+    );
+
+    const replacement = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
+    clients.push(replacement);
+    replacement.reportSchemaReady("schema-a");
+
+    await replacement.waitForRole("leader", 4000);
+    await waitFor(
+      () => demotedLeadershipIds.includes(1),
+      2000,
+      "broker should demote the replaced candidate",
+    );
+
+    const demotionsBeforeStaleReady = demotedLeadershipIds.length;
+    reportStaleLeaderReady!();
+
+    await waitFor(
+      () => demotedLeadershipIds.length > demotionsBeforeStaleReady,
+      2000,
+      "broker should send a scoped demote for stale leader-ready",
+    );
+    expect(demotedLeadershipIds.slice(demotionsBeforeStaleReady)).toContain(1);
+  });
+
   it("evicts a leader tab that misses broker pongs", async () => {
     const dbName = uniqueName("broker-pong-timeout");
     let silentLeaderPings = 0;

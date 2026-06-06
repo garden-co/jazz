@@ -764,6 +764,11 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
  */
 export type BatchScope = Scoped<DbDirectBatch>;
 
+interface BrokerPromotionState {
+  leadershipId: number;
+  cancelled: boolean;
+}
+
 /**
  * High-level database interface for typed queries and mutations.
  *
@@ -797,6 +802,7 @@ export class Db {
   private worker: Worker | null = null;
   private brokerClient: BrowserBrokerClient | null = null;
   private brokerPromotion: Promise<void> | null = null;
+  private activeBrokerPromotion: BrokerPromotionState | null = null;
   private tabLockLease: LeaderLockLease | null = null;
   private compatibilityLockLease: LeaderLockLease | null = null;
   private brokerLeaderReadyLeadershipId: number | null = null;
@@ -1384,6 +1390,9 @@ export class Db {
   private async promoteViaBroker(leadershipId: number, resetRequestId?: string): Promise<void> {
     if (this.isShuttingDown || !this.primaryDbName) return;
 
+    const promotion: BrokerPromotionState = { leadershipId, cancelled: false };
+    this.activeBrokerPromotion = promotion;
+
     this.closeFollowerPortState(new Error("Follower port closed during leader promotion"));
     this.closePendingLeaderFollowerPorts();
     this.currentLeaderTabId = this.tabId;
@@ -1397,30 +1406,41 @@ export class Db {
         throw new Error(`Unable to acquire ${this.brokerTabLockName()}`);
       }
       this.tabLockLease = tabLockLease;
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
 
       const compatibilityLockLease = await tryAcquireWebLock(this.brokerCompatibilityLockName());
       if (!compatibilityLockLease) {
         throw new Error(`Unable to acquire ${this.brokerCompatibilityLockName()}`);
       }
       this.compatibilityLockLease = compatibilityLockLease;
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
 
       if (resetRequestId) {
         await this.deleteBrokerStorageFiles();
+        if (await this.finishCancelledBrokerPromotion(promotion)) return;
       }
 
-      this.worker = await Db.spawnWorker(this.config.runtimeSources);
+      const worker = await Db.spawnWorker(this.config.runtimeSources);
+      if (await this.finishCancelledBrokerPromotion(promotion, worker)) return;
+      this.worker = worker;
       this.tabRole = "leader";
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
       if (resetRequestId) {
         this.recreateFirstClientAfterBrokerReset();
       }
       this.attachWorkerBridgeForExistingClient();
     } catch (error) {
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
       this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));
       await this.shutdownLeaderWorker();
       this.releaseBrokerLeadershipResources();
       this.tabRole = "follower";
       this.currentLeaderTabId = null;
       throw error;
+    } finally {
+      if (this.activeBrokerPromotion === promotion) {
+        this.activeBrokerPromotion = null;
+      }
     }
   }
 
@@ -1440,14 +1460,44 @@ export class Db {
   }
 
   private async demoteViaBroker(leadershipId: number): Promise<void> {
-    if (leadershipId !== this.currentLeadershipId) return;
-    if (this.tabRole !== "leader") return;
+    const activePromotion = this.activeBrokerPromotion;
+    const demotedActivePromotion = activePromotion?.leadershipId === leadershipId;
+    if (!demotedActivePromotion && leadershipId !== this.currentLeadershipId) return;
+    if (demotedActivePromotion) {
+      activePromotion.cancelled = true;
+    } else if (this.tabRole !== "leader") {
+      return;
+    }
     this.tabRole = "follower";
     this.currentLeaderTabId = null;
     this.brokerLeaderReadyLeadershipId = null;
     this.closePendingLeaderFollowerPorts();
     await this.shutdownLeaderWorker();
     this.releaseBrokerLeadershipResources();
+  }
+
+  private async finishCancelledBrokerPromotion(
+    promotion: BrokerPromotionState,
+    worker?: Worker,
+  ): Promise<boolean> {
+    if (
+      !promotion.cancelled &&
+      !this.isShuttingDown &&
+      this.currentLeadershipId === promotion.leadershipId
+    ) {
+      return false;
+    }
+
+    if (worker && this.worker !== worker) {
+      worker.terminate();
+    }
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyLeadershipId = null;
+    this.closePendingLeaderFollowerPorts();
+    await this.shutdownLeaderWorker();
+    this.releaseBrokerLeadershipResources();
+    return true;
   }
 
   private async prepareForBrokerStorageReset(leadershipId: number): Promise<void> {
