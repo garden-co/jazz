@@ -7,6 +7,9 @@ import {
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
 
+const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
+const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
+
 export interface BrowserBrokerClientSnapshot {
   brokerEpoch: string | null;
   role: BrowserBrokerRole;
@@ -83,6 +86,7 @@ export class BrowserBrokerClient {
   private reconnecting = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
+  private brokerLivenessTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(options: BrowserBrokerClientOptions) {
     this.options = options;
@@ -194,8 +198,11 @@ export class BrowserBrokerClient {
     if (this.closed) return;
     this.closed = true;
     this.closedError = new Error("Browser broker client closed");
+    this.stopBrokerLivenessTimer();
     this.port?.postMessage({ type: "shutdown" });
-    this.port?.close();
+    if (this.port) {
+      this.detachBrokerPort(this.port);
+    }
     for (const waiter of this.roleWaiters) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error("Browser broker client closed"));
@@ -211,6 +218,7 @@ export class BrowserBrokerClient {
     this.port = port;
 
     port.addEventListener("message", this.onMessage);
+    port.addEventListener("messageerror", this.onPortMessageError);
     port.start();
 
     const hello = new Promise<void>((resolve, reject) => {
@@ -252,7 +260,19 @@ export class BrowserBrokerClient {
       brokerPongTimeoutMs: this.options.brokerPongTimeoutMs,
     });
 
-    await hello;
+    try {
+      await hello;
+      this.refreshBrokerLivenessTimer();
+    } catch (error) {
+      if (this.port === port) {
+        this.detachBrokerPort(port);
+        this.port = null;
+      }
+      if (this.worker === worker) {
+        this.worker = null;
+      }
+      throw error;
+    }
   }
 
   private createSharedWorker(): SharedWorker {
@@ -268,6 +288,10 @@ export class BrowserBrokerClient {
     this.handleControlMessage(event.data as BrowserBrokerControlMessage);
   };
 
+  private readonly onPortMessageError = (): void => {
+    void this.reconnectAfterBrokerPortFailure(new Error("Browser broker port message error"));
+  };
+
   private handleControlMessage(message: BrowserBrokerControlMessage): void {
     if (!message || typeof message !== "object") return;
     if (this.brokerEpoch && message.brokerEpoch !== this.brokerEpoch) {
@@ -278,8 +302,10 @@ export class BrowserBrokerClient {
     switch (message.type) {
       case "broker-hello":
         this.brokerEpoch = message.brokerEpoch;
+        this.refreshBrokerLivenessTimer();
         return;
       case "broker-ping":
+        this.refreshBrokerLivenessTimer();
         this.options.onBrokerPing?.();
         if (this.shouldRespondToBrokerPing()) {
           this.port?.postMessage({ type: "broker-pong", brokerEpoch: message.brokerEpoch });
@@ -341,7 +367,10 @@ export class BrowserBrokerClient {
       case "unsupported":
         this.closed = true;
         this.closedError = new Error(message.reason);
-        this.port?.close();
+        this.stopBrokerLivenessTimer();
+        if (this.port) {
+          this.detachBrokerPort(this.port);
+        }
         this.rejectRoleWaiters(this.closedError);
         this.rejectResetWaiters(this.closedError);
         return;
@@ -349,24 +378,29 @@ export class BrowserBrokerClient {
   }
 
   private async reconnectAfterBrokerEpochChange(nextBrokerEpoch: string): Promise<void> {
+    await this.reconnectAfterBrokerPortFailure(
+      new Error(`Browser broker epoch changed from ${this.brokerEpoch} to ${nextBrokerEpoch}`),
+    );
+  }
+
+  private async reconnectAfterBrokerPortFailure(error: Error): Promise<void> {
     if (this.closed || this.reconnecting) return;
     this.reconnecting = true;
 
     const previousRole = this.role;
     const previousTerm = this.term;
     const previousPort = this.port;
-    const error = new Error(
-      `Browser broker epoch changed from ${this.brokerEpoch} to ${nextBrokerEpoch}`,
-    );
 
+    this.stopBrokerLivenessTimer();
     this.brokerEpoch = null;
     this.role = "follower";
     this.leaderTabId = null;
     this.term = 0;
     this.rejectResetWaiters(error);
 
-    previousPort?.removeEventListener("message", this.onMessage);
-    previousPort?.close();
+    if (previousPort) {
+      this.detachBrokerPort(previousPort);
+    }
 
     try {
       if (previousRole === "leader" && previousTerm > 0) {
@@ -455,6 +489,36 @@ export class BrowserBrokerClient {
     }
     return respond !== false;
   }
+
+  private refreshBrokerLivenessTimer(): void {
+    this.stopBrokerLivenessTimer();
+    if (this.closed) return;
+    this.brokerLivenessTimer = setTimeout(() => {
+      this.brokerLivenessTimer = null;
+      void this.reconnectAfterBrokerPortFailure(
+        new Error("Browser broker liveness timed out waiting for broker ping"),
+      );
+    }, this.brokerLivenessTimeoutMs());
+  }
+
+  private stopBrokerLivenessTimer(): void {
+    if (!this.brokerLivenessTimer) return;
+    clearTimeout(this.brokerLivenessTimer);
+    this.brokerLivenessTimer = null;
+  }
+
+  private brokerLivenessTimeoutMs(): number {
+    return (
+      normalizePositiveTimeout(this.options.brokerPingIntervalMs, DEFAULT_BROKER_PING_INTERVAL_MS) +
+      normalizePositiveTimeout(this.options.brokerPongTimeoutMs, DEFAULT_BROKER_PONG_TIMEOUT_MS)
+    );
+  }
+
+  private detachBrokerPort(port: MessagePort): void {
+    port.removeEventListener("message", this.onMessage);
+    port.removeEventListener("messageerror", this.onPortMessageError);
+    port.close();
+  }
 }
 
 function stringifyError(error: unknown): string {
@@ -463,4 +527,11 @@ function stringifyError(error: unknown): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function normalizePositiveTimeout(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.floor(value));
 }

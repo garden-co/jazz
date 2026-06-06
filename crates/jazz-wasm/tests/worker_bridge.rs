@@ -25,7 +25,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
-use web_sys::{MessagePort, Worker};
+use web_sys::{MessageChannel, MessagePort, Worker};
 
 use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use jazz_tools::row_histories::BatchId;
@@ -626,6 +626,41 @@ fn send_peer_sync_drops_empty_payload() {
         posted_before,
         "empty payload should not post"
     );
+}
+
+#[wasm_bindgen_test]
+async fn message_port_bridge_update_auth_posts_to_follower_port() {
+    let channel = MessageChannel::new().expect("message channel");
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::worker_bridge::WasmMessagePortBridge::attach(channel.port1(), &runtime)
+        .expect("attach");
+
+    let captured = Rc::new(RefCell::new(Vec::<MainToWorkerWire>::new()));
+    let captured_clone = Rc::clone(&captured);
+    let on_message = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        let data = Reflect::get(&event, &"data".into()).expect("event data");
+        if let Some(arr) = data.dyn_ref::<Uint8Array>() {
+            if let Ok(wire) = postcard::from_bytes::<MainToWorkerWire>(&arr.to_vec()) {
+                captured_clone.borrow_mut().push(wire);
+            }
+        }
+    });
+    channel
+        .port2()
+        .set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    channel.port2().start();
+
+    bridge.update_auth(Some("jwt-refresh".into()));
+    yield_once().await;
+
+    assert!(
+        captured.borrow().iter().any(|wire| matches!(
+            wire,
+            MainToWorkerWire::UpdateAuth { jwt_token } if jwt_token.as_deref() == Some("jwt-refresh")
+        )),
+        "follower port bridge should post UpdateAuth over the data port"
+    );
+    drop(on_message);
 }
 
 #[wasm_bindgen_test]

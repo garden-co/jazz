@@ -271,8 +271,12 @@ export function createRuntimeSourceIdentity(runtimeSources?: RuntimeSourcesConfi
     baseUrl: runtimeSources.baseUrl ?? null,
     workerUrl: runtimeSources.workerUrl ?? null,
     wasmUrl: runtimeSources.wasmUrl ?? null,
-    wasmModule: runtimeSources.wasmModule ? "custom-module" : null,
-    wasmSource: runtimeSources.wasmSource ? "custom-source" : null,
+    wasmModule: runtimeSources.wasmModule
+      ? getObjectRuntimeSourceIdentity("wasm-module", runtimeSources.wasmModule)
+      : null,
+    wasmSource: runtimeSources.wasmSource
+      ? getBufferSourceRuntimeSourceIdentity(runtimeSources.wasmSource)
+      : null,
   });
 }
 
@@ -295,6 +299,49 @@ export function createAuthCompatibilityClass(input: {
 
 function stableStringify(value: unknown): string {
   return JSON.stringify(sortForStableStringify(value));
+}
+
+let runtimeSourceObjectIdentityCounter = 0;
+const runtimeSourceObjectIdentities = new WeakMap<object, string>();
+
+function getObjectRuntimeSourceIdentity(prefix: string, value: object): string {
+  let identity = runtimeSourceObjectIdentities.get(value);
+  if (!identity) {
+    runtimeSourceObjectIdentityCounter += 1;
+    identity = `${prefix}:${runtimeSourceObjectIdentityCounter}`;
+    runtimeSourceObjectIdentities.set(value, identity);
+  }
+  return identity;
+}
+
+function getBufferSourceRuntimeSourceIdentity(value: BufferSource): string {
+  try {
+    const bytes = bufferSourceBytes(value);
+    return `wasm-source:${bytes.byteLength}:${hashBytes(bytes)}`;
+  } catch {
+    return getObjectRuntimeSourceIdentity("wasm-source", value as object);
+  }
+}
+
+function bufferSourceBytes(value: BufferSource): Uint8Array {
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return new Uint8Array(value);
+}
+
+function hashBytes(bytes: Uint8Array): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+
+  for (const byte of bytes) {
+    h1 ^= byte;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= byte;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+
+  return `${(h1 >>> 0).toString(16).padStart(8, "0")}${(h2 >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function sortForStableStringify(value: unknown): unknown {
