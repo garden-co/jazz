@@ -173,7 +173,17 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       evictStaleTabs();
       return;
     case "leader-ready":
-      if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
+      if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) {
+        const tab = tabs.get(tabId);
+        if (tab) {
+          post(tab.port, {
+            type: "demote",
+            brokerInstanceId,
+            leadershipId: message.leadershipId,
+          });
+        }
+        return;
+      }
       leader.ready = true;
       leader.tabLockName = message.tabLockName;
       leader.workerLockName = message.workerLockName;
