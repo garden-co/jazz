@@ -291,7 +291,7 @@ describe("SharedWorker browser broker", () => {
     });
   });
 
-  it("steals a stuck migration compatibility lock before promoting a replacement", async () => {
+  it("does not steal a stuck migration compatibility lock before promoting a replacement", async () => {
     const dbName = uniqueName("broker-compat-force-takeover");
     const first = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-a", "fingerprint-a", {
@@ -301,13 +301,11 @@ describe("SharedWorker browser broker", () => {
     clients.push(first);
 
     const secondReadyTerms: number[] = [];
-    const secondFailures: string[] = [];
     const second = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-b", "fingerprint-a", {
         forceTakeoverTimeoutMs: 50,
         reportFailures: true,
         onReady: (term) => secondReadyTerms.push(term),
-        onFailure: (term, reason) => secondFailures.push(`${term}:${reason}`),
       }),
     );
     clients.push(second);
@@ -317,12 +315,8 @@ describe("SharedWorker browser broker", () => {
 
     await first.shutdown();
 
-    await waitFor(
-      () => secondReadyTerms.some((term) => term > 1),
-      4000,
-      `stuck compatibility lock should be stolen before replacement promotion; ready: ${secondReadyTerms.join(", ")}; failures: ${secondFailures.join(", ")}`,
-    );
-    expect(second.snapshot().leaderTabId).toBe("tab-b");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(secondReadyTerms.some((term) => term > 1)).toBe(false);
   });
 
   it("does not repeatedly promote a candidate blocked by the migration compatibility lock", async () => {
@@ -365,6 +359,46 @@ describe("SharedWorker browser broker", () => {
 
     expect(failureReason).toContain(compatibilityLockName);
     expect(promotionAttempts).toBe(1);
+  });
+
+  it("replaces a promoted tab that has not reported schema before leader-ready", async () => {
+    const dbName = uniqueName("broker-schema-ready-promotes");
+    const promotionAttempts: string[] = [];
+    const demotedTerms: number[] = [];
+
+    const silent = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async () => {
+        promotionAttempts.push("tab-a");
+      },
+      onDemote: (term) => {
+        demotedTerms.push(term);
+      },
+    });
+    clients.push(silent);
+
+    await waitFor(
+      () => promotionAttempts.includes("tab-a"),
+      2000,
+      "first tab should be promoted before it has a schema",
+    );
+
+    const schemaReady = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
+        onReady: () => promotionAttempts.push("tab-b"),
+      }),
+    );
+    clients.push(schemaReady);
+
+    schemaReady.reportSchemaReady("schema-a");
+
+    await schemaReady.waitForRole("leader", 4000);
+    expect(schemaReady.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-b",
+      leaderTabId: "tab-b",
+    });
+    expect(demotedTerms).toContain(1);
   });
 
   it("evicts a leader tab that misses broker pongs", async () => {
@@ -460,8 +494,13 @@ describe("SharedWorker browser broker", () => {
     const second = await BrowserBrokerClient.connect(createResetAwareOptions("tab-b"));
     clientByTabId.set("tab-b", second);
     clients.push(second);
+    const schemaless = await BrowserBrokerClient.connect(createResetAwareOptions("tab-c"));
+    clientByTabId.set("tab-c", schemaless);
+    clients.push(schemaless);
 
     await first.waitForRole("leader", 2000);
+    first.reportSchemaReady("schema-a");
+    second.reportSchemaReady("schema-a");
     await second.waitForRole("follower", 2000);
 
     const reset = second.requestStorageReset(requestId);
@@ -470,7 +509,8 @@ describe("SharedWorker browser broker", () => {
     await waitFor(
       () =>
         resetBegunByTab.includes(`tab-a:${requestId}`) &&
-        resetBegunByTab.includes(`tab-b:${requestId}`),
+        resetBegunByTab.includes(`tab-b:${requestId}`) &&
+        resetBegunByTab.includes(`tab-c:${requestId}`),
       2000,
       "broker should ask every connected tab to prepare storage reset",
     );
@@ -483,5 +523,71 @@ describe("SharedWorker browser broker", () => {
       }),
     );
     expect(second.snapshot().term).toBeGreaterThan(1);
+  });
+
+  it("continues storage reset when the promoted reset leader is evicted before ready", async () => {
+    const dbName = uniqueName("broker-reset-leader-evicted");
+    const requestId = `reset-${dbName}`;
+    let silentResetLeader = false;
+    const resetPromotions: string[] = [];
+
+    function createResetEvictionOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        brokerPingIntervalMs: 20,
+        brokerPongTimeoutMs: 60,
+        respondToBrokerPings: () => tabId !== "tab-b" || !silentResetLeader,
+        onStorageResetBegin: async () => {
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+        },
+        onBecomeLeader: async (client, term, resetRequestId) => {
+          if (resetRequestId) {
+            resetPromotions.push(`${tabId}:${resetRequestId}`);
+            if (tabId === "tab-b") {
+              silentResetLeader = true;
+              return;
+            }
+          }
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            term,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, term, port) => {
+          port.close();
+          if (followerTabId === "tab-b") return;
+          if (tabId === "tab-a") {
+            first?.reportFollowerPortAttached(followerTabId, term);
+          }
+        },
+        onUseFollowerPort: (_leaderTabId, _term, port) => {
+          port.close();
+        },
+      };
+    }
+
+    let first: BrowserBrokerClient | null = null;
+    first = await BrowserBrokerClient.connect(createResetEvictionOptions("tab-a"));
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createResetEvictionOptions("tab-b"));
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    await second.waitForRole("follower", 2000);
+
+    const reset = first.requestStorageReset(requestId);
+    reset.catch(() => undefined);
+
+    await reset;
+
+    expect(resetPromotions).toContain(`tab-b:${requestId}`);
+    expect(resetPromotions).toContain(`tab-a:${requestId}`);
+    expect(first.snapshot().leaderTabId).toBe("tab-a");
   });
 });

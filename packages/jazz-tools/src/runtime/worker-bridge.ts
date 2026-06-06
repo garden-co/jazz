@@ -89,6 +89,7 @@ interface ListenerSlots {
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
 interface WasmMessagePortBridgeHandle {
+  updateAuth(jwtToken?: string | null): void;
   shutdown(): void;
 }
 
@@ -288,5 +289,9 @@ export class MessagePortRuntimeBridge {
   shutdown(): void {
     this.bridge?.shutdown();
     this.bridge = null;
+  }
+
+  updateAuth(auth: { jwtToken?: string }): void {
+    this.bridge?.updateAuth(auth.jwtToken ?? null);
   }
 }

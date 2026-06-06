@@ -199,7 +199,9 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       if (resetState?.promotedTerm === message.term) {
         resetState.errors.push(message.reason);
         tabs.delete(tabId);
+        removeTabFromActiveReset(tabId);
         leader = null;
+        resetState.promotedTerm = null;
         void promoteResetLeader(resetState);
         return;
       }
@@ -227,17 +229,23 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       return;
     case "shutdown":
       tabs.delete(tabId);
-      if (resetState) {
-        resetState.participants.delete(tabId);
-        resetState.preparedTabs.delete(tabId);
-        continueStorageResetIfReady(resetState);
-      }
       if (leader?.tabId === tabId) {
+        const term = leader.term;
+        const activeReset = resetState;
         const cleared = clearLeader(leader.term, "leader-shutdown", {
           demoteLeader: false,
           removeLeaderTab: false,
         });
+        removeTabFromActiveReset(tabId);
+        if (activeReset && activeReset.promotedTerm === term && activeReset.phase !== "preparing") {
+          activeReset.promotedTerm = null;
+          void promoteResetLeader(activeReset);
+          resetIfIdle();
+          return;
+        }
         scheduleReplacementElection(cleared);
+      } else {
+        removeTabFromActiveReset(tabId);
       }
       resetIfIdle();
       return;
@@ -261,10 +269,25 @@ function updateVisibility(tabId: string, visibility: BrowserBrokerVisibility): v
 
 function electIfNeeded(): void {
   if (resetState) return;
-  if (leader || tabs.size === 0) return;
+  if (leader?.ready || tabs.size === 0) return;
+  if (leader && !namespace?.schemaFingerprint) return;
 
-  const candidate = selectLeaderCandidate([...tabs.values()]);
+  const candidate = selectLeaderCandidate(eligibleLeaderCandidates());
   if (!candidate) return;
+
+  if (leader) {
+    const currentLeaderTab = tabs.get(leader.tabId);
+    if (currentLeaderTab?.schemaFingerprint === namespace?.schemaFingerprint) {
+      return;
+    }
+    if (candidate.tabId === leader.tabId) {
+      return;
+    }
+    clearLeader(leader.term, "leader-not-ready-for-schema", {
+      demoteLeader: true,
+      removeLeaderTab: false,
+    });
+  }
 
   const tab = tabs.get(candidate.tabId);
   if (!tab) return;
@@ -318,7 +341,9 @@ function handleSchemaReady(tabId: string, schemaFingerprint: string): void {
   tab.schemaFingerprint = schemaFingerprint;
   if (leader?.ready) {
     assignFollowerPorts(leader);
+    return;
   }
+  electIfNeeded();
 }
 
 function rejectTabForSchemaMismatch(tabId: string, schemaFingerprint: string): void {
@@ -529,7 +554,7 @@ function continueStorageResetIfReady(activeReset: ResetState): void {
 
 async function promoteResetLeader(activeReset: ResetState): Promise<void> {
   if (resetState !== activeReset) return;
-  const candidate = selectLeaderCandidate([...tabs.values()]);
+  const candidate = selectLeaderCandidate(eligibleLeaderCandidates());
   if (!candidate) {
     finishStorageReset(activeReset, false, "No connected tab is available to reset storage");
     return;
@@ -592,7 +617,8 @@ function finishStorageResetIfReconnected(activeReset: ResetState): void {
   if (!leader || !leader.ready || activeReset.promotedTerm !== leader.term) return;
 
   for (const tabId of activeReset.participants) {
-    if (tabId === leader.tabId || !tabs.has(tabId)) continue;
+    const tab = tabs.get(tabId);
+    if (!tab || !shouldAssignFollowerPort(tab, leader)) continue;
     if (!attachedFollowerPorts.has(followerAttachmentKey(tabId, leader.term))) {
       return;
     }
@@ -672,11 +698,22 @@ function evictTab(tabId: string, reason: string): void {
   tab.port.close();
 
   if (leader?.tabId === tabId) {
+    const term = leader.term;
+    const activeReset = resetState;
     const cleared = clearLeader(leader.term, reason, {
       demoteLeader: false,
       removeLeaderTab: false,
     });
+    removeTabFromActiveReset(tabId);
+    if (activeReset && activeReset.promotedTerm === term && activeReset.phase !== "preparing") {
+      activeReset.promotedTerm = null;
+      void promoteResetLeader(activeReset);
+      resetIfIdle();
+      return;
+    }
     scheduleReplacementElection(cleared);
+  } else {
+    removeTabFromActiveReset(tabId);
   }
   resetIfIdle();
 }
@@ -688,18 +725,16 @@ async function waitForPreviousLeaderLocks(
     return;
   }
 
-  const lockNames = [
-    previousLeader.tabLockName,
-    previousLeader.workerLockName,
-    previousLeader.compatibilityLockName,
-  ].filter((lockName): lockName is string => lockName !== null);
+  const takeoverLockNames = [previousLeader.tabLockName, previousLeader.workerLockName].filter(
+    (lockName): lockName is string => lockName !== null,
+  );
 
-  if (await acquireAndReleaseLocks(lockNames)) {
+  if (await acquireAndReleaseLocks(takeoverLockNames)) {
     return;
   }
 
   await sleep(namespace?.forceTakeoverTimeoutMs ?? DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS);
-  for (const lockName of lockNames) {
+  for (const lockName of takeoverLockNames) {
     await stealAndReleaseWebLock(lockName).catch(() => undefined);
   }
 }
@@ -718,13 +753,7 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
   if (!leaderTab) return;
 
   for (const follower of tabs.values()) {
-    if (follower.tabId === nextLeader.tabId) continue;
-    if (
-      namespace?.schemaFingerprint &&
-      follower.schemaFingerprint !== namespace.schemaFingerprint
-    ) {
-      continue;
-    }
+    if (!shouldAssignFollowerPort(follower, nextLeader)) continue;
     const key = followerAttachmentKey(follower.tabId, nextLeader.term);
     if (pendingFollowerAttachments.has(key)) continue;
     if (attachedFollowerPorts.has(key)) continue;
@@ -754,6 +783,28 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
       [channel.port2],
     );
   }
+}
+
+function eligibleLeaderCandidates(): BrowserBrokerCandidate[] {
+  const schemaFingerprint = namespace?.schemaFingerprint;
+  if (!schemaFingerprint) {
+    return [...tabs.values()];
+  }
+  return [...tabs.values()].filter((tab) => tab.schemaFingerprint === schemaFingerprint);
+}
+
+function shouldAssignFollowerPort(tab: TabState, nextLeader: LeaderState): boolean {
+  if (tab.tabId === nextLeader.tabId) return false;
+  return !namespace?.schemaFingerprint || tab.schemaFingerprint === namespace.schemaFingerprint;
+}
+
+function removeTabFromActiveReset(tabId: string): void {
+  const activeReset = resetState;
+  if (!activeReset) return;
+
+  activeReset.participants.delete(tabId);
+  activeReset.preparedTabs.delete(tabId);
+  continueStorageResetIfReady(activeReset);
 }
 
 function markFollowerPortAttached(followerTabId: string, term: number): void {

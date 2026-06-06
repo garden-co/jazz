@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BROKER_CONTROL_PROTOCOL_VERSION,
   createBrowserBrokerFingerprint,
+  createRuntimeSourceIdentity,
   detectBrowserBrokerMissingCapabilities,
   formatUnsupportedBrowserBrokerError,
   selectLeaderCandidate,
@@ -79,5 +80,24 @@ describe("browser broker protocol", () => {
         schemaHash: "schema-b",
       }),
     ).not.toBe(createBrowserBrokerFingerprint(input));
+  });
+
+  it("distinguishes custom runtime source objects", () => {
+    const firstSource = new Uint8Array([0, 1, 2, 3]);
+    const secondSource = new Uint8Array([0, 1, 2, 4]);
+
+    expect(createRuntimeSourceIdentity({ wasmSource: firstSource })).not.toBe(
+      createRuntimeSourceIdentity({ wasmSource: secondSource }),
+    );
+
+    const firstModule = {} as WebAssembly.Module;
+    const secondModule = {} as WebAssembly.Module;
+
+    expect(createRuntimeSourceIdentity({ wasmModule: firstModule })).not.toBe(
+      createRuntimeSourceIdentity({ wasmModule: secondModule }),
+    );
+    expect(createRuntimeSourceIdentity({ wasmModule: firstModule })).toBe(
+      createRuntimeSourceIdentity({ wasmModule: firstModule }),
+    );
   });
 });

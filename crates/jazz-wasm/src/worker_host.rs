@@ -733,6 +733,14 @@ fn process_follower_port_message(peer_id: &str, msg: MainToWorkerMessage) {
             route_peer_payloads(rt, peer_id, payloads);
         }
         MainToWorkerMessage::Wire(MainToWorkerWire::PeerClose { .. }) => close_peer(peer_id),
+        MainToWorkerMessage::Wire(MainToWorkerWire::UpdateAuth { jwt_token }) => {
+            update_auth(jwt_token, runtime.as_ref());
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::AcknowledgeRejectedBatch { batch_id }) => {
+            if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
+                tracing::warn!("acknowledge rejected batch from follower port: {err:?}");
+            }
+        }
         MainToWorkerMessage::Init(_)
         | MainToWorkerMessage::Unknown(_)
         | MainToWorkerMessage::Wire(_) => {}

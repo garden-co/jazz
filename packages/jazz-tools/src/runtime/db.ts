@@ -946,6 +946,9 @@ export class Db {
     this.workerBridge?.updateAuth({
       jwtToken,
     });
+    this.followerPortBridge?.updateAuth({
+      jwtToken,
+    });
 
     return true;
   }
@@ -968,6 +971,9 @@ export class Db {
     }
 
     this.workerBridge?.updateAuth({
+      jwtToken: this.config.jwtToken,
+    });
+    this.followerPortBridge?.updateAuth({
       jwtToken: this.config.jwtToken,
     });
 
@@ -1165,7 +1171,23 @@ export class Db {
     bridge.onFollowerPortAttached((event) => {
       if (this.tabRole !== "leader") return;
       if (event.term !== this.currentLeaderTerm) return;
-      this.brokerClient?.reportFollowerPortAttached(event.peerId, event.term);
+      const reportAttached = () => {
+        if (this.tabRole !== "leader") return;
+        if (event.term !== this.currentLeaderTerm) return;
+        this.brokerClient?.reportFollowerPortAttached(event.peerId, event.term);
+      };
+      if (!this.config.serverUrl) {
+        reportAttached();
+        return;
+      }
+      void bridge
+        .waitForUpstreamServerConnection()
+        .then(reportAttached)
+        .catch((error) => {
+          if (this.brokerClient && this.tabRole === "leader") {
+            this.brokerClient.reportLeaderFailed(this.currentLeaderTerm, stringifyError(error));
+          }
+        });
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -1176,11 +1198,23 @@ export class Db {
       })
       .then(() => undefined);
     bridgeReady.catch((error) => {
-      if (this.brokerClient && this.tabRole === "leader") {
-        this.brokerClient.reportLeaderFailed(this.currentLeaderTerm, stringifyError(error));
-      }
+      void this.handleBrokerLeaderBridgeFailure(error);
     });
     this.bridgeReady = bridgeReady;
+  }
+
+  private async handleBrokerLeaderBridgeFailure(error: unknown): Promise<void> {
+    if (this.brokerClient && this.tabRole === "leader") {
+      this.brokerClient.reportLeaderFailed(this.currentLeaderTerm, stringifyError(error));
+    }
+    if (this.tabRole !== "leader") return;
+
+    this.closePendingLeaderFollowerPorts();
+    await this.shutdownLeaderWorker();
+    this.releaseBrokerLeadershipResources();
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyTerm = null;
   }
 
   private installMainThreadWasmTelemetry(): void {

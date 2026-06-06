@@ -61,6 +61,13 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
     let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
 }
 
+fn post_wire_to_port(port: &MessagePort, msg: &MainToWorkerWire) {
+    let Ok((value, transfer)) = main_to_worker_post(msg) else {
+        return;
+    };
+    let _ = port.post_message_with_transferable(&value, transfer.as_ref());
+}
+
 fn local_batch_record_needs_fate_reconciliation(record: &LocalBatchRecord) -> bool {
     match record.latest_fate.as_ref() {
         None => true,
@@ -585,6 +592,17 @@ impl WasmMessagePortBridge {
     pub fn shutdown(&self) {
         self.inner.shutdown();
     }
+
+    #[wasm_bindgen(js_name = updateAuth)]
+    pub fn update_auth(&self, jwt_token: Option<String>) {
+        if self.inner.disposed.get() {
+            return;
+        }
+        post_wire_to_port(
+            &self.inner.port,
+            &MainToWorkerWire::UpdateAuth { jwt_token },
+        );
+    }
 }
 
 impl Drop for WasmMessagePortBridge {
@@ -658,10 +676,18 @@ impl MessagePortBridgeInner {
 
         match parse_worker_to_main(&event.data()) {
             ParsedWorkerToMain::Wire(WorkerToMainWire::Sync { payloads }) => {
+                let had_payloads = !payloads.is_empty();
                 self.apply_sync_entries(payloads);
+                if had_payloads {
+                    self.runtime.batched_tick();
+                }
             }
             ParsedWorkerToMain::Wire(WorkerToMainWire::PeerSync { payloads, .. }) => {
+                let had_payloads = !payloads.is_empty();
                 self.apply_peer_payloads(payloads);
+                if had_payloads {
+                    self.runtime.batched_tick();
+                }
             }
             ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message }) => {
                 tracing::warn!("message port bridge error: {message}");
@@ -716,6 +742,7 @@ impl MessagePortBridgeInner {
         if self.disposed.replace(true) {
             return;
         }
+        self.runtime.batched_tick();
         self.sender.flush_now();
         self.runtime.install_noop_sync_sender();
         self.sender.set_server_payload_forwarder(None);
