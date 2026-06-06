@@ -78,7 +78,7 @@ struct PeerRouting {
     main_client_id: Option<String>,
     peer_client_by_peer_id: HashMap<String, String>,
     peer_id_by_client: HashMap<String, String>,
-    peer_terms: HashMap<String, u32>,
+    peer_leadership_ids: HashMap<String, u32>,
     peer_targets: HashMap<String, JsValue>,
     peer_port_message_closures: HashMap<String, Closure<dyn FnMut(MessageEvent)>>,
 }
@@ -89,7 +89,7 @@ impl Default for PeerRouting {
             main_client_id: None,
             peer_client_by_peer_id: HashMap::new(),
             peer_id_by_client: HashMap::new(),
-            peer_terms: HashMap::new(),
+            peer_leadership_ids: HashMap::new(),
             peer_targets: HashMap::new(),
             peer_port_message_closures: HashMap::new(),
         }
@@ -443,7 +443,7 @@ fn close_peer(peer_id: &str) {
         if let Some(client) = guard.peer_client_by_peer_id.remove(peer_id) {
             guard.peer_id_by_client.remove(&client);
         }
-        guard.peer_terms.remove(peer_id);
+        guard.peer_leadership_ids.remove(peer_id);
         if let Some(target) = guard.peer_targets.remove(peer_id) {
             close_message_target(&target);
         }
@@ -451,7 +451,7 @@ fn close_peer(peer_id: &str) {
     });
 }
 
-fn attach_follower_port(peer_id: String, term: u32, port: MessagePort) {
+fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) {
     let Some(runtime) = RUNTIME.with(|cell| cell.borrow().clone()) else {
         return;
     };
@@ -473,14 +473,16 @@ fn attach_follower_port(peer_id: String, term: u32, port: MessagePort) {
 
     PEER_ROUTING.with(|cell| {
         let mut guard = cell.borrow_mut();
-        guard.peer_terms.insert(peer_id.clone(), term);
+        guard
+            .peer_leadership_ids
+            .insert(peer_id.clone(), leadership_id);
         guard.peer_targets.insert(peer_id.clone(), port_target);
         guard
             .peer_port_message_closures
             .insert(peer_id.clone(), on_message);
     });
 
-    post_follower_port_attached(&peer_id, term);
+    post_follower_port_attached(&peer_id, leadership_id);
 }
 
 // =============================================================================
@@ -497,10 +499,14 @@ fn make_peer_routing_lookup() -> Function {
             let Some(peer_id) = guard.peer_id_by_client.get(&client) else {
                 return JsValue::NULL;
             };
-            let term = guard.peer_terms.get(peer_id).copied().unwrap_or(0);
+            let leadership_id = guard.peer_leadership_ids.get(peer_id).copied().unwrap_or(0);
             let obj = Object::new();
             let _ = Reflect::set(&obj, &"peerId".into(), &JsValue::from_str(peer_id));
-            let _ = Reflect::set(&obj, &"term".into(), &JsValue::from_f64(term as f64));
+            let _ = Reflect::set(
+                &obj,
+                &"leadershipId".into(),
+                &JsValue::from_f64(leadership_id as f64),
+            );
             if let Some(target) = guard.peer_targets.get(peer_id) {
                 let _ = Reflect::set(&obj, &"target".into(), target);
             }
@@ -626,14 +632,16 @@ fn process_main_message(msg: MainToWorkerMessage) {
         }
         MainToWorkerWire::PeerSync {
             peer_id,
-            term,
+            leadership_id,
             payloads,
         } => {
             let Some(rt) = runtime.as_ref() else { return };
             match ensure_peer_client(rt, &peer_id) {
                 Ok(client) => {
                     PEER_ROUTING.with(|cell| {
-                        cell.borrow_mut().peer_terms.insert(peer_id.clone(), term);
+                        cell.borrow_mut()
+                            .peer_leadership_ids
+                            .insert(peer_id.clone(), leadership_id);
                     });
                     for payload in payloads {
                         let arr = Uint8Array::from(payload.as_ref());
@@ -899,7 +907,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         let mut g = cell.borrow_mut();
         g.peer_client_by_peer_id.clear();
         g.peer_id_by_client.clear();
-        g.peer_terms.clear();
+        g.peer_leadership_ids.clear();
         for target in g.peer_targets.values() {
             close_message_target(target);
         }
@@ -939,7 +947,7 @@ fn post_to_main(msg: &WorkerToMainWire) {
     let _ = global.post_message_with_transfer(&value, transfer.as_ref());
 }
 
-fn post_follower_port_attached(peer_id: &str, term: u32) {
+fn post_follower_port_attached(peer_id: &str, leadership_id: u32) {
     let message = Object::new();
     let _ = Reflect::set(
         &message,
@@ -947,7 +955,11 @@ fn post_follower_port_attached(peer_id: &str, term: u32) {
         &JsValue::from_str("follower-port-attached"),
     );
     let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
-    let _ = Reflect::set(&message, &"term".into(), &JsValue::from_f64(term as f64));
+    let _ = Reflect::set(
+        &message,
+        &"leadershipId".into(),
+        &JsValue::from_f64(leadership_id as f64),
+    );
     let global = global_worker_scope();
     let _ = global.post_message(&message);
 }
@@ -968,7 +980,7 @@ fn handle_follower_port_control(value: &JsValue) -> bool {
             else {
                 return true;
             };
-            let term = Reflect::get(value, &"term".into())
+            let leadership_id = Reflect::get(value, &"leadershipId".into())
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0) as u32;
@@ -978,7 +990,7 @@ fn handle_follower_port_control(value: &JsValue) -> bool {
             else {
                 return true;
             };
-            attach_follower_port(peer_id, term, port);
+            attach_follower_port(peer_id, leadership_id, port);
             true
         }
         "detach-follower-port" => {

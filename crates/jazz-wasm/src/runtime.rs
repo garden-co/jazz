@@ -581,7 +581,7 @@ struct RustOutboxSenderInner {
     /// Worker-side: the runtime client id assigned to the main-thread peer.
     /// `None` on the main side and during the brief window before init.
     main_client_id: RefCell<Option<String>>,
-    /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
+    /// Worker-side: `(clientId: string) => { peerId, leadershipId } | null` lookup
     /// for routing client-bound payloads to the right follower-tab peer.
     peer_routing_lookup: RefCell<Option<Function>>,
     /// Worker-side: `() => void` invoked after each batch flush that
@@ -793,7 +793,7 @@ impl SyncSender for RustOutboxSender {
             return;
         }
 
-        // Peer client: look up (peerId, term) and post peer-sync immediately.
+        // Peer client: look up (peerId, leadership_id) and post peer-sync immediately.
         let routing = inner.peer_routing_lookup.borrow();
         let Some(lookup) = routing.as_ref() else {
             return;
@@ -818,11 +818,11 @@ impl SyncSender for RustOutboxSender {
             Ok(v) => v.as_string(),
             Err(_) => None,
         };
-        let term = match js_sys::Reflect::get(&routing_value, &"term".into()) {
+        let leadership_id = match js_sys::Reflect::get(&routing_value, &"leadershipId".into()) {
             Ok(v) => v.as_f64(),
             Err(_) => None,
         };
-        let (Some(peer_id), Some(term)) = (peer_id, term) else {
+        let (Some(peer_id), Some(leadership_id)) = (peer_id, leadership_id) else {
             return;
         };
         let target_override = match js_sys::Reflect::get(&routing_value, &"target".into()) {
@@ -830,7 +830,7 @@ impl SyncSender for RustOutboxSender {
             _ => None,
         };
 
-        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
+        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, leadership_id, payloads:[bytes] }`
         // and post the Uint8Array with the underlying ArrayBuffer transferred.
         let bytes_payload = match encoded {
             SyncEntry::BareBytes(b) | SyncEntry::SequencedBytes { payload: b, .. } => b,
@@ -839,7 +839,7 @@ impl SyncSender for RustOutboxSender {
         };
         let wire = crate::worker_protocol::WorkerToMainWire::PeerSync {
             peer_id,
-            term: term as u32,
+            leadership_id: leadership_id as u32,
             payloads: vec![bytes_payload],
         };
         let Ok(bytes) = postcard::to_allocvec(&wire) else {

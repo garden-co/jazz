@@ -19,11 +19,11 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
 
     snapshot() {
       return {
-        brokerEpoch: "test-broker",
+        brokerInstanceId: "test-broker",
         role: "leader" as const,
         tabId: this.options.tabId,
         leaderTabId: this.options.tabId,
-        term: 1,
+        leadershipId: 1,
       };
     }
 

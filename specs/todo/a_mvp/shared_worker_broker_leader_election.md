@@ -18,7 +18,7 @@ leader's dedicated worker.
 - Keep a separate Web Lock in the leader dedicated worker before OPFS is opened.
 - Detect Safari BFCache-style lock loss quickly by monitoring Web Locks from the
   broker.
-- Fence every broker epoch, leader term, and follower port attachment so stale
+- Fence every broker instance, leadership ID, and follower port attachment so stale
   tabs/workers cannot continue durable work silently.
 - Route follower sync payloads directly to the leader dedicated worker through
   broker-supplied `MessagePort`s.
@@ -113,10 +113,10 @@ and configuration fingerprint.
 The broker owns cross-tab coordination only:
 
 - connected tab registry
-- broker epoch assignment
+- broker instance assignment
 - visibility ranking
 - leader election
-- leader term assignment
+- leadership ID assignment
 - tab-lock and worker-lock monitoring
 - leader demotion
 - follower port assignment
@@ -213,12 +213,12 @@ Leader selection:
 This deliberately accepts possible Safari churn when every tab is hidden. Fast
 lock-loss monitoring is the recovery mechanism.
 
-The broker owns leader terms. Every promotion increments the term. Ports and
-worker peer attachments are scoped to the term in which they were created.
+The broker owns leadership IDs. Every promotion increments the leadership ID. Ports and
+worker peer attachments are scoped to the leadership ID in which they were created.
 
-The broker also owns a `brokerEpoch` generated when the SharedWorker broker
-starts. Every broker-to-tab control message includes the epoch. Tabs ignore
-messages from stale epochs and treat broker epoch changes as a broker restart.
+The broker also owns a `brokerInstanceId` generated when the SharedWorker broker
+starts. Every broker-to-tab control message includes the broker instance. Tabs ignore
+messages from stale broker instances and treat broker instance changes as a broker restart.
 
 ## Locks
 
@@ -246,19 +246,19 @@ OPFS before releasing that lock during clean shutdown.
 ## Broker Lock Monitoring
 
 After a leader is ready, the broker starts queued lock requests for the tab and
-worker lock names. Each monitor request is scoped to the current `brokerEpoch`,
-leader term, and lock name. Monitor requests must use an `AbortSignal` so the
+worker lock names. Each monitor request is scoped to the current `brokerInstanceId`,
+leadership ID, and lock name. Monitor requests must use an `AbortSignal` so the
 broker can cancel them before planned demotion, storage reset, shutdown, or
 replacement election.
 
-If a queued monitor request is granted while it still matches the current epoch
-and term, and the broker has not marked that lock release as planned, the broker
+If a queued monitor request is granted while it still matches the current broker instance
+and leadership ID, and the broker has not marked that lock release as planned, the broker
 treats that as leader loss:
 
 1. immediately release the broker-acquired lock,
-2. mark the current leader term dead,
-3. stop assigning new follower ports for that term,
-4. instruct connected tabs to close follower data ports for that term,
+2. mark the current leadership ID dead,
+3. stop assigning new follower ports for that leadership ID,
+4. instruct connected tabs to close follower data ports for that leadership ID,
 5. elect a replacement.
 
 This is the fast path for Safari BFCache behavior: if a hidden leader tab enters
@@ -269,7 +269,7 @@ The same mechanism applies to worker crashes. If the leader worker dies and its
 worker lock is released, the broker's queued worker-lock monitor is granted and
 failover starts.
 
-If a monitor is granted for an old epoch/term, or after the broker has cancelled
+If a monitor is granted for an old broker instance/leadership ID, or after the broker has cancelled
 it for a planned transition, the broker releases the lock and ignores the grant.
 Normal demotion and reset must not be reported as unexpected lock loss merely
 because the queued monitor became grantable.
@@ -279,23 +279,23 @@ because the queued monitor became grantable.
 Promotion flow:
 
 1. Broker chooses a candidate by the visibility ranking.
-2. Broker sends `become-leader` with a new term.
+2. Broker sends `become-leader` with a new leadership ID.
 3. Candidate acquires `jazz-leader-tab:<appId>:<dbName>`.
 4. Candidate acquires the old `jazz-leader-lock:<appId>:<dbName>` compatibility
    lock when migration compatibility is enabled.
-5. Candidate spawns the dedicated Jazz worker with the broker epoch and term.
+5. Candidate spawns the dedicated Jazz worker with the broker instance and leadership ID.
 6. Worker acquires `jazz-leader-worker:<appId>:<dbName>`.
 7. Worker opens the primary OPFS namespace and persistent runtime.
-8. Leader tab reports `leader-ready` to the broker with the term and lock names
+8. Leader tab reports `leader-ready` to the broker with the leadership ID and lock names
    it successfully holds.
-9. Broker starts tab-lock and worker-lock monitors for the same term.
+9. Broker starts tab-lock and worker-lock monitors for the same leadership ID.
 10. Broker announces the durable-ready leader and starts assigning follower
     ports.
 
 The broker must not announce a leader as durable-ready before both locks are
 held and the worker has opened the persistent runtime.
 
-If promotion fails, the broker demotes that candidate for the failed term and
+If promotion fails, the broker demotes that candidate for the failed leadership ID and
 elects another connected tab. If no tab can be promoted, persistent browser mode
 remains unavailable until a connected tab can satisfy the lock and worker
 requirements.
@@ -312,12 +312,12 @@ contention, or stale-worker OPFS open failures reject with explicit errors.
 
 Normal demotion:
 
-1. Broker cancels the term's lock monitors and marks the transition as planned.
+1. Broker cancels lock monitors for that leadership ID and marks the transition as planned.
 2. Broker sends `demote` to the old leader tab.
-3. Leader tab marks the term stale and refuses new durable work.
-4. Leader tab closes follower data ports for the term.
+3. Leader tab marks the leadership ID stale and refuses new durable work.
+4. Leader tab closes follower data ports for the leadership ID.
 5. Leader tab asks the worker bridge to shut down cleanly.
-6. Worker marks the term stale, rejects new peer attachments and durable work,
+6. Worker marks the leadership ID stale, rejects new peer attachments and durable work,
    then flushes and closes the persistent runtime.
 7. Worker closes OPFS and releases the worker lock.
 8. Leader tab terminates the dedicated worker.
@@ -326,11 +326,11 @@ Normal demotion:
 The leader tab and leader worker must also enter this stale/poisoned state if
 they observe any of these signals:
 
-- broker port failure or broker epoch change
-- `demote` for their current term
+- broker port failure or broker instance change
+- `demote` for their current leadership ID
 - worker-side promotion failure
 - explicit shutdown
-- local detection that their term no longer matches current broker state
+- local detection that their leadership ID no longer matches current broker state
 
 `forceTakeoverTimeoutMs` defaults to `1000` and must be configurable for tests
 and browser-specific tuning.
@@ -352,7 +352,7 @@ decision to demote and, after timeout, to steal locks.
 
 Because lock stealing does not terminate JavaScript, it is only a recovery gate
 for future promotion attempts. A stolen lock does not make the old leader safe.
-Any old leader that later reconnects to the broker with a stale epoch or term
+Any old leader that later reconnects to the broker with a stale broker instance or leadership ID
 must be rejected and must keep its local Db poisoned rather than resuming
 durable work.
 
@@ -381,12 +381,12 @@ Tab to broker:
 - `shutdown`
   - tells the broker this tab is intentionally closing its participation
 - `broker-pong`
-  - replies to broker liveness checks for the current epoch
+  - replies to broker liveness checks for the current broker instance
 
 Broker to tab:
 
 - `broker-hello`
-  - announces the broker epoch accepted for this port
+  - announces the broker instance accepted for this port
 - `broker-ping`
   - lightweight broker liveness check; this is not leader throttling detection
 - `become-leader`
@@ -394,7 +394,7 @@ Broker to tab:
 - `demote`
   - asks a leader to shut down and release locks
 - `leader-ready`
-  - announces the durable-ready leader and term
+  - announces the durable-ready leader and leadership ID
 - `attach-follower-port`
   - sends one endpoint of a `MessageChannel` to the leader tab so it can
     transfer that endpoint into the dedicated worker
@@ -403,7 +403,7 @@ Broker to tab:
 - `follower-ready`
   - tells the follower its port has been accepted by the leader worker
 - `close-follower-port`
-  - tells a tab to close a stale follower data port for a dead term
+  - tells a tab to close a stale follower data port for a dead leadership ID
 - `storage-reset-begin`
   - freezes ordinary port assignment and starts reset coordination
 - `storage-reset-finished`
@@ -411,17 +411,17 @@ Broker to tab:
 - `unsupported`
   - reports an unsupported environment or incompatible connection
 
-Every broker-to-tab control message carries `brokerEpoch`. Every leader-specific
-control message carries `term`. Tabs must ignore stale epoch/term messages,
+Every broker-to-tab control message carries `brokerInstanceId`. Every leader-specific
+control message carries `leadershipId`. Tabs must ignore stale broker instance/leadership ID messages,
 close stale follower data ports, and reject stale leader-worker acknowledgements.
 
 Leader tab to dedicated worker:
 
 - existing init and direct leader `WorkerBridge` traffic remain
 - `attach-follower-port`
-  - transfers a follower `MessagePort` plus peer id and term
+  - transfers a follower `MessagePort` plus peer id and leadership ID
 - `detach-follower-port`
-  - closes a follower peer for a term
+  - closes a follower peer for a leadership ID
 
 Leader dedicated worker to leader tab:
 
@@ -454,8 +454,8 @@ After transfer, the broker is not in the data path.
 
 The data port carries binary Jazz sync payload batches. It must not carry
 election messages, storage reset messages, or browser lifecycle messages. The
-term and peer identity are established when the port is attached; a new leader
-term gets new ports.
+leadership ID and peer identity are established when the port is attached; a new leader
+leadership ID gets new ports.
 
 The leader worker maps each follower port to a runtime peer client. On port
 close or `detach-follower-port`, the worker closes that peer client.
@@ -465,7 +465,7 @@ the follower data port as its durable/upstream path.
 
 Follower data ports are opened only after a three-way acknowledgement:
 
-1. broker creates the `MessageChannel` for a follower and current term,
+1. broker creates the `MessageChannel` for a follower and current leadership ID,
 2. leader worker acknowledges the worker-side endpoint and peer id,
 3. broker sends `follower-ready` to the follower.
 
@@ -507,7 +507,7 @@ Leader tab shutdown:
 
 - send `shutdown` to the broker,
 - broker treats this as intentional demotion,
-- close follower data ports for the term,
+- close follower data ports for the leadership ID,
 - gracefully shut down the worker bridge,
 - terminate the dedicated worker,
 - release locks,
@@ -520,14 +520,14 @@ remaining connected tabs.
 ## Broker Failure And Restart
 
 The SharedWorker broker is in-memory. If it crashes or is restarted, its
-connected tabs must treat the new broker as a new coordination epoch.
+connected tabs must treat the new broker as a new coordination broker instance.
 
 Because `MessagePort` close is not uniformly observable across browsers, the
 broker sends a lightweight control-plane `broker-ping` for each active tab port.
 Tabs reply with `broker-pong`. Missed broker pings, broker-port errors, or a
-changed `brokerEpoch` are fatal to the tab's current broker participation:
+changed `brokerInstanceId` are fatal to the tab's current broker participation:
 
-1. a leader tab marks its term stale, refuses new durable work, closes follower
+1. a leader tab marks its leadership ID stale, refuses new durable work, closes follower
    ports, shuts down its worker, and releases locks;
 2. a follower closes its follower data port and marks persistent startup/runtime
    unavailable;
@@ -535,8 +535,8 @@ changed `brokerEpoch` are fatal to the tab's current broker participation:
    a fresh `hello`.
 
 The new broker elects from scratch. It must not try to reconstruct the previous
-term from tab claims because terms were broker-memory state. This ping/pong is
-only broker liveness and epoch detection; it must not be used to infer that a
+leadership ID from tab claims because leadership IDs were broker-memory state. This ping/pong is
+only broker liveness and broker instance detection; it must not be used to infer that a
 leader tab or leader worker is throttled.
 
 ## Testing Strategy
@@ -560,13 +560,13 @@ Representative coverage:
 - follower reads and writes persist through the leader worker
 - leader tab-lock release elects the most recently visible connected tab
 - leader worker-lock release elects a replacement
-- planned demotion/reset cancels term monitors and does not report unexpected
+- planned demotion/reset cancels leadership ID monitors and does not report unexpected
   lock loss
 - stuck leader demotion uses Web Locks `steal` only after
   `forceTakeoverTimeoutMs`
-- stale leaders refuse durable work after demotion, broker epoch change, or
+- stale leaders refuse durable work after demotion, broker instance change, or
   broker liveness failure
-- broker restart creates a new epoch and forces tabs to reconnect/re-elect
+- broker restart creates a new broker instance and forces tabs to reconnect/re-elect
 - hidden-only election chooses the most recently visible connected tab
 - storage reset requested from a follower succeeds and reconnects all tabs
 - old BroadcastChannel election, sync, reset, and fallback namespace code paths
@@ -608,5 +608,5 @@ under heavy load with a worker that is genuinely throttled or dead.
 
 Until that future workflow exists, throttling suspicion must not trigger broker
 demotion. The MVP failover triggers are lock loss, worker failure, tab
-disconnect, broker epoch/liveness failure, explicit demotion, promotion failure,
+disconnect, broker instance/liveness failure, explicit demotion, promotion failure,
 and storage reset.

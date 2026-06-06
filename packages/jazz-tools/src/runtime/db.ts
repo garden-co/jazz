@@ -799,7 +799,7 @@ export class Db {
   private brokerPromotion: Promise<void> | null = null;
   private tabLockLease: LeaderLockLease | null = null;
   private compatibilityLockLease: LeaderLockLease | null = null;
-  private brokerLeaderReadyTerm: number | null = null;
+  private brokerLeaderReadyLeadershipId: number | null = null;
   private followerDataPort: MessagePort | null = null;
   private followerPortBridge: MessagePortRuntimeBridge | null = null;
   private followerReady: Promise<void> | null = null;
@@ -809,7 +809,7 @@ export class Db {
   private brokerResetSchema: WasmSchema | null = null;
   private readonly pendingLeaderFollowerPorts = new Map<
     string,
-    { followerTabId: string; term: number; port: MessagePort }
+    { followerTabId: string; leadershipId: number; port: MessagePort }
   >();
   private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
@@ -818,7 +818,7 @@ export class Db {
   private tabRole: BrowserBrokerRole = "follower";
   private tabId: string | null = null;
   private currentLeaderTabId: string | null = null;
-  private currentLeaderTerm = 0;
+  private currentLeadershipId = 0;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1016,26 +1016,27 @@ export class Db {
         tabId: db.tabId,
         fingerprint: Db.createBrokerFingerprint(config, db.primaryDbName),
         visibility: db.currentBrokerVisibility(),
-        onBecomeLeader: (client, term, resetRequestId) => {
+        onBecomeLeader: (client, leadershipId, resetRequestId) => {
           db.brokerClient = client;
-          const promotion = db.promoteViaBroker(term, resetRequestId);
+          const promotion = db.promoteViaBroker(leadershipId, resetRequestId);
           db.brokerPromotion = promotion;
           return promotion;
         },
-        onDemote: (term) => db.demoteViaBroker(term),
-        onAttachFollowerPort: (followerTabId, term, port) => {
-          db.handleBrokerAttachFollowerPort(followerTabId, term, port);
+        onDemote: (leadershipId) => db.demoteViaBroker(leadershipId),
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          db.handleBrokerAttachFollowerPort(followerTabId, leadershipId, port);
         },
-        onUseFollowerPort: (leaderTabId, term, port) => {
-          db.handleBrokerUseFollowerPort(leaderTabId, term, port);
+        onUseFollowerPort: (leaderTabId, leadershipId, port) => {
+          db.handleBrokerUseFollowerPort(leaderTabId, leadershipId, port);
         },
-        onFollowerReady: (leaderTabId, term) => {
-          db.handleBrokerFollowerReady(leaderTabId, term);
+        onFollowerReady: (leaderTabId, leadershipId) => {
+          db.handleBrokerFollowerReady(leaderTabId, leadershipId);
         },
-        onCloseFollowerPort: (term) => {
-          db.handleBrokerCloseFollowerPort(term);
+        onCloseFollowerPort: (leadershipId) => {
+          db.handleBrokerCloseFollowerPort(leadershipId);
         },
-        onStorageResetBegin: (_requestId, term) => db.prepareForBrokerStorageReset(term),
+        onStorageResetBegin: (_requestId, leadershipId) =>
+          db.prepareForBrokerStorageReset(leadershipId),
       });
       db.brokerClient = broker;
       db.adoptBrokerSnapshot(broker.snapshot());
@@ -1170,11 +1171,11 @@ export class Db {
     });
     bridge.onFollowerPortAttached((event) => {
       if (this.tabRole !== "leader") return;
-      if (event.term !== this.currentLeaderTerm) return;
+      if (event.leadershipId !== this.currentLeadershipId) return;
       const reportAttached = () => {
         if (this.tabRole !== "leader") return;
-        if (event.term !== this.currentLeaderTerm) return;
-        this.brokerClient?.reportFollowerPortAttached(event.peerId, event.term);
+        if (event.leadershipId !== this.currentLeadershipId) return;
+        this.brokerClient?.reportFollowerPortAttached(event.peerId, event.leadershipId);
       };
       if (!this.config.serverUrl) {
         reportAttached();
@@ -1185,7 +1186,7 @@ export class Db {
         .then(reportAttached)
         .catch((error) => {
           if (this.brokerClient && this.tabRole === "leader") {
-            this.brokerClient.reportLeaderFailed(this.currentLeaderTerm, stringifyError(error));
+            this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
           }
         });
     });
@@ -1205,7 +1206,7 @@ export class Db {
 
   private async handleBrokerLeaderBridgeFailure(error: unknown): Promise<void> {
     if (this.brokerClient && this.tabRole === "leader") {
-      this.brokerClient.reportLeaderFailed(this.currentLeaderTerm, stringifyError(error));
+      this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
     }
     if (this.tabRole !== "leader") return;
 
@@ -1214,7 +1215,7 @@ export class Db {
     this.releaseBrokerLeadershipResources();
     this.tabRole = "follower";
     this.currentLeaderTabId = null;
-    this.brokerLeaderReadyTerm = null;
+    this.brokerLeaderReadyLeadershipId = null;
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1358,7 +1359,7 @@ export class Db {
     this.tabRole = snapshot.role;
     this.tabId = snapshot.tabId;
     this.currentLeaderTabId = snapshot.leaderTabId;
-    this.currentLeaderTerm = snapshot.term;
+    this.currentLeadershipId = snapshot.leadershipId;
   }
 
   private currentBrokerVisibility(): BrowserBrokerVisibility {
@@ -1380,15 +1381,15 @@ export class Db {
     return `jazz-leader-lock:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
   }
 
-  private async promoteViaBroker(term: number, resetRequestId?: string): Promise<void> {
+  private async promoteViaBroker(leadershipId: number, resetRequestId?: string): Promise<void> {
     if (this.isShuttingDown || !this.primaryDbName) return;
 
     this.closeFollowerPortState(new Error("Follower port closed during leader promotion"));
     this.closePendingLeaderFollowerPorts();
     this.currentLeaderTabId = this.tabId;
-    this.currentLeaderTerm = term;
+    this.currentLeadershipId = leadershipId;
     this.workerDbName = this.primaryDbName;
-    this.brokerLeaderReadyTerm = null;
+    this.brokerLeaderReadyLeadershipId = null;
 
     try {
       const tabLockLease = await tryAcquireWebLock(this.brokerTabLockName());
@@ -1414,7 +1415,7 @@ export class Db {
       }
       this.attachWorkerBridgeForExistingClient();
     } catch (error) {
-      this.brokerClient?.reportLeaderFailed(term, stringifyError(error));
+      this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));
       await this.shutdownLeaderWorker();
       this.releaseBrokerLeadershipResources();
       this.tabRole = "follower";
@@ -1438,34 +1439,34 @@ export class Db {
     }
   }
 
-  private async demoteViaBroker(term: number): Promise<void> {
-    if (term !== this.currentLeaderTerm) return;
+  private async demoteViaBroker(leadershipId: number): Promise<void> {
+    if (leadershipId !== this.currentLeadershipId) return;
     if (this.tabRole !== "leader") return;
     this.tabRole = "follower";
     this.currentLeaderTabId = null;
-    this.brokerLeaderReadyTerm = null;
+    this.brokerLeaderReadyLeadershipId = null;
     this.closePendingLeaderFollowerPorts();
     await this.shutdownLeaderWorker();
     this.releaseBrokerLeadershipResources();
   }
 
-  private async prepareForBrokerStorageReset(term: number): Promise<void> {
+  private async prepareForBrokerStorageReset(leadershipId: number): Promise<void> {
     if (this.isShuttingDown) return;
-    if (term !== this.currentLeaderTerm) return;
+    if (leadershipId !== this.currentLeadershipId) return;
 
     this.tabRole = "follower";
     this.currentLeaderTabId = null;
-    this.brokerLeaderReadyTerm = null;
+    this.brokerLeaderReadyLeadershipId = null;
     await this.shutdownWorkerAndClientsForStorageReset();
     this.releaseBrokerLeadershipResources();
   }
 
   private reportBrokerLeaderReady(): void {
     if (!this.brokerClient || this.tabRole !== "leader") return;
-    if (this.brokerLeaderReadyTerm === this.currentLeaderTerm) return;
-    this.brokerLeaderReadyTerm = this.currentLeaderTerm;
+    if (this.brokerLeaderReadyLeadershipId === this.currentLeadershipId) return;
+    this.brokerLeaderReadyLeadershipId = this.currentLeadershipId;
     this.brokerClient.reportLeaderReady({
-      term: this.currentLeaderTerm,
+      leadershipId: this.currentLeadershipId,
       tabLockName: this.brokerTabLockName(),
       workerLockName: this.brokerWorkerLockName(),
       compatibilityLockName: this.brokerCompatibilityLockName(),
@@ -1474,15 +1475,15 @@ export class Db {
 
   private handleBrokerAttachFollowerPort(
     followerTabId: string,
-    term: number,
+    leadershipId: number,
     port: MessagePort,
   ): void {
-    if (this.tabRole !== "leader" || term !== this.currentLeaderTerm) {
+    if (this.tabRole !== "leader" || leadershipId !== this.currentLeadershipId) {
       port.close();
       return;
     }
 
-    this.pendingLeaderFollowerPorts.set(followerTabId, { followerTabId, term, port });
+    this.pendingLeaderFollowerPorts.set(followerTabId, { followerTabId, leadershipId, port });
     this.flushPendingLeaderFollowerPorts();
   }
 
@@ -1491,11 +1492,11 @@ export class Db {
 
     for (const [followerTabId, entry] of this.pendingLeaderFollowerPorts) {
       this.pendingLeaderFollowerPorts.delete(followerTabId);
-      if (entry.term !== this.currentLeaderTerm) {
+      if (entry.leadershipId !== this.currentLeadershipId) {
         entry.port.close();
         continue;
       }
-      this.workerBridge.attachFollowerPort(entry.followerTabId, entry.term, entry.port);
+      this.workerBridge.attachFollowerPort(entry.followerTabId, entry.leadershipId, entry.port);
     }
   }
 
@@ -1506,8 +1507,12 @@ export class Db {
     this.pendingLeaderFollowerPorts.clear();
   }
 
-  private handleBrokerUseFollowerPort(leaderTabId: string, term: number, port: MessagePort): void {
-    if (this.tabRole === "leader" || term < this.currentLeaderTerm) {
+  private handleBrokerUseFollowerPort(
+    leaderTabId: string,
+    leadershipId: number,
+    port: MessagePort,
+  ): void {
+    if (this.tabRole === "leader" || leadershipId < this.currentLeadershipId) {
       port.close();
       return;
     }
@@ -1515,23 +1520,23 @@ export class Db {
     this.closeFollowerPortState(new Error("Follower port replaced"));
     this.tabRole = "follower";
     this.currentLeaderTabId = leaderTabId;
-    this.currentLeaderTerm = term;
+    this.currentLeadershipId = leadershipId;
     this.followerDataPort = port;
     this.ensureFollowerReadyPromise();
     this.attachFollowerPortBridgeForExistingClient();
   }
 
-  private handleBrokerFollowerReady(leaderTabId: string, term: number): void {
+  private handleBrokerFollowerReady(leaderTabId: string, leadershipId: number): void {
     if (this.tabRole !== "follower") return;
-    if (term !== this.currentLeaderTerm) return;
+    if (leadershipId !== this.currentLeadershipId) return;
     this.currentLeaderTabId = leaderTabId;
     this.resolveFollowerReady?.();
     this.resolveFollowerReady = null;
     this.rejectFollowerReady = null;
   }
 
-  private handleBrokerCloseFollowerPort(term: number): void {
-    if (term !== this.currentLeaderTerm) return;
+  private handleBrokerCloseFollowerPort(leadershipId: number): void {
+    if (leadershipId !== this.currentLeadershipId) return;
     this.closeFollowerPortState(new Error("Follower port closed by broker"));
   }
 
@@ -1755,7 +1760,7 @@ export class Db {
     }
     this.workerBridge = null;
     this.bridgeReady = null;
-    this.brokerLeaderReadyTerm = null;
+    this.brokerLeaderReadyLeadershipId = null;
     this.closePendingLeaderFollowerPorts();
     this.closeFollowerPortState(new Error("Browser storage reset"));
 

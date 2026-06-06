@@ -31,7 +31,7 @@ type TabState = BrowserBrokerCandidate & {
 
 type LeaderState = {
   tabId: string;
-  term: number;
+  leadershipId: number;
   ready: boolean;
   tabLockName: string | null;
   workerLockName: string | null;
@@ -43,7 +43,7 @@ type LeaderState = {
 
 type ClearedLeaderState = Pick<
   LeaderState,
-  "tabId" | "term" | "tabLockName" | "workerLockName" | "compatibilityLockName"
+  "tabId" | "leadershipId" | "tabLockName" | "workerLockName" | "compatibilityLockName"
 >;
 
 type ResetState = {
@@ -52,12 +52,12 @@ type ResetState = {
   preparedTabs: Set<string>;
   errors: string[];
   previousLeader: ClearedLeaderState | null;
-  promotedTerm: number | null;
+  promotedLeadershipId: number | null;
   phase: "preparing" | "promoting" | "reconnecting";
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
-const brokerEpoch = createBrokerId("epoch");
+const brokerInstanceId = createBrokerId("broker");
 const tabs = new Map<string, TabState>();
 let namespace: {
   appId: string;
@@ -69,7 +69,7 @@ let namespace: {
   schemaFingerprint: string | null;
 } | null = null;
 let leader: LeaderState | null = null;
-let currentTerm = 0;
+let currentLeadershipId = 0;
 const pendingFollowerAttachments = new Set<string>();
 const attachedFollowerPorts = new Set<string>();
 let replacementElectionInFlight = false;
@@ -125,7 +125,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   ) {
     post(port, {
       type: "unsupported",
-      brokerEpoch,
+      brokerInstanceId,
       reason: "incompatible persistent browser configuration",
     });
     port.close();
@@ -145,7 +145,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     lastPongAt: now,
   });
 
-  post(port, { type: "broker-hello", brokerEpoch });
+  post(port, { type: "broker-hello", brokerInstanceId });
   startBrokerPingTimer();
   if (resetState) {
     addTabToActiveReset(message.tabId);
@@ -154,9 +154,9 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   if (leader?.ready) {
     post(port, {
       type: "leader-ready",
-      brokerEpoch,
+      brokerInstanceId,
       leaderTabId: leader.tabId,
-      term: leader.term,
+      leadershipId: leader.leadershipId,
     });
     assignFollowerPorts(leader);
   } else {
@@ -173,14 +173,14 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       evictStaleTabs();
       return;
     case "leader-ready":
-      if (!leader || leader.tabId !== tabId || leader.term !== message.term) return;
+      if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
       leader.ready = true;
       leader.tabLockName = message.tabLockName;
       leader.workerLockName = message.workerLockName;
       leader.compatibilityLockName = message.compatibilityLockName ?? null;
       announceLeaderReady(leader);
       startLeaderLockMonitors(leader);
-      if (resetState?.promotedTerm === message.term) {
+      if (resetState?.promotedLeadershipId === message.leadershipId) {
         resetState.phase = "reconnecting";
         assignFollowerPorts(leader);
         finishStorageResetIfReconnected(resetState);
@@ -189,32 +189,32 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       assignFollowerPorts(leader);
       return;
     case "follower-port-attached":
-      if (!leader || leader.tabId !== tabId || leader.term !== message.term) return;
-      markFollowerPortAttached(message.followerTabId, message.term);
+      if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
+      markFollowerPortAttached(message.followerTabId, message.leadershipId);
       return;
     case "schema-ready":
       handleSchemaReady(tabId, message.schemaFingerprint);
       return;
     case "leader-failed":
-      if (resetState?.promotedTerm === message.term) {
+      if (resetState?.promotedLeadershipId === message.leadershipId) {
         resetState.errors.push(message.reason);
         tabs.delete(tabId);
         removeTabFromActiveReset(tabId);
         leader = null;
-        resetState.promotedTerm = null;
+        resetState.promotedLeadershipId = null;
         void promoteResetLeader(resetState);
         return;
       }
-      if (leader?.tabId === tabId && leader.term === message.term) {
+      if (leader?.tabId === tabId && leader.leadershipId === message.leadershipId) {
         const failedTab = tabs.get(tabId);
-        const cleared = clearLeader(message.term, "leader-failed", {
+        const cleared = clearLeader(message.leadershipId, "leader-failed", {
           demoteLeader: false,
           removeLeaderTab: true,
         });
         if (failedTab) {
           post(failedTab.port, {
             type: "unsupported",
-            brokerEpoch,
+            brokerInstanceId,
             reason: message.reason,
           });
         }
@@ -230,15 +230,19 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
     case "shutdown":
       tabs.delete(tabId);
       if (leader?.tabId === tabId) {
-        const term = leader.term;
+        const leadershipId = leader.leadershipId;
         const activeReset = resetState;
-        const cleared = clearLeader(leader.term, "leader-shutdown", {
+        const cleared = clearLeader(leader.leadershipId, "leader-shutdown", {
           demoteLeader: false,
           removeLeaderTab: false,
         });
         removeTabFromActiveReset(tabId);
-        if (activeReset && activeReset.promotedTerm === term && activeReset.phase !== "preparing") {
-          activeReset.promotedTerm = null;
+        if (
+          activeReset &&
+          activeReset.promotedLeadershipId === leadershipId &&
+          activeReset.phase !== "preparing"
+        ) {
+          activeReset.promotedLeadershipId = null;
           void promoteResetLeader(activeReset);
           resetIfIdle();
           return;
@@ -250,7 +254,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       resetIfIdle();
       return;
     case "broker-pong":
-      if (message.brokerEpoch !== brokerEpoch) return;
+      if (message.brokerInstanceId !== brokerInstanceId) return;
       tabs.get(tabId)!.lastPongAt = Date.now();
       evictStaleTabs();
       return;
@@ -283,7 +287,7 @@ function electIfNeeded(): void {
     if (candidate.tabId === leader.tabId) {
       return;
     }
-    clearLeader(leader.term, "leader-not-ready-for-schema", {
+    clearLeader(leader.leadershipId, "leader-not-ready-for-schema", {
       demoteLeader: true,
       removeLeaderTab: false,
     });
@@ -292,10 +296,10 @@ function electIfNeeded(): void {
   const tab = tabs.get(candidate.tabId);
   if (!tab) return;
 
-  currentTerm += 1;
+  currentLeadershipId += 1;
   leader = {
     tabId: tab.tabId,
-    term: currentTerm,
+    leadershipId: currentLeadershipId,
     ready: false,
     tabLockName: null,
     workerLockName: null,
@@ -307,8 +311,8 @@ function electIfNeeded(): void {
 
   post(tab.port, {
     type: "become-leader",
-    brokerEpoch,
-    term: currentTerm,
+    brokerInstanceId,
+    leadershipId: currentLeadershipId,
   });
 }
 
@@ -316,7 +320,7 @@ function resetIfIdle(): void {
   if (tabs.size > 0) return;
   namespace = null;
   leader = null;
-  currentTerm = 0;
+  currentLeadershipId = 0;
   pendingFollowerAttachments.clear();
   attachedFollowerPorts.clear();
   resetState = null;
@@ -352,14 +356,14 @@ function rejectTabForSchemaMismatch(tabId: string, schemaFingerprint: string): v
 
   post(tab.port, {
     type: "unsupported",
-    brokerEpoch,
+    brokerInstanceId,
     reason: "incompatible persistent browser schema",
   });
   tab.port.close();
   tabs.delete(tabId);
 
   if (leader?.tabId === tabId) {
-    const cleared = clearLeader(leader.term, `schema mismatch: ${schemaFingerprint}`, {
+    const cleared = clearLeader(leader.leadershipId, `schema mismatch: ${schemaFingerprint}`, {
       demoteLeader: false,
       removeLeaderTab: false,
     });
@@ -372,9 +376,9 @@ function announceLeaderReady(nextLeader: LeaderState): void {
   for (const tab of tabs.values()) {
     post(tab.port, {
       type: "leader-ready",
-      brokerEpoch,
+      brokerInstanceId,
       leaderTabId: nextLeader.tabId,
-      term: nextLeader.term,
+      leadershipId: nextLeader.leadershipId,
     });
   }
 }
@@ -385,45 +389,45 @@ function startLeaderLockMonitors(nextLeader: LeaderState): void {
 
   nextLeader.tabLockMonitor = monitorWebLockRelease(nextLeader.tabLockName, {
     onGranted: () => {
-      handleLeaderLockReleased(nextLeader.term, "tab-lock-released");
+      handleLeaderLockReleased(nextLeader.leadershipId, "tab-lock-released");
     },
     onError: (error) => {
-      handleLeaderLockReleased(nextLeader.term, stringifyError(error));
+      handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
     },
   });
   nextLeader.workerLockMonitor = monitorWebLockRelease(nextLeader.workerLockName, {
     onGranted: () => {
-      handleLeaderLockReleased(nextLeader.term, "worker-lock-released");
+      handleLeaderLockReleased(nextLeader.leadershipId, "worker-lock-released");
     },
     onError: (error) => {
-      handleLeaderLockReleased(nextLeader.term, stringifyError(error));
+      handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
     },
   });
   if (nextLeader.compatibilityLockName) {
     nextLeader.compatibilityLockMonitor = monitorWebLockRelease(nextLeader.compatibilityLockName, {
       onGranted: () => {
-        handleLeaderLockReleased(nextLeader.term, "compatibility-lock-released");
+        handleLeaderLockReleased(nextLeader.leadershipId, "compatibility-lock-released");
       },
       onError: (error) => {
-        handleLeaderLockReleased(nextLeader.term, stringifyError(error));
+        handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
       },
     });
   }
 }
 
-function handleLeaderLockReleased(term: number, reason: string): void {
-  if (!leader || leader.term !== term) return;
-  const cleared = clearLeader(term, reason, { demoteLeader: true, removeLeaderTab: true });
+function handleLeaderLockReleased(leadershipId: number, reason: string): void {
+  if (!leader || leader.leadershipId !== leadershipId) return;
+  const cleared = clearLeader(leadershipId, reason, { demoteLeader: true, removeLeaderTab: true });
   scheduleReplacementElection(cleared);
 }
 
 function clearLeader(
-  term: number,
+  leadershipId: number,
   reason: string,
   options: { demoteLeader: boolean; removeLeaderTab: boolean },
 ): ClearedLeaderState | null {
   const current = leader;
-  if (!current || current.term !== term) return null;
+  if (!current || current.leadershipId !== leadershipId) return null;
   cancelLeaderMonitors(current);
   pendingFollowerAttachments.clear();
   attachedFollowerPorts.clear();
@@ -432,8 +436,8 @@ function clearLeader(
   if (options.demoteLeader && leaderTab) {
     post(leaderTab.port, {
       type: "demote",
-      brokerEpoch,
-      term,
+      brokerInstanceId,
+      leadershipId,
     });
   }
 
@@ -441,8 +445,8 @@ function clearLeader(
     if (tab.tabId === current.tabId) continue;
     post(tab.port, {
       type: "close-follower-port",
-      brokerEpoch,
-      term,
+      brokerInstanceId,
+      leadershipId,
     });
   }
 
@@ -453,7 +457,7 @@ function clearLeader(
   void reason;
   return {
     tabId: current.tabId,
-    term: current.term,
+    leadershipId: current.leadershipId,
     tabLockName: current.tabLockName,
     workerLockName: current.workerLockName,
     compatibilityLockName: current.compatibilityLockName,
@@ -475,29 +479,29 @@ function startStorageReset(requestId: string): void {
   }
 
   const previousLeader = leader
-    ? clearLeader(leader.term, "storage-reset", {
+    ? clearLeader(leader.leadershipId, "storage-reset", {
         demoteLeader: false,
         removeLeaderTab: false,
       })
     : null;
 
-  const term = previousLeader?.term ?? currentTerm;
+  const leadershipId = previousLeader?.leadershipId ?? currentLeadershipId;
   resetState = {
     requestId,
     participants: new Set(tabs.keys()),
     preparedTabs: new Set(),
     errors: [],
     previousLeader,
-    promotedTerm: null,
+    promotedLeadershipId: null,
     phase: "preparing",
   };
 
   for (const tab of tabs.values()) {
     post(tab.port, {
       type: "storage-reset-begin",
-      brokerEpoch,
+      brokerInstanceId,
       requestId,
-      term,
+      leadershipId,
     });
   }
 
@@ -513,9 +517,9 @@ function addTabToActiveReset(tabId: string): void {
   activeReset.participants.add(tabId);
   post(tab.port, {
     type: "storage-reset-begin",
-    brokerEpoch,
+    brokerInstanceId,
     requestId: activeReset.requestId,
-    term: activeReset.previousLeader?.term ?? currentTerm,
+    leadershipId: activeReset.previousLeader?.leadershipId ?? currentLeadershipId,
   });
 }
 
@@ -566,11 +570,11 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     return;
   }
 
-  currentTerm += 1;
-  activeReset.promotedTerm = currentTerm;
+  currentLeadershipId += 1;
+  activeReset.promotedLeadershipId = currentLeadershipId;
   leader = {
     tabId: tab.tabId,
-    term: currentTerm,
+    leadershipId: currentLeadershipId,
     ready: false,
     tabLockName: null,
     workerLockName: null,
@@ -582,8 +586,8 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
 
   post(tab.port, {
     type: "become-leader",
-    brokerEpoch,
-    term: currentTerm,
+    brokerInstanceId,
+    leadershipId: currentLeadershipId,
     resetRequestId: activeReset.requestId,
   });
 }
@@ -600,7 +604,7 @@ function finishStorageReset(
   for (const tab of tabs.values()) {
     post(tab.port, {
       type: "storage-reset-finished",
-      brokerEpoch,
+      brokerInstanceId,
       requestId: completedReset.requestId,
       success,
       ...(errorMessage ? { errorMessage } : {}),
@@ -614,12 +618,12 @@ function finishStorageReset(
 
 function finishStorageResetIfReconnected(activeReset: ResetState): void {
   if (resetState !== activeReset || activeReset.phase !== "reconnecting") return;
-  if (!leader || !leader.ready || activeReset.promotedTerm !== leader.term) return;
+  if (!leader || !leader.ready || activeReset.promotedLeadershipId !== leader.leadershipId) return;
 
   for (const tabId of activeReset.participants) {
     const tab = tabs.get(tabId);
     if (!tab || !shouldAssignFollowerPort(tab, leader)) continue;
-    if (!attachedFollowerPorts.has(followerAttachmentKey(tabId, leader.term))) {
+    if (!attachedFollowerPorts.has(followerAttachmentKey(tabId, leader.leadershipId))) {
       return;
     }
   }
@@ -671,7 +675,7 @@ function sendBrokerPings(): void {
     }
     post(tab.port, {
       type: "broker-ping",
-      brokerEpoch,
+      brokerInstanceId,
     });
   }
 }
@@ -698,15 +702,19 @@ function evictTab(tabId: string, reason: string): void {
   tab.port.close();
 
   if (leader?.tabId === tabId) {
-    const term = leader.term;
+    const leadershipId = leader.leadershipId;
     const activeReset = resetState;
-    const cleared = clearLeader(leader.term, reason, {
+    const cleared = clearLeader(leader.leadershipId, reason, {
       demoteLeader: false,
       removeLeaderTab: false,
     });
     removeTabFromActiveReset(tabId);
-    if (activeReset && activeReset.promotedTerm === term && activeReset.phase !== "preparing") {
-      activeReset.promotedTerm = null;
+    if (
+      activeReset &&
+      activeReset.promotedLeadershipId === leadershipId &&
+      activeReset.phase !== "preparing"
+    ) {
+      activeReset.promotedLeadershipId = null;
       void promoteResetLeader(activeReset);
       resetIfIdle();
       return;
@@ -754,7 +762,7 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
 
   for (const follower of tabs.values()) {
     if (!shouldAssignFollowerPort(follower, nextLeader)) continue;
-    const key = followerAttachmentKey(follower.tabId, nextLeader.term);
+    const key = followerAttachmentKey(follower.tabId, nextLeader.leadershipId);
     if (pendingFollowerAttachments.has(key)) continue;
     if (attachedFollowerPorts.has(key)) continue;
 
@@ -764,9 +772,9 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
       leaderTab.port,
       {
         type: "attach-follower-port",
-        brokerEpoch,
+        brokerInstanceId,
         followerTabId: follower.tabId,
-        term: nextLeader.term,
+        leadershipId: nextLeader.leadershipId,
         port: channel.port1,
       },
       [channel.port1],
@@ -775,9 +783,9 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
       follower.port,
       {
         type: "use-follower-port",
-        brokerEpoch,
+        brokerInstanceId,
         leaderTabId: nextLeader.tabId,
-        term: nextLeader.term,
+        leadershipId: nextLeader.leadershipId,
         port: channel.port2,
       },
       [channel.port2],
@@ -807,29 +815,29 @@ function removeTabFromActiveReset(tabId: string): void {
   continueStorageResetIfReady(activeReset);
 }
 
-function markFollowerPortAttached(followerTabId: string, term: number): void {
-  const key = followerAttachmentKey(followerTabId, term);
+function markFollowerPortAttached(followerTabId: string, leadershipId: number): void {
+  const key = followerAttachmentKey(followerTabId, leadershipId);
   if (!pendingFollowerAttachments.has(key)) return;
   pendingFollowerAttachments.delete(key);
 
-  if (!leader || leader.term !== term) return;
+  if (!leader || leader.leadershipId !== leadershipId) return;
   const follower = tabs.get(followerTabId);
   if (!follower) return;
   attachedFollowerPorts.add(key);
 
   post(follower.port, {
     type: "follower-ready",
-    brokerEpoch,
+    brokerInstanceId,
     leaderTabId: leader.tabId,
-    term,
+    leadershipId,
   });
-  if (resetState?.phase === "reconnecting" && resetState.promotedTerm === term) {
+  if (resetState?.phase === "reconnecting" && resetState.promotedLeadershipId === leadershipId) {
     finishStorageResetIfReconnected(resetState);
   }
 }
 
-function followerAttachmentKey(followerTabId: string, term: number): string {
-  return `${term}:${followerTabId}`;
+function followerAttachmentKey(followerTabId: string, leadershipId: number): string {
+  return `${leadershipId}:${followerTabId}`;
 }
 
 function post(

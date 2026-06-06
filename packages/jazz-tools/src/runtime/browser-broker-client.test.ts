@@ -29,10 +29,10 @@ describe("BrowserBrokerClient", () => {
     vi.useRealTimers();
   });
 
-  it("reconnects and demotes stale local state when the broker epoch changes", async () => {
-    const brokerEpochs = ["epoch-a", "epoch-b"];
+  it("reconnects and demotes stale local state when the broker instance changes", async () => {
+    const brokerInstanceIds = ["instance-a", "instance-b"];
     const workers: FakeSharedWorker[] = [];
-    const demotedTerms: number[] = [];
+    const demotedLeadershipIds: number[] = [];
 
     class FakePort extends EventTarget {
       readonly postedMessages: unknown[] = [];
@@ -41,9 +41,9 @@ describe("BrowserBrokerClient", () => {
       postMessage(message: unknown): void {
         this.postedMessages.push(message);
         if ((message as { type?: unknown }).type === "hello") {
-          const brokerEpoch = brokerEpochs[workers.length - 1];
+          const brokerInstanceId = brokerInstanceIds[workers.length - 1];
           queueMicrotask(() => {
-            dispatchPortMessage(this, { type: "broker-hello", brokerEpoch });
+            dispatchPortMessage(this, { type: "broker-hello", brokerInstanceId });
           });
         }
       }
@@ -76,51 +76,51 @@ describe("BrowserBrokerClient", () => {
           locks: { request() {} },
         },
       },
-      onDemote: (term) => {
-        demotedTerms.push(term);
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
       },
     });
 
     dispatchPortMessage(workers[0].port, {
       type: "leader-ready",
-      brokerEpoch: "epoch-a",
+      brokerInstanceId: "instance-a",
       leaderTabId: "tab-a",
-      term: 1,
+      leadershipId: 1,
     } satisfies BrowserBrokerControlMessage);
     await client.waitForRole("leader", 100);
 
     dispatchPortMessage(workers[0].port, {
       type: "broker-ping",
-      brokerEpoch: "epoch-b",
+      brokerInstanceId: "instance-b",
     } satisfies BrowserBrokerControlMessage);
 
     await waitFor(
-      () => workers.length === 2 && demotedTerms.includes(1),
+      () => workers.length === 2 && demotedLeadershipIds.includes(1),
       200,
-      "client should reconnect after broker epoch change",
+      "client should reconnect after broker instance change",
     );
 
     expect(workers[0].port.closed).toBe(true);
     expect(client.snapshot()).toMatchObject({
-      brokerEpoch: "epoch-b",
+      brokerInstanceId: "instance-b",
       role: "follower",
       leaderTabId: null,
-      term: 0,
+      leadershipId: 0,
     });
 
     dispatchPortMessage(workers[1].port, {
       type: "leader-ready",
-      brokerEpoch: "epoch-b",
+      brokerInstanceId: "instance-b",
       leaderTabId: "tab-a",
-      term: 2,
+      leadershipId: 2,
     } satisfies BrowserBrokerControlMessage);
 
     await client.waitForRole("leader", 100);
     expect(client.snapshot()).toMatchObject({
-      brokerEpoch: "epoch-b",
+      brokerInstanceId: "instance-b",
       role: "leader",
       leaderTabId: "tab-a",
-      term: 2,
+      leadershipId: 2,
     });
 
     await client.shutdown();
@@ -178,23 +178,23 @@ describe("BrowserBrokerClient", () => {
 
     dispatchPortMessage(workers[0]!.port, {
       type: "become-leader",
-      brokerEpoch: "late-epoch",
-      term: 1,
+      brokerInstanceId: "late-instance",
+      leadershipId: 1,
     } satisfies BrowserBrokerControlMessage);
 
     expect(onBecomeLeader).not.toHaveBeenCalled();
   });
 
   it("reconnects when broker pings stop", async () => {
-    const brokerEpochs = ["epoch-a", "epoch-b"];
+    const brokerInstanceIds = ["instance-a", "instance-b"];
     const workers: FakeSharedWorker[] = [];
-    const demotedTerms: number[] = [];
+    const demotedLeadershipIds: number[] = [];
 
     class FakePort extends EventTarget {
       readonly postedMessages: unknown[] = [];
       closed = false;
 
-      constructor(private readonly brokerEpoch: string) {
+      constructor(private readonly brokerInstanceId: string) {
         super();
       }
 
@@ -202,7 +202,10 @@ describe("BrowserBrokerClient", () => {
         this.postedMessages.push(message);
         if ((message as { type?: unknown }).type === "hello") {
           queueMicrotask(() => {
-            dispatchPortMessage(this, { type: "broker-hello", brokerEpoch: this.brokerEpoch });
+            dispatchPortMessage(this, {
+              type: "broker-hello",
+              brokerInstanceId: this.brokerInstanceId,
+            });
           });
         }
       }
@@ -218,8 +221,9 @@ describe("BrowserBrokerClient", () => {
       readonly port: MessagePort & FakePort;
 
       constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
-        this.port = new FakePort(brokerEpochs[workers.length] ?? "epoch-next") as MessagePort &
-          FakePort;
+        this.port = new FakePort(
+          brokerInstanceIds[workers.length] ?? "instance-next",
+        ) as MessagePort & FakePort;
         workers.push(this);
       }
     }
@@ -239,31 +243,31 @@ describe("BrowserBrokerClient", () => {
           locks: { request() {} },
         },
       },
-      onDemote: (term) => {
-        demotedTerms.push(term);
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
       },
     });
 
     dispatchPortMessage(workers[0]!.port, {
       type: "leader-ready",
-      brokerEpoch: "epoch-a",
+      brokerInstanceId: "instance-a",
       leaderTabId: "tab-a",
-      term: 1,
+      leadershipId: 1,
     } satisfies BrowserBrokerControlMessage);
     await client.waitForRole("leader", 100);
 
     await waitFor(
-      () => workers.length >= 2 && demotedTerms.includes(1),
+      () => workers.length >= 2 && demotedLeadershipIds.includes(1),
       500,
       "client should reconnect after broker pings stop",
     );
 
     expect(workers[0]!.port.closed).toBe(true);
     expect(client.snapshot()).toMatchObject({
-      brokerEpoch: "epoch-b",
+      brokerInstanceId: "instance-b",
       role: "follower",
       leaderTabId: null,
-      term: 0,
+      leadershipId: 0,
     });
 
     await client.shutdown();
