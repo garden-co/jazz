@@ -1528,6 +1528,21 @@ impl WasmRuntime {
             .set_sync_sender(Box::new(NoopSyncSender));
     }
 
+    /// Temporary bridge detach: leave no fallback sender installed so the
+    /// runtime keeps future outbox entries until a replacement bridge attaches.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn clear_sync_sender(&self) {
+        self.core.borrow_mut().clear_sync_sender();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = enableOutboxBufferingWithoutSyncSender)]
+    pub fn enable_outbox_buffering_without_sync_sender(&self) {
+        self.core
+            .borrow_mut()
+            .set_buffer_outbox_without_sync_sender(true);
+    }
+
     /// Register a callback for unhandled mutation errors.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = onMutationError)]

@@ -150,6 +150,15 @@ fn fresh_runtime() -> WasmRuntime {
     .expect("WasmRuntime::new")
 }
 
+fn insert_todo(runtime: &WasmRuntime, title: &str) {
+    let values = Object::new();
+    Reflect::set(&values, &"title".into(), &title.into()).unwrap();
+    Reflect::set(&values, &"completed".into(), &JsValue::FALSE).unwrap();
+    runtime
+        .insert("todos", values.into(), None)
+        .expect("insert todo");
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -501,6 +510,40 @@ async fn yield_once() {
     JsFuture::from(promise).await.expect("yield");
 }
 
+struct CapturedPortMessages {
+    messages: Rc<RefCell<Vec<MainToWorkerWire>>>,
+    _on_message: Closure<dyn FnMut(JsValue)>,
+}
+
+impl CapturedPortMessages {
+    fn attach(port: &MessagePort) -> Self {
+        let messages = Rc::new(RefCell::new(Vec::<MainToWorkerWire>::new()));
+        let messages_clone = Rc::clone(&messages);
+        let on_message = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+            let data = Reflect::get(&event, &"data".into()).expect("event data");
+            if let Some(arr) = data.dyn_ref::<Uint8Array>() {
+                if let Ok(wire) = postcard::from_bytes::<MainToWorkerWire>(&arr.to_vec()) {
+                    messages_clone.borrow_mut().push(wire);
+                }
+            }
+        });
+        port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        port.start();
+        Self {
+            messages,
+            _on_message: on_message,
+        }
+    }
+
+    fn sync_count(&self) -> usize {
+        self.messages
+            .borrow()
+            .iter()
+            .filter(|wire| matches!(wire, MainToWorkerWire::Sync { .. }))
+            .count()
+    }
+}
+
 // =============================================================================
 // Wire-format trio for the peer-channel API
 // =============================================================================
@@ -661,6 +704,42 @@ async fn message_port_bridge_update_auth_posts_to_follower_port() {
         "follower port bridge should post UpdateAuth over the data port"
     );
     drop(on_message);
+}
+
+#[wasm_bindgen_test]
+async fn message_port_bridge_detach_for_reconnect_buffers_future_outbox() {
+    let first_channel = MessageChannel::new().expect("first message channel");
+    let runtime = fresh_runtime();
+    runtime.enable_outbox_buffering_without_sync_sender();
+    let first_capture = CapturedPortMessages::attach(&first_channel.port2());
+    let first_bridge =
+        jazz_wasm::worker_bridge::WasmMessagePortBridge::attach(first_channel.port1(), &runtime)
+            .expect("attach first bridge");
+    yield_once().await;
+    let first_syncs_before_detach = first_capture.sync_count();
+
+    first_bridge.detach_for_reconnect();
+    insert_todo(&runtime, "buffer while follower port is missing");
+    runtime.batched_tick();
+    yield_once().await;
+    assert_eq!(
+        first_capture.sync_count(),
+        first_syncs_before_detach,
+        "detached follower port received outbox traffic"
+    );
+
+    let second_channel = MessageChannel::new().expect("second message channel");
+    let second_capture = CapturedPortMessages::attach(&second_channel.port2());
+    let _second_bridge =
+        jazz_wasm::worker_bridge::WasmMessagePortBridge::attach(second_channel.port1(), &runtime)
+            .expect("attach second bridge");
+    runtime.batched_tick();
+    yield_once().await;
+
+    assert!(
+        second_capture.sync_count() > 0,
+        "buffered outbox did not flush through the replacement follower port"
+    );
 }
 
 #[wasm_bindgen_test]
