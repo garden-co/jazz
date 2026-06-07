@@ -1088,6 +1088,7 @@ export class Db {
         schema: runtimeSchema,
         hasWorker: usesDurablePeer,
         useBinaryEncoding: usesDurablePeer,
+        bufferOutboxWithoutSyncSender: this.brokerClient !== null,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
@@ -1393,7 +1394,9 @@ export class Db {
     const promotion: BrokerPromotionState = { leadershipId, cancelled: false };
     this.activeBrokerPromotion = promotion;
 
-    this.closeFollowerPortState(new Error("Follower port closed during leader promotion"));
+    this.closeFollowerPortState(new Error("Follower port closed during leader promotion"), {
+      preserveOutbox: true,
+    });
     this.closePendingLeaderFollowerPorts();
     this.currentLeaderTabId = this.tabId;
     this.currentLeadershipId = leadershipId;
@@ -1567,7 +1570,7 @@ export class Db {
       return;
     }
 
-    this.closeFollowerPortState(new Error("Follower port replaced"));
+    this.closeFollowerPortState(new Error("Follower port replaced"), { preserveOutbox: true });
     this.tabRole = "follower";
     this.currentLeaderTabId = leaderTabId;
     this.currentLeadershipId = leadershipId;
@@ -1587,7 +1590,9 @@ export class Db {
 
   private handleBrokerCloseFollowerPort(leadershipId: number): void {
     if (leadershipId !== this.currentLeadershipId) return;
-    this.closeFollowerPortState(new Error("Follower port closed by broker"));
+    this.closeFollowerPortState(new Error("Follower port closed by broker"), {
+      preserveOutbox: true,
+    });
   }
 
   private ensureFollowerReadyPromise(): Promise<void> {
@@ -1642,6 +1647,7 @@ export class Db {
       schema,
       hasWorker: true,
       useBinaryEncoding: true,
+      bufferOutboxWithoutSyncSender: true,
       onAuthFailure: (reason) => {
         this.markUnauthenticated(reason);
       },
@@ -1651,8 +1657,12 @@ export class Db {
     this.clientSchemas.set(schemaJson, schema);
   }
 
-  private closeFollowerPortState(error?: Error): void {
-    this.followerPortBridge?.shutdown();
+  private closeFollowerPortState(error?: Error, options: { preserveOutbox?: boolean } = {}): void {
+    if (options.preserveOutbox) {
+      this.followerPortBridge?.detachForReconnect();
+    } else {
+      this.followerPortBridge?.shutdown();
+    }
     this.followerPortBridge = null;
     this.followerDataPort?.close();
     this.followerDataPort = null;

@@ -601,6 +601,11 @@ impl WasmMessagePortBridge {
         self.inner.shutdown();
     }
 
+    #[wasm_bindgen(js_name = detachForReconnect)]
+    pub fn detach_for_reconnect(&self) {
+        self.inner.detach_for_reconnect();
+    }
+
     #[wasm_bindgen(js_name = updateAuth)]
     pub fn update_auth(&self, jwt_token: Option<String>) {
         if self.inner.disposed.get() {
@@ -754,6 +759,18 @@ impl MessagePortBridgeInner {
         self.sender.flush_now();
         self.runtime.install_noop_sync_sender();
         self.sender.set_server_payload_forwarder(None);
+        self.runtime.remove_server();
+        self.port.set_onmessage(None);
+        self.port.close();
+        *self.on_message_closure.borrow_mut() = None;
+    }
+
+    fn detach_for_reconnect(&self) {
+        if self.disposed.replace(true) {
+            return;
+        }
+        self.sender.set_server_payload_forwarder(None);
+        self.runtime.clear_sync_sender();
         self.runtime.remove_server();
         self.port.set_onmessage(None);
         self.port.close();

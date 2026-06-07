@@ -426,7 +426,7 @@ fn test_persist_schema_then_unprivileged_add_server_skips_catalogue() {
 }
 
 #[test]
-fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed() {
+fn test_batched_tick_drops_outbox_when_senderless_buffering_is_disabled() {
     let schema = test_schema();
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
@@ -445,10 +445,40 @@ fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed(
         .sync_manager_mut()
         .take_outbox();
     assert!(
+        !outbox
+            .iter()
+            .any(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id)),
+        "batched_tick without a transport should drop server-bound outbox unless buffering is enabled"
+    );
+}
+
+#[test]
+fn test_clear_sync_sender_keeps_server_outbox_when_buffering_is_enabled() {
+    let mut core = create_test_runtime();
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.sync_sender().take();
+
+    core.set_buffer_outbox_without_sync_sender(true);
+    core.clear_sync_sender();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "buffered@test.local"),
+        None,
+    )
+    .unwrap();
+    core.batched_tick();
+
+    let outbox = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    assert!(
         outbox
             .iter()
             .any(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id)),
-        "batched_tick without a transport should leave server-bound outbox entries intact"
+        "clearing the sender should leave server-bound outbox entries intact for reconnect"
     );
 }
 

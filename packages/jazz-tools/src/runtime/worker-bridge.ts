@@ -90,6 +90,7 @@ type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
 interface WasmMessagePortBridgeHandle {
   updateAuth(jwtToken?: string | null): void;
+  detachForReconnect(): void;
   shutdown(): void;
 }
 
@@ -288,6 +289,11 @@ export class MessagePortRuntimeBridge {
 
   shutdown(): void {
     this.bridge?.shutdown();
+    this.bridge = null;
+  }
+
+  detachForReconnect(): void {
+    this.bridge?.detachForReconnect();
     this.bridge = null;
   }
 
