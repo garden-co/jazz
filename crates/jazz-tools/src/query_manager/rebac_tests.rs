@@ -31,7 +31,7 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
