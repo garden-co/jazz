@@ -40,12 +40,11 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
-    generate_id as generate_binding_id, parse_batch_id_input, parse_batch_mode_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
-    parse_write_context_input, query_rows_can_be_schema_aligned, serialize_mutation_error_event,
-    subscription_delta_to_json,
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, parse_batch_id_input,
+    parse_batch_mode_input, parse_durability_tier as parse_binding_tier, parse_external_object_id,
+    parse_query_input, parse_read_durability_options, parse_runtime_schema_input,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -229,16 +228,6 @@ fn make_subscription_callback(
     }
 }
 
-fn napi_decode_seed(seed_b64: &str) -> napi::Result<[u8; 32]> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(seed_b64)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid base64url seed: {}", e)))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("Seed must be exactly 32 bytes"))?;
-    Ok(arr)
-}
-
 // ============================================================================
 // NapiScheduler
 // ============================================================================
@@ -309,19 +298,14 @@ fn init_dev_server_telemetry(collector_url: Option<&str>) {
     });
 }
 
-/// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
-/// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
-/// does the actual work. Debounced: only one tick is pending at a time.
-/// The TSFN type produced by `build_threadsafe_function().weak().build()`:
-/// CalleeHandled = false, Weak = true (won't keep event loop alive).
-type SchedulerTsfn = ThreadsafeFunction<(), (), (), napi::Status, false, true, 0>;
+/// Scheduler that schedules `batched_tick()` after a short background delay.
+/// Debounced: only one tick is pending at a time.
 type MutationErrorTsfn = ThreadsafeFunction<serde_json::Value>;
 
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
     mutation_error_delivery_scheduled: Arc<AtomicBool>,
     core_ref: Weak<Mutex<NapiCoreType>>,
-    tsfn: Option<SchedulerTsfn>,
 }
 
 impl NapiScheduler {
@@ -330,16 +314,11 @@ impl NapiScheduler {
             scheduled: Arc::new(AtomicBool::new(false)),
             mutation_error_delivery_scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
-            tsfn: None,
         }
     }
 
     fn set_core_ref(&mut self, core_ref: Weak<Mutex<NapiCoreType>>) {
         self.core_ref = core_ref;
-    }
-
-    fn set_tsfn(&mut self, tsfn: SchedulerTsfn) {
-        self.tsfn = Some(tsfn);
     }
 }
 
@@ -400,7 +379,6 @@ fn deliver_pending_mutation_errors(core_arc: &Arc<Mutex<NapiCoreType>>) {
 }
 
 fn build_napi_runtime(
-    env: Env,
     schema_json: String,
     app_id: String,
     jazz_env: String,
@@ -445,38 +423,13 @@ fn build_napi_runtime(
     let core = RuntimeCore::new(schema_manager, storage, scheduler);
     let core_arc = Arc::new(Mutex::new(core));
 
-    // Set up the scheduler's TSFN
+    // Set up the scheduler's weak reference and persist schema catalogue state.
     {
         let core_weak = Arc::downgrade(&core_arc);
-        let scheduled_flag = {
-            let core_guard = core_arc
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core_guard.scheduler().scheduled.clone()
-        };
-
-        let core_ref_for_tsfn = core_weak.clone();
-        let flag_for_tsfn = scheduled_flag;
-
-        let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
-            // Reset flag first so new ticks can be scheduled
-            flag_for_tsfn.store(false, Ordering::SeqCst);
-            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
-                && let Ok(mut core) = core_arc.lock()
-            {
-                core.batched_tick();
-            }
-            Ok(())
-        })?;
-
-        let tsfn = tick_fn.build_threadsafe_function().weak::<true>().build()?;
-
-        // Set on scheduler
         let mut core_guard = core_arc
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core_guard.scheduler_mut().set_core_ref(core_weak);
-        core_guard.scheduler_mut().set_tsfn(tsfn);
 
         // Persist schema to catalogue for server sync
         core_guard.persist_schema();
@@ -505,7 +458,6 @@ impl NapiRuntime {
     /// Create a new NapiRuntime with SQLite-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
-        env: Env,
         schema_json: String,
         app_id: String,
         jazz_env: String,
@@ -516,7 +468,6 @@ impl NapiRuntime {
         let storage = open_sqlite_storage(&data_path)?;
 
         build_napi_runtime(
-            env,
             schema_json,
             app_id,
             jazz_env,
@@ -529,7 +480,6 @@ impl NapiRuntime {
     /// Create a new NapiRuntime with in-memory storage (no local persistence).
     #[napi(js_name = "inMemory")]
     pub fn in_memory(
-        env: Env,
         schema_json: String,
         app_id: String,
         jazz_env: String,
@@ -537,7 +487,6 @@ impl NapiRuntime {
         tier: Option<String>,
     ) -> napi::Result<Self> {
         build_napi_runtime(
-            env,
             schema_json,
             app_id,
             jazz_env,
@@ -965,35 +914,6 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))
     }
 
-    #[napi(js_name = "deriveUserId")]
-    pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
-        let seed = napi_decode_seed(&seed_b64)?;
-        Ok(identity::derive_user_id(&seed).to_string())
-    }
-
-    #[napi(js_name = "mintLocalFirstToken")]
-    pub fn mint_local_first_token(
-        seed_b64: String,
-        audience: String,
-        ttl_seconds: u32,
-    ) -> napi::Result<String> {
-        let seed = napi_decode_seed(&seed_b64)?;
-        identity::mint_jazz_self_signed_token(
-            &seed,
-            identity::LOCAL_FIRST_ISSUER,
-            &audience,
-            ttl_seconds as u64,
-        )
-        .map_err(napi::Error::from_reason)
-    }
-
-    #[napi(js_name = "getPublicKeyBase64url")]
-    pub fn get_public_key_base64url(seed_b64: String) -> napi::Result<String> {
-        let seed = napi_decode_seed(&seed_b64)?;
-        let verifying_key = identity::derive_verifying_key(&seed);
-        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
-    }
-
     /// Connect to a Jazz server over WebSocket.
     ///
     /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
@@ -1401,24 +1321,6 @@ impl DevServer {
 // Module-level utility functions
 // ============================================================================
 
-#[napi(js_name = "generateId")]
-pub fn generate_id() -> String {
-    generate_binding_id()
-}
-
-#[napi(js_name = "currentTimestamp")]
-pub fn current_timestamp() -> i64 {
-    current_timestamp_ms()
-}
-
-#[napi(js_name = "parseSchema", ts_return_type = "any")]
-pub fn parse_schema_fn(json: String) -> napi::Result<serde_json::Value> {
-    let schema: Schema = serde_json::from_str(&json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-    serde_json::to_value(&schema)
-        .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
-}
-
 // ============================================================================
 // Identity crypto utilities
 // ============================================================================
@@ -1430,12 +1332,6 @@ fn decode_seed_napi(seed_b64: &str) -> napi::Result<[u8; 32]> {
     bytes
         .try_into()
         .map_err(|_| napi::Error::from_reason("seed must be exactly 32 bytes"))
-}
-
-#[napi(js_name = "deriveUserId")]
-pub fn derive_user_id(seed_b64: String) -> napi::Result<String> {
-    let seed = decode_seed_napi(&seed_b64)?;
-    Ok(identity::derive_user_id(&seed).to_string())
 }
 
 #[napi(js_name = "mintLocalFirstToken")]
@@ -1488,13 +1384,6 @@ pub fn verify_local_first_identity_proof_napi(
             error: Some(e),
         },
     }
-}
-
-#[napi(js_name = "getPublicKeyBase64url")]
-pub fn get_public_key_b64(seed_b64: String) -> napi::Result<String> {
-    let seed = decode_seed_napi(&seed_b64)?;
-    let verifying_key = identity::derive_verifying_key(&seed);
-    Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
 }
 
 #[cfg(test)]
