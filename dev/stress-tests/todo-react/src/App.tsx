@@ -76,6 +76,16 @@ function requireEnv(value: string | undefined, name: string): string {
   return value;
 }
 
+function optionalPositiveIntParam(params: URLSearchParams, name: string): number | undefined {
+  const raw = params.get(name);
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
 function AppInner() {
   const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
   const params = new URLSearchParams(location.search);
@@ -83,6 +93,8 @@ function AppInner() {
   const isBenchmark = params.has("benchmark");
   const benchmarkSyncDisabled = isBenchmark && params.get("sync") === "off";
   const serverUrl = benchmarkSyncDisabled ? undefined : requireEnv(serverUrlEnv, "JAZZ_SERVER_URL");
+  const workerInitTimeoutMs =
+    optionalPositiveIntParam(params, "workerInitTimeoutMs") ?? (isBenchmark ? 120_000 : undefined);
   const config: DbConfig = {
     appId,
     env: import.meta.env.DEV ? "dev" : "prod",
@@ -93,6 +105,7 @@ function AppInner() {
     telemetryCollectorUrl,
     logLevel: telemetryCollectorUrl ? "debug" : undefined,
     ...(dbName ? { driver: { type: "persistent" as const, dbName } } : {}),
+    ...(workerInitTimeoutMs ? { workerInitTimeoutMs } : {}),
   };
 
   return (
