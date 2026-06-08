@@ -72,7 +72,7 @@ fn claim_compound_input(group_slug: &str, published: bool, title: &str) -> HashM
 
 async fn create_title_document(client: &JazzClient, table_name: &str, title: &str) -> ObjectId {
     client
-        .create(table_name, title_document_input(title))
+        .insert(table_name, title_document_input(title))
         .await
         .expect("create title document")
         .0
@@ -85,7 +85,7 @@ async fn create_group_document(
     title: &str,
 ) -> ObjectId {
     client
-        .create(table_name, group_document_input(group_slug, title))
+        .insert(table_name, group_document_input(group_slug, title))
         .await
         .expect("create group document")
         .0
@@ -99,7 +99,7 @@ async fn create_claim_compound_document(
     title: &str,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             claim_compound_input(group_slug, published, title),
         )
@@ -319,7 +319,7 @@ async fn admin_role_claims_reject_member_mutations() {
     .await;
 
     let rejected_insert = member
-        .create(table_name, title_document_input("member create"))
+        .insert(table_name, title_document_input("member create"))
         .await
         .expect("optimistic local member create")
         .0;

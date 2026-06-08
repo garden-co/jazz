@@ -66,7 +66,7 @@ describe("JazzClient schema order", () => {
       },
     });
 
-    await client.create("todos", {
+    await client.insert("todos", {
       title: { type: "Text", value: "Buy milk" },
       done: { type: "Boolean", value: false },
     });
@@ -134,7 +134,7 @@ describe("JazzClient schema order", () => {
       schema,
     });
 
-    const result = client.create("todos", {
+    const result = client.insert("todos", {
       title: { type: "Text", value: "Buy milk" },
       done: { type: "Boolean", value: false },
     });

@@ -376,7 +376,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
         let title = format!("todo-{i:03}");
         expected_titles.insert(title.clone());
         alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(title)),
@@ -457,7 +457,7 @@ async fn update_and_delete(server: &TestingServer) {
     let mut ids = Vec::new();
     for i in 0..5u32 {
         let (id, _) = alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(format!("original-{i}"))),
@@ -653,7 +653,7 @@ async fn multi_table_isolation(server: &TestingServer) {
     let mut todo_ids = Vec::new();
     for i in 0..5 {
         let (id, _) = alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(format!("mt-todo-{i}"))),
@@ -668,7 +668,7 @@ async fn multi_table_isolation(server: &TestingServer) {
     let mut note_ids = Vec::new();
     for i in 0..3 {
         let (id, _) = alice
-            .create(
+            .insert(
                 "notes",
                 HashMap::from([
                     ("body".to_string(), Value::Text(format!("mt-note-{i}"))),
@@ -782,7 +782,7 @@ async fn index_queries(server: &TestingServer) {
     for i in 0..20u32 {
         let category = if i % 2 == 0 { "electronics" } else { "books" };
         let (id, _) = alice
-            .create(
+            .insert(
                 "products",
                 HashMap::from([
                     ("name".to_string(), Value::Text(format!("product-{i:02}"))),
@@ -912,7 +912,7 @@ async fn restart_preserves_data() {
     let mut before_ids = Vec::new();
     for i in 0..BEFORE_COUNT {
         let (id, _) = alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     (
@@ -992,7 +992,7 @@ async fn restart_preserves_data() {
     let alice = make_client_external_jwks(&server2, schema, "alice-restart", "todos").await;
     for i in 0..AFTER_COUNT {
         alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     (
@@ -1062,7 +1062,7 @@ async fn catalogue_entries_survive_restart() {
         make_client_external_jwks(&server1, schema.clone(), "alice-catalogue", "todos").await;
 
     let (todo_id, _) = alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (

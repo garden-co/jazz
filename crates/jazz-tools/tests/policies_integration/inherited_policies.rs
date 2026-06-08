@@ -292,7 +292,7 @@ async fn create_folder(
     archived: bool,
 ) -> ObjectId {
     client
-        .create(table_name, folder_input(title, owners, archived))
+        .insert(table_name, folder_input(title, owners, archived))
         .await
         .expect("create folder")
         .0
@@ -307,7 +307,7 @@ async fn create_folder_document(
     folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             folder_document_input(owner_id, title, archived, folder_id),
         )
@@ -326,7 +326,7 @@ async fn create_multi_folder_document(
     secondary_folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             multi_folder_document_input(
                 owner_id,
@@ -343,7 +343,7 @@ async fn create_multi_folder_document(
 
 async fn create_file(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
     client
-        .create("files", file_input(owner_id, name))
+        .insert("files", file_input(owner_id, name))
         .await
         .expect("create file")
         .0
@@ -356,7 +356,7 @@ async fn create_scalar_ref_todo(
     image: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create("todos", todo_scalar_ref_input(owner_id, title, image))
+        .insert("todos", todo_scalar_ref_input(owner_id, title, image))
         .await
         .expect("create scalar-ref todo")
         .0
@@ -369,7 +369,7 @@ async fn create_array_ref_todo(
     images: &[ObjectId],
 ) -> ObjectId {
     client
-        .create("todos", todo_array_ref_input(owner_id, title, images))
+        .insert("todos", todo_array_ref_input(owner_id, title, images))
         .await
         .expect("create array-ref todo")
         .0
@@ -1983,7 +1983,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
 
     let folder_id = create_folder(&admin, "folders", "Shared Folder", &["alice"], false).await;
     let file_id = admin
-        .create(
+        .insert(
             "files",
             row_input!(
                 "title" => "Spec.pdf",
@@ -1994,7 +1994,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
         .expect("create file")
         .0;
     let part_id = admin
-        .create(
+        .insert(
             "file_parts",
             row_input!(
                 "title" => "Page 1",

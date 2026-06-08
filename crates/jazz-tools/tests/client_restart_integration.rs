@@ -505,7 +505,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
         .expect("connect memory client");
 
     client
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (

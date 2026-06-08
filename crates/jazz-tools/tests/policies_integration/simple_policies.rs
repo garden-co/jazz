@@ -53,7 +53,7 @@ async fn seed_document(
     archived: bool,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             boolean_policy_document_input(owner_id, title, archived),
         )
@@ -68,7 +68,7 @@ async fn create_row(
     values: HashMap<String, Value>,
 ) -> ObjectId {
     client
-        .create(table_name, values)
+        .insert(table_name, values)
         .await
         .expect("create row")
         .0

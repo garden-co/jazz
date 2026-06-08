@@ -172,7 +172,7 @@ impl TodoSeed {
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create(
+        .insert(
             "orgs",
             HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
         )
@@ -188,7 +188,7 @@ async fn create_team(
     parent_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             "teams",
             HashMap::from([
                 ("name".to_string(), Value::Text(name.to_string())),
@@ -209,7 +209,7 @@ async fn create_team(
 
 async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>) -> ObjectId {
     client
-        .create(
+        .insert(
             "users",
             HashMap::from([
                 ("name".to_string(), Value::Text(name.to_string())),
@@ -230,7 +230,7 @@ async fn create_team_edge(
     parent_team: ObjectId,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             "team_edges",
             HashMap::from([
                 ("child_team".to_string(), Value::Uuid(child_team)),
@@ -244,7 +244,7 @@ async fn create_team_edge(
 
 async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
     client
-        .create("todos", seed.values())
+        .insert("todos", seed.values())
         .await
         .expect("create todo")
         .0
@@ -252,7 +252,7 @@ async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
 
 async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
     client
-        .create(
+        .insert(
             "file_parts",
             HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
         )
@@ -263,7 +263,7 @@ async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
 
 async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> ObjectId {
     client
-        .create(
+        .insert(
             "files",
             HashMap::from([
                 ("name".to_string(), Value::Text(name.to_string())),

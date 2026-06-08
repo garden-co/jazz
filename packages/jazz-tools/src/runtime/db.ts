@@ -613,7 +613,7 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeHandle = this.requireRuntimeHandle("insert");
-    const row = runtimeHandle.create(table._table, values, options);
+    const row = runtimeHandle.insert(table._table, values, options);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -1698,7 +1698,7 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    const inserted = client.create(
+    const inserted = client.insert(
       table._table,
       values,
       options,

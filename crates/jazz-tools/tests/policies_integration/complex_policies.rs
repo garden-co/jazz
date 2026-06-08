@@ -345,7 +345,7 @@ fn exists_update_policy_schema() -> Schema {
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create("documents", row_input!("title" => title.to_string()))
+        .insert("documents", row_input!("title" => title.to_string()))
         .await
         .expect("create title document")
         .0
@@ -358,7 +358,7 @@ async fn create_chat(
     is_public: bool,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             "chats",
             row_input!(
                 "name" => name.to_string(),
@@ -373,7 +373,7 @@ async fn create_chat(
 
 async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group_slug: &str) {
     client
-        .create(
+        .insert(
             "document_grants",
             row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
         )
@@ -383,7 +383,7 @@ async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group
 
 async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug: &str) {
     client
-        .create(
+        .insert(
             "group_memberships",
             row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
         )
@@ -449,7 +449,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     dave_log.clear();
 
     let share_id = admin
-        .create(
+        .insert(
             "document_shares",
             row_input!("document_id" => doc_id, "user_id" => "bob"),
         )
@@ -657,7 +657,7 @@ async fn exists_rel_hop_grants_and_denies_correctly() {
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     async fn create_folder(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
         client
-            .create(
+            .insert(
                 "folders",
                 row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
             )
@@ -674,7 +674,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         folder_id: Option<ObjectId>,
     ) -> ObjectId {
         client
-            .create(
+            .insert(
                 "documents",
                 row_input!(
                     "team_slug" => team_slug.to_string(),
@@ -690,7 +690,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
 
     async fn create_document_flag(client: &JazzClient, document_id: ObjectId, flag: &str) {
         client
-            .create(
+            .insert(
                 "document_flags",
                 row_input!("document_id" => document_id, "flag" => flag.to_string()),
             )
@@ -941,7 +941,7 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
 
     let doc_id = create_title_document(&admin, "Original").await;
     admin
-        .create(
+        .insert(
             "document_editors",
             row_input!("document_id" => doc_id, "user_id" => "alice"),
         )

@@ -720,8 +720,8 @@ abstract class BatchHandleBase {
     this.client.rollbackBatch(this.batchId);
   }
 
-  create(table: string, values: InsertValues, options?: CreateOptions): Row {
-    const row = this.client.createInternal(
+  insert(table: string, values: InsertValues, options?: CreateOptions): Row {
+    const row = this.client.insertInternal(
       table,
       values,
       options,
@@ -1217,21 +1217,21 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(
+  insert(
     table: string,
     values: InsertValues,
     options?: CreateOptions,
     session?: Session,
     attribution?: string,
   ): WriteResult<Row> {
-    const row = this.createInternal(table, values, options, session, attribution);
+    const row = this.insertInternal(table, values, options, session, attribution);
     return new WriteResult(row, row.batchId, this);
   }
 
   /**
    * @internal
    */
-  createInternal(
+  insertInternal(
     table: string,
     values: InsertValues,
     options?: CreateOptions,

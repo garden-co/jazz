@@ -267,7 +267,7 @@ pub fn build_todo_lineage_query() -> jazz_tools::Query {
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = todo_values("Write docs", "");
 
-    let _new_row = client.create("todos", values).await?;
+    let _new_row = client.insert("todos", values).await?;
     client
         .update(
             existing_id,
@@ -284,7 +284,7 @@ pub async fn write_todo_with_default_durability(
     client: &JazzClient,
 ) -> jazz_tools::Result<ObjectId> {
     let (id, _row_values) = client
-        .create(
+        .insert(
             "todos",
             todo_values("Write docs with default durability behavior", ""),
         )
@@ -443,7 +443,7 @@ pub async fn create_file_from_bytes(
 
     for chunk in data.chunks(CHUNK_SIZE) {
         let (part_id, _) = client
-            .create(
+            .insert(
                 "file_parts",
                 jazz_tools::row_input!("data" => chunk.to_vec()),
             )
@@ -461,7 +461,7 @@ pub async fn create_file_from_bytes(
         file_values.insert("name".to_string(), name.into());
     }
 
-    let (file_id, _) = client.create("files", file_values).await?;
+    let (file_id, _) = client.insert("files", file_values).await?;
     Ok(file_id)
 }
 // #endregion files-create-from-bytes-rust
@@ -475,7 +475,7 @@ pub async fn create_upload_from_bytes(
     let file_id = create_file_from_bytes(client, data, Some("photo.jpg"), "image/jpeg").await?;
 
     let (upload_id, _) = client
-        .create(
+        .insert(
             "uploads",
             jazz_tools::row_input!(
                 "owner_id" => owner_id,
