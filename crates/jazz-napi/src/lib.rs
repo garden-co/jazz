@@ -577,7 +577,7 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let batch_id = core
-            .upsert_with_id(&table, oid, values.0, write_context.as_ref())
+            .upsert(&table, oid, values.0, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Upsert failed: {:?}", e)))?;
 
         Ok(serde_json::json!({

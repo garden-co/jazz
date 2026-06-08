@@ -620,7 +620,7 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             let batch_id = core
-                .upsert_with_id(&table, oid, named_values, write_context.as_ref())
+                .upsert(&table, oid, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
                 "batchId": batch_id.to_string(),

@@ -372,7 +372,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Create or update a row with a caller-supplied external row id.
-    pub fn upsert_with_id(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: ObjectId,
@@ -381,7 +381,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.upsert_with_id(table, object_id, values, owned.as_ref())?)
+        Ok(core.upsert(table, object_id, values, owned.as_ref())?)
     }
 
     /// Delete a row.
