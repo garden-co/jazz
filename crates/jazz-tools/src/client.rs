@@ -285,17 +285,17 @@ impl JazzClient {
     }
 
     /// Create a new row in a table.
-    pub async fn create(
+    pub async fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_with_id(table, Option::<Uuid>::None, values)
+        self.insert_with_id(table, Option::<Uuid>::None, values)
             .await
     }
 
     /// Create a new row in a table using a caller-supplied UUID.
-    pub async fn create_with_id(
+    pub async fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,
@@ -547,16 +547,16 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(
+    pub async fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_with_id(table, Option::<Uuid>::None, values)
+        self.insert_with_id(table, Option::<Uuid>::None, values)
             .await
     }
 
-    pub async fn create_with_id(
+    pub async fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,

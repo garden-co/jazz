@@ -158,7 +158,7 @@ async fn seed_document(
     archived: bool,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             boolean_policy_document_input(owner_id, title, archived),
         )
@@ -169,7 +169,7 @@ async fn seed_document(
 
 async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> ObjectId {
     client
-        .create("documents", document_input(owner_id, title))
+        .insert("documents", document_input(owner_id, title))
         .await
         .expect("create document")
         .0
@@ -177,7 +177,7 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create("orgs", row_input!("name" => name))
+        .insert("orgs", row_input!("name" => name))
         .await
         .expect("create org")
         .0
@@ -185,7 +185,7 @@ async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
 
 async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> ObjectId {
     client
-        .create(
+        .insert(
             "teams",
             row_input!("name" => name, "org_id" => Value::Uuid(org_id)),
         )
@@ -200,7 +200,7 @@ async fn create_team_membership(
     team_id: ObjectId,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             "team_memberships",
             row_input!("owner_id" => owner_id, "team_id" => Value::Uuid(team_id)),
         )
@@ -211,7 +211,7 @@ async fn create_team_membership(
 
 async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &str) -> ObjectId {
     client
-        .create("team_documents", team_document_input(team_id, title))
+        .insert("team_documents", team_document_input(team_id, title))
         .await
         .expect("create team document")
         .0
@@ -1116,7 +1116,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let mut observer_log = Vec::new();
 
     let forged_id = intruder
-        .create("documents", document_input("alice", "forged"))
+        .insert("documents", document_input("alice", "forged"))
         .await
         .expect("optimistic local create")
         .0;
@@ -1302,7 +1302,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
 
     // Mallory tries to insert a row claiming alice's ownership.
     let forged_id = mallory
-        .create("documents", document_input("alice", "forged"))
+        .insert("documents", document_input("alice", "forged"))
         .await
         .expect("optimistic local create")
         .0;

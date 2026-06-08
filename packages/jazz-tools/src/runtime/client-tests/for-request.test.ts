@@ -226,7 +226,7 @@ describe("JazzClient runtime helpers", () => {
     );
 
     const tx = client.beginTransaction();
-    tx.create("todos", { done: { type: "Boolean", value: false } });
+    tx.insert("todos", { done: { type: "Boolean", value: false } });
     await tx.query('{"table":"todos"}');
 
     const writeContext = JSON.parse(writeContextJson ?? "{}");

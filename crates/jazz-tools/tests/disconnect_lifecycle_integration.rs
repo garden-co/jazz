@@ -50,7 +50,7 @@ async fn client_reconnects_after_server_reaps_stale_state() {
         .await;
 
     let (todo_id, _) = alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("survive-reap".to_string())),
@@ -232,7 +232,7 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
 
     // Both create a todo
     alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("alice-todo".to_string())),
@@ -242,7 +242,7 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
         .await
         .expect("alice create");
 
-    bob.create(
+    bob.insert(
         "todos",
         HashMap::from([
             ("title".to_string(), Value::Text("bob-todo".to_string())),
@@ -301,7 +301,7 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
     assert_eq!(bob_rows.len(), 2);
 
     // Bob can still create
-    bob.create(
+    bob.insert(
         "todos",
         HashMap::from([
             ("title".to_string(), Value::Text("bob-todo-2".to_string())),

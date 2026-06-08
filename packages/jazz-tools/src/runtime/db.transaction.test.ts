@@ -127,7 +127,7 @@ describe("Db transactions", () => {
     const committedRuntime = makeWriteHandle("batch-tx");
     const runtimeTransaction = {
       batchId: "batch-tx",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => committedRuntime.handle),
@@ -154,7 +154,7 @@ describe("Db transactions", () => {
       title: "Transactional",
       done: false,
     });
-    expect(runtimeTransaction.create).toHaveBeenCalledWith(
+    expect(runtimeTransaction.insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Transactional" },
@@ -188,7 +188,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-tx-fast-path",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -213,7 +213,7 @@ describe("Db transactions", () => {
 
     expect(getSchema).not.toHaveBeenCalled();
     expect(getSchemaHash).not.toHaveBeenCalled();
-    expect(runtimeTransaction.create).toHaveBeenCalledWith(
+    expect(runtimeTransaction.insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Fast transaction" },
@@ -248,7 +248,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-session-tx",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
@@ -295,7 +295,7 @@ describe("Db transactions", () => {
     const committedRuntime = makeWriteHandle("batch-callback");
     const runtimeTransaction = {
       batchId: "batch-callback",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => committedRuntime.handle),
@@ -344,7 +344,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-callback-rejected",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
@@ -382,7 +382,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-callback-thrown",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-callback-thrown").handle),
@@ -421,7 +421,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-callback-rejected",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
@@ -462,7 +462,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-callback-rejected",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
@@ -492,7 +492,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeTransaction = {
       batchId: "batch-upsert-tx",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
       delete: vi.fn(),
@@ -530,7 +530,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeTransaction = {
       batchId: "batch-async-callback",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => makeWriteHandle("batch-async-callback").handle),
@@ -582,7 +582,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: "batch-closed",
-      create: vi.fn(() => {
+      insert: vi.fn(() => {
         assertTestTransactionActive(status, "batch-closed");
         return runtimeRow;
       }),
@@ -613,7 +613,7 @@ describe("Db transactions", () => {
     expect(committed.batchId).toBe("batch-closed");
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
-    expect(runtimeTransaction.create).toHaveBeenCalledTimes(2);
+    expect(runtimeTransaction.insert).toHaveBeenCalledTimes(2);
   });
 
   it("throws when committing a db transaction before any actions", () => {
@@ -645,7 +645,7 @@ describe("Db transactions", () => {
     };
     const runtimeTransaction = {
       batchId: "batch-read",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(async () => [runtimeRow]),
@@ -685,7 +685,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: "batch-read-closed",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(async () => {
@@ -725,7 +725,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: "batch-rollback",
-      create: vi.fn(() => {
+      insert: vi.fn(() => {
         assertTestTransactionActive(status, "batch-rollback");
         return {} as Row;
       }),
@@ -766,7 +766,7 @@ describe("Db transactions", () => {
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/rolled back/i);
     expect(runtimeTransaction.commit).toHaveBeenCalledTimes(1);
     expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(2);
-    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
+    expect(runtimeTransaction.insert).toHaveBeenCalledTimes(1);
     expect(runtimeTransaction.update).toHaveBeenCalledTimes(1);
   });
 
@@ -775,7 +775,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: "batch-commit-before-rollback",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => {
@@ -814,7 +814,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeTransaction = {
       batchId: "batch-runtime-rolled-back",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => {
@@ -847,7 +847,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeTransaction = {
       batchId: "batch-runtime-write-rolled-back",
-      create: vi.fn(() => {
+      insert: vi.fn(() => {
         throw new Error("runtime write rejected after rollback");
       }),
       update: vi.fn(),
@@ -874,7 +874,7 @@ describe("Db transactions", () => {
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(
       /runtime write rejected after rollback/,
     );
-    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
+    expect(runtimeTransaction.insert).toHaveBeenCalledTimes(1);
   });
 
   it("rejects db transaction writes against a different client/schema", () => {
@@ -885,7 +885,7 @@ describe("Db transactions", () => {
     };
     const runtimeTransaction = {
       batchId: "batch-cross-client",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-cross-client").handle),
@@ -916,7 +916,7 @@ describe("Db transactions", () => {
       /cannot be used with table "todos" from a different schema\/client/,
     );
     expect(runtimeTransaction.update).toHaveBeenCalledTimes(1);
-    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+    expect(runtimeTransaction.insert).not.toHaveBeenCalled();
   });
 
   it("creates a typed db batch bound by its first table operation", async () => {
@@ -932,7 +932,7 @@ describe("Db transactions", () => {
     const committedRuntime = makeWriteHandle("batch-direct", "direct");
     const runtimeBatch = {
       batchId: "batch-direct",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => committedRuntime.handle),
@@ -961,7 +961,7 @@ describe("Db transactions", () => {
       title: "Direct batch",
       done: false,
     });
-    expect(runtimeBatch.create).toHaveBeenCalledWith(
+    expect(runtimeBatch.insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Direct batch" },
@@ -995,7 +995,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeBatch = {
       batchId: "batch-direct-fast-path",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -1022,7 +1022,7 @@ describe("Db transactions", () => {
 
     expect(getSchema).not.toHaveBeenCalled();
     expect(getSchemaHash).not.toHaveBeenCalled();
-    expect(runtimeBatch.create).toHaveBeenCalledWith(
+    expect(runtimeBatch.insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Fast batch" },
@@ -1052,7 +1052,7 @@ describe("Db transactions", () => {
     };
     const runtimeBatch = {
       batchId: "batch-direct-read",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(async () => [runtimeRow]),
@@ -1101,7 +1101,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeBatch = {
       batchId: "batch-direct-callback",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => makeWriteHandle("batch-direct-callback", "direct").handle),
@@ -1141,10 +1141,9 @@ describe("Db transactions", () => {
   });
 
   it("does not commit a callback batch when the callback rejects", async () => {
-    const table = todoTable();
     const runtimeBatch = {
       batchId: "batch-direct-callback-rejected",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-direct-callback-rejected", "direct").handle),
@@ -1172,7 +1171,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeBatch = {
       batchId: "batch-upsert-direct",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
       delete: vi.fn(),
@@ -1212,7 +1211,7 @@ describe("Db transactions", () => {
     } as Row;
     const runtimeBatch = {
       batchId: "batch-direct-async-callback",
-      create: vi.fn(() => runtimeRow),
+      insert: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
       commit: vi.fn(() => makeWriteHandle("batch-direct-async-callback", "direct").handle),
@@ -1277,7 +1276,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
       batchId: "batch-direct-rollback",
-      create: vi.fn(() => {
+      insert: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-rollback");
         return {
           id: "todo-direct-rollback",
@@ -1334,7 +1333,7 @@ describe("Db transactions", () => {
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
       batchId: "batch-direct-commit-before-rollback",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-commit-before-rollback");
       }),
@@ -1376,7 +1375,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeBatch = {
       batchId: "batch-direct-thrown-callback",
-      create: vi.fn(() => ({
+      insert: vi.fn(() => ({
         id: "todo-direct-thrown-callback",
         values: [
           { type: "Text", value: "Thrown callback batch" },
@@ -1422,7 +1421,7 @@ describe("Db transactions", () => {
     };
     const runtimeBatch = {
       batchId: "batch-cross-client-direct",
-      create: vi.fn(),
+      insert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-cross-client-direct", "direct").handle),
@@ -1455,6 +1454,6 @@ describe("Db transactions", () => {
       /cannot be used with table "todos" from a different schema\/client/,
     );
     expect(runtimeBatch.update).toHaveBeenCalledTimes(1);
-    expect(runtimeBatch.create).not.toHaveBeenCalled();
+    expect(runtimeBatch.insert).not.toHaveBeenCalled();
   });
 });

@@ -128,7 +128,7 @@ async fn create_todo(
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
 
-    match state.client.create("todos", values).await {
+    match state.client.insert("todos", values).await {
         Ok((row_id, row_values)) => {
             let todo = row_to_todo(row_id, &row_values);
 

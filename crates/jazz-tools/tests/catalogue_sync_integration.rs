@@ -622,7 +622,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
 
     let denied_user_id = jazz_tools::ObjectId::new();
     let (denied_row_id, _) = writer
-        .create(
+        .insert(
             "users",
             user_values_v1(denied_user_id, "timed out before permissions"),
         )
@@ -935,7 +935,7 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
     let user_id_value = jazz_tools::ObjectId::new();
     let user_email = "bob@example.com";
     let (user_obj_id, _) = bob
-        .create(
+        .insert(
             "users",
             user_values_v2(user_id_value, "Bob Backward", user_email),
         )

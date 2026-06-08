@@ -185,7 +185,7 @@ async fn bob_updates_alice_todo() {
 
     // Alice creates
     let (todo_id, _) = alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("collab-todo".to_string())),

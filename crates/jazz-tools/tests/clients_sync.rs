@@ -65,7 +65,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
 
     let (todo_id, _) = writer
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("revision-000".to_string())),
@@ -153,7 +153,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
     client_a
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -236,7 +236,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
         Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
 
     let (todo_id, expected_values) = client
-        .create_with_id(
+        .insert_with_id(
             "todos",
             external_id,
             HashMap::from([
@@ -439,7 +439,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     wait_for_edge_query_ready(&client_bob, Duration::from_secs(30)).await;
 
     client_alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -490,7 +490,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     .await;
 
     client_bob
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("from-bob".to_string())),

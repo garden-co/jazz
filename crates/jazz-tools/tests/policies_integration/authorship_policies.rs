@@ -35,7 +35,7 @@ fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Val
 async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
     client
         .for_session(Session::new(user_id))
-        .create("notes", note_input(title))
+        .insert("notes", note_input(title))
         .await
         .expect("create note with session-authored provenance")
         .0
@@ -43,7 +43,7 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
 
 async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create("notes", note_input(title))
+        .insert("notes", note_input(title))
         .await
         .expect("create note without attribution")
         .0
@@ -499,7 +499,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     // `$updatedBy` handoff on the later update.
     let note_id = alice
         .for_session(Session::new("alice"))
-        .create("notes", row_input!("title" => "draft", "shared" => true))
+        .insert("notes", row_input!("title" => "draft", "shared" => true))
         .await
         .expect("alice creates shared draft")
         .0;

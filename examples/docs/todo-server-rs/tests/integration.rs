@@ -218,7 +218,7 @@ async fn create_todo(
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
-    match state.client.create("todos", values).await {
+    match state.client.insert("todos", values).await {
         Ok((row_id, row_values)) => {
             let todo = row_to_todo(row_id, &row_values);
             broadcast_todos(&state).await;
@@ -463,7 +463,7 @@ async fn test_local_persistence() {
 
         // Create a todo
         let values = todo_values("Persist me", "");
-        let (row_id, _row_values) = client.create("todos", values).await.unwrap();
+        let (row_id, _row_values) = client.insert("todos", values).await.unwrap();
 
         // Verify it exists
         let query = QueryBuilder::new("todos").build();
@@ -786,7 +786,7 @@ async fn test_server_resync() {
 
         // Create a todo
         let values = todo_values("Synced todo", "");
-        let (_row_id, _row_values) = client.create("todos", values).await.unwrap();
+        let (_row_id, _row_values) = client.insert("todos", values).await.unwrap();
 
         // Verify it exists locally
         let query = QueryBuilder::new("todos").build();

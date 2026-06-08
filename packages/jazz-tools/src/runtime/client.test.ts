@@ -289,7 +289,7 @@ describe("JazzClient batch query plumbing", () => {
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const batch = client.beginBatch();
 
-    batch.create("todos", {});
+    batch.insert("todos", {});
 
     await expect(
       batch.query({ _build: () => JSON.stringify({ table: "todos" }) }),

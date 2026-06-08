@@ -76,7 +76,7 @@ async fn ephemeral_claims_merged_into_session() {
         .await;
 
     let (room_id, _) = admin
-        .create(
+        .insert(
             "rooms",
             HashMap::from([
                 ("name".to_string(), Value::Text("Party Room".to_string())),
