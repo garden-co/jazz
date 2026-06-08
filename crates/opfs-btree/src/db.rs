@@ -1,7 +1,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
 
-use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
@@ -10,6 +9,7 @@ use crate::page::{
     raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
+use crate::{BTreeError, checksum};
 
 const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
@@ -19,6 +19,16 @@ const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
+const WAL_HEADER_MAGIC: [u8; 8] = *b"OPFSWJ01";
+const WAL_FRAME_MAGIC: [u8; 8] = *b"OPFSWF01";
+const WAL_COMMIT_MAGIC: [u8; 8] = *b"OPFSWC01";
+const WAL_FORMAT_VERSION: u32 = 1;
+const WAL_FRAME_FLAG_BLOB: u32 = 1;
+const WAL_FRAME_FLAG_FREELIST: u32 = 1 << 1;
+
+const WAL_HEADER_CHECKSUM_OFFSET: usize = 56;
+const WAL_FRAME_CHECKSUM_OFFSET: usize = 32;
+const WAL_COMMIT_CHECKSUM_OFFSET: usize = 28;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -35,6 +45,23 @@ impl<'a> CheckpointPage<'a> {
             Self::Owned(raw) => raw,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WalHeader {
+    generation: u64,
+    root_page_id: PageId,
+    freelist_head_page_id: PageId,
+    total_pages: u64,
+    frame_count: u64,
+}
+
+#[derive(Clone, Debug)]
+struct WalFrame {
+    page_id: PageId,
+    is_blob: bool,
+    is_freelist: bool,
+    raw: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +140,7 @@ pub struct OpfsBTree<F: SyncFile> {
     page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: OpfsSet<PageId>,
+    wal_pages: OpfsSet<PageId>,
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
@@ -161,6 +189,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             page_access_epoch: OpfsMap::default(),
             access_epoch: 0,
             dirty_pages: OpfsSet::default(),
+            wal_pages: OpfsSet::default(),
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
@@ -202,6 +231,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
         }
         tree.sanitize_free_pages();
+        tree.replay_wal()?;
 
         Ok(tree)
     }
@@ -372,7 +402,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             total_pages = self.total_pages
         )
         .entered();
-        let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
+        let mut dirty_page_ids: Vec<PageId> =
+            self.dirty_pages.union(&self.wal_pages).copied().collect();
         dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
         self.write_pages_to_disk(&dirty_page_ids, &freelist_pages)?;
@@ -382,8 +413,48 @@ impl<F: SyncFile> OpfsBTree<F> {
             freelist_head_page_id,
             self.total_pages,
         )?;
+        self.truncate_wal_tail()?;
         self.dirty_pages.clear();
+        self.wal_pages.clear();
         self.evict_pages_if_needed(None);
+        Ok(())
+    }
+
+    pub fn flush_wal(&mut self) -> Result<(), BTreeError> {
+        let _span = tracing::debug_span!(
+            "OpfsBTree::flush_wal",
+            dirty_pages = self.dirty_pages.len(),
+            total_pages = self.total_pages
+        )
+        .entered();
+        if self.dirty_pages.is_empty() {
+            return Ok(());
+        }
+
+        let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
+        dirty_page_ids.sort_unstable();
+        let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
+        let generation = self.active.generation.saturating_add(1);
+
+        self.append_wal_commit(
+            generation,
+            self.root_page_id.unwrap_or(0),
+            freelist_head_page_id,
+            self.total_pages,
+            &dirty_page_ids,
+            &freelist_pages,
+        )?;
+        self.file.flush()?;
+
+        self.wal_pages.extend(dirty_page_ids);
+        self.dirty_pages.clear();
+        self.active = Superblock::new(
+            self.options.page_size as u32,
+            generation,
+            self.root_page_id.unwrap_or(0),
+            freelist_head_page_id,
+            self.total_pages,
+        );
         Ok(())
     }
 
@@ -1212,6 +1283,313 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    fn truncate_wal_tail(&mut self) -> Result<(), BTreeError> {
+        if self.persisted_pages <= self.total_pages {
+            return Ok(());
+        }
+        let required_len = self
+            .total_pages
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("checkpoint truncate length overflow".to_string()))?;
+        self.file.truncate(required_len)?;
+        self.file.flush()?;
+        self.persisted_pages = self.total_pages;
+        Ok(())
+    }
+
+    fn append_wal_commit(
+        &mut self,
+        generation: u64,
+        root_page_id: PageId,
+        freelist_head_page_id: PageId,
+        total_pages: u64,
+        dirty_page_ids: &[PageId],
+        freelist_pages: &[(PageId, Page)],
+    ) -> Result<(), BTreeError> {
+        let mut frames: Vec<(PageId, bool, bool, CheckpointPage<'_>)> =
+            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
+        for page_id in dirty_page_ids {
+            if let Some(raw) = self.pages.get(page_id) {
+                self.validate_writable_page_id(*page_id)?;
+                let is_blob = self.blob_pages.contains(page_id);
+                if is_blob {
+                    if raw.len() != self.options.page_size {
+                        return Err(BTreeError::Corrupt(format!(
+                            "blob page {} has invalid length {}",
+                            page_id,
+                            raw.len()
+                        )));
+                    }
+                } else {
+                    let _ = validate_page(raw, self.options.page_size)?;
+                }
+                frames.push((*page_id, is_blob, false, CheckpointPage::Borrowed(raw)));
+            }
+        }
+        for (page_id, page) in freelist_pages {
+            self.validate_writable_page_id(*page_id)?;
+            frames.push((
+                *page_id,
+                false,
+                true,
+                CheckpointPage::Owned(encode_page(page, self.options.page_size)?),
+            ));
+        }
+        if frames.is_empty() {
+            return Ok(());
+        }
+
+        frames.sort_unstable_by_key(|(page_id, _, _, _)| *page_id);
+        for pair in frames.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(BTreeError::Corrupt(format!(
+                    "duplicate WAL page {}",
+                    pair[0].0
+                )));
+            }
+        }
+
+        let frame_count = u64::try_from(frames.len())
+            .map_err(|_| BTreeError::Io("WAL frame count overflow".to_string()))?;
+        let wal_pages = frame_count
+            .checked_mul(2)
+            .and_then(|pages| pages.checked_add(2))
+            .ok_or_else(|| BTreeError::Io("WAL page count overflow".to_string()))?;
+        let start_page_id = self.persisted_pages.max(2);
+        let required_pages = start_page_id
+            .checked_add(wal_pages)
+            .ok_or_else(|| BTreeError::Io("WAL file length overflow".to_string()))?;
+        let required_len = required_pages
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("WAL file byte length overflow".to_string()))?;
+        self.file.truncate(required_len)?;
+
+        let header = WalHeader {
+            generation,
+            root_page_id,
+            freelist_head_page_id,
+            total_pages,
+            frame_count,
+        };
+        self.write_wal_page(
+            start_page_id,
+            &encode_wal_header_page(self.options.page_size, header)?,
+        )?;
+
+        let mut cursor = start_page_id + 1;
+        for (page_id, is_blob, is_freelist, raw) in &frames {
+            let raw = raw.as_slice();
+            if raw.len() != self.options.page_size {
+                return Err(BTreeError::Corrupt(format!(
+                    "WAL page {} has invalid length {}",
+                    page_id,
+                    raw.len()
+                )));
+            }
+            let meta = encode_wal_frame_meta_page(
+                self.options.page_size,
+                *page_id,
+                *is_blob,
+                *is_freelist,
+                raw,
+            )?;
+            self.write_wal_page(cursor, &meta)?;
+            self.write_wal_page(cursor + 1, raw)?;
+            cursor += 2;
+        }
+
+        let commit = encode_wal_commit_page(self.options.page_size, generation, frame_count)?;
+        self.write_wal_page(cursor, &commit)?;
+        self.persisted_pages = required_pages;
+        Ok(())
+    }
+
+    fn write_wal_page(&self, page_id: PageId, raw: &[u8]) -> Result<(), BTreeError> {
+        if raw.len() != self.options.page_size {
+            return Err(BTreeError::Corrupt(format!(
+                "WAL page raw length {} does not match page size {}",
+                raw.len(),
+                self.options.page_size
+            )));
+        }
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("WAL write offset overflow".to_string()))?;
+        self.file.write_all_at(offset, raw)
+    }
+
+    fn replay_wal(&mut self) -> Result<(), BTreeError> {
+        let mut cursor = self.active.total_pages.max(2);
+        while cursor < self.persisted_pages {
+            let Some((header, frames, next_cursor)) = self.read_wal_commit(cursor)? else {
+                break;
+            };
+            self.apply_wal_commit(header, frames)?;
+            cursor = next_cursor;
+        }
+        Ok(())
+    }
+
+    fn read_wal_commit(
+        &self,
+        start_page_id: PageId,
+    ) -> Result<Option<(WalHeader, Vec<WalFrame>, PageId)>, BTreeError> {
+        let Some(header) = self.read_wal_header(start_page_id)? else {
+            return Ok(None);
+        };
+        let frame_count = usize::try_from(header.frame_count)
+            .map_err(|_| BTreeError::Corrupt("WAL frame count too large".to_string()))?;
+        let wal_pages = header
+            .frame_count
+            .checked_mul(2)
+            .and_then(|pages| pages.checked_add(2))
+            .ok_or_else(|| BTreeError::Corrupt("WAL page count overflow".to_string()))?;
+        let next_cursor = start_page_id
+            .checked_add(wal_pages)
+            .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
+        if next_cursor > self.persisted_pages {
+            return Ok(None);
+        }
+
+        let mut frames = Vec::with_capacity(frame_count);
+        let mut cursor = start_page_id + 1;
+        for _ in 0..frame_count {
+            let Some((page_id, is_blob, is_freelist, expected_checksum)) =
+                self.read_wal_frame_meta(cursor)?
+            else {
+                return Ok(None);
+            };
+            let raw = self.read_raw_page_at(cursor + 1)?;
+            if checksum::hash(&raw) != expected_checksum {
+                return Ok(None);
+            }
+            frames.push(WalFrame {
+                page_id,
+                is_blob,
+                is_freelist,
+                raw,
+            });
+            cursor += 2;
+        }
+
+        if !self.read_wal_commit_marker(cursor, header.generation, header.frame_count)? {
+            return Ok(None);
+        }
+        Ok(Some((header, frames, next_cursor)))
+    }
+
+    fn apply_wal_commit(
+        &mut self,
+        header: WalHeader,
+        frames: Vec<WalFrame>,
+    ) -> Result<(), BTreeError> {
+        if header.total_pages < 2 {
+            return Err(BTreeError::Corrupt(
+                "WAL total_pages must be >= 2".to_string(),
+            ));
+        }
+        self.total_pages = header.total_pages;
+        self.root_page_id = (header.root_page_id != 0).then_some(header.root_page_id);
+        self.free_pages.clear();
+        self.free_set.clear();
+        self.freelist_meta_pages.clear();
+
+        for frame in frames {
+            self.validate_writable_page_id(frame.page_id)?;
+            if frame.raw.len() != self.options.page_size {
+                return Err(BTreeError::Corrupt(format!(
+                    "WAL frame page {} has invalid length {}",
+                    frame.page_id,
+                    frame.raw.len()
+                )));
+            }
+            if frame.is_blob {
+                self.blob_pages.insert(frame.page_id);
+            } else {
+                let _ = validate_page(&frame.raw, self.options.page_size)?;
+                self.blob_pages.remove(&frame.page_id);
+            }
+            self.pages.insert(frame.page_id, frame.raw);
+            if frame.is_freelist {
+                self.dirty_pages.remove(&frame.page_id);
+                self.wal_pages.remove(&frame.page_id);
+            } else {
+                self.wal_pages.insert(frame.page_id);
+            }
+            self.touch_page(frame.page_id);
+        }
+
+        if header.freelist_head_page_id != 0 {
+            self.load_freelist_from_cached_pages(header.freelist_head_page_id)?;
+        }
+        self.sanitize_free_pages();
+        self.active = Superblock::new(
+            self.options.page_size as u32,
+            header.generation,
+            header.root_page_id,
+            header.freelist_head_page_id,
+            header.total_pages,
+        );
+        Ok(())
+    }
+
+    fn load_freelist_from_cached_pages(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
+        let mut current = head_page_id;
+        let mut seen = OpfsSet::default();
+
+        while current != 0 {
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "freelist pages contain a cycle".to_string(),
+                ));
+            }
+
+            let raw = self.pages.get(&current).ok_or_else(|| {
+                BTreeError::Corrupt(format!("WAL freelist page {} missing", current))
+            })?;
+            let (ids, next) = raw_freelist_page(raw, self.options.page_size)?;
+            self.freelist_meta_pages.push(current);
+            for id in ids {
+                self.add_free_page(id);
+            }
+            current = next.unwrap_or(0);
+        }
+
+        Ok(())
+    }
+
+    fn read_wal_header(&self, page_id: PageId) -> Result<Option<WalHeader>, BTreeError> {
+        let raw = self.read_raw_page_at(page_id)?;
+        decode_wal_header_page(&raw, self.options.page_size)
+    }
+
+    fn read_wal_frame_meta(
+        &self,
+        page_id: PageId,
+    ) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
+        let raw = self.read_raw_page_at(page_id)?;
+        decode_wal_frame_meta_page(&raw, self.options.page_size)
+    }
+
+    fn read_wal_commit_marker(
+        &self,
+        page_id: PageId,
+        generation: u64,
+        frame_count: u64,
+    ) -> Result<bool, BTreeError> {
+        let raw = self.read_raw_page_at(page_id)?;
+        decode_wal_commit_page(&raw, generation, frame_count)
+    }
+
+    fn read_raw_page_at(&self, page_id: PageId) -> Result<Vec<u8>, BTreeError> {
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("raw page read offset overflow".to_string()))?;
+        let mut raw = vec![0u8; self.options.page_size];
+        self.file.read_exact_at(offset, &mut raw)?;
+        Ok(raw)
+    }
+
     fn validate_writable_page_id(&self, page_id: PageId) -> Result<(), BTreeError> {
         if page_id < 2 {
             return Err(BTreeError::Corrupt(format!(
@@ -1249,6 +1627,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
         self.dirty_pages.remove(&page_id);
+        self.wal_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
         self.blob_pages.remove(&page_id);
         self.pages.remove(&page_id)
@@ -1490,6 +1869,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             if Some(*page_id) == protected_page
                 || Some(*page_id) == root_page_id
                 || self.dirty_pages.contains(page_id)
+                || self.wal_pages.contains(page_id)
             {
                 continue;
             }
@@ -1756,6 +2136,184 @@ fn write_slot_unchecked<F: SyncFile>(
     let mut page = vec![0u8; page_size];
     sb.encode_into_page(&mut page)?;
     file.write_all_at(slot.byte_offset(page_size), &page)?;
+    Ok(())
+}
+
+fn encode_wal_header_page(page_size: usize, header: WalHeader) -> Result<Vec<u8>, BTreeError> {
+    let mut page = vec![0u8; page_size];
+    ensure_wal_page_capacity(&page, WAL_HEADER_CHECKSUM_OFFSET + 4)?;
+    page[0..8].copy_from_slice(&WAL_HEADER_MAGIC);
+    write_u32_at(&mut page, 8, WAL_FORMAT_VERSION)?;
+    write_u32_at(&mut page, 12, page_size_u32(page_size)?)?;
+    write_u64_at(&mut page, 16, header.generation)?;
+    write_u64_at(&mut page, 24, header.root_page_id)?;
+    write_u64_at(&mut page, 32, header.freelist_head_page_id)?;
+    write_u64_at(&mut page, 40, header.total_pages)?;
+    write_u64_at(&mut page, 48, header.frame_count)?;
+    let checksum = checksum::hash(&page[..WAL_HEADER_CHECKSUM_OFFSET]);
+    write_u32_at(&mut page, WAL_HEADER_CHECKSUM_OFFSET, checksum)?;
+    Ok(page)
+}
+
+fn decode_wal_header_page(raw: &[u8], page_size: usize) -> Result<Option<WalHeader>, BTreeError> {
+    ensure_wal_page_capacity(raw, WAL_HEADER_CHECKSUM_OFFSET + 4)?;
+    if raw[0..8] != WAL_HEADER_MAGIC {
+        return Ok(None);
+    }
+    if read_u32_at(raw, 8)? != WAL_FORMAT_VERSION
+        || read_u32_at(raw, 12)? != page_size_u32(page_size)?
+    {
+        return Ok(None);
+    }
+    if read_u32_at(raw, WAL_HEADER_CHECKSUM_OFFSET)?
+        != checksum::hash(&raw[..WAL_HEADER_CHECKSUM_OFFSET])
+    {
+        return Ok(None);
+    }
+    Ok(Some(WalHeader {
+        generation: read_u64_at(raw, 16)?,
+        root_page_id: read_u64_at(raw, 24)?,
+        freelist_head_page_id: read_u64_at(raw, 32)?,
+        total_pages: read_u64_at(raw, 40)?,
+        frame_count: read_u64_at(raw, 48)?,
+    }))
+}
+
+fn encode_wal_frame_meta_page(
+    page_size: usize,
+    page_id: PageId,
+    is_blob: bool,
+    is_freelist: bool,
+    raw_page: &[u8],
+) -> Result<Vec<u8>, BTreeError> {
+    let mut page = vec![0u8; page_size];
+    ensure_wal_page_capacity(&page, WAL_FRAME_CHECKSUM_OFFSET + 4)?;
+    page[0..8].copy_from_slice(&WAL_FRAME_MAGIC);
+    write_u32_at(&mut page, 8, WAL_FORMAT_VERSION)?;
+    write_u32_at(&mut page, 12, page_size_u32(page_size)?)?;
+    write_u64_at(&mut page, 16, page_id)?;
+    let mut flags = 0;
+    if is_blob {
+        flags |= WAL_FRAME_FLAG_BLOB;
+    }
+    if is_freelist {
+        flags |= WAL_FRAME_FLAG_FREELIST;
+    }
+    write_u32_at(&mut page, 24, flags)?;
+    write_u32_at(&mut page, 28, checksum::hash(raw_page))?;
+    let checksum = checksum::hash(&page[..WAL_FRAME_CHECKSUM_OFFSET]);
+    write_u32_at(&mut page, WAL_FRAME_CHECKSUM_OFFSET, checksum)?;
+    Ok(page)
+}
+
+fn decode_wal_frame_meta_page(
+    raw: &[u8],
+    page_size: usize,
+) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
+    ensure_wal_page_capacity(raw, WAL_FRAME_CHECKSUM_OFFSET + 4)?;
+    if raw[0..8] != WAL_FRAME_MAGIC {
+        return Ok(None);
+    }
+    if read_u32_at(raw, 8)? != WAL_FORMAT_VERSION
+        || read_u32_at(raw, 12)? != page_size_u32(page_size)?
+    {
+        return Ok(None);
+    }
+    if read_u32_at(raw, WAL_FRAME_CHECKSUM_OFFSET)?
+        != checksum::hash(&raw[..WAL_FRAME_CHECKSUM_OFFSET])
+    {
+        return Ok(None);
+    }
+    let flags = read_u32_at(raw, 24)?;
+    if flags & !(WAL_FRAME_FLAG_BLOB | WAL_FRAME_FLAG_FREELIST) != 0 {
+        return Ok(None);
+    }
+    Ok(Some((
+        read_u64_at(raw, 16)?,
+        flags & WAL_FRAME_FLAG_BLOB != 0,
+        flags & WAL_FRAME_FLAG_FREELIST != 0,
+        read_u32_at(raw, 28)?,
+    )))
+}
+
+fn encode_wal_commit_page(
+    page_size: usize,
+    generation: u64,
+    frame_count: u64,
+) -> Result<Vec<u8>, BTreeError> {
+    let mut page = vec![0u8; page_size];
+    ensure_wal_page_capacity(&page, WAL_COMMIT_CHECKSUM_OFFSET + 4)?;
+    page[0..8].copy_from_slice(&WAL_COMMIT_MAGIC);
+    write_u32_at(&mut page, 8, WAL_FORMAT_VERSION)?;
+    write_u64_at(&mut page, 12, generation)?;
+    write_u64_at(&mut page, 20, frame_count)?;
+    let checksum = checksum::hash(&page[..WAL_COMMIT_CHECKSUM_OFFSET]);
+    write_u32_at(&mut page, WAL_COMMIT_CHECKSUM_OFFSET, checksum)?;
+    Ok(page)
+}
+
+fn decode_wal_commit_page(
+    raw: &[u8],
+    generation: u64,
+    frame_count: u64,
+) -> Result<bool, BTreeError> {
+    ensure_wal_page_capacity(raw, WAL_COMMIT_CHECKSUM_OFFSET + 4)?;
+    if raw[0..8] != WAL_COMMIT_MAGIC {
+        return Ok(false);
+    }
+    if read_u32_at(raw, 8)? != WAL_FORMAT_VERSION {
+        return Ok(false);
+    }
+    if read_u64_at(raw, 12)? != generation || read_u64_at(raw, 20)? != frame_count {
+        return Ok(false);
+    }
+    Ok(read_u32_at(raw, WAL_COMMIT_CHECKSUM_OFFSET)?
+        == checksum::hash(&raw[..WAL_COMMIT_CHECKSUM_OFFSET]))
+}
+
+fn ensure_wal_page_capacity(raw: &[u8], needed: usize) -> Result<(), BTreeError> {
+    if raw.len() < needed {
+        return Err(BTreeError::Corrupt(format!(
+            "WAL page too small: {} < {}",
+            raw.len(),
+            needed
+        )));
+    }
+    Ok(())
+}
+
+fn page_size_u32(page_size: usize) -> Result<u32, BTreeError> {
+    u32::try_from(page_size)
+        .map_err(|_| BTreeError::InvalidOptions("page size too large".to_string()))
+}
+
+fn read_u32_at(raw: &[u8], offset: usize) -> Result<u32, BTreeError> {
+    let bytes = raw
+        .get(offset..offset + 4)
+        .ok_or_else(|| BTreeError::Corrupt("u32 read out of bounds".to_string()))?;
+    Ok(u32::from_le_bytes(bytes.try_into().expect("slice len")))
+}
+
+fn read_u64_at(raw: &[u8], offset: usize) -> Result<u64, BTreeError> {
+    let bytes = raw
+        .get(offset..offset + 8)
+        .ok_or_else(|| BTreeError::Corrupt("u64 read out of bounds".to_string()))?;
+    Ok(u64::from_le_bytes(bytes.try_into().expect("slice len")))
+}
+
+fn write_u32_at(raw: &mut [u8], offset: usize, value: u32) -> Result<(), BTreeError> {
+    let slot = raw
+        .get_mut(offset..offset + 4)
+        .ok_or_else(|| BTreeError::Corrupt("u32 write out of bounds".to_string()))?;
+    slot.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn write_u64_at(raw: &mut [u8], offset: usize, value: u64) -> Result<(), BTreeError> {
+    let slot = raw
+        .get_mut(offset..offset + 8)
+        .ok_or_else(|| BTreeError::Corrupt("u64 write out of bounds".to_string()))?;
+    slot.copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
 
@@ -2139,6 +2697,71 @@ mod tests {
         assert!(state.generation >= 2);
         assert!(state.root_page_id >= 2);
         assert!(state.total_pages > 2);
+    }
+
+    #[test]
+    fn wal_flush_persists_data_across_reopen() {
+        let options = small_options();
+        let file = MemoryFile::new();
+        let big = vec![7u8; options.overflow_threshold + 1024];
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"k1", b"value1").expect("put k1");
+        tree.put(b"k2", &big).expect("put k2");
+        tree.flush_wal().expect("flush wal");
+
+        let mut reopened = OpfsBTree::open(file.clone(), options).expect("reopen tree");
+        assert_eq!(
+            reopened.get(b"k1").expect("get k1"),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(reopened.get(b"k2").expect("get k2"), Some(big));
+
+        reopened.checkpoint().expect("checkpoint replayed WAL");
+        let mut checkpointed = OpfsBTree::open(file, options).expect("reopen checkpointed tree");
+        assert_eq!(
+            checkpointed.get(b"k1").expect("checkpointed get k1"),
+            Some(b"value1".to_vec())
+        );
+    }
+
+    #[test]
+    fn wal_replay_ignores_incomplete_trailing_commit() {
+        let options = small_options();
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"k", b"checkpointed").expect("put checkpointed");
+        tree.checkpoint().expect("checkpoint");
+        tree.put(b"k", b"uncommitted").expect("put uncommitted");
+        tree.flush_wal().expect("flush wal");
+
+        let len = file.len().expect("file len");
+        file.truncate(len - options.page_size as u64)
+            .expect("truncate commit page");
+
+        let mut reopened = OpfsBTree::open(file, options).expect("reopen tree");
+        assert_eq!(
+            reopened.get(b"k").expect("get k"),
+            Some(b"checkpointed".to_vec())
+        );
+    }
+
+    #[test]
+    fn checkpoint_after_wal_flush_materializes_journaled_pages() {
+        let options = small_options();
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"k", b"wal-first").expect("put wal-first");
+        tree.flush_wal().expect("flush wal");
+        tree.checkpoint().expect("checkpoint after wal");
+
+        let mut reopened = OpfsBTree::open(file, options).expect("reopen tree");
+        assert_eq!(
+            reopened.get(b"k").expect("get k"),
+            Some(b"wal-first".to_vec())
+        );
     }
 
     #[test]
