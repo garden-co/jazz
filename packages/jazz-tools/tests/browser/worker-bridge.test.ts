@@ -2290,6 +2290,98 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
+  it("reconciles a follower write that was pending when the leader crashes", async () => {
+    const dbName = uniqueDbName("leader-crash-pending-follower-write");
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    const marker = `pending-follower-write-${Date.now()}`;
+    let pendingWrite!: Promise<unknown>;
+    let pendingWriteState: "pending" | "resolved" | "rejected" = "pending";
+    await waitForCondition(
+      async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
+      8000,
+      "Broker should keep the follower bridged through the elected leader",
+    );
+    await leader.all(allTodos, { tier: "local" });
+    await waitForCondition(
+      async () => {
+        void (follower as any).followerReady?.catch(() => {});
+        await follower.all(allTodos, { tier: "local" });
+        return (
+          Boolean((follower as any).followerPortBridge) &&
+          (follower as any).resolveFollowerReady === null
+        );
+      },
+      8000,
+      "Follower should have a ready data port before the pending write test",
+    );
+
+    // The follower stays alive: the write must not be lost if the leader
+    // crashes before confirming local durability.
+    (follower as any).closeFollowerPortState(undefined, {
+      preserveOutbox: true,
+    });
+
+    pendingWrite = follower.insert(todos, { title: marker, done: false }).wait({
+      tier: "local",
+    });
+    void pendingWrite.then(
+      () => {
+        pendingWriteState = "resolved";
+      },
+      () => {
+        pendingWriteState = "rejected";
+      },
+    );
+
+    await sleep(250);
+    expect(pendingWriteState).toBe("pending");
+
+    const leaderWorker = getPrivateWorker(leader);
+    await (leader as any).workerBridge?.simulateCrash?.();
+    leaderWorker?.terminate();
+    (leader as any).worker = null;
+    (leader as any).workerBridge = null;
+    await leader.shutdown();
+    untrack(leader);
+
+    await waitForCondition(
+      async () => getTabRole(follower) === "leader" && getPrivateWorker(follower) !== null,
+      12000,
+      "Follower should be promoted to durable leader after the old leader crashes",
+    );
+
+    await withTimeout(
+      pendingWrite,
+      12000,
+      "Pending follower write did not resolve after leader crash failover",
+    );
+
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === marker);
+      },
+      8000,
+      "Promoted follower should retain the pending write locally",
+    );
+
+    await follower.shutdown();
+    untrack(follower);
+
+    const fresh = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const rows = await fresh.all(allTodos, { tier: "local" });
+    expect(rows.some((row) => row.title === marker)).toBe(true);
+  });
+
   it("re-elects cleanly when a closed leader tab is reopened", async () => {
     const dbName = uniqueDbName("leader-reopen");
     const dbA = track(
