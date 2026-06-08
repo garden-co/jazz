@@ -94,7 +94,6 @@ export function makeClient() {
       ]);
       return [];
     },
-    subscribe: () => nextHandle++,
     createSubscription: (
       queryJson: string,
       sessionJson?: string | null,
@@ -163,7 +162,6 @@ export function makeClientWithContext(context: AppContext): JazzClient {
       batchId: "batch-id",
     }),
     query: async () => [],
-    subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},

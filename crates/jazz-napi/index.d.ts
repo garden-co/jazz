@@ -27,7 +27,6 @@ export declare class NapiRuntime {
   commitBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
-  subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number

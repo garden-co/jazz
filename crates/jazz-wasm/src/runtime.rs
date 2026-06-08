@@ -1674,48 +1674,6 @@ impl WasmRuntime {
     // Subscriptions
     // =========================================================================
 
-    /// Subscribe to a query with a callback.
-    ///
-    /// Default behavior matches RuntimeCore:
-    /// - with upstream server: first callback waits for protocol QuerySettled convergence
-    /// - without upstream server: first callback is local-immediate
-    ///
-    /// Pass durability options to override this default.
-    ///
-    /// # Returns
-    /// Subscription handle (f64) for later unsubscription.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen]
-    pub fn subscribe(
-        &self,
-        query_json: &str,
-        on_update: Function,
-        session_json: Option<String>,
-        settled_tier: Option<String>,
-        options_json: Option<String>,
-    ) -> Result<f64, JsError> {
-        let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
-        let (query, session, durability, propagation) =
-            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
-        let callback = make_subscription_callback(on_update);
-
-        let handle = self
-            .core
-            .borrow_mut()
-            .subscribe_with_durability_and_propagation(
-                query,
-                callback,
-                session,
-                durability,
-                propagation,
-            )
-            .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
-
-        let subscription_id = handle.0;
-        tracing::debug!(subscription_id, "subscribed");
-        Ok(subscription_id as f64)
-    }
-
     /// Unsubscribe from a query.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]

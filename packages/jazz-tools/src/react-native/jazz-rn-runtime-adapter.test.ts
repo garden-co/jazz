@@ -38,7 +38,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     ),
     onBatchedTickNeeded: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
-    subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn((_objectId, _valuesJson, writeContextJson) =>
       JSON.stringify({ batchId: writeContextJson ? "batch-update-2" : "batch-update-1" }),
@@ -260,28 +259,6 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.delete_).toHaveBeenCalledWith("row-1", writeContextJson);
   });
 
-  it("bridges subscription callbacks with handle conversion", () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    const onUpdate = vi.fn();
-    const handle = adapter.subscribe("{}", onUpdate, null, null);
-    expect(handle).toBe(7);
-
-    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
-    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
-    expect(onUpdate).toHaveBeenCalledWith({
-      added: [],
-      removed: [],
-      updated: [],
-      pending: false,
-    });
-
-    adapter.unsubscribe(handle);
-    expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
-  });
-
   it("bridges 2-phase createSubscription + executeSubscription with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
@@ -317,9 +294,10 @@ describe("JazzRnRuntimeAdapter", () => {
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
     });
-    adapter.subscribe("{}", onUpdate, null, null);
-    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
+    const handle = adapter.createSubscription("{}", null, null);
+    adapter.executeSubscription(handle, onUpdate);
+    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = executeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
@@ -328,9 +306,10 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const onUpdate = vi.fn();
-    adapter.subscribe("{}", onUpdate, null, null);
-    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
+    const handle = adapter.createSubscription("{}", null, null);
+    adapter.executeSubscription(handle, onUpdate);
+    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = executeMock.mock.calls[0]![1];
 
     subscriptionCallback.onUpdate(
       JSON.stringify({

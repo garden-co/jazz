@@ -780,47 +780,6 @@ impl RnRuntime {
     // Subscriptions
     // =========================================================================
 
-    pub fn subscribe(
-        &self,
-        query_json: String,
-        callback: Box<dyn SubscriptionCallback>,
-        session_json: Option<String>,
-        tier: Option<String>,
-    ) -> Result<u64, JazzRnError> {
-        with_panic_boundary("subscribe", || {
-            let (query, session, durability) =
-                parse_subscription_inputs(&query_json, session_json, tier)?;
-            let alignment_table = if query_rows_can_be_schema_aligned(&query) {
-                Some(query.table)
-            } else {
-                None
-            };
-            let callback = make_subscription_callback(
-                callback,
-                alignment_table
-                    .as_ref()
-                    .map(|_| self.declared_schema.clone()),
-                alignment_table,
-            );
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-
-            let handle = core
-                .subscribe_with_durability_and_propagation(
-                    query,
-                    callback,
-                    session,
-                    durability,
-                    QueryPropagation::Full,
-                )
-                .map_err(runtime_err)?;
-
-            Ok(handle.0)
-        })
-    }
-
     pub fn unsubscribe(&self, handle: u64) -> Result<(), JazzRnError> {
         with_panic_boundary("unsubscribe", || {
             self.subscription_queries
