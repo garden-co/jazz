@@ -760,8 +760,7 @@ fn route_peer_payloads(runtime: &Rc<WasmRuntime>, peer_id: &str, payloads: Vec<B
         Ok(client) => {
             for payload in payloads {
                 let arr = Uint8Array::from(payload.as_ref());
-                if let Err(err) = runtime.on_sync_message_received_from_client(&client, arr.into())
-                {
+                if let Err(err) = runtime.receive_sync_message_from_client(&client, arr.into()) {
                     tracing::warn!("follower-port route: {err:?}");
                 }
             }
