@@ -2382,6 +2382,129 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows.some((row) => row.title === marker)).toBe(true);
   });
 
+  it("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
+    // Faithful version of the failover-during-pending-write case. Unlike a write
+    // made while the follower is detached (which only ever buffers locally and
+    // replays on self-promotion), here the follower stays *bridged* to the
+    // leader, so the write actually travels to the leader and is persisted there
+    // before the crash. This is the path the design worries about: the leader
+    // produces a BatchFate that is lost when it dies, and the follower's wait
+    // must still resolve via failover reconciliation rather than hang forever.
+    const dbName = uniqueDbName("leader-crash-inflight-follower-wait");
+
+    // Bring the leader up first and let it become durable-ready before the second
+    // tab joins. Two tabs created back-to-back race the election (the second can
+    // win and demote the first), which would leave the `leader`/`follower`
+    // references below pointing at the wrong tab. Electing the leader before the
+    // follower connects keeps the roles stable.
+    const leader = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    leader.insert(todos, { title: "seed", done: false });
+    await waitForCondition(
+      async () => {
+        const rows = await leader.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === "seed");
+      },
+      8000,
+      "Leader should persist its seed row before the follower connects",
+    );
+    await waitForCondition(
+      async () => getTabRole(leader) === "leader" && getPrivateWorker(leader) !== null,
+      8000,
+      "Leader should be durable-ready before the follower connects",
+    );
+
+    const follower = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    await waitForCondition(
+      async () => getTabRole(follower) === "follower" && getPrivateWorker(follower) === null,
+      8000,
+      "Second tab should join as a follower without spawning a worker",
+    );
+    // Reading the leader's seed row over the data port is a black-box proof that
+    // the follower is genuinely bridged to the leader's worker, so the pending
+    // write below will actually reach the leader (not just buffer locally).
+    await waitForCondition(
+      async () => {
+        const rows = await follower.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === "seed");
+      },
+      8000,
+      "Follower should receive the leader's row through the live data port",
+    );
+
+    // Issue the write + local wait but do NOT await it: the batch travels to the
+    // leader's worker over the live data port while the wait stays pending.
+    const marker = "pending-when-bridged-leader-crashed";
+    const pendingWrite = follower
+      .insert(todos, { title: marker, done: false })
+      .wait({ tier: "local" });
+    let settled = false;
+    void pendingWrite.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Local durability needs a follower -> leader -> follower round trip that
+    // cannot have happened synchronously, so the wait must still be pending.
+    expect(settled).toBe(false);
+
+    // Crash the leader's worker while the wait is in flight. `simulateCrash`
+    // drains the already-delivered follower batch and flushes the WAL (see
+    // handle_shutdown in crates/jazz-wasm/src/worker_host.rs), so the write is
+    // persisted on the leader's OPFS, but the noop sender it then installs means
+    // the BatchFate is never delivered back to the follower -- the exact
+    // "lost BatchFate" case. (If the batch had not reached the leader yet,
+    // failover retransmit still drives it to durability; either way the wait
+    // must resolve.)
+    const leaderWorker = getPrivateWorker(leader);
+    await (leader as any).workerBridge.simulateCrash();
+    leaderWorker?.terminate();
+    // Null the dead bridge so shutdown only frees client-side resources, then
+    // shut the leader down so its tab releases its Web Locks. A real
+    // closed/crashed tab releases them automatically; releasing them here is
+    // what lets the broker elect the surviving follower.
+    (leader as any).worker = null;
+    (leader as any).workerBridge = null;
+    await leader.shutdown();
+    untrack(leader);
+
+    // The surviving follower is promoted and opens its own durable worker, which
+    // reopens the same OPFS namespace (and replays the persisted write).
+    await waitForCondition(
+      async () => getTabRole(follower) === "leader" && getPrivateWorker(follower) !== null,
+      12000,
+      "Surviving follower should be promoted to a durable leader after the crash",
+    );
+
+    // The assertion that bites: the pending wait resolves through failover
+    // reconciliation instead of hanging forever on the lost BatchFate.
+    await withTimeout(
+      pendingWrite,
+      12000,
+      "Pending follower wait did not resolve after the bridged leader crashed",
+    );
+
+    // And the write is genuinely durable: visible on the promoted follower and
+    // on a freshly opened tab reading the same OPFS namespace.
+    const promotedRows = await follower.all(allTodos, { tier: "local" });
+    expect(promotedRows.some((row) => row.title === marker)).toBe(true);
+
+    await follower.shutdown();
+    untrack(follower);
+
+    const reopened = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const reopenedRows = await reopened.all(allTodos, { tier: "local" });
+    expect(reopenedRows.some((row) => row.title === marker)).toBe(true);
+  });
+
   it("re-elects cleanly when a closed leader tab is reopened", async () => {
     const dbName = uniqueDbName("leader-reopen");
     const dbA = track(
