@@ -89,10 +89,6 @@ export interface Runtime {
   /** Drive a synchronous batched tick. Used by callers that need to flush
    * pending state before a synchronous teardown. */
   batchedTick?(): void;
-  /**
-   * When true, runtime row outputs are already aligned to the declared schema order.
-   */
-  returnsDeclaredSchemaRows?: boolean;
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
@@ -852,10 +848,6 @@ export class JazzClient {
     return payload;
   }
 
-  private returnsDeclaredSchemaRows(): boolean {
-    return this.runtime.returnsDeclaredSchemaRows === true;
-  }
-
   private constructor(
     runtime: Runtime,
     context: AppContext,
@@ -1059,10 +1051,6 @@ export class JazzClient {
     arraySubqueries: ArraySubqueryPlan[] = [],
     selectColumns: string[] = [],
   ): Value[] {
-    if (this.returnsDeclaredSchemaRows()) {
-      return values;
-    }
-
     const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const declaredTable = this.context.schema[table];
     const runtimeTable = effectiveRuntimeSchema[table];
@@ -1147,10 +1135,6 @@ export class JazzClient {
     plan: ArraySubqueryPlan,
     runtimeSchema?: WasmSchema,
   ): Value {
-    if (this.returnsDeclaredSchemaRows()) {
-      return value;
-    }
-
     const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     if (value.type !== "Array") {
       return value;
@@ -1185,10 +1169,6 @@ export class JazzClient {
     rows: Row[],
     runtimeSchema?: WasmSchema,
   ): Row[] {
-    if (this.returnsDeclaredSchemaRows()) {
-      return rows;
-    }
-
     const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable) {
@@ -1212,10 +1192,6 @@ export class JazzClient {
     delta: SubscriptionWireDelta,
     runtimeSchema?: WasmSchema,
   ): SubscriptionWireDelta {
-    if (this.returnsDeclaredSchemaRows()) {
-      return delta;
-    }
-
     const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable || !Array.isArray(delta)) {
@@ -1384,8 +1360,7 @@ export class JazzClient {
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const effectiveRuntimeSchema =
-      runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
@@ -1482,8 +1457,7 @@ export class JazzClient {
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const effectiveRuntimeSchema =
-      runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
 
     // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
     // a handle synchronously (zero work), then `executeSubscription` is deferred
@@ -1562,22 +1536,6 @@ export class JazzClient {
    */
   getRuntime(): Runtime {
     return this.runtime;
-  }
-
-  /**
-   * Get schema context for server requests.
-   * @internal
-   */
-  getSchemaContext(): {
-    env: string;
-    schema_hash: string;
-    user_branch: string;
-  } {
-    return {
-      env: this.context.env ?? "dev",
-      schema_hash: this.runtime.getSchemaHash(),
-      user_branch: this.context.userBranch ?? "main",
-    };
   }
 
   async waitForBatch(batchId: BatchId, tier: DurabilityTier): Promise<void> {
