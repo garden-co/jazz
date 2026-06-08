@@ -22,7 +22,7 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(target_arch = "wasm32")]
-pub mod wasm;
+mod wasm;
 
 use crate::object::ObjectId;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
@@ -184,8 +184,10 @@ impl OpfsBTreeStorage {
 
     fn tree_insert_many_sorted(&self, entries: &[(String, &[u8])]) -> Result<(), StorageError> {
         self.with_tree_mut(|tree| {
-            tree.put_many_sorted(entries.iter().map(|(key, value)| (key.as_bytes(), *value)))
-                .map_err(map_storage_err)
+            for (key, value) in entries {
+                tree.put(key.as_bytes(), value).map_err(map_storage_err)?;
+            }
+            Ok(())
         })
     }
 
@@ -285,12 +287,9 @@ impl Storage for OpfsBTreeStorage {
                 }
 
                 pending_puts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                tree.put_many_sorted(
-                    pending_puts
-                        .iter()
-                        .map(|(key, value)| (key.as_bytes(), *value)),
-                )
-                .map_err(map_storage_err)?;
+                for (key, value) in pending_puts.iter() {
+                    tree.put(key.as_bytes(), value).map_err(map_storage_err)?;
+                }
                 pending_puts.clear();
                 Ok(())
             }
@@ -361,10 +360,9 @@ impl Storage for OpfsBTreeStorage {
 
     fn append_history_region_row_bytes(
         &mut self,
-        table: &str,
+        _table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        let _ = table;
         let mut entries: Vec<(String, &[u8])> = rows
             .iter()
             .map(|row| {
@@ -378,10 +376,9 @@ impl Storage for OpfsBTreeStorage {
 
     fn upsert_visible_region_row_bytes(
         &mut self,
-        table: &str,
+        _table: &str,
         rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        let _ = table;
         let mut entries: Vec<(String, &[u8])> = rows
             .iter()
             .map(|row| {
