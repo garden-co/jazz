@@ -93,6 +93,10 @@ pub struct TransportHandle {
     pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
+/// Per-attempt retry deadlines for native Tokio transports.
+///
+/// Non-Tokio transports currently ignore these fields and keep their existing
+/// connection and authentication timing behavior.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TransportRetryConfig {
     pub connect_attempt_timeout: Option<Duration>,
