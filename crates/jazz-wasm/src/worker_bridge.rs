@@ -38,7 +38,7 @@ use crate::worker_protocol::{
     ParsedWorkerToMain, SyncEntry, WorkerLifecycleEvent, WorkerToMainWire,
 };
 
-const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
+const DEFAULT_INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
 
 fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
@@ -83,6 +83,12 @@ impl WasmWorkerBridge {
     ) -> Result<WasmWorkerBridge, JsError> {
         let opts: BridgeInitOptions = serde_wasm_bindgen::from_value(options.clone())
             .map_err(|e| JsError::new(&format!("invalid options: {e}")))?;
+        let init_timeout_ms = opts
+            .init_timeout_ms
+            .unwrap_or(DEFAULT_INIT_RESPONSE_TIMEOUT_MS);
+        if init_timeout_ms <= 0 {
+            return Err(JsError::new("initTimeoutMs must be a positive integer"));
+        }
         let init_message = build_init_message(&opts, &options)?;
         let expects_upstream = opts.server_url.is_some();
         let runtime = runtime.clone();
@@ -109,6 +115,7 @@ impl WasmWorkerBridge {
             runtime.clone(),
             sender,
             init_message,
+            init_timeout_ms,
             expects_upstream,
         ));
         let weak_inner = Rc::downgrade(&inner);
@@ -174,7 +181,7 @@ impl WasmWorkerBridge {
 
         let inner = Rc::clone(&self.inner);
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let timeout = make_timeout(INIT_RESPONSE_TIMEOUT_MS);
+            let timeout = make_timeout(inner.init_timeout_ms);
             let response = match select(rx, timeout).await {
                 Either::Left((Ok(Ok(client_id)), _)) => Ok(client_id),
                 Either::Left((Ok(Err(msg)), _)) => Err(msg),
@@ -591,6 +598,7 @@ struct BridgeInner {
     /// shutdown.
     sender: RustOutboxSender,
     init_message: JsValue,
+    init_timeout_ms: i32,
     state: Cell<BridgeState>,
     worker_client_id: RefCell<Option<String>>,
     listeners: RefCell<Listeners>,
@@ -614,6 +622,7 @@ impl BridgeInner {
         runtime: WasmRuntime,
         sender: RustOutboxSender,
         init_message: JsValue,
+        init_timeout_ms: i32,
         expects_upstream: bool,
     ) -> Self {
         let (promise, resolver) = make_deferred_promise();
@@ -622,6 +631,7 @@ impl BridgeInner {
             runtime,
             sender,
             init_message,
+            init_timeout_ms,
             state: Cell::new(BridgeState::Idle),
             worker_client_id: RefCell::new(None),
             listeners: RefCell::new(Listeners::default()),
@@ -980,6 +990,7 @@ struct BridgeInitOptions {
     admin_secret: Option<String>,
     fallback_wasm_url: Option<String>,
     log_level: Option<String>,
+    init_timeout_ms: Option<i32>,
     telemetry_collector_url: Option<String>,
 }
 

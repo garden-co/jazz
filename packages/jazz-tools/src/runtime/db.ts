@@ -123,6 +123,8 @@ export interface DbConfig {
   dbName?: string;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
+  /** Optional worker init timeout override for benchmark/debug scenarios. */
+  workerInitTimeoutMs?: number;
   /** Optional OTLP/HTTP collector URL for WASM trace telemetry. */
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
@@ -1254,6 +1256,7 @@ export class Db {
       runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
+      initTimeoutMs: this.config.workerInitTimeoutMs,
       telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
   }

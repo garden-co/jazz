@@ -34,6 +34,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  initTimeoutMs?: number;
   telemetryCollectorUrl?: string;
 }
 
