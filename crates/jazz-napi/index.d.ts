@@ -37,9 +37,6 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
-  static deriveUserId(seedB64: string): string
-  static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
-  static getPublicKeyBase64url(seedB64: string): string
   /**
    * Connect to a Jazz server over WebSocket.
    *
@@ -73,17 +70,7 @@ export declare class TestingServer {
   stop(): Promise<void>
 }
 
-export declare function currentTimestamp(): number
-
-export declare function deriveUserId(seedB64: string): string
-
-export declare function generateId(): string
-
-export declare function getPublicKeyBase64url(seedB64: string): string
-
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
-
-export declare function parseSchema(json: string): any
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
