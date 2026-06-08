@@ -141,6 +141,7 @@ pub struct OpfsBTree<F: SyncFile> {
     access_epoch: u64,
     dirty_pages: OpfsSet<PageId>,
     wal_pages: OpfsSet<PageId>,
+    freelist_dirty: bool,
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
@@ -190,6 +191,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             access_epoch: 0,
             dirty_pages: OpfsSet::default(),
             wal_pages: OpfsSet::default(),
+            freelist_dirty: false,
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
@@ -320,6 +322,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         {
             self.remove_page(root_page_id);
             self.add_free_page(root_page_id);
+            self.freelist_dirty = true;
             self.root_page_id = None;
         }
 
@@ -416,6 +419,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.truncate_wal_tail()?;
         self.dirty_pages.clear();
         self.wal_pages.clear();
+        self.freelist_dirty = false;
         self.evict_pages_if_needed(None);
         Ok(())
     }
@@ -427,7 +431,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             total_pages = self.total_pages
         )
         .entered();
-        if self.dirty_pages.is_empty() {
+        let root_page_id = self.root_page_id.unwrap_or(0);
+        if self.dirty_pages.is_empty()
+            && !self.freelist_dirty
+            && root_page_id == self.active.root_page_id
+            && self.total_pages == self.active.total_pages
+        {
             return Ok(());
         }
 
@@ -438,7 +447,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         self.append_wal_commit(
             generation,
-            self.root_page_id.unwrap_or(0),
+            root_page_id,
             freelist_head_page_id,
             self.total_pages,
             &dirty_page_ids,
@@ -451,10 +460,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.active = Superblock::new(
             self.options.page_size as u32,
             generation,
-            self.root_page_id.unwrap_or(0),
+            root_page_id,
             freelist_head_page_id,
             self.total_pages,
         );
+        self.freelist_dirty = false;
         Ok(())
     }
 
@@ -861,6 +871,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.remove_page(page_id);
             self.add_free_page(page_id);
         }
+        self.freelist_dirty = true;
 
         Ok(())
     }
@@ -1530,6 +1541,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             header.freelist_head_page_id,
             header.total_pages,
         );
+        self.freelist_dirty = false;
         Ok(())
     }
 
@@ -1721,6 +1733,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn alloc_page(&mut self) -> PageId {
         while let Some(page_id) = self.free_pages.pop() {
             if self.free_set.remove(&page_id) {
+                self.freelist_dirty = true;
                 tracing::trace!(page_id, reused = true, "alloc_page");
                 return page_id;
             }
@@ -1766,6 +1779,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     })?;
                     self.free_set.remove(&page_id);
                 }
+                self.freelist_dirty = true;
                 tracing::trace!(
                     head_page_id = run_start,
                     page_count,
@@ -1797,12 +1811,14 @@ impl<F: SyncFile> OpfsBTree<F> {
             if let Some(hi) = preferred.checked_add(delta)
                 && self.free_set.remove(&hi)
             {
+                self.freelist_dirty = true;
                 return hi;
             }
             if let Some(lo) = preferred.checked_sub(delta)
                 && lo >= 2
                 && self.free_set.remove(&lo)
             {
+                self.freelist_dirty = true;
                 return lo;
             }
         }

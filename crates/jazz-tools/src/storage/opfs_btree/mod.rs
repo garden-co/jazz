@@ -284,7 +284,7 @@ impl Storage for OpfsBTreeStorage {
                     return Ok(());
                 }
 
-                pending_puts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                pending_puts.sort_by(|left, right| left.0.cmp(&right.0));
                 for (key, value) in pending_puts.iter() {
                     tree.put(key.as_bytes(), value).map_err(map_storage_err)?;
                 }
@@ -368,7 +368,7 @@ impl Storage for OpfsBTreeStorage {
                 (raw_table_entry_key(row.row_raw_table, &key), row.bytes)
             })
             .collect();
-        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
         self.tree_insert_many_sorted(&entries)
     }
 
@@ -384,7 +384,7 @@ impl Storage for OpfsBTreeStorage {
                 (raw_table_entry_key(row.row_raw_table, &key), row.bytes)
             })
             .collect();
-        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
         self.tree_insert_many_sorted(&entries)
     }
 
