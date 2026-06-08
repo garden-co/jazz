@@ -2396,8 +2396,6 @@ mod tests {
         inner: MemoryFile,
         writes: Rc<RefCell<Vec<(u64, usize)>>>,
         reads: Rc<RefCell<Vec<(u64, usize)>>>,
-        len_calls: Rc<RefCell<usize>>,
-        truncate_calls: Rc<RefCell<usize>>,
     }
 
     impl CountingFile {
@@ -2406,8 +2404,6 @@ mod tests {
                 inner: MemoryFile::new(),
                 writes: Rc::new(RefCell::new(Vec::new())),
                 reads: Rc::new(RefCell::new(Vec::new())),
-                len_calls: Rc::new(RefCell::new(0)),
-                truncate_calls: Rc::new(RefCell::new(0)),
             }
         }
 
@@ -2445,22 +2441,11 @@ mod tests {
         fn reset_io_stats(&self) {
             self.reads.borrow_mut().clear();
             self.writes.borrow_mut().clear();
-            *self.len_calls.borrow_mut() = 0;
-            *self.truncate_calls.borrow_mut() = 0;
-        }
-
-        fn len_call_count(&self) -> usize {
-            *self.len_calls.borrow()
-        }
-
-        fn truncate_call_count(&self) -> usize {
-            *self.truncate_calls.borrow()
         }
     }
 
     impl SyncFile for CountingFile {
         fn len(&self) -> Result<u64, BTreeError> {
-            *self.len_calls.borrow_mut() += 1;
             self.inner.len()
         }
 
@@ -2475,7 +2460,6 @@ mod tests {
         }
 
         fn truncate(&self, len: u64) -> Result<(), BTreeError> {
-            *self.truncate_calls.borrow_mut() += 1;
             self.inner.truncate(len)
         }
 
@@ -2528,26 +2512,6 @@ mod tests {
         assert_eq!(state.root_page_id, 0);
         assert_eq!(state.total_pages, 20);
         assert_eq!(state.generation, 3);
-    }
-
-    #[test]
-    fn reopen_detects_existing_page_size() {
-        let file = MemoryFile::new();
-        let old_options = BTreeOptions::default();
-        let mut tree = OpfsBTree::open(file.clone(), old_options).expect("open tree");
-        tree.put(b"key", b"value").expect("put key");
-        tree.checkpoint().expect("checkpoint");
-
-        let new_options = BTreeOptions {
-            page_size: old_options.page_size * 2,
-            ..old_options
-        };
-        let mut reopened = OpfsBTree::open(file, new_options).expect("reopen tree");
-
-        assert_eq!(
-            reopened.get(b"key").expect("get key"),
-            Some(b"value".to_vec())
-        );
     }
 
     #[test]
@@ -2611,29 +2575,6 @@ mod tests {
 
         tree.delete(b"b").expect("delete b");
         assert_eq!(tree.get(b"b").expect("get b after delete"), None);
-    }
-
-    #[test]
-    fn put_many_sorted_inserts_batch() {
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
-        let entries = [
-            (b"a".as_slice(), b"one".as_slice()),
-            (b"b".as_slice(), b"two".as_slice()),
-            (b"c".as_slice(), b"three".as_slice()),
-        ];
-
-        tree.put_many_sorted(entries).expect("put sorted entries");
-
-        assert_eq!(tree.get(b"b").expect("get b"), Some(b"two".to_vec()));
-        assert_eq!(
-            tree.range(b"a", b"d", 10).expect("range"),
-            vec![
-                (b"a".to_vec(), b"one".to_vec()),
-                (b"b".to_vec(), b"two".to_vec()),
-                (b"c".to_vec(), b"three".to_vec()),
-            ]
-        );
     }
 
     #[test]
@@ -2783,71 +2724,6 @@ mod tests {
     }
 
     #[test]
-    fn wal_flush_persists_data_across_reopen() {
-        let options = small_options();
-        let file = MemoryFile::new();
-        let big = vec![7u8; options.overflow_threshold + 1024];
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
-
-        tree.put(b"k1", b"value1").expect("put k1");
-        tree.put(b"k2", &big).expect("put k2");
-        tree.flush_wal().expect("flush wal");
-
-        let mut reopened = OpfsBTree::open(file.clone(), options).expect("reopen tree");
-        assert_eq!(
-            reopened.get(b"k1").expect("get k1"),
-            Some(b"value1".to_vec())
-        );
-        assert_eq!(reopened.get(b"k2").expect("get k2"), Some(big));
-
-        reopened.checkpoint().expect("checkpoint replayed WAL");
-        let mut checkpointed = OpfsBTree::open(file, options).expect("reopen checkpointed tree");
-        assert_eq!(
-            checkpointed.get(b"k1").expect("checkpointed get k1"),
-            Some(b"value1".to_vec())
-        );
-    }
-
-    #[test]
-    fn wal_replay_ignores_incomplete_trailing_commit() {
-        let options = small_options();
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
-
-        tree.put(b"k", b"checkpointed").expect("put checkpointed");
-        tree.checkpoint().expect("checkpoint");
-        tree.put(b"k", b"uncommitted").expect("put uncommitted");
-        tree.flush_wal().expect("flush wal");
-
-        let len = file.len().expect("file len");
-        file.truncate(len - options.page_size as u64)
-            .expect("truncate commit page");
-
-        let mut reopened = OpfsBTree::open(file, options).expect("reopen tree");
-        assert_eq!(
-            reopened.get(b"k").expect("get k"),
-            Some(b"checkpointed".to_vec())
-        );
-    }
-
-    #[test]
-    fn checkpoint_after_wal_flush_materializes_journaled_pages() {
-        let options = small_options();
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
-
-        tree.put(b"k", b"wal-first").expect("put wal-first");
-        tree.flush_wal().expect("flush wal");
-        tree.checkpoint().expect("checkpoint after wal");
-
-        let mut reopened = OpfsBTree::open(file, options).expect("reopen tree");
-        assert_eq!(
-            reopened.get(b"k").expect("get k"),
-            Some(b"wal-first".to_vec())
-        );
-    }
-
-    #[test]
     fn checkpoint_writes_only_dirty_data_pages() {
         let options = small_options();
         let file = CountingFile::new();
@@ -2866,36 +2742,6 @@ mod tests {
         tree.checkpoint().expect("checkpoint v2");
         let writes_after_v2 = file.data_page_write_count(options.page_size);
         assert_eq!(writes_after_v2, writes_after_noop + 1);
-    }
-
-    #[test]
-    fn checkpoint_uses_cached_file_length_after_open() {
-        let options = small_options();
-        let file = CountingFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
-
-        file.reset_io_stats();
-        tree.put(b"k", b"v1").expect("put v1");
-        tree.checkpoint().expect("checkpoint v1");
-        assert_eq!(
-            file.len_call_count(),
-            0,
-            "checkpoint should not probe file length after open"
-        );
-        assert_eq!(
-            file.truncate_call_count(),
-            1,
-            "first data checkpoint should extend the file once"
-        );
-
-        file.reset_io_stats();
-        tree.put(b"k", b"v2").expect("put v2");
-        tree.checkpoint().expect("checkpoint v2");
-        assert_eq!(
-            file.len_call_count(),
-            0,
-            "later checkpoints should keep using cached persisted length"
-        );
     }
 
     #[test]

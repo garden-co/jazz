@@ -8,15 +8,6 @@ const DEFAULT_SAMPLES = 5;
 const DEFAULT_WORKER_INIT_TIMEOUT_MS = 180_000;
 const DEFAULT_SYNC_SETTLEMENT_TIER = "edge";
 const DEFAULT_RESULT_TIMEOUT_MS = 180_000;
-const OPFS_COUNTER_KEYS = [
-  "readCalls",
-  "readBytes",
-  "writeCalls",
-  "writeBytes",
-  "lenCalls",
-  "truncateCalls",
-  "flushCalls",
-];
 
 function parseArgs(argv) {
   const args = {
@@ -84,20 +75,6 @@ function percentileSummary(values) {
     p50: percentile(numbers, 50),
     p95: percentile(numbers, 95),
   };
-}
-
-function counterSummary(samples, phase) {
-  const counters = samples
-    .map((sample) => sample[phase].opfsIoCounters)
-    .filter((counter) => counter && typeof counter === "object");
-  if (counters.length === 0) return undefined;
-
-  return Object.fromEntries(
-    OPFS_COUNTER_KEYS.map((key) => [
-      key,
-      percentileSummary(counters.map((counter) => counter[key])),
-    ]),
-  );
 }
 
 async function waitForBenchmarkResult(page, phase, resultTimeoutMs) {
@@ -202,8 +179,6 @@ const summary = {
   localDurabilityMs: percentileSummary(samples.map((sample) => sample.write.localDurabilityMs)),
   syncSettlementMs: percentileSummary(samples.map((sample) => sample.write.syncSettlementMs)),
   reopenQueryMs: percentileSummary(samples.map((sample) => sample.reopen.reopenQueryMs)),
-  writeOpfsIoCounters: counterSummary(samples, "write"),
-  reopenOpfsIoCounters: counterSummary(samples, "reopen"),
   pageErrors: samples.flatMap((sample) => sample.pageErrors),
   consoleErrors: samples.flatMap((sample) => sample.consoleErrors),
 };

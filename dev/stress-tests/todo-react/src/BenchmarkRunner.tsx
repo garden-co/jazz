@@ -15,16 +15,6 @@ const YIELD_EVERY_BATCHES = 10;
 
 type BenchmarkPhase = "write" | "reopen";
 
-type OpfsIoCounters = {
-  readCalls: number;
-  readBytes: number;
-  writeCalls: number;
-  writeBytes: number;
-  lenCalls: number;
-  truncateCalls: number;
-  flushCalls: number;
-};
-
 type BenchmarkResult = {
   status: "ok";
   phase: BenchmarkPhase;
@@ -39,7 +29,6 @@ type BenchmarkResult = {
   reopenQueryMs?: number;
   totalMs: number;
   queriedTodos?: number;
-  opfsIoCounters: OpfsIoCounters | null;
 };
 
 type BenchmarkError = {
@@ -94,14 +83,6 @@ function publishResult(result: BenchmarkResult | BenchmarkError): void {
   window.__JAZZ_TODO_BENCHMARK__ = result;
 }
 
-async function resetOpfsIoCounters(db: Db): Promise<void> {
-  await db.debugOpfsIoCountersReset();
-}
-
-async function snapshotOpfsIoCounters(db: Db): Promise<OpfsIoCounters | null> {
-  return await db.debugOpfsIoCountersSnapshot();
-}
-
 export function BenchmarkRunner({ phase }: { phase: BenchmarkPhase }) {
   const db = useDb();
   const session = useSession();
@@ -145,7 +126,6 @@ async function runWriteBenchmark(
   let batchesSinceYield = 0;
   const syncSettlementTier = benchmarkSyncSettlementTier();
 
-  await resetOpfsIoCounters(db);
   setStatus("enqueue-projects");
   const enqueueStart = nowMs();
   for (let i = 0; i < TOTAL_PROJECTS; i += BATCH_SIZE) {
@@ -190,7 +170,6 @@ async function runWriteBenchmark(
   const enqueueMs = nowMs() - enqueueStart;
 
   const durability = await waitForBenchmarkWriteDurability(handles, syncSettlementTier, setStatus);
-  const opfsIoCounters = await snapshotOpfsIoCounters(db);
 
   setStatus("shutdown");
   await db.shutdown();
@@ -208,7 +187,6 @@ async function runWriteBenchmark(
     enqueueMs,
     ...durability,
     totalMs,
-    opfsIoCounters,
   };
 }
 
@@ -219,12 +197,10 @@ async function runReopenBenchmark(
   setStatus: (status: string) => void,
 ): Promise<BenchmarkResult> {
   const totalStart = nowMs();
-  await resetOpfsIoCounters(db);
   setStatus("query-local");
   const queryStart = nowMs();
   const rows = await db.all(app.todos.limit(100), { tier: "local" });
   const reopenQueryMs = nowMs() - queryStart;
-  const opfsIoCounters = await snapshotOpfsIoCounters(db);
   const totalMs = nowMs() - totalStart;
   setStatus("done");
 
@@ -238,6 +214,5 @@ async function runReopenBenchmark(
     reopenQueryMs,
     totalMs,
     queriedTodos: rows.length,
-    opfsIoCounters,
   };
 }

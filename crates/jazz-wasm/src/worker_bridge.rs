@@ -34,8 +34,8 @@ use web_sys::{MessageEvent, Worker};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
-    main_to_worker_post, parse_worker_to_main, MainToWorkerWire, OpfsIoCountersDebug,
-    ParsedWorkerToMain, SyncEntry, WorkerLifecycleEvent, WorkerToMainWire,
+    main_to_worker_post, parse_worker_to_main, MainToWorkerWire, ParsedWorkerToMain, SyncEntry,
+    WorkerLifecycleEvent, WorkerToMainWire,
 };
 
 const DEFAULT_INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
@@ -379,82 +379,6 @@ impl WasmWorkerBridge {
         })
     }
 
-    #[wasm_bindgen(js_name = debugOpfsIoCountersSnapshot)]
-    pub fn debug_opfs_io_counters_snapshot(&self) -> js_sys::Promise {
-        if self.inner.is_inactive() {
-            return js_sys::Promise::reject(&JsValue::from_str("WorkerBridge has been disposed"));
-        }
-        if self
-            .inner
-            .opfs_io_counters_snapshot_resolver
-            .borrow()
-            .is_some()
-        {
-            return js_sys::Promise::reject(&JsValue::from_str(
-                "OPFS IO counter snapshot already pending",
-            ));
-        }
-
-        let inner = Rc::clone(&self.inner);
-        wasm_bindgen_futures::future_to_promise(async move {
-            let (tx, rx) = oneshot::channel::<Result<OpfsIoCountersDebug, String>>();
-            *inner.opfs_io_counters_snapshot_resolver.borrow_mut() = Some(tx);
-            post_wire(
-                &inner.worker,
-                &MainToWorkerWire::DebugOpfsIoCountersSnapshot,
-            );
-            let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
-            match select(rx, timeout).await {
-                Either::Left((Ok(Ok(counters)), _)) => serde_wasm_bindgen::to_value(&counters)
-                    .map_err(|e| JsValue::from_str(&format!("serialize counters: {e}"))),
-                Either::Left((Ok(Err(message)), _)) => Err(JsValue::from_str(&message)),
-                Either::Left((Err(_), _)) => Err(JsValue::from_str(
-                    "OPFS IO counter snapshot resolver dropped",
-                )),
-                Either::Right(_) => {
-                    inner.opfs_io_counters_snapshot_resolver.borrow_mut().take();
-                    Err(JsValue::from_str("OPFS IO counter snapshot timeout"))
-                }
-            }
-        })
-    }
-
-    #[wasm_bindgen(js_name = debugOpfsIoCountersReset)]
-    pub fn debug_opfs_io_counters_reset(&self) -> js_sys::Promise {
-        if self.inner.is_inactive() {
-            return js_sys::Promise::reject(&JsValue::from_str("WorkerBridge has been disposed"));
-        }
-        if self
-            .inner
-            .opfs_io_counters_reset_resolver
-            .borrow()
-            .is_some()
-        {
-            return js_sys::Promise::reject(&JsValue::from_str(
-                "OPFS IO counter reset already pending",
-            ));
-        }
-
-        let inner = Rc::clone(&self.inner);
-        wasm_bindgen_futures::future_to_promise(async move {
-            let (tx, rx) = oneshot::channel::<Result<(), String>>();
-            *inner.opfs_io_counters_reset_resolver.borrow_mut() = Some(tx);
-            post_wire(&inner.worker, &MainToWorkerWire::DebugOpfsIoCountersReset);
-            let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
-            match select(rx, timeout).await {
-                Either::Left((Ok(Ok(())), _)) => Ok(JsValue::UNDEFINED),
-                Either::Left((Ok(Err(message)), _)) => Err(JsValue::from_str(&message)),
-                Either::Left((Err(_), _)) => {
-                    Err(JsValue::from_str("OPFS IO counter reset resolver dropped"))
-                }
-                Either::Right(_) => {
-                    inner.opfs_io_counters_reset_resolver.borrow_mut().take();
-                    Err(JsValue::from_str("OPFS IO counter reset timeout"))
-                }
-            }
-        })
-    }
-
     #[wasm_bindgen(js_name = setListeners)]
     pub fn set_listeners(&self, listeners: JsValue) {
         let mut slots = self.inner.listeners.borrow_mut();
@@ -606,9 +530,6 @@ struct BridgeInner {
     init_resolver: RefCell<Option<oneshot::Sender<Result<String, String>>>>,
     init_promise: RefCell<Option<js_sys::Promise>>,
     shutdown_resolver: RefCell<Option<oneshot::Sender<Result<(), String>>>>,
-    opfs_io_counters_snapshot_resolver:
-        RefCell<Option<oneshot::Sender<Result<OpfsIoCountersDebug, String>>>>,
-    opfs_io_counters_reset_resolver: RefCell<Option<oneshot::Sender<Result<(), String>>>>,
     expects_upstream: Cell<bool>,
     upstream_connected: Cell<bool>,
     has_forwarder: Cell<bool>,
@@ -639,8 +560,6 @@ impl BridgeInner {
             init_resolver: RefCell::new(None),
             init_promise: RefCell::new(None),
             shutdown_resolver: RefCell::new(None),
-            opfs_io_counters_snapshot_resolver: RefCell::new(None),
-            opfs_io_counters_reset_resolver: RefCell::new(None),
             expects_upstream: Cell::new(expects_upstream),
             upstream_connected: Cell::new(false),
             has_forwarder: Cell::new(false),
@@ -789,8 +708,6 @@ impl BridgeInner {
     fn dispose_internals(&self) {
         *self.listeners.borrow_mut() = Listeners::default();
         *self.on_message_closure.borrow_mut() = None;
-        self.opfs_io_counters_snapshot_resolver.borrow_mut().take();
-        self.opfs_io_counters_reset_resolver.borrow_mut().take();
     }
 
     fn mark_upstream_connected(&self) {
@@ -958,16 +875,6 @@ impl BridgeInner {
             WorkerToMainWire::DebugSchemaStateOk { .. }
             | WorkerToMainWire::DebugSeedLiveSchemaOk => {
                 // Test-only debug responses; no listener slot in the bridge.
-            }
-            WorkerToMainWire::DebugOpfsIoCountersSnapshotOk { counters } => {
-                if let Some(tx) = self.opfs_io_counters_snapshot_resolver.borrow_mut().take() {
-                    let _ = tx.send(Ok(counters));
-                }
-            }
-            WorkerToMainWire::DebugOpfsIoCountersResetOk => {
-                if let Some(tx) = self.opfs_io_counters_reset_resolver.borrow_mut().take() {
-                    let _ = tx.send(Ok(()));
-                }
             }
         }
     }

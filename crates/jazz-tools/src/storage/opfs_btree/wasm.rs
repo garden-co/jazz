@@ -1,7 +1,7 @@
 //! WASM-only entry points (`OpfsFile`-based constructors). The whole module
 //! is cfg-gated to wasm32 in `mod.rs`, so the body is unconditional here.
 
-use opfs_btree::{OpfsFile, OpfsIoCounters};
+use opfs_btree::OpfsFile;
 
 use crate::storage::StorageError;
 
@@ -20,12 +20,4 @@ impl OpfsBTreeStorage {
     pub async fn destroy_opfs(namespace: &str) -> Result<(), StorageError> {
         OpfsFile::destroy(namespace).await.map_err(map_storage_err)
     }
-}
-
-pub fn opfs_io_counters_snapshot() -> OpfsIoCounters {
-    opfs_btree::opfs_io_counters_snapshot()
-}
-
-pub fn opfs_io_counters_reset() {
-    opfs_btree::opfs_io_counters_reset();
 }
