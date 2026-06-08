@@ -23,6 +23,20 @@ const ALLOC_NEAR_WINDOW: u64 = 32;
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
 
+enum CheckpointPage<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> CheckpointPage<'a> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(raw) => raw,
+            Self::Owned(raw) => raw,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
     pub page_size: usize,
@@ -93,6 +107,7 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
+    persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: OpfsSet<PageId>,
     page_access_epoch: OpfsMap<PageId, u64>,
@@ -126,6 +141,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let a = read_slot(&file, SuperblockSlot::A, options.page_size)?;
         let b = read_slot(&file, SuperblockSlot::B, options.page_size)?;
         let file_len = file.len()?;
+        let persisted_pages = file_len / options.page_size as u64;
 
         let (active_slot, active) = choose_active(a, b).unwrap_or((
             SuperblockSlot::A,
@@ -139,6 +155,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
+            persisted_pages,
             pages: OpfsMap::default(),
             blob_pages: OpfsSet::default(),
             page_access_epoch: OpfsMap::default(),
@@ -163,6 +180,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
+            tree.persisted_pages = 2;
             return Ok(tree);
         }
 
@@ -1049,8 +1067,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             )));
         }
 
-        let file_pages = self.file.len()? / self.options.page_size as u64;
-        let readable_pages = self.total_pages.min(file_pages);
+        let readable_pages = self.total_pages.min(self.persisted_pages);
         if page_id >= readable_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for persisted pages {}",
@@ -1118,11 +1135,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             .total_pages
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("file size overflow".to_string()))?;
-        if self.file.len()? < required_len {
+        if self.persisted_pages < self.total_pages {
             self.file.truncate(required_len)?;
+            self.persisted_pages = self.total_pages;
         }
 
-        let mut encoded_pages: Vec<(PageId, Vec<u8>)> =
+        let mut checkpoint_pages: Vec<(PageId, CheckpointPage<'_>)> =
             Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
         for page_id in dirty_page_ids {
             if let Some(raw) = self.pages.get(page_id) {
@@ -1136,20 +1154,23 @@ impl<F: SyncFile> OpfsBTree<F> {
                         raw.len()
                     )));
                 }
-                encoded_pages.push((*page_id, raw.clone()));
+                checkpoint_pages.push((*page_id, CheckpointPage::Borrowed(raw)));
             }
         }
         for (page_id, page) in freelist_pages {
             self.validate_writable_page_id(*page_id)?;
-            encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
+            checkpoint_pages.push((
+                *page_id,
+                CheckpointPage::Owned(encode_page(page, self.options.page_size)?),
+            ));
         }
 
-        if encoded_pages.is_empty() {
+        if checkpoint_pages.is_empty() {
             return Ok(());
         }
 
-        encoded_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
-        for pair in encoded_pages.windows(2) {
+        checkpoint_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
+        for pair in checkpoint_pages.windows(2) {
             if pair[0].0 == pair[1].0 {
                 return Err(BTreeError::Corrupt(format!(
                     "duplicate checkpoint page {}",
@@ -1160,12 +1181,12 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let page_size = self.options.page_size;
         let mut idx = 0usize;
-        while idx < encoded_pages.len() {
-            let start_page_id = encoded_pages[idx].0;
+        while idx < checkpoint_pages.len() {
+            let start_page_id = checkpoint_pages[idx].0;
             let mut end = idx + 1;
-            while end < encoded_pages.len() {
-                let prev_page_id = encoded_pages[end - 1].0;
-                if prev_page_id.checked_add(1) != Some(encoded_pages[end].0) {
+            while end < checkpoint_pages.len() {
+                let prev_page_id = checkpoint_pages[end - 1].0;
+                if prev_page_id.checked_add(1) != Some(checkpoint_pages[end].0) {
                     break;
                 }
                 end += 1;
@@ -1176,8 +1197,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .checked_mul(page_size)
                 .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
             let mut run = Vec::with_capacity(run_capacity);
-            for (_, raw) in &encoded_pages[idx..end] {
-                run.extend_from_slice(raw);
+            for (_, raw) in &checkpoint_pages[idx..end] {
+                run.extend_from_slice(raw.as_slice());
             }
 
             let offset = start_page_id.checked_mul(page_size as u64).ok_or_else(|| {
@@ -1529,7 +1550,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         );
 
         let target_slot = self.active_slot.inactive();
-        write_slot(&self.file, target_slot, self.options.page_size, next)?;
+        write_slot_unchecked(&self.file, target_slot, self.options.page_size, next)?;
         self.file.flush()?;
 
         self.active_slot = target_slot;
@@ -1723,6 +1744,15 @@ fn write_slot<F: SyncFile>(
         file.truncate(required_file_len)?;
     }
 
+    write_slot_unchecked(file, slot, page_size, sb)
+}
+
+fn write_slot_unchecked<F: SyncFile>(
+    file: &F,
+    slot: SuperblockSlot,
+    page_size: usize,
+    sb: Superblock,
+) -> Result<(), BTreeError> {
     let mut page = vec![0u8; page_size];
     sb.encode_into_page(&mut page)?;
     file.write_all_at(slot.byte_offset(page_size), &page)?;
@@ -1768,6 +1798,8 @@ mod tests {
         inner: MemoryFile,
         writes: Rc<RefCell<Vec<(u64, usize)>>>,
         reads: Rc<RefCell<Vec<(u64, usize)>>>,
+        len_calls: Rc<RefCell<usize>>,
+        truncate_calls: Rc<RefCell<usize>>,
     }
 
     impl CountingFile {
@@ -1776,6 +1808,8 @@ mod tests {
                 inner: MemoryFile::new(),
                 writes: Rc::new(RefCell::new(Vec::new())),
                 reads: Rc::new(RefCell::new(Vec::new())),
+                len_calls: Rc::new(RefCell::new(0)),
+                truncate_calls: Rc::new(RefCell::new(0)),
             }
         }
 
@@ -1813,11 +1847,22 @@ mod tests {
         fn reset_io_stats(&self) {
             self.reads.borrow_mut().clear();
             self.writes.borrow_mut().clear();
+            *self.len_calls.borrow_mut() = 0;
+            *self.truncate_calls.borrow_mut() = 0;
+        }
+
+        fn len_call_count(&self) -> usize {
+            *self.len_calls.borrow()
+        }
+
+        fn truncate_call_count(&self) -> usize {
+            *self.truncate_calls.borrow()
         }
     }
 
     impl SyncFile for CountingFile {
         fn len(&self) -> Result<u64, BTreeError> {
+            *self.len_calls.borrow_mut() += 1;
             self.inner.len()
         }
 
@@ -1832,6 +1877,7 @@ mod tests {
         }
 
         fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            *self.truncate_calls.borrow_mut() += 1;
             self.inner.truncate(len)
         }
 
@@ -2114,6 +2160,36 @@ mod tests {
         tree.checkpoint().expect("checkpoint v2");
         let writes_after_v2 = file.data_page_write_count(options.page_size);
         assert_eq!(writes_after_v2, writes_after_noop + 1);
+    }
+
+    #[test]
+    fn checkpoint_uses_cached_file_length_after_open() {
+        let options = small_options();
+        let file = CountingFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        file.reset_io_stats();
+        tree.put(b"k", b"v1").expect("put v1");
+        tree.checkpoint().expect("checkpoint v1");
+        assert_eq!(
+            file.len_call_count(),
+            0,
+            "checkpoint should not probe file length after open"
+        );
+        assert_eq!(
+            file.truncate_call_count(),
+            1,
+            "first data checkpoint should extend the file once"
+        );
+
+        file.reset_io_stats();
+        tree.put(b"k", b"v2").expect("put v2");
+        tree.checkpoint().expect("checkpoint v2");
+        assert_eq!(
+            file.len_call_count(),
+            0,
+            "later checkpoints should keep using cached persisted length"
+        );
     }
 
     #[test]
