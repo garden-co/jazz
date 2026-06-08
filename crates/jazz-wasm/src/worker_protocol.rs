@@ -65,18 +65,6 @@ pub struct InitPayload {
     pub runtime_sources: JsValue,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpfsIoCountersDebug {
-    pub read_calls: u64,
-    pub read_bytes: u64,
-    pub write_calls: u64,
-    pub write_bytes: u64,
-    pub len_calls: u64,
-    pub truncate_calls: u64,
-    pub flush_calls: u64,
-}
-
 // =============================================================================
 // Worker → main `Sync` entry
 // =============================================================================
@@ -132,8 +120,6 @@ pub enum MainToWorkerWire {
     DebugSeedLiveSchema {
         schema_json: String,
     },
-    DebugOpfsIoCountersSnapshot,
-    DebugOpfsIoCountersReset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,10 +163,6 @@ pub enum WorkerToMainWire {
         state_json: String,
     },
     DebugSeedLiveSchemaOk,
-    DebugOpfsIoCountersSnapshotOk {
-        counters: OpfsIoCountersDebug,
-    },
-    DebugOpfsIoCountersResetOk,
 }
 
 // =============================================================================
@@ -341,8 +323,6 @@ pub fn encode_main_to_worker_js(value: JsValue) -> Result<Uint8Array, JsError> {
                 .unwrap_or_default();
             MainToWorkerWire::DebugSeedLiveSchema { schema_json }
         }
-        "debug-opfs-io-counters-snapshot" => MainToWorkerWire::DebugOpfsIoCountersSnapshot,
-        "debug-opfs-io-counters-reset" => MainToWorkerWire::DebugOpfsIoCountersReset,
         other => {
             return Err(JsError::new(&format!(
                 "encodeMainToWorkerJs: unsupported type `{other}`"
@@ -389,14 +369,6 @@ pub fn encode_worker_to_main_js(value: JsValue) -> Result<Uint8Array, JsError> {
             WorkerToMainWire::DebugSchemaStateOk { state_json }
         }
         "debug-seed-live-schema-ok" => WorkerToMainWire::DebugSeedLiveSchemaOk,
-        "debug-opfs-io-counters-snapshot-ok" => {
-            let counters_value =
-                Reflect::get(&value, &JsValue::from_str("counters")).unwrap_or(JsValue::UNDEFINED);
-            let counters: OpfsIoCountersDebug = serde_wasm_bindgen::from_value(counters_value)
-                .map_err(|e| JsError::new(&format!("counters: {e}")))?;
-            WorkerToMainWire::DebugOpfsIoCountersSnapshotOk { counters }
-        }
-        "debug-opfs-io-counters-reset-ok" => WorkerToMainWire::DebugOpfsIoCountersResetOk,
         other => {
             return Err(JsError::new(&format!(
                 "encodeWorkerToMainJs: unsupported type `{other}`"
@@ -438,15 +410,6 @@ pub fn decode_main_to_worker_js(bytes: &Uint8Array) -> Result<JsValue, JsError> 
             set("type", &JsValue::from_str("debug-seed-live-schema"))?;
             set("schemaJson", &JsValue::from_str(&schema_json))?;
         }
-        MainToWorkerWire::DebugOpfsIoCountersSnapshot => {
-            set(
-                "type",
-                &JsValue::from_str("debug-opfs-io-counters-snapshot"),
-            )?;
-        }
-        MainToWorkerWire::DebugOpfsIoCountersReset => {
-            set("type", &JsValue::from_str("debug-opfs-io-counters-reset"))?;
-        }
         other => {
             return Err(JsError::new(&format!(
                 "decodeMainToWorkerJs: unsupported variant {other:?}"
@@ -483,21 +446,6 @@ pub fn decode_worker_to_main_js(bytes: &Uint8Array) -> Result<JsValue, JsError> 
         }
         WorkerToMainWire::DebugSeedLiveSchemaOk => {
             set("type", &JsValue::from_str("debug-seed-live-schema-ok"))?;
-        }
-        WorkerToMainWire::DebugOpfsIoCountersSnapshotOk { counters } => {
-            set(
-                "type",
-                &JsValue::from_str("debug-opfs-io-counters-snapshot-ok"),
-            )?;
-            let counters = serde_wasm_bindgen::to_value(&counters)
-                .map_err(|e| JsError::new(&format!("counters: {e}")))?;
-            set("counters", &counters)?;
-        }
-        WorkerToMainWire::DebugOpfsIoCountersResetOk => {
-            set(
-                "type",
-                &JsValue::from_str("debug-opfs-io-counters-reset-ok"),
-            )?;
         }
         WorkerToMainWire::InitOk { client_id } => {
             set("type", &JsValue::from_str("init-ok"))?;
@@ -566,8 +514,6 @@ mod tests {
         rt_main(&MainToWorkerWire::DebugSeedLiveSchema {
             schema_json: "{}".into(),
         });
-        rt_main(&MainToWorkerWire::DebugOpfsIoCountersSnapshot);
-        rt_main(&MainToWorkerWire::DebugOpfsIoCountersReset);
     }
 
     #[test]
@@ -618,17 +564,5 @@ mod tests {
             state_json: "{}".into(),
         });
         rt_worker(&WorkerToMainWire::DebugSeedLiveSchemaOk);
-        rt_worker(&WorkerToMainWire::DebugOpfsIoCountersSnapshotOk {
-            counters: OpfsIoCountersDebug {
-                read_calls: 1,
-                read_bytes: 2,
-                write_calls: 3,
-                write_bytes: 4,
-                len_calls: 5,
-                truncate_calls: 6,
-                flush_calls: 7,
-            },
-        });
-        rt_worker(&WorkerToMainWire::DebugOpfsIoCountersResetOk);
     }
 }

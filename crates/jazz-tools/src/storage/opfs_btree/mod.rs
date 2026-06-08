@@ -866,45 +866,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn opfs_btree_flush_wal_persists() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("wal.opfsbtree");
-
-        let id = ObjectId::new();
-        let row = make_row_batch(id, "main", 12345, "wal data");
-
-        {
-            let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
-            seed_users_schema(&mut storage);
-            seed_users_row(&mut storage, id);
-            storage
-                .append_history_region_rows("users", std::slice::from_ref(&row))
-                .unwrap();
-            storage
-                .upsert_visible_region_rows(
-                    "users",
-                    std::slice::from_ref(&VisibleRowEntry::rebuild(
-                        row.clone(),
-                        std::slice::from_ref(&row),
-                    )),
-                )
-                .unwrap();
-            storage.flush_wal().unwrap();
-        }
-
-        {
-            let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
-            assert_eq!(
-                storage
-                    .load_visible_region_row("users", "main", id)
-                    .unwrap(),
-                Some(row)
-            );
-        }
-    }
-
     #[test]
     fn opfs_btree_catalogue_entry_roundtrip() {
         let mut storage = test_storage();

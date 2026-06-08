@@ -14,5 +14,3 @@ pub use file::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file::StdFile;
 pub use file::{MemoryFile, SyncFile};
-#[cfg(target_arch = "wasm32")]
-pub use file::{OpfsIoCounters, opfs_io_counters_reset, opfs_io_counters_snapshot};

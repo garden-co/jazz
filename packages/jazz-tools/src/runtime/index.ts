@@ -78,10 +78,6 @@ export {
   type RowDelta,
   type SubscriptionDelta,
 } from "./subscription-manager.js";
-export {
-  WorkerBridge,
-  type OpfsIoCountersDebug,
-  type WorkerBridgeOptions,
-} from "./worker-bridge.js";
+export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

@@ -54,7 +54,7 @@ use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
     parse_main_to_worker, worker_to_main_post, InitPayload, MainToWorkerMessage, MainToWorkerWire,
-    OpfsIoCountersDebug, WorkerLifecycleEvent, WorkerToMainWire,
+    WorkerLifecycleEvent, WorkerToMainWire,
 };
 
 // =============================================================================
@@ -209,8 +209,6 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
             MainToWorkerWire::SimulateCrash => "simulate-crash",
             MainToWorkerWire::DebugSchemaState => "debug-schema-state",
             MainToWorkerWire::DebugSeedLiveSchema { .. } => "debug-seed-live-schema",
-            MainToWorkerWire::DebugOpfsIoCountersSnapshot => "debug-opfs-io-counters-snapshot",
-            MainToWorkerWire::DebugOpfsIoCountersReset => "debug-opfs-io-counters-reset",
         },
     }
 }
@@ -674,28 +672,6 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 });
             }
         },
-        MainToWorkerWire::DebugOpfsIoCountersSnapshot => {
-            post_to_main(&WorkerToMainWire::DebugOpfsIoCountersSnapshotOk {
-                counters: opfs_io_counters_debug_snapshot(),
-            });
-        }
-        MainToWorkerWire::DebugOpfsIoCountersReset => {
-            jazz_tools::storage::opfs_io_counters_reset();
-            post_to_main(&WorkerToMainWire::DebugOpfsIoCountersResetOk);
-        }
-    }
-}
-
-fn opfs_io_counters_debug_snapshot() -> OpfsIoCountersDebug {
-    let counters = jazz_tools::storage::opfs_io_counters_snapshot();
-    OpfsIoCountersDebug {
-        read_calls: counters.read_calls,
-        read_bytes: counters.read_bytes,
-        write_calls: counters.write_calls,
-        write_bytes: counters.write_bytes,
-        len_calls: counters.len_calls,
-        truncate_calls: counters.truncate_calls,
-        flush_calls: counters.flush_calls,
     }
 }
 
