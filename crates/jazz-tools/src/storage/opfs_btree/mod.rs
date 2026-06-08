@@ -22,7 +22,7 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(target_arch = "wasm32")]
-mod wasm;
+pub mod wasm;
 
 use crate::object::ObjectId;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
