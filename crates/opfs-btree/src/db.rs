@@ -15,7 +15,6 @@ const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 4 * 1024;
-const DETECT_PAGE_SIZES: [usize; 5] = [4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024];
 const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
@@ -164,28 +163,18 @@ enum StagedValue {
 }
 
 impl<F: SyncFile> OpfsBTree<F> {
-    pub fn open(file: F, mut options: BTreeOptions) -> Result<Self, BTreeError> {
+    pub fn open(file: F, options: BTreeOptions) -> Result<Self, BTreeError> {
         options.validate()?;
 
         let a = read_slot(&file, SuperblockSlot::A, options.page_size)?;
         let b = read_slot(&file, SuperblockSlot::B, options.page_size)?;
         let file_len = file.len()?;
 
-        let (active_slot, active) = match choose_active(a, b) {
-            Some(active) => active,
-            None => match detect_active_superblock(&file, options.page_size)? {
-                Some((page_size, active_slot, active)) => {
-                    options.page_size = page_size;
-                    options.validate()?;
-                    (active_slot, active)
-                }
-                None => (
-                    SuperblockSlot::A,
-                    Superblock::new(options.page_size as u32, 0, 0, 0, 0),
-                ),
-            },
-        };
         let persisted_pages = file_len / options.page_size as u64;
+        let (active_slot, active) = choose_active(a, b).unwrap_or((
+            SuperblockSlot::A,
+            Superblock::new(options.page_size as u32, 0, 0, 0, 0),
+        ));
 
         let mut tree = Self {
             file,
@@ -2084,25 +2073,6 @@ fn choose_active(
         (None, Some(b)) => Some((SuperblockSlot::B, b)),
         (None, None) => None,
     }
-}
-
-fn detect_active_superblock<F: SyncFile>(
-    file: &F,
-    requested_page_size: usize,
-) -> Result<Option<(usize, SuperblockSlot, Superblock)>, BTreeError> {
-    for page_size in DETECT_PAGE_SIZES {
-        if page_size == requested_page_size {
-            continue;
-        }
-
-        let a = read_slot(file, SuperblockSlot::A, page_size)?;
-        let b = read_slot(file, SuperblockSlot::B, page_size)?;
-        if let Some((active_slot, active)) = choose_active(a, b) {
-            return Ok(Some((page_size, active_slot, active)));
-        }
-    }
-
-    Ok(None)
 }
 
 fn slot_char(slot: SuperblockSlot) -> char {
