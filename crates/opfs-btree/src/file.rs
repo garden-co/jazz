@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::BTreeError;
 
 #[cfg(target_arch = "wasm32")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
@@ -200,8 +200,8 @@ struct OpfsFileInner {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[derive(Debug, Clone, Copy, Default, Serialize)]
-pub(crate) struct OpfsIoCounters {
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct OpfsIoCounters {
     pub read_calls: u64,
     pub read_bytes: u64,
     pub write_calls: u64,
@@ -213,7 +213,7 @@ pub(crate) struct OpfsIoCounters {
 
 #[cfg(target_arch = "wasm32")]
 impl OpfsIoCounters {
-    pub(crate) fn delta_since(self, before: Self) -> Self {
+    pub fn delta_since(self, before: Self) -> Self {
         Self {
             read_calls: self.read_calls.saturating_sub(before.read_calls),
             read_bytes: self.read_bytes.saturating_sub(before.read_bytes),
@@ -256,12 +256,12 @@ fn update_opfs_io_counters(f: impl FnOnce(&mut OpfsIoCounters)) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn opfs_io_counters_snapshot() -> OpfsIoCounters {
+pub fn opfs_io_counters_snapshot() -> OpfsIoCounters {
     OPFS_IO_COUNTERS.with(|cell| cell.get())
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn opfs_io_counters_reset() {
+pub fn opfs_io_counters_reset() {
     OPFS_IO_COUNTERS.with(|cell| cell.set(OpfsIoCounters::default()));
 }
 

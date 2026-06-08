@@ -40,7 +40,12 @@ import {
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
-import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
+import {
+  WorkerBridge,
+  type OpfsIoCountersDebug,
+  type PeerSyncBatch,
+  type WorkerBridgeOptions,
+} from "./worker-bridge.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -1931,6 +1936,18 @@ export class Db {
     );
 
     await operation;
+  }
+
+  /** @internal Browser benchmark helper for the OPFS-backed worker storage path. */
+  async debugOpfsIoCountersSnapshot(): Promise<OpfsIoCountersDebug | null> {
+    await this.ensureBridgeReady();
+    return (await this.workerBridge?.debugOpfsIoCountersSnapshot()) ?? null;
+  }
+
+  /** @internal Browser benchmark helper for the OPFS-backed worker storage path. */
+  async debugOpfsIoCountersReset(): Promise<void> {
+    await this.ensureBridgeReady();
+    await this.workerBridge?.debugOpfsIoCountersReset();
   }
 
   /**

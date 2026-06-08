@@ -26,6 +26,16 @@ declare module "jazz-wasm" {
       }
     | { kind: "dropped"; count: number };
 
+  export interface OpfsIoCountersDebug {
+    readCalls: number;
+    readBytes: number;
+    writeCalls: number;
+    writeBytes: number;
+    lenCalls: number;
+    truncateCalls: number;
+    flushCalls: number;
+  }
+
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
@@ -83,6 +93,8 @@ declare module "jazz-wasm" {
     disconnectUpstream(): void;
     reconnectUpstream(): void;
     simulateCrash(): Promise<void>;
+    debugOpfsIoCountersSnapshot(): Promise<OpfsIoCountersDebug>;
+    debugOpfsIoCountersReset(): Promise<void>;
     setListeners(listeners: object): void;
     shutdown(): Promise<void>;
     getWorkerClientId(): string | null;
