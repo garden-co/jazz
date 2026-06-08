@@ -410,12 +410,14 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = admin
-        .create_persisted(
+    let (user_obj_id, _, batch_id) = admin
+        .insert(
             "users",
             user_values_v1(user_id_value, "visible after permissions"),
-            DurabilityTier::EdgeServer,
         )
+        .expect("admin creates user after permissions publish");
+    admin
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("admin creates user after permissions publish");
 
@@ -463,13 +465,15 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
 
     let queued_user_id = jazz_tools::ObjectId::new();
     let queued_row_id = jazz_tools::ObjectId::new();
-    let queued_write_error = writer
-        .create_persisted_with_id(
+    let (_, _, batch_id) = writer
+        .insert_with_id(
             "users",
             *queued_row_id.uuid(),
             user_values_v1(queued_user_id, "queued before permissions"),
-            DurabilityTier::EdgeServer,
         )
+        .expect("pre-permissions create should stage locally");
+    let queued_write_error = writer
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect_err("pre-permissions persisted create should be rejected");
     let queued_write_error = queued_write_error.to_string();
@@ -514,14 +518,16 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
     assert!(rows_after_publish.is_empty());
 
     let accepted_user_id = jazz_tools::ObjectId::new();
-    let (accepted_row_id, _) = writer
-        .create_persisted(
+    let (accepted_row_id, _, batch_id) = writer
+        .insert(
             "users",
             user_values_v1(accepted_user_id, "accepted after permissions"),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("post-publish create should succeed");
+    writer
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("post-publish create should settle");
 
     let rows_after_create = wait_for_query(
         &observer,
@@ -547,17 +553,19 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         "pre-permissions row should stay hidden after permissions arrive"
     );
 
-    writer
-        .update_persisted(
+    let batch_id = writer
+        .update(
             accepted_row_id,
             vec![(
                 "name".to_string(),
                 Value::Text("updated after permissions".to_string()),
             )],
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("update should succeed once permissions exist");
+    writer
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("update should settle once permissions exist");
 
     let rows_after_update = wait_for_query(
         &observer,
@@ -579,10 +587,13 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    writer
-        .delete_persisted(accepted_row_id, DurabilityTier::EdgeServer)
-        .await
+    let batch_id = writer
+        .delete(accepted_row_id)
         .expect("delete should succeed once permissions exist");
+    writer
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("delete should settle once permissions exist");
 
     let rows_after_delete = wait_for_query(
         &observer,
@@ -621,12 +632,11 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .await;
 
     let denied_user_id = jazz_tools::ObjectId::new();
-    let (denied_row_id, _) = writer
+    let (denied_row_id, _, _) = writer
         .insert(
             "users",
             user_values_v1(denied_user_id, "timed out before permissions"),
         )
-        .await
         .expect("optimistic local create before timeout");
 
     tokio::time::sleep(Duration::from_secs(12)).await;
@@ -650,14 +660,16 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
     wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let allowed_user_id = jazz_tools::ObjectId::new();
-    let (allowed_row_id, _) = writer
-        .create_persisted(
+    let (allowed_row_id, _, batch_id) = writer
+        .insert(
             "users",
             user_values_v1(allowed_user_id, "accepted after timeout window"),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create should succeed after permissions publish");
+    writer
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("create should settle after permissions publish");
 
     let observer_rows = wait_for_query(
         &observer,
@@ -735,14 +747,16 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = admin
-        .create_persisted(
+    let (user_obj_id, _, batch_id) = admin
+        .insert(
             "users",
             user_values_v1(user_id_value, "subscription target"),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("admin creates user after permissions publish");
+    admin
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("admin user reaches edge after permissions publish");
 
     wait_for_subscription_update(
         &mut stream,
@@ -836,14 +850,13 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = alice
-        .create_persisted(
-            "users",
-            user_values_v1(user_id_value, "Alice Smith"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
+    let (user_obj_id, _, batch_id) = alice
+        .insert("users", user_values_v1(user_id_value, "Alice Smith"))
         .expect("alice creates user after permissions publish");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge after permissions publish");
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
     let bob =
@@ -934,12 +947,11 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
 
     let user_id_value = jazz_tools::ObjectId::new();
     let user_email = "bob@example.com";
-    let (user_obj_id, _) = bob
+    let (user_obj_id, _, _) = bob
         .insert(
             "users",
             user_values_v2(user_id_value, "Bob Backward", user_email),
         )
-        .await
         .expect("bob creates user");
 
     wait_for_query(
@@ -1026,14 +1038,13 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = alice
-        .create_persisted(
-            "users",
-            user_values_v1(user_id_value, "Alice Through Lens"),
-            DurabilityTier::EdgeServer,
-        )
-        .await
+    let (user_obj_id, _, batch_id) = alice
+        .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge after v1 permissions publish");
 
     wait_for_query(
         &alice,

@@ -73,7 +73,6 @@ fn claim_compound_input(group_slug: &str, published: bool, title: &str) -> HashM
 async fn create_title_document(client: &JazzClient, table_name: &str, title: &str) -> ObjectId {
     client
         .insert(table_name, title_document_input(title))
-        .await
         .expect("create title document")
         .0
 }
@@ -86,7 +85,6 @@ async fn create_group_document(
 ) -> ObjectId {
     client
         .insert(table_name, group_document_input(group_slug, title))
-        .await
         .expect("create group document")
         .0
 }
@@ -103,7 +101,6 @@ async fn create_claim_compound_document(
             table_name,
             claim_compound_input(group_slug, published, title),
         )
-        .await
         .expect("create claim compound document")
         .0
 }
@@ -196,7 +193,6 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
             admin_doc,
             vec![("title".to_string(), "admin updated".into())],
         )
-        .await
         .expect("admin update");
 
     wait_for_subscription_update(
@@ -225,7 +221,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
         *id == admin_doc && *values == title_document_values("admin updated")
     }));
 
-    admin.delete(admin_doc).await.expect("admin delete");
+    admin.delete(admin_doc).expect("admin delete");
     wait_for_subscription_update(
         &mut member_stream,
         &mut member_log,
@@ -320,7 +316,6 @@ async fn admin_role_claims_reject_member_mutations() {
 
     let rejected_insert = member
         .insert(table_name, title_document_input("member create"))
-        .await
         .expect("optimistic local member create")
         .0;
     let barrier_doc = create_title_document(&admin, table_name, "barrier").await;
@@ -371,7 +366,6 @@ async fn admin_role_claims_reject_member_mutations() {
             admin_doc,
             vec![("title".to_string(), "member hacked".into())],
         )
-        .await
         .expect("optimistic local member update");
 
     let rows_after_rejected_update = observer
@@ -392,7 +386,6 @@ async fn admin_role_claims_reject_member_mutations() {
 
     member
         .delete(admin_doc)
-        .await
         .expect("optimistic local member delete");
 
     let rows_after_rejected_delete = observer
@@ -518,7 +511,6 @@ async fn claim_array_id_policy_gates_updates_by_primary_key() {
             allowed_doc,
             vec![("title".to_string(), "allowed updated".into())],
         )
-        .await
         .expect("optimistic local allowed update");
 
     wait_for_query(
@@ -551,7 +543,6 @@ async fn claim_array_id_policy_gates_updates_by_primary_key() {
             blocked_doc,
             vec![("title".to_string(), "blocked updated".into())],
         )
-        .await
         .expect("optimistic local blocked update");
 
     let rows_after_rejected_update = observer

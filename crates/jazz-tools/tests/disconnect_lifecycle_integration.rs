@@ -49,7 +49,7 @@ async fn client_reconnects_after_server_reaps_stale_state() {
         .connect()
         .await;
 
-    let (todo_id, _) = alice
+    let (todo_id, _, _) = alice
         .insert(
             "todos",
             HashMap::from([
@@ -57,7 +57,6 @@ async fn client_reconnects_after_server_reaps_stale_state() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create todo");
 
     // Wait for edge-settlement so the data is persisted server-side
@@ -134,7 +133,6 @@ async fn client_reconnects_after_server_reaps_stale_state() {
                 Value::Text("updated-after-reap".to_string()),
             )],
         )
-        .await
         .expect("update after reconnect");
 
     wait_for_query(
@@ -239,7 +237,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("alice create");
 
     bob.insert(
@@ -249,7 +246,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
             ("completed".to_string(), Value::Boolean(false)),
         ]),
     )
-    .await
     .expect("bob create");
 
     // Wait for both to be edge-settled
@@ -308,7 +304,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
             ("completed".to_string(), Value::Boolean(false)),
         ]),
     )
-    .await
     .expect("bob create after reap");
 
     wait_for_query(
