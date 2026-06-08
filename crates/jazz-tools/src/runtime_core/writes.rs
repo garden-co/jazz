@@ -621,8 +621,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(batch_id)
     }
 
-    /// Compatibility shim for callers that expect explicit-id upserts.
-    pub fn upsert_with_id(
+    pub fn upsert(
         &mut self,
         table: &str,
         object_id: ObjectId,

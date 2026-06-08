@@ -375,7 +375,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<()> {
         self.runtime
-            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
+            .upsert(table, ObjectId::from_uuid(object_id), values, None)
             .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
@@ -390,7 +390,7 @@ impl JazzClient {
     ) -> Result<()> {
         let batch_id = self
             .runtime
-            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
+            .upsert(table, ObjectId::from_uuid(object_id), values, None)
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let receiver = self
             .runtime
@@ -637,7 +637,7 @@ impl<'a> SessionClient<'a> {
     ) -> Result<()> {
         self.client
             .runtime
-            .upsert_with_id(
+            .upsert(
                 table,
                 ObjectId::from_uuid(object_id),
                 values,
@@ -657,7 +657,7 @@ impl<'a> SessionClient<'a> {
         let batch_id = self
             .client
             .runtime
-            .upsert_with_id(
+            .upsert(
                 table,
                 ObjectId::from_uuid(object_id),
                 values,
