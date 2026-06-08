@@ -43,6 +43,16 @@ export interface PeerSyncBatch {
   payload: Uint8Array[];
 }
 
+export interface OpfsIoCountersDebug {
+  readCalls: number;
+  readBytes: number;
+  writeCalls: number;
+  writeBytes: number;
+  lenCalls: number;
+  truncateCalls: number;
+  flushCalls: number;
+}
+
 interface WasmBridgeHandle {
   init(): Promise<{ clientId: string }>;
   updateAuth(jwtToken?: string | null): void;
@@ -61,6 +71,8 @@ interface WasmBridgeHandle {
   disconnectUpstream(): void;
   reconnectUpstream(): void;
   simulateCrash(): Promise<void>;
+  debugOpfsIoCountersSnapshot(): Promise<OpfsIoCountersDebug>;
+  debugOpfsIoCountersReset(): Promise<void>;
   setListeners(listeners: ListenerSlots): void;
   shutdown(): Promise<void>;
   getWorkerClientId(): string | null;
@@ -206,6 +218,16 @@ export class WorkerBridge {
   async simulateCrash(): Promise<void> {
     if (!this.bridge) return;
     await this.bridge.simulateCrash();
+  }
+
+  async debugOpfsIoCountersSnapshot(): Promise<OpfsIoCountersDebug | null> {
+    if (!this.bridge) return null;
+    return await this.bridge.debugOpfsIoCountersSnapshot();
+  }
+
+  async debugOpfsIoCountersReset(): Promise<void> {
+    if (!this.bridge) return;
+    await this.bridge.debugOpfsIoCountersReset();
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {

@@ -18,6 +18,8 @@ mod storage_core;
 mod storage_trait;
 pub use memory::MemoryStorage;
 pub use opfs_btree::OpfsBTreeStorage;
+#[cfg(target_arch = "wasm32")]
+pub use opfs_btree::wasm::{opfs_io_counters_reset, opfs_io_counters_snapshot};
 pub use storage_trait::Storage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 mod rocksdb;
