@@ -304,16 +304,6 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    pub fn put_many_sorted<'a, I>(&mut self, entries: I) -> Result<(), BTreeError>
-    where
-        I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
-    {
-        for (key, value) in entries {
-            self.put(key, value)?;
-        }
-        Ok(())
-    }
-
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
         let root_page_id = match self.root_page_id {
