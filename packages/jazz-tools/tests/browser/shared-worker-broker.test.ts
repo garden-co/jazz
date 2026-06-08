@@ -263,6 +263,53 @@ describe("SharedWorker browser broker", () => {
     expect(second.snapshot().leaderTabId).toBe("tab-b");
   });
 
+  it("does not let a stale replacement election steal a newly promoted leader's reused locks", async () => {
+    const dbName = uniqueName("broker-reused-lock-takeover");
+    const forceTakeoverTimeoutMs = 80;
+    const first = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-a", "fingerprint-a", {
+        compatibility: false,
+        forceTakeoverTimeoutMs,
+      }),
+    );
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
+        compatibility: false,
+        forceTakeoverTimeoutMs,
+      }),
+    );
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    await second.waitForRole("follower", 2000);
+
+    await first.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+
+    const thirdDemotedLeadershipIds: number[] = [];
+    const third = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-c", "fingerprint-a", {
+        compatibility: false,
+        forceTakeoverTimeoutMs,
+        onDemote: (leadershipId) => thirdDemotedLeadershipIds.push(leadershipId),
+      }),
+    );
+    clients.push(third);
+
+    await third.waitForRole("leader", 2000);
+    await new Promise((resolve) => setTimeout(resolve, forceTakeoverTimeoutMs + 100));
+
+    expect(third.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-c",
+      leaderTabId: "tab-c",
+    });
+    expect(thirdDemotedLeadershipIds).toEqual([]);
+  });
+
   it("promotes a replacement when the migration compatibility lock is released", async () => {
     const dbName = uniqueName("broker-compat-lock-release");
     const first = await BrowserBrokerClient.connect(
