@@ -83,6 +83,8 @@ function makeFakeRuntime() {
       nextBatchNumber += 1;
       return `batch-${batchMode}-${nextBatchNumber}`;
     }),
+    connect: vi.fn<Runtime["connect"]>(),
+    disconnect: vi.fn<Runtime["disconnect"]>(),
     commitBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
     rollbackBatch: vi.fn<Runtime["rollbackBatch"]>(() => false),

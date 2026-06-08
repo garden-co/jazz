@@ -131,6 +131,14 @@ declare module "jazz-wasm" {
     rollbackBatch(batchId: string): boolean;
     commitBatch(batchId: string): void;
     waitForBatch(batchId: string, tier: string): Promise<void>;
+    /** Connect to a Jazz server over WebSocket. */
+    connect(url: string, authJson: string): void;
+    /** Disconnect from the Jazz server and drop the transport handle. */
+    disconnect(): void;
+    /** Push updated auth credentials into the live transport. */
+    updateAuth(authJson: string): void;
+    /** Register a callback invoked when the Rust transport rejects auth. */
+    onAuthFailure(callback: (reason: string) => void): void;
     query(
       queryJson: string,
       sessionJson?: string | null,

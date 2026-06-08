@@ -477,7 +477,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding({ updateAuth });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    adapter.updateAuth?.(JSON.stringify({ jwt_token: "refreshed" }));
+    adapter.updateAuth(JSON.stringify({ jwt_token: "refreshed" }));
 
     expect(updateAuth).toHaveBeenCalledWith(JSON.stringify({ jwt_token: "refreshed" }));
   });
@@ -491,7 +491,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const listener = vi.fn();
-    adapter.onAuthFailure?.(listener);
+    adapter.onAuthFailure(listener);
 
     expect(onAuthFailure).toHaveBeenCalledTimes(1);
     expect(captured).not.toBeNull();
