@@ -229,6 +229,27 @@ describe("SharedWorker browser broker", () => {
     });
   });
 
+  it("keeps leadership ids monotonic after the broker becomes idle", async () => {
+    const dbName = uniqueName("broker-idle-leadership");
+    const first = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-a"));
+    clients.push(first);
+
+    await first.waitForRole("leader", 2000);
+    const firstLeadershipId = first.snapshot().leadershipId;
+
+    await first.shutdown();
+    clients.splice(clients.indexOf(first), 1);
+    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+
+    const second = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
+    clients.push(second);
+    await second.waitForRole("leader", 2000);
+
+    expect(second.snapshot().leadershipId).toBeGreaterThan(firstLeadershipId);
+  });
+
   it("steals stuck leader locks before promoting a replacement", async () => {
     const dbName = uniqueName("broker-force-takeover");
     const first = await BrowserBrokerClient.connect(

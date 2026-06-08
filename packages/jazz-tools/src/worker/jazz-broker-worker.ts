@@ -332,7 +332,6 @@ function resetIfIdle(): void {
   if (tabs.size > 0) return;
   namespace = null;
   leader = null;
-  currentLeadershipId = 0;
   pendingFollowerAttachments.clear();
   attachedFollowerPorts.clear();
   resetState = null;
