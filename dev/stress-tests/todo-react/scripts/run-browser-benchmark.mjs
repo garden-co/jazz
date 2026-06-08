@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 const DEFAULT_BASE_URL = "http://localhost:5477/";
 const DEFAULT_SAMPLES = 5;
+const DEFAULT_WORKER_INIT_TIMEOUT_MS = 180_000;
 const DEFAULT_SYNC_SETTLEMENT_TIER = "edge";
 const DEFAULT_RESULT_TIMEOUT_MS = 180_000;
 const OPFS_COUNTER_KEYS = [
@@ -24,6 +25,7 @@ function parseArgs(argv) {
     label: "current",
     sync: "off",
     syncSettlementTier: DEFAULT_SYNC_SETTLEMENT_TIER,
+    workerInitTimeoutMs: DEFAULT_WORKER_INIT_TIMEOUT_MS,
     resultTimeoutMs: DEFAULT_RESULT_TIMEOUT_MS,
   };
 
@@ -41,6 +43,8 @@ function parseArgs(argv) {
       args.sync = argv[++i];
     } else if (arg === "--sync-settlement-tier") {
       args.syncSettlementTier = argv[++i];
+    } else if (arg === "--worker-init-timeout-ms") {
+      args.workerInitTimeoutMs = Number(argv[++i]);
     } else if (arg === "--result-timeout-ms") {
       args.resultTimeoutMs = Number(argv[++i]);
     } else {
@@ -56,6 +60,9 @@ function parseArgs(argv) {
   }
   if (args.syncSettlementTier !== "edge" && args.syncSettlementTier !== "global") {
     throw new Error("--sync-settlement-tier must be either 'edge' or 'global'");
+  }
+  if (!Number.isInteger(args.workerInitTimeoutMs) || args.workerInitTimeoutMs < 1) {
+    throw new Error("--worker-init-timeout-ms must be a positive integer");
   }
   if (!Number.isInteger(args.resultTimeoutMs) || args.resultTimeoutMs < 1) {
     throw new Error("--result-timeout-ms must be a positive integer");
@@ -135,6 +142,7 @@ function configureBenchmarkUrl(url, phase, dbName, args) {
   if (args.sync === "on") {
     url.searchParams.set("syncSettlementTier", args.syncSettlementTier);
   }
+  url.searchParams.set("workerInitTimeoutMs", String(args.workerInitTimeoutMs));
 }
 
 async function runSample(args, sampleIndex) {
@@ -186,6 +194,7 @@ const summary = {
   label: args.label,
   sync: args.sync,
   syncSettlementTier: args.sync === "on" ? args.syncSettlementTier : undefined,
+  workerInitTimeoutMs: args.workerInitTimeoutMs,
   resultTimeoutMs: args.resultTimeoutMs,
   samples: samples.length,
   writeTotalMs: percentileSummary(samples.map((sample) => sample.write.totalMs)),
