@@ -6,6 +6,11 @@ export interface LeaderLockStrategy {
   tryAcquire(lockName: string): Promise<LeaderLockLease | null>;
 }
 
+export interface WebLockAcquireOptions {
+  lockManager?: LockManagerLike | null;
+  onLost?: (reason: unknown) => void;
+}
+
 interface LockManagerLike {
   request<T>(
     name: string,
@@ -74,8 +79,9 @@ export function createNavigatorLocksLeaderLockStrategy(
 
 export async function tryAcquireWebLock(
   lockName: string,
-  lockManager: LockManagerLike | null = resolveNavigatorLocks(),
+  optionsOrLockManager?: WebLockAcquireOptions | LockManagerLike | null,
 ): Promise<LeaderLockLease | null> {
+  const { lockManager, onLost } = normalizeAcquireOptions(optionsOrLockManager);
   if (!lockManager) return null;
 
   let resolveAcquired: ((lease: LeaderLockLease | null) => void) | null = null;
@@ -83,6 +89,9 @@ export async function tryAcquireWebLock(
     resolveAcquired = resolve;
   });
 
+  let acquired = false;
+  let releasedIntentionally = false;
+  let lossReported = false;
   let releaseLock: (() => void) | null = null;
   const heldUntilReleased = new Promise<void>((resolve) => {
     releaseLock = () => resolve();
@@ -96,9 +105,11 @@ export async function tryAcquireWebLock(
         return;
       }
 
+      acquired = true;
       resolveAcquired?.({
         release: () => {
           if (!releaseLock) return;
+          releasedIntentionally = true;
           releaseLock();
           releaseLock = null;
         },
@@ -106,12 +117,58 @@ export async function tryAcquireWebLock(
       resolveAcquired = null;
       await heldUntilReleased;
     })
-    .catch(() => {
-      resolveAcquired?.(null);
-      resolveAcquired = null;
-    });
+    .then(
+      () => {
+        if (acquired && !releasedIntentionally) {
+          reportLockLost();
+        }
+      },
+      (error) => {
+        if (acquired && !releasedIntentionally) {
+          reportLockLost(error);
+          return;
+        }
+        resolveAcquired?.(null);
+        resolveAcquired = null;
+      },
+    );
+
+  function reportLockLost(reason: unknown = new Error(`Web Lock ${lockName} was lost`)): void {
+    if (lossReported) return;
+    lossReported = true;
+    onLost?.(reason);
+  }
 
   return await acquiredPromise;
+}
+
+function normalizeAcquireOptions(
+  optionsOrLockManager: WebLockAcquireOptions | LockManagerLike | null | undefined,
+): { lockManager: LockManagerLike | null; onLost?: (reason: unknown) => void } {
+  if (optionsOrLockManager === undefined) {
+    return { lockManager: resolveNavigatorLocks() };
+  }
+  if (optionsOrLockManager === null) {
+    return { lockManager: null };
+  }
+  if (isLockManagerLike(optionsOrLockManager)) {
+    return { lockManager: optionsOrLockManager };
+  }
+  return {
+    lockManager:
+      optionsOrLockManager.lockManager === undefined
+        ? resolveNavigatorLocks()
+        : optionsOrLockManager.lockManager,
+    onLost: optionsOrLockManager.onLost,
+  };
+}
+
+function isLockManagerLike(value: unknown): value is LockManagerLike {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { request?: unknown }).request === "function"
+  );
 }
 
 export interface WebLockMonitor {

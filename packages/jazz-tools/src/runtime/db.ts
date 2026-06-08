@@ -1404,16 +1404,26 @@ export class Db {
     this.brokerLeaderReadyLeadershipId = null;
 
     try {
-      const tabLockLease = await tryAcquireWebLock(this.brokerTabLockName());
+      const tabLockName = this.brokerTabLockName();
+      const tabLockLease = await tryAcquireWebLock(tabLockName, {
+        onLost: (reason) => {
+          void this.handleBrokerLeaderLockLost(leadershipId, tabLockName, reason);
+        },
+      });
       if (!tabLockLease) {
-        throw new Error(`Unable to acquire ${this.brokerTabLockName()}`);
+        throw new Error(`Unable to acquire ${tabLockName}`);
       }
       this.tabLockLease = tabLockLease;
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
 
-      const compatibilityLockLease = await tryAcquireWebLock(this.brokerCompatibilityLockName());
+      const compatibilityLockName = this.brokerCompatibilityLockName();
+      const compatibilityLockLease = await tryAcquireWebLock(compatibilityLockName, {
+        onLost: (reason) => {
+          void this.handleBrokerLeaderLockLost(leadershipId, compatibilityLockName, reason);
+        },
+      });
       if (!compatibilityLockLease) {
-        throw new Error(`Unable to acquire ${this.brokerCompatibilityLockName()}`);
+        throw new Error(`Unable to acquire ${compatibilityLockName}`);
       }
       this.compatibilityLockLease = compatibilityLockLease;
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
@@ -1471,6 +1481,28 @@ export class Db {
     } else if (this.tabRole !== "leader") {
       return;
     }
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyLeadershipId = null;
+    this.closePendingLeaderFollowerPorts();
+    await this.shutdownLeaderWorker();
+    this.releaseBrokerLeadershipResources();
+  }
+
+  private async handleBrokerLeaderLockLost(
+    leadershipId: number,
+    lockName: string,
+    reason: unknown,
+  ): Promise<void> {
+    const activePromotion = this.activeBrokerPromotion;
+    if (activePromotion?.leadershipId === leadershipId) {
+      activePromotion.cancelled = true;
+    } else if (leadershipId !== this.currentLeadershipId || this.tabRole !== "leader") {
+      return;
+    }
+
+    const message = stringifyError(reason);
+    this.brokerClient?.reportLeaderFailed(leadershipId, message || `${lockName} was lost`);
     this.tabRole = "follower";
     this.currentLeaderTabId = null;
     this.brokerLeaderReadyLeadershipId = null;

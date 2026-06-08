@@ -121,6 +121,38 @@ describe("leader-lock browser integration", () => {
     reacquired!.release();
     lease!.release();
   });
+
+  it("reports an acquired lock as lost when it is stolen", async () => {
+    const lockName = uniqueLockName("leader-lock-on-lost");
+    const lostReasons: unknown[] = [];
+    const lease = await tryAcquireWebLock(lockName, {
+      onLost: (reason) => {
+        lostReasons.push(reason);
+      },
+    });
+    expect(lease).not.toBeNull();
+
+    await stealAndReleaseWebLock(lockName);
+
+    await waitForCondition(() => lostReasons.length === 1, 1000, "lock loss was not reported");
+    lease!.release();
+  });
+
+  it("does not report an intentionally released lock as lost", async () => {
+    const lockName = uniqueLockName("leader-lock-on-lost-release");
+    const lostReasons: unknown[] = [];
+    const lease = await tryAcquireWebLock(lockName, {
+      onLost: (reason) => {
+        lostReasons.push(reason);
+      },
+    });
+    expect(lease).not.toBeNull();
+
+    lease!.release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(lostReasons).toEqual([]);
+  });
 });
 
 async function waitForCondition(
