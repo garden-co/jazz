@@ -439,8 +439,7 @@ impl Storage for OpfsBTreeStorage {
 
     fn flush_wal(&self) -> Result<(), StorageError> {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush_wal").entered();
-        // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
-        self.flush()
+        self.with_tree_mut(|tree| tree.flush_wal().map_err(map_storage_err))
     }
 }
 
@@ -818,6 +817,45 @@ mod tests {
                 storage.index_lookup("users", "name", "main", &Value::Text("Alice".to_string()));
             assert_eq!(results.len(), 1);
             assert!(results.contains(&id));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn opfs_btree_flush_wal_persists() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("wal.opfsbtree");
+
+        let id = ObjectId::new();
+        let row = make_row_batch(id, "main", 12345, "wal data");
+
+        {
+            let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
+            seed_users_schema(&mut storage);
+            seed_users_row(&mut storage, id);
+            storage
+                .append_history_region_rows("users", std::slice::from_ref(&row))
+                .unwrap();
+            storage
+                .upsert_visible_region_rows(
+                    "users",
+                    std::slice::from_ref(&VisibleRowEntry::rebuild(
+                        row.clone(),
+                        std::slice::from_ref(&row),
+                    )),
+                )
+                .unwrap();
+            storage.flush_wal().unwrap();
+        }
+
+        {
+            let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
+            assert_eq!(
+                storage
+                    .load_visible_region_row("users", "main", id)
+                    .unwrap(),
+                Some(row)
+            );
         }
     }
 
