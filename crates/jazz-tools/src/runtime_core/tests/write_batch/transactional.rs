@@ -1,97 +1,6 @@
 use super::*;
 
 #[test]
-fn rc_committed_transaction_rejects_later_handle_operations_with_transaction_wording() {
-    let mut core = create_test_runtime();
-    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Transactional);
-    let write_context = WriteContext::default().with_batch_id(batch_id);
-
-    core.insert(
-        "users",
-        user_insert_values(ObjectId::new(), "Alice"),
-        Some(&write_context),
-    )
-    .unwrap();
-    core.commit_batch(batch_id).unwrap();
-
-    let expected_error = format!("Write error: transaction {batch_id} is already committed");
-
-    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
-    assert_eq!(commit_err, expected_error);
-
-    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
-    assert_eq!(rollback_err, expected_error);
-
-    let write_err = core
-        .insert(
-            "users",
-            user_insert_values(ObjectId::new(), "Bob"),
-            Some(&write_context),
-        )
-        .unwrap_err()
-        .to_string();
-    assert_eq!(write_err, expected_error);
-
-    let query_err = match core.query_with_local_batch(
-        Query::new("users"),
-        None,
-        ReadDurabilityOptions::default(),
-        crate::sync_manager::QueryPropagation::Full,
-        Some(batch_id),
-    ) {
-        Ok(_) => panic!("query should reject committed transaction"),
-        Err(error) => error.to_string(),
-    };
-    assert_eq!(query_err, expected_error);
-}
-
-#[test]
-fn rc_rolled_back_transaction_rejects_later_handle_operations_with_transaction_wording() {
-    let mut core = create_test_runtime();
-    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Transactional);
-    let write_context = WriteContext::default().with_batch_id(batch_id);
-
-    core.insert(
-        "users",
-        user_insert_values(ObjectId::new(), "Alice"),
-        Some(&write_context),
-    )
-    .unwrap();
-    core.rollback_batch(batch_id).unwrap();
-
-    let expected_error =
-        format!("Write error: transaction {batch_id} has already been rolled back");
-
-    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
-    assert_eq!(commit_err, expected_error);
-
-    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
-    assert_eq!(rollback_err, expected_error);
-
-    let write_err = core
-        .insert(
-            "users",
-            user_insert_values(ObjectId::new(), "Bob"),
-            Some(&write_context),
-        )
-        .unwrap_err()
-        .to_string();
-    assert_eq!(write_err, expected_error);
-
-    let query_err = match core.query_with_local_batch(
-        Query::new("users"),
-        None,
-        ReadDurabilityOptions::default(),
-        crate::sync_manager::QueryPropagation::Full,
-        Some(batch_id),
-    ) {
-        Ok(_) => panic!("query should reject rolled-back transaction"),
-        Err(error) => error.to_string(),
-    };
-    assert_eq!(query_err, expected_error);
-}
-
-#[test]
 fn rc_transactional_insert_stays_local_until_authority_receives_it() {
     // alice stages one transactional write
     //   ordinary visible reads stay empty locally
@@ -180,7 +89,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     let history_rows =
@@ -236,7 +145,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
 
     pump_a_to_b(&mut s);
 
@@ -322,7 +231,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
         "persisted waiters should remain pending until the sealed batch settles"
     );
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     let worker_row =
@@ -518,7 +427,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
 
     let sealed_write_context = WriteContext {
         session: None,
@@ -627,7 +536,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         "open transactional batches should not persist replayable durability records before seal"
     );
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     assert_eq!(
         receiver.try_recv(),
@@ -676,7 +585,7 @@ fn rc_wait_for_batch_resolves_transactional_accepted_settlement() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     let mut batch_receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
 
     pump_a_to_b(&mut s);
@@ -724,7 +633,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
     let batch_id = history_rows[0].batch_id;
     let branch_name = s.a.schema_manager().branch_name();
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
 
     assert_eq!(
@@ -804,7 +713,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
         "open shared transactional batches should not persist replayable durability records before seal"
     );
 
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     assert_eq!(first_receiver.try_recv(), Ok(None));
     assert_eq!(second_receiver.try_recv(), Ok(None));
@@ -883,7 +792,7 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows() {
     let batch_id = history_rows[0].batch_id;
     let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
     let row_digest = history_rows[0].content_digest();
-    s.a.commit_batch(batch_id).unwrap();
+    s.a.seal_batch(batch_id).unwrap();
 
     s.a.batched_tick();
     let dropped_outbox = s.a.sync_sender().take();
@@ -995,7 +904,7 @@ fn rc_missing_batch_fate_retransmits_local_transactional_rows_without_row_locato
     let batch_id = history_rows[0].batch_id;
     let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
     let row_digest = history_rows[0].content_digest();
-    core.commit_batch(batch_id).unwrap();
+    core.seal_batch(batch_id).unwrap();
 
     core.batched_tick();
     core.sync_sender().take();
@@ -1212,7 +1121,7 @@ fn rc_authority_rejects_stale_update_after_concurrent_commit() {
         )
         .unwrap();
 
-    harness.alice.commit_batch(alice_batch_id).unwrap();
+    harness.alice.seal_batch(alice_batch_id).unwrap();
     pump_client_messages_to_server(
         &mut harness.alice,
         &mut harness.server,
@@ -1225,7 +1134,7 @@ fn rc_authority_rejects_stale_update_after_concurrent_commit() {
     ));
     harness.server.sync_sender().take();
 
-    harness.bob.commit_batch(bob_batch_id).unwrap();
+    harness.bob.seal_batch(bob_batch_id).unwrap();
     pump_client_messages_to_server(
         &mut harness.bob,
         &mut harness.server,
@@ -1271,7 +1180,7 @@ fn rc_authority_rejects_update_staged_before_receiving_concurrent_commit() {
         )
         .unwrap();
 
-    harness.alice.commit_batch(alice_batch_id).unwrap();
+    harness.alice.seal_batch(alice_batch_id).unwrap();
     pump_client_messages_to_server(
         &mut harness.alice,
         &mut harness.server,
@@ -1305,7 +1214,7 @@ fn rc_authority_rejects_update_staged_before_receiving_concurrent_commit() {
         "Bob should learn Alice's accepted transaction before sealing his own",
     );
 
-    harness.bob.commit_batch(bob_batch_id).unwrap();
+    harness.bob.seal_batch(bob_batch_id).unwrap();
     sync_server_with_clients(
         &mut harness.server,
         &mut [
@@ -1352,7 +1261,7 @@ fn rc_authority_accepts_update_staged_after_receiving_concurrent_commit() {
         )
         .unwrap();
 
-    harness.alice.commit_batch(alice_batch_id).unwrap();
+    harness.alice.seal_batch(alice_batch_id).unwrap();
     pump_client_messages_to_server(
         &mut harness.alice,
         &mut harness.server,
@@ -1396,7 +1305,7 @@ fn rc_authority_accepts_update_staged_after_receiving_concurrent_commit() {
         )
         .unwrap();
 
-    harness.bob.commit_batch(bob_batch_id).unwrap();
+    harness.bob.seal_batch(bob_batch_id).unwrap();
     sync_server_with_clients(
         &mut harness.server,
         &mut [

@@ -3,7 +3,7 @@ import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runti
 import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
-  const commitBatch = overrides.commitBatch ?? vi.fn();
+  const sealBatch = overrides.sealBatch ?? vi.fn();
   return {
     batchedTick: vi.fn(),
     close: vi.fn(),
@@ -17,10 +17,9 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
       JSON.stringify({ batchId: writeContextJson ? "batch-delete-2" : "batch-delete-1" }),
     ),
     executeSubscription: vi.fn(),
+    flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     waitForBatch: vi.fn(async () => undefined),
-    beginBatch: vi.fn((batchMode) => `batch-${batchMode}`),
-    rollbackBatch: vi.fn(() => true),
     insert: vi.fn((_table, _valuesJson, writeContextJson) =>
       JSON.stringify({
         id: "row-1",
@@ -37,15 +36,13 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     ),
     onBatchedTickNeeded: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
+    subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn((_objectId, _valuesJson, writeContextJson) =>
       JSON.stringify({ batchId: writeContextJson ? "batch-update-2" : "batch-update-1" }),
     ),
-    upsert: vi.fn((_table, _objectId, _valuesJson, writeContextJson) =>
-      JSON.stringify({ batchId: writeContextJson ? "batch-upsert-2" : "batch-upsert-1" }),
-    ),
     ...overrides,
-    commitBatch,
+    sealBatch,
   };
 }
 
@@ -68,9 +65,6 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    expect(adapter.beginBatch("transactional")).toBe("batch-transactional");
-    expect(adapter.rollbackBatch("batch-transactional")).toBe(true);
-
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
     expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
     expect(binding.insert).toHaveBeenCalledWith(
@@ -91,14 +85,6 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
     expect(binding.update).toHaveBeenCalledWith(
-      "row-1",
-      JSON.stringify({ done: { type: "Boolean", value: true } }),
-      undefined,
-    );
-
-    adapter.upsert("todos", "row-1", { done: { type: "Boolean", value: true } });
-    expect(binding.upsert).toHaveBeenCalledWith(
-      "todos",
       "row-1",
       JSON.stringify({ done: { type: "Boolean", value: true } }),
       undefined,
@@ -258,6 +244,28 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.delete_).toHaveBeenCalledWith("row-1", writeContextJson);
   });
 
+  it("bridges subscription callbacks with handle conversion", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const onUpdate = vi.fn();
+    const handle = adapter.subscribe("{}", onUpdate, null, null);
+    expect(handle).toBe(7);
+
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
+    subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
+    expect(onUpdate).toHaveBeenCalledWith({
+      added: [],
+      removed: [],
+      updated: [],
+      pending: false,
+    });
+
+    adapter.unsubscribe(handle);
+    expect(binding.unsubscribe).toHaveBeenCalledWith(7n);
+  });
+
   it("bridges 2-phase createSubscription + executeSubscription with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
@@ -293,10 +301,9 @@ describe("JazzRnRuntimeAdapter", () => {
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
     });
-    const handle = adapter.createSubscription("{}", null, null);
-    adapter.executeSubscription(handle, onUpdate);
-    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = executeMock.mock.calls[0]![1];
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
@@ -305,10 +312,9 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const onUpdate = vi.fn();
-    const handle = adapter.createSubscription("{}", null, null);
-    adapter.executeSubscription(handle, onUpdate);
-    const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = executeMock.mock.calls[0]![1];
+    adapter.subscribe("{}", onUpdate, null, null);
+    const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
 
     subscriptionCallback.onUpdate(
       JSON.stringify({
@@ -476,7 +482,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding({ updateAuth });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    adapter.updateAuth(JSON.stringify({ jwt_token: "refreshed" }));
+    adapter.updateAuth?.(JSON.stringify({ jwt_token: "refreshed" }));
 
     expect(updateAuth).toHaveBeenCalledWith(JSON.stringify({ jwt_token: "refreshed" }));
   });
@@ -490,7 +496,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const listener = vi.fn();
-    adapter.onAuthFailure(listener);
+    adapter.onAuthFailure?.(listener);
 
     expect(onAuthFailure).toHaveBeenCalledTimes(1);
     expect(captured).not.toBeNull();
@@ -506,7 +512,7 @@ describe("JazzRnRuntimeAdapter", () => {
       onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
         capturedMutationError = callback;
       }),
-      commitBatch: vi.fn(),
+      sealBatch: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
@@ -526,7 +532,7 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       }),
     );
-    adapter.commitBatch("batch-1");
+    adapter.sealBatch("batch-1");
 
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
@@ -541,6 +547,6 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       },
     });
-    expect(binding.commitBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
   });
 });

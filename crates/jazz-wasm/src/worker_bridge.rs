@@ -848,7 +848,8 @@ impl BridgeInner {
                     }
                 }
                 // Drained worker-side messages need a tick on the main runtime
-                // so subscriptions wake after each worker→main sync batch.
+                // so subscriptions wake. Matches main's TS bridge that called
+                // `runtime.batchedTick()` after each worker→main sync batch.
                 if had_payloads {
                     self.runtime.batched_tick();
                 }

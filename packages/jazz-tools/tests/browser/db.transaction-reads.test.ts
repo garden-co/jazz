@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
-import { WriteHandle } from "../../src/runtime/client.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
 
@@ -125,24 +124,6 @@ describe("db transaction reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
-  it("rejects transaction operations after commit", async () => {
-    const tx = db.beginTransaction();
-    tx.insert(todos, { title: "Committed transaction", done: false });
-    const batchId = tx.batchId();
-
-    tx.commit();
-
-    const coreError = `transaction ${batchId} is already committed`;
-    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
-  });
-
   it("changes from rolled-back transactions are not visible globally", async () => {
     const tx = db.beginTransaction();
     tx.insert(todos, { title: "Batch", done: false });
@@ -150,24 +131,6 @@ describe("db transaction reads browser integration", () => {
     tx.rollback();
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
-  });
-
-  it("rejects transaction operations after rollback", async () => {
-    const tx = db.beginTransaction();
-    tx.insert(todos, { title: "Rolled-back transaction", done: false });
-    const batchId = tx.batchId();
-
-    tx.rollback();
-
-    const coreError = `transaction ${batchId} has already been rolled back`;
-    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
   });
 
   it("supports custom ids and upserts inside transactions", async () => {
@@ -232,13 +195,13 @@ describe("db transaction reads browser integration", () => {
         done: false,
       });
 
-      const result = await db.transaction(async (tx) => {
-        const rows = await tx.all<Todo>(makeTodoQuery());
-        expect(rows).toEqual([existingTodo]);
-        return "no writes needed";
-      });
-      expect(result.value).toEqual("no writes needed");
-      expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
+      await expect(
+        db.transaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).resolves.toMatchObject({ value: "no writes needed" });
     });
 
     it("rolls back cleanly when an async transaction reads then throws before writing", async () => {
@@ -345,42 +308,6 @@ describe("db batch reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
-  it("rejects batch operations after commit", async () => {
-    const batch = db.beginBatch();
-    batch.insert(todos, { title: "Committed batch", done: false });
-    const batchId = batch.batchId();
-
-    batch.commit();
-
-    const coreError = `batch ${batchId} is already committed`;
-    expect(() => batch.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(batch.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
-  });
-
-  it("rejects batch operations after rollback", async () => {
-    const batch = db.beginBatch();
-    batch.insert(todos, { title: "Rolled-back batch", done: false });
-    const batchId = batch.batchId();
-
-    batch.rollback();
-
-    const coreError = `batch ${batchId} has already been rolled back`;
-    expect(() => batch.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(batch.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
-  });
-
   it("supports custom ids and upserts inside direct batches", async () => {
     const { value: existingTodo } = db.insert(todos, {
       title: "Bob queued docs review",
@@ -443,13 +370,13 @@ describe("db batch reads browser integration", () => {
         done: false,
       });
 
-      const result = await db.batch(async (batch) => {
-        const rows = await batch.all<Todo>(makeTodoQuery());
-        expect(rows).toEqual([existingTodo]);
-        return "no writes needed";
-      });
-      expect(result.value).toEqual("no writes needed");
-      expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
+      await expect(
+        db.batch(async (batch) => {
+          const rows = await batch.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).resolves.toMatchObject({ value: "no writes needed" });
     });
 
     it("rolls back cleanly when an async batch reads then throws before writing", async () => {

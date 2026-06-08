@@ -51,7 +51,6 @@ export interface NormalizedBuiltQuery {
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
-  includeDeleted: boolean;
   hops: string[];
   gather?: BuiltGather;
 }
@@ -65,7 +64,6 @@ type BuiltQueryShape = {
   orderBy?: unknown;
   limit?: unknown;
   offset?: unknown;
-  includeDeleted?: unknown;
   hops?: unknown;
   gather?: unknown;
 };
@@ -261,7 +259,6 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,
-    includeDeleted: value.includeDeleted === true,
     hops: Array.isArray(value.hops)
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],

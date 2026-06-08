@@ -17,6 +17,7 @@ function makeFakeRnBinding() {
     query: vi.fn(),
     createSubscription: vi.fn(),
     executeSubscription: vi.fn(),
+    subscribe: vi.fn(),
     unsubscribe: vi.fn(),
     update: vi.fn(),
   };

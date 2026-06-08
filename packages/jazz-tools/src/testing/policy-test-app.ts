@@ -1,6 +1,6 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { TransactionScope } from "../index.js";
+import { DbTransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import {
   fetchPermissionsHead,
@@ -16,7 +16,7 @@ type ExpectLike = (value: unknown) => {
   };
   toThrow(expected?: unknown): void;
 };
-type TestDbMethodCallback = (db: TransactionScope) => unknown;
+type TestDbMethodCallback = (db: DbTransactionScope) => unknown;
 
 /**
  * Db used for testing permissions.

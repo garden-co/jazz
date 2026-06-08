@@ -110,8 +110,6 @@ describe("Db write handles", () => {
         done: { type: "Boolean", value: false },
       },
       undefined,
-      undefined,
-      undefined,
     );
     expect(pending.batchId).toBe("batch-insert");
     expect(pending.value).toEqual({
@@ -149,10 +147,8 @@ describe("Db write handles", () => {
         done: { type: "Boolean", value: true },
       },
       undefined,
-      undefined,
-      undefined,
     );
-    expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined);
+    expect(remove).toHaveBeenCalledWith("todo-1");
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
@@ -178,14 +174,14 @@ describe("Db write handles", () => {
     );
     const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-session-update");
     const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-session-delete");
-    const create = vi.fn(() => insertHandle);
-    const update = vi.fn(() => updateHandle);
-    const deleteRow = vi.fn(() => deleteHandle);
+    const createHandleInternal = vi.fn(() => insertHandle);
+    const updateHandleInternal = vi.fn(() => updateHandle);
+    const deleteHandleInternal = vi.fn(() => deleteHandle);
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      create,
-      update,
-      delete: deleteRow,
+      createHandleInternal,
+      updateHandleInternal,
+      deleteHandleInternal,
     };
 
     const db = createDbFromClient(
@@ -199,26 +195,27 @@ describe("Db write handles", () => {
     const updated = db.update(table, "todo-2", { done: false });
     const deleted = db.delete(table, "todo-2");
 
-    expect(create).toHaveBeenCalledWith(
+    expect(createHandleInternal).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "With session" },
         done: { type: "Boolean", value: true },
       },
-      undefined,
       session,
       "alice@writer",
+      undefined,
     );
-    expect(update).toHaveBeenCalledWith(
+    expect(updateHandleInternal).toHaveBeenCalledWith(
       "todo-2",
       {
         done: { type: "Boolean", value: false },
       },
-      undefined,
       session,
       "alice@writer",
+      undefined,
+      undefined,
     );
-    expect(deleteRow).toHaveBeenCalledWith("todo-2", undefined, session, "alice@writer");
+    expect(deleteHandleInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer");
     expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",

@@ -126,7 +126,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-tx");
     const runtimeTransaction = {
-      batchId: "batch-tx",
+      batchId: vi.fn(() => "batch-tx"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -134,10 +134,10 @@ describe("Db transactions", () => {
       localBatchRecord: vi.fn((batchId = "batch-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-tx")]),
     };
-    const beginTransaction = vi.fn(() => runtimeTransaction);
+    const beginTransactionInternal = vi.fn(() => runtimeTransaction);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction,
+      beginTransactionInternal,
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -147,7 +147,7 @@ describe("Db transactions", () => {
     const updated = tx.update(table, "todo-1", { done: true });
     const deleted = tx.delete(table, "todo-1");
 
-    expect(beginTransaction).toHaveBeenCalledWith(undefined, undefined);
+    expect(beginTransactionInternal).toHaveBeenCalledWith(undefined, undefined);
     expect(tx.batchId()).toBe("batch-tx");
     expect(inserted).toEqual({
       id: "todo-1",
@@ -187,7 +187,7 @@ describe("Db transactions", () => {
       batchId: "batch-tx-fast-path",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-tx-fast-path",
+      batchId: vi.fn(() => "batch-tx-fast-path"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
@@ -201,7 +201,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema,
       getSchemaHash,
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -231,7 +231,7 @@ describe("Db transactions", () => {
     });
   });
 
-  it("threads session-backed db transactions through beginTransaction", async () => {
+  it("threads session-backed db transactions through beginTransactionInternal", async () => {
     const table = todoTable();
     const session: Session = {
       user_id: "alice",
@@ -247,7 +247,7 @@ describe("Db transactions", () => {
       batchId: "batch-session-tx",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-session-tx",
+      batchId: vi.fn(() => "batch-session-tx"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -257,7 +257,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -270,7 +270,7 @@ describe("Db transactions", () => {
     const tx = db.beginTransaction();
     const inserted = tx.insert(table, { title: "Session transaction", done: true });
 
-    expect(runtimeClient.beginTransaction).toHaveBeenCalledWith(session, "alice@writer");
+    expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(session, "alice@writer");
     const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-session-tx");
@@ -294,7 +294,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-callback");
     const runtimeTransaction = {
-      batchId: "batch-callback",
+      batchId: vi.fn(() => "batch-callback"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -305,7 +305,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       waitForBatch: vi.fn(async () => undefined),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -343,7 +343,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-callback-rejected",
+      batchId: vi.fn(() => "batch-callback-rejected"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -356,7 +356,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -364,7 +364,7 @@ describe("Db transactions", () => {
     await expect(
       db.transaction(async (tx) => {
         tx.insert(table, { title: "Rejected callback transaction", done: false });
-        // @ts-expect-error - commit is not available on TransactionScope
+        // @ts-expect-error - commit is not available on DbTransactionScope
         return tx.commit();
       }),
     ).rejects.toEqual(new TypeError("tx.commit is not a function"));
@@ -381,7 +381,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-thrown",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-callback-thrown",
+      batchId: vi.fn(() => "batch-callback-thrown"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -392,7 +392,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -420,7 +420,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-callback-rejected",
+      batchId: vi.fn(() => "batch-callback-rejected"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -433,7 +433,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -461,7 +461,7 @@ describe("Db transactions", () => {
       batchId: "batch-callback-rejected",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-callback-rejected",
+      batchId: vi.fn(() => "batch-callback-rejected"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -474,7 +474,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -482,7 +482,7 @@ describe("Db transactions", () => {
     await expect(
       db.transaction(async (tx) => {
         tx.insert(table, { title: "Rejected callback transaction", done: false });
-        // @ts-expect-error - rollback is not available on TransactionScope
+        // @ts-expect-error - rollback is not available on DbTransactionScope
         return tx.rollback();
       }),
     ).rejects.toEqual(new TypeError("tx.rollback is not a function"));
@@ -491,7 +491,7 @@ describe("Db transactions", () => {
   it("routes typed transaction upserts through the runtime transaction", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: "batch-upsert-tx",
+      batchId: vi.fn(() => "batch-upsert-tx"),
       create: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -502,7 +502,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -529,7 +529,7 @@ describe("Db transactions", () => {
       batchId: "batch-async-callback",
     } as Row;
     const runtimeTransaction = {
-      batchId: "batch-async-callback",
+      batchId: vi.fn(() => "batch-async-callback"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -540,7 +540,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       waitForBatch: vi.fn(async () => undefined),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -581,7 +581,7 @@ describe("Db transactions", () => {
     } as Row;
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: "batch-closed",
+      batchId: vi.fn(() => "batch-closed"),
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-closed");
         return runtimeRow;
@@ -598,7 +598,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -617,10 +617,10 @@ describe("Db transactions", () => {
   });
 
   it("throws when committing a db transaction before any actions", () => {
-    const beginTransaction = vi.fn();
+    const beginTransactionInternal = vi.fn();
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction,
+      beginTransactionInternal,
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -630,7 +630,7 @@ describe("Db transactions", () => {
     expect(() => tx.commit()).toThrow(
       "DbTransaction.commit() requires at least one table operation first",
     );
-    expect(beginTransaction).not.toHaveBeenCalled();
+    expect(beginTransactionInternal).not.toHaveBeenCalled();
   });
 
   it("supports typed reads scoped to the open transaction", async () => {
@@ -644,7 +644,7 @@ describe("Db transactions", () => {
       ],
     };
     const runtimeTransaction = {
-      batchId: "batch-read",
+      batchId: vi.fn(() => "batch-read"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -655,7 +655,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -684,7 +684,7 @@ describe("Db transactions", () => {
     const query = todoQuery();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: "batch-read-closed",
+      batchId: vi.fn(() => "batch-read-closed"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -702,7 +702,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -724,7 +724,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: "batch-rollback",
+      batchId: vi.fn(() => "batch-rollback"),
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-rollback");
         return {} as Row;
@@ -747,7 +747,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -774,7 +774,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
-      batchId: "batch-commit-before-rollback",
+      batchId: vi.fn(() => "batch-commit-before-rollback"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -794,7 +794,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -813,7 +813,7 @@ describe("Db transactions", () => {
   it("delegates terminal transaction errors to runtime operations", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: "batch-runtime-rolled-back",
+      batchId: vi.fn(() => "batch-runtime-rolled-back"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -828,7 +828,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -846,7 +846,7 @@ describe("Db transactions", () => {
   it("delegates terminal write errors to runtime transaction operations", () => {
     const table = todoTable();
     const runtimeTransaction = {
-      batchId: "batch-runtime-write-rolled-back",
+      batchId: vi.fn(() => "batch-runtime-write-rolled-back"),
       create: vi.fn(() => {
         throw new Error("runtime write rejected after rollback");
       }),
@@ -861,7 +861,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     };
     const db = createDbFromClient(
@@ -884,7 +884,7 @@ describe("Db transactions", () => {
       _schema: todoSchema(),
     };
     const runtimeTransaction = {
-      batchId: "batch-cross-client",
+      batchId: vi.fn(() => "batch-cross-client"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -894,12 +894,12 @@ describe("Db transactions", () => {
     };
     const primaryClient = {
       getSchema: () => new Map(Object.entries(primaryTable._schema)),
-      beginTransaction: vi.fn(() => runtimeTransaction),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const secondaryClient = {
       getSchema: () => new Map(Object.entries(secondaryTable._schema)),
-      beginTransaction: vi.fn(),
+      beginTransactionInternal: vi.fn(),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
     } as unknown as JazzClient;
     const db = new MultiClientDb(
@@ -931,7 +931,7 @@ describe("Db transactions", () => {
     } as Row;
     const committedRuntime = makeWriteHandle("batch-direct", "direct");
     const runtimeBatch = {
-      batchId: "batch-direct",
+      batchId: vi.fn(() => "batch-direct"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -941,10 +941,10 @@ describe("Db transactions", () => {
       ),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-direct", "direct")]),
     };
-    const beginBatch = vi.fn(() => runtimeBatch);
+    const beginBatchInternal = vi.fn(() => runtimeBatch);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch,
+      beginBatchInternal,
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -954,7 +954,7 @@ describe("Db transactions", () => {
     const updated = batch.update(table, "todo-direct-1", { done: true });
     const deleted = batch.delete(table, "todo-direct-1");
 
-    expect(beginBatch).toHaveBeenCalledWith(undefined, undefined);
+    expect(beginBatchInternal).toHaveBeenCalledWith(undefined, undefined);
     expect(batch.batchId()).toBe("batch-direct");
     expect(inserted).toEqual({
       id: "todo-direct-1",
@@ -994,7 +994,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-fast-path",
     } as Row;
     const runtimeBatch = {
-      batchId: "batch-direct-fast-path",
+      batchId: vi.fn(() => "batch-direct-fast-path"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       upsert: vi.fn(() => undefined),
@@ -1010,7 +1010,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema,
       getSchemaHash,
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1051,7 +1051,7 @@ describe("Db transactions", () => {
       ],
     };
     const runtimeBatch = {
-      batchId: "batch-direct-read",
+      batchId: vi.fn(() => "batch-direct-read"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
@@ -1065,7 +1065,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1100,7 +1100,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-callback",
     } as Row;
     const runtimeBatch = {
-      batchId: "batch-direct-callback",
+      batchId: vi.fn(() => "batch-direct-callback"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -1113,7 +1113,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       waitForBatch: vi.fn(async () => undefined),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1143,7 +1143,7 @@ describe("Db transactions", () => {
   it("does not commit a callback batch when the callback rejects", async () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: "batch-direct-callback-rejected",
+      batchId: vi.fn(() => "batch-direct-callback-rejected"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -1157,7 +1157,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1171,7 +1171,7 @@ describe("Db transactions", () => {
   it("routes typed direct batch upserts through the runtime batch", () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: "batch-upsert-direct",
+      batchId: vi.fn(() => "batch-upsert-direct"),
       create: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -1184,7 +1184,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1211,7 +1211,7 @@ describe("Db transactions", () => {
       batchId: "batch-direct-async-callback",
     } as Row;
     const runtimeBatch = {
-      batchId: "batch-direct-async-callback",
+      batchId: vi.fn(() => "batch-direct-async-callback"),
       create: vi.fn(() => runtimeRow),
       update: vi.fn(() => undefined),
       delete: vi.fn(() => undefined),
@@ -1226,7 +1226,7 @@ describe("Db transactions", () => {
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       waitForBatch: vi.fn(async () => undefined),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1256,10 +1256,10 @@ describe("Db transactions", () => {
   });
 
   it("throws when committing a db batch before any actions", () => {
-    const beginBatch = vi.fn();
+    const beginBatchInternal = vi.fn();
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch,
+      beginBatchInternal,
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1269,14 +1269,14 @@ describe("Db transactions", () => {
     expect(() => batch.commit()).toThrow(
       "DbDirectBatch.commit() requires at least one table operation first",
     );
-    expect(beginBatch).not.toHaveBeenCalled();
+    expect(beginBatchInternal).not.toHaveBeenCalled();
   });
 
   it("rolls back db batches without committing the underlying batch", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
-      batchId: "batch-direct-rollback",
+      batchId: vi.fn(() => "batch-direct-rollback"),
       create: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-rollback");
         return {
@@ -1310,7 +1310,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     };
     const db = createDbFromClient(
@@ -1333,7 +1333,7 @@ describe("Db transactions", () => {
     const table = todoTable();
     let status: TestTransactionStatus = "active";
     const runtimeBatch = {
-      batchId: "batch-direct-commit-before-rollback",
+      batchId: vi.fn(() => "batch-direct-commit-before-rollback"),
       create: vi.fn(),
       update: vi.fn(() => {
         assertTestTransactionActive(status, "batch-direct-commit-before-rollback");
@@ -1357,7 +1357,7 @@ describe("Db transactions", () => {
     };
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     };
     const db = createDbFromClient(
@@ -1375,7 +1375,7 @@ describe("Db transactions", () => {
   it("rolls back a callback batch when the callback throws after a write", () => {
     const table = todoTable();
     const runtimeBatch = {
-      batchId: "batch-direct-thrown-callback",
+      batchId: vi.fn(() => "batch-direct-thrown-callback"),
       create: vi.fn(() => ({
         id: "todo-direct-thrown-callback",
         values: [
@@ -1397,7 +1397,7 @@ describe("Db transactions", () => {
     };
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new TestDb(client);
@@ -1421,7 +1421,7 @@ describe("Db transactions", () => {
       _schema: todoSchema(),
     };
     const runtimeBatch = {
-      batchId: "batch-cross-client-direct",
+      batchId: vi.fn(() => "batch-cross-client-direct"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
@@ -1433,12 +1433,12 @@ describe("Db transactions", () => {
     };
     const primaryClient = {
       getSchema: () => new Map(Object.entries(primaryTable._schema)),
-      beginBatch: vi.fn(() => runtimeBatch),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const secondaryClient = {
       getSchema: () => new Map(Object.entries(secondaryTable._schema)),
-      beginBatch: vi.fn(),
+      beginBatchInternal: vi.fn(),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
     } as unknown as JazzClient;
     const db = new MultiClientDb(

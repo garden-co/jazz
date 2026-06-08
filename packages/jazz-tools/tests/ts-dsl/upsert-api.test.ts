@@ -131,10 +131,11 @@ describe("TS Upsert API", () => {
     ).toThrow("Cannot set required field 'title' to null");
   });
 
-  it("fails when trying to insert a row with missing required fields", async () => {
-    const id = "00000000-0000-0000-0000-000000000000";
-    expect(() => db.upsert(app.todos, { done: true }, { id })).toThrow(
-      'Upsert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
+  it("does not fall back to update when upsert insert shape validation fails", async () => {
+    const todo = insertTodo(db, { title: "Test Todo" });
+
+    expect(() => db.upsert(app.todos, { done: true }, { id: todo.id })).toThrow(
+      'Insert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
     );
   });
 
@@ -170,38 +171,7 @@ describe("TS Upsert API", () => {
     db.delete(app.projects, project.id);
 
     expect(() => db.upsert(app.projects, { name: "Restored Project" }, { id: project.id })).toThrow(
-      `Upsert failed: WriteError("row already deleted: ${project.id}")`,
+      `Insert failed: WriteError("row already deleted: ${project.id}")`,
     );
-  });
-
-  it("can use caller-supplied updatedAt on new-row upsert", async () => {
-    const id = "00000000-0000-0000-0000-000000000000";
-    const updatedAt = 1_704_067_200_123_000;
-    db.upsert(app.projects, { name: "Backfilled Project" }, { id, updatedAt });
-
-    const project = await db.one(app.projects.select("name", "$updatedAt").where({ id }));
-
-    expect(project).toEqual({
-      id: project?.id,
-      name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
-    });
-  });
-
-  it("can use caller-supplied updatedAt on existing-row upsert", async () => {
-    const updatedAt = 1_704_067_200_123_000;
-    const originalProject = insertProject(db, "Test Project");
-
-    db.upsert(app.projects, { name: "Backfilled Project" }, { id: originalProject.id, updatedAt });
-
-    const project = await db.one(
-      app.projects.select("name", "$updatedAt").where({ id: { eq: originalProject.id } }),
-    );
-
-    expect(project).toEqual({
-      id: originalProject.id,
-      name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
-    });
   });
 });

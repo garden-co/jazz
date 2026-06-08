@@ -60,25 +60,6 @@ describe("TS Delete API", () => {
     expect(rows).toEqual([]);
   });
 
-  it("can use caller-supplied updatedAt on delete", async () => {
-    const updatedAt = 1_704_067_200_123_000;
-    const project = insertProject(db);
-
-    db.delete(app.projects, project.id, { updatedAt });
-
-    const deleted = await db.one(
-      app.projects
-        .select("name", "$updatedAt")
-        .includeDeleted()
-        .where({ id: { eq: project.id } }),
-    );
-    expect(deleted).toEqual({
-      id: project.id,
-      name: project.name,
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
-    });
-  });
-
   it("trying to delete an already-deleted row fails", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);

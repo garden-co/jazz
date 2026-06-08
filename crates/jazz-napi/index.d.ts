@@ -18,15 +18,14 @@ export declare class NapiRuntime {
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
   insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any, writeContextJson?: string | undefined | null): any
-  upsert(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   delete(objectId: string, writeContextJson?: string | undefined | null): any
   restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void
-  rollbackBatch(batchId: string): boolean
-  beginBatch(batchMode: string): string
-  commitBatch(batchId: string): void
+  discardLocalBatch(batchId: string): boolean
+  sealBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
+  subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
@@ -37,6 +36,9 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
+  static deriveUserId(seedB64: string): string
+  static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+  static getPublicKeyBase64url(seedB64: string): string
   /**
    * Connect to a Jazz server over WebSocket.
    *
@@ -70,7 +72,17 @@ export declare class TestingServer {
   stop(): Promise<void>
 }
 
+export declare function currentTimestamp(): number
+
+export declare function deriveUserId(seedB64: string): string
+
+export declare function generateId(): string
+
+export declare function getPublicKeyBase64url(seedB64: string): string
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+
+export declare function parseSchema(json: string): any
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
