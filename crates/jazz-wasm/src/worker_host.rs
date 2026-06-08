@@ -1001,6 +1001,10 @@ fn handle_follower_port_control(value: &JsValue) -> bool {
             }
             true
         }
+        "worker-lock-lost" => {
+            handle_main_message(MainToWorkerMessage::Wire(MainToWorkerWire::Shutdown));
+            true
+        }
         _ => false,
     }
 }

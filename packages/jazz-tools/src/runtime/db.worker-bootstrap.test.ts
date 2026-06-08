@@ -12,6 +12,7 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
   class FakeBrowserBrokerClient {
     static connect = connectMock;
     static instances: FakeBrowserBrokerClient[] = [];
+    static leaderFailures: Array<{ leadershipId: number; reason: string }> = [];
     private readonly options: any;
     private role: "leader" | "follower" = "leader";
     private leaderTabId: string | null;
@@ -35,7 +36,9 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
 
     reportLeaderReady(): void {}
 
-    reportLeaderFailed(): void {}
+    reportLeaderFailed(leadershipId: number, reason: string): void {
+      FakeBrowserBrokerClient.leaderFailures.push({ leadershipId, reason });
+    }
 
     reportVisibility(): void {}
 
@@ -113,6 +116,7 @@ afterEach(() => {
   tryAcquireWebLockMock.mockClear();
   FakeBrowserBrokerClient.connect.mockClear();
   FakeBrowserBrokerClient.instances.splice(0);
+  FakeBrowserBrokerClient.leaderFailures.splice(0);
 
   if (originalWindow === undefined) {
     delete (globalThis as Record<string, unknown>).window;
@@ -503,6 +507,76 @@ describe("Db worker runtime bootstrap", () => {
       expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
     } finally {
       await db?.shutdown();
+    }
+  });
+
+  it("shuts down broker leadership resources when the tab lock is lost", async () => {
+    const appId = "worker-bootstrap-tab-lock-lost";
+    const dbName = "worker-bootstrap-tab-lock-lost";
+    const releasedLocks = new Set<string>();
+    const lostCallbacks = new Map<string, (reason: unknown) => void>();
+    let terminatedWorkers = 0;
+
+    tryAcquireWebLockMock.mockImplementation(async (lockName?: string, options?: any) => {
+      if (lockName && typeof options?.onLost === "function") {
+        lostCallbacks.set(lockName, options.onLost);
+      }
+      return {
+        release: vi.fn(() => {
+          if (lockName) {
+            releasedLocks.add(lockName);
+          }
+        }),
+      };
+    });
+
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {
+        terminatedWorkers++;
+      }
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await createWorkerDb({
+      appId,
+      driver: { type: "persistent", dbName },
+    });
+
+    try {
+      const tabLockName = `jazz-leader-tab:${appId}:${dbName}`;
+      expect(lostCallbacks.has(tabLockName)).toBe(true);
+
+      lostCallbacks.get(tabLockName)!(new Error("tab lock stolen"));
+
+      await waitFor(() => terminatedWorkers === 1, 200, "leader worker should terminate");
+      expect(releasedLocks).toEqual(
+        new Set([`jazz-leader-tab:${appId}:${dbName}`, `jazz-leader-lock:${appId}:${dbName}`]),
+      );
+      expect(FakeBrowserBrokerClient.leaderFailures).toEqual([
+        { leadershipId: 1, reason: "tab lock stolen" },
+      ]);
+      expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
+    } finally {
+      await db.shutdown();
     }
   });
 });

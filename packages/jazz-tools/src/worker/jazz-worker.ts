@@ -239,26 +239,55 @@ async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage)
   }
 
   let lockGranted = false;
-  await locks.request(
-    init.workerLockName,
-    { mode: "exclusive", ifAvailable: true },
-    async (lock) => {
-      if (!lock) {
-        self.postMessage({
-          type: "error",
-          message: `Worker lock preflight failed: ${init.workerLockName} is already held`,
-        });
-        return;
-      }
+  let lockLossReported = false;
+  try {
+    await locks.request(
+      init.workerLockName,
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          self.postMessage({
+            type: "error",
+            message: `Worker lock preflight failed: ${init.workerLockName} is already held`,
+          });
+          return;
+        }
 
-      lockGranted = true;
-      handoff();
-      await new Promise<void>(() => undefined);
-    },
-  );
+        lockGranted = true;
+        handoff();
+        await new Promise<void>(() => undefined);
+      },
+    );
+  } catch (error) {
+    if (!lockGranted) {
+      throw error;
+    }
+    reportWorkerLockLost(error);
+    return;
+  }
+
+  if (lockGranted) {
+    reportWorkerLockLost(new Error(`Worker lock ${init.workerLockName} was lost`));
+    return;
+  }
 
   if (!lockGranted) {
     pendingMessages.length = 0;
+  }
+
+  function reportWorkerLockLost(reason: unknown): void {
+    if (lockLossReported) return;
+    lockLossReported = true;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    self.onmessage?.(
+      new MessageEvent("message", {
+        data: {
+          type: "worker-lock-lost",
+          workerLockName: init.workerLockName,
+          reason: message,
+        },
+      }),
+    );
   }
 }
 
