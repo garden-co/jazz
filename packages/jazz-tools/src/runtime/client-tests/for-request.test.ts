@@ -200,7 +200,6 @@ describe("JazzClient runtime helpers", () => {
         ]);
         return [];
       },
-      subscribe: () => 0,
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},

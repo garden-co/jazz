@@ -72,13 +72,6 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
-  subscribe(
-    query_json: string,
-    on_update: Function,
-    session_json?: string | null,
-    tier?: string | null,
-    options_json?: string | null,
-  ): number;
   createSubscription(
     query_json: string,
     session_json?: string | null,

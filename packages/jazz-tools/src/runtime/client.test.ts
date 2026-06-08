@@ -65,16 +65,6 @@ function makeFakeRuntime() {
           options_json?: string | null,
         ) => Promise<any>
       >(),
-    subscribe:
-      vi.fn<
-        (
-          query_json: string,
-          on_update: Function,
-          session_json?: string | null,
-          tier?: string | null,
-          options_json?: string | null,
-        ) => number
-      >(),
     createSubscription:
       vi.fn<
         (

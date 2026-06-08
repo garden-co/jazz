@@ -144,13 +144,6 @@ declare module "jazz-wasm" {
       optionsJson?: string | null,
     ): number;
     executeSubscription(handle: number, onUpdate: Function): void;
-    subscribe(
-      queryJson: string,
-      onUpdate: Function,
-      sessionJson?: string | null,
-      tier?: string | null,
-      optionsJson?: string | null,
-    ): number;
     unsubscribe(handle: number): void;
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */

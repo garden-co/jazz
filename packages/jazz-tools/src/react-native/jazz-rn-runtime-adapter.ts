@@ -72,12 +72,6 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   executeSubscription(handle: bigint, callback: { onUpdate(deltaJson: string): void }): void;
-  subscribe(
-    queryJson: string,
-    callback: { onUpdate(deltaJson: string): void },
-    sessionJson: string | undefined,
-    tier: string | undefined,
-  ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
   commitBatch(batchId: string): void;
@@ -314,36 +308,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
         }
       },
     });
-  }
-
-  subscribe(
-    query_json: string,
-    on_update: Function,
-    session_json?: string | null,
-    tier?: string | null,
-  ): number {
-    const handle = this.binding.subscribe(
-      query_json,
-      {
-        onUpdate: (deltaJson: string) => {
-          try {
-            const parsed = JSON.parse(deltaJson) as unknown;
-            on_update(parsed);
-          } catch (error) {
-            swallowCallbackError("subscription", error);
-          }
-        },
-      },
-      session_json ?? undefined,
-      tier ?? undefined,
-    );
-
-    const numericHandle = Number(handle);
-    if (!Number.isSafeInteger(numericHandle)) {
-      throw new Error(`Subscription handle ${handle.toString()} is outside safe integer range`);
-    }
-    this.handleMap.set(numericHandle, handle);
-    return numericHandle;
   }
 
   unsubscribe(handle: number): void {

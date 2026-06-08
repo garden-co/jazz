@@ -142,14 +142,6 @@ interface NativeModuleInterface {
     batchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
-    ptr: bigint,
-    queryJson: Uint8Array,
-    callback: bigint,
-    sessionJson: Uint8Array,
-    tier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_unsubscribe(
     ptr: bigint,
     handle: bigint,
@@ -364,7 +356,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_restore(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(): number;

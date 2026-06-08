@@ -850,12 +850,6 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined
   ) /*throws*/ : string;
   rollbackBatch(batchId: string) /*throws*/ : boolean;
-  subscribe(
-    queryJson: string,
-    callback: SubscriptionCallback,
-    sessionJson: string | undefined,
-    tier: string | undefined
-  ) /*throws*/ : /*u64*/ bigint;
   unsubscribe(handle: /*u64*/ bigint) /*throws*/ : void;
   update(
     objectId: string,
@@ -1312,32 +1306,6 @@ export class RnRuntime
     );
   }
 
-  subscribe(
-    queryJson: string,
-    callback: SubscriptionCallback,
-    sessionJson: string | undefined,
-    tier: string | undefined
-  ): /*u64*/ bigint /*throws*/ {
-    return FfiConverterUInt64.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_subscribe(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(queryJson),
-            FfiConverterTypeSubscriptionCallback.lower(callback),
-            FfiConverterOptionalString.lower(sessionJson),
-            FfiConverterOptionalString.lower(tier),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
   unsubscribe(handle: /*u64*/ bigint): void /*throws*/ {
     uniffiCaller.rustCallWithError(
       /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1752,14 +1720,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe() !==
-    64604
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_subscribe'
     );
   }
   if (

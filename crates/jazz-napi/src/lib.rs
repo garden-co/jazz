@@ -833,46 +833,6 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi]
-    pub fn subscribe(
-        &self,
-        query_json: String,
-        #[napi(ts_arg_type = "(...args: any[]) => any")] on_update: ThreadsafeFunction<
-            serde_json::Value,
-        >,
-        session_json: Option<String>,
-        tier: Option<String>,
-        options_json: Option<String>,
-    ) -> napi::Result<f64> {
-        let (query, session, durability, propagation) =
-            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
-        let alignment_table = query_rows_can_be_schema_aligned(&query).then_some(query.table);
-
-        let callback = make_subscription_callback(
-            on_update,
-            alignment_table
-                .as_ref()
-                .map(|_| self.declared_schema.clone()),
-            alignment_table,
-        );
-
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = core
-            .subscribe_with_durability_and_propagation(
-                query,
-                callback,
-                session,
-                durability,
-                propagation,
-            )
-            .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
-
-        Ok(handle.0 as f64)
-    }
-
-    #[napi]
     pub fn unsubscribe(&self, handle: f64) -> napi::Result<()> {
         self.subscription_queries
             .lock()
