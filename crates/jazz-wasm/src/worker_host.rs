@@ -209,6 +209,8 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
             MainToWorkerWire::SimulateCrash => "simulate-crash",
             MainToWorkerWire::DebugSchemaState => "debug-schema-state",
             MainToWorkerWire::DebugSeedLiveSchema { .. } => "debug-seed-live-schema",
+            MainToWorkerWire::DebugOpfsIoCountersSnapshot => "debug-opfs-io-counters-snapshot",
+            MainToWorkerWire::DebugOpfsIoCountersReset => "debug-opfs-io-counters-reset",
         },
     }
 }
