@@ -1,8 +1,12 @@
-use crate::browser_telemetry::{emit_log, BrowserTelemetryConfig};
+use crate::browser_telemetry::{emit_log, emit_sync_log_records, BrowserTelemetryConfig};
 use crate::browser_worker::{
+    runtime_worker_input_client_log_records_with_session,
+    runtime_worker_output_server_log_records_with_session, runtime_worker_output_session_id,
     BrowserStorageStats, RuntimeRequestId, RuntimeWorkerInput, RuntimeWorkerOutput,
 };
-use crate::native_sync::NativeSyncLogContext;
+use crate::native_sync::{
+    NativeSyncLogContext, DIRECTION_MAIN_FROM_WORKER, DIRECTION_MAIN_TO_WORKER,
+};
 use crate::worker_bridge::WorkerClient;
 use js_sys::{Function, Promise};
 use mini_jazz_sqlite::connection::{DownstreamConnectionManager, DownstreamConnectionSubscription};
@@ -59,6 +63,7 @@ struct Inner {
     status: BrowserRuntimeStatus,
     on_status: Callback<BrowserRuntimeStatus>,
     browser_telemetry: Option<BrowserTelemetryConfig>,
+    sync_session_id: Option<String>,
 }
 
 struct BrowserRowsSubscription {
@@ -112,12 +117,13 @@ impl BrowserRuntime {
                 status: BrowserRuntimeStatus::default(),
                 on_status,
                 browser_telemetry: config.browser_telemetry.clone(),
+                sync_session_id: None,
             })),
         };
         *runtime_slot.borrow_mut() = Some(runtime.clone());
 
         runtime.with_inner(|inner| {
-            inner.worker.send(RuntimeWorkerInput::Open {
+            let input = RuntimeWorkerInput::Open {
                 db_name: config.db_name,
                 node_id: config.worker_node_id,
                 user: config.user,
@@ -127,7 +133,8 @@ impl BrowserRuntime {
                 native_sync_url: config.native_sync_url,
                 native_sync_logging: config.native_sync_logging,
                 browser_telemetry: config.browser_telemetry,
-            })?;
+            };
+            inner.send_worker_input(input)?;
             Ok(())
         })?;
 
@@ -332,6 +339,19 @@ impl BrowserRuntime {
     }
 
     fn handle_worker_output(&self, output: RuntimeWorkerOutput) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(session_id) = runtime_worker_output_session_id(&output) {
+                inner.sync_session_id = Some(session_id.to_owned());
+            }
+            let records = runtime_worker_output_server_log_records_with_session(
+                DIRECTION_MAIN_FROM_WORKER,
+                &output,
+                inner.sync_session_id.as_deref(),
+            );
+            emit_sync_log_records(inner.browser_telemetry.as_ref(), &records);
+        }
+
         let result = match output {
             RuntimeWorkerOutput::Opened {
                 bundles,
@@ -563,14 +583,14 @@ impl Inner {
         self.status.syncing = true;
         if bundles.is_empty() {
             self.pending_protocols.insert(request_id);
-            self.worker.send(RuntimeWorkerInput::Protocol {
+            self.send_worker_input(RuntimeWorkerInput::Protocol {
                 request_id,
                 client_messages,
                 sync_context,
             })?;
         } else {
             self.pending_syncs.insert(request_id);
-            self.worker.send(RuntimeWorkerInput::ApplyBundles {
+            self.send_worker_input(RuntimeWorkerInput::ApplyBundles {
                 request_id,
                 bundles,
                 client_messages,
@@ -639,12 +659,22 @@ impl Inner {
         let request_id = self.next_request_id()?;
         self.pending_protocols.insert(request_id);
         self.status.syncing = true;
-        self.worker.send(RuntimeWorkerInput::Protocol {
+        self.send_worker_input(RuntimeWorkerInput::Protocol {
             request_id,
             client_messages,
             sync_context: None,
         })?;
         Ok(())
+    }
+
+    fn send_worker_input(&mut self, input: RuntimeWorkerInput) -> Result<(), String> {
+        let records = runtime_worker_input_client_log_records_with_session(
+            DIRECTION_MAIN_TO_WORKER,
+            &input,
+            self.sync_session_id.as_deref(),
+        );
+        emit_sync_log_records(self.browser_telemetry.as_ref(), &records);
+        self.worker.send(input)
     }
 
     fn has_pending_work(&self) -> bool {

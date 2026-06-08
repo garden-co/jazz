@@ -143,13 +143,36 @@ pub enum ReconcileSet {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReconcileAlgorithm {
     Exact,
+    Rateless,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationSketch {
     pub set: ReconcileSet,
     pub algorithm: ReconcileAlgorithm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<ReconcileParameters>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<ReconcileSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_heads: Vec<RowHeadItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileParameters {
+    pub seed: u64,
+    pub estimated_items: u64,
+    pub target_degree: u8,
+    pub symbol_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileSymbol {
+    pub index: u32,
+    pub count: i64,
+    pub item_len_xor: u64,
+    pub item_bytes_xor: String,
+    pub item_hash_xor: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +234,12 @@ pub enum ClientMessage {
         message_id: MessageId,
         cursor: Option<ReplayCursor>,
     },
+    ReconcileSymbols {
+        subscription_id: SubscriptionId,
+        set: ReconcileSet,
+        parameters: ReconcileParameters,
+        symbols: Vec<ReconcileSymbol>,
+    },
     Close(CloseReason),
 }
 
@@ -234,6 +263,13 @@ pub enum ServerMessage {
         subscription_id: SubscriptionId,
         tier: SettlementTier,
         cursor: ReplayCursor,
+    },
+    ReconcileMore {
+        subscription_id: SubscriptionId,
+        set: ReconcileSet,
+        parameters: ReconcileParameters,
+        next_symbol_index: u32,
+        requested_symbols: u32,
     },
     Error(ProtocolError),
     Close(CloseReason),

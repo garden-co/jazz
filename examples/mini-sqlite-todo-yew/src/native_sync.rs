@@ -12,6 +12,15 @@ const LOG_TARGET: &str = "mini_sqlite_todo_yew::native_sync";
 const SUMMARY_ITEM_LIMIT: usize = 8;
 const SUMMARY_MAX_CHARS: usize = 512;
 
+pub const DIRECTION_MAIN_TO_WORKER: &str = "main.to_worker";
+pub const DIRECTION_WORKER_FROM_MAIN: &str = "worker.from_main";
+pub const DIRECTION_WORKER_TO_MAIN: &str = "worker.to_main";
+pub const DIRECTION_MAIN_FROM_WORKER: &str = "main.from_worker";
+pub const DIRECTION_WORKER_TO_SERVER: &str = "worker.to_server";
+pub const DIRECTION_SERVER_FROM_WORKER: &str = "server.from_worker";
+pub const DIRECTION_SERVER_TO_WORKER: &str = "server.to_worker";
+pub const DIRECTION_WORKER_FROM_SERVER: &str = "worker.from_server";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSyncProbe {
     pub probe_id: String,
@@ -464,6 +473,15 @@ fn client_message_summary(message: &ClientMessage) -> SyncMessageSummary {
             cursor: cursor.map(|cursor| cursor.0.to_string()),
             ..SyncMessageSummary::kind("client.ack")
         },
+        ClientMessage::ReconcileSymbols {
+            subscription_id,
+            symbols,
+            ..
+        } => SyncMessageSummary {
+            subscription_id: Some(to_json_string(subscription_id)),
+            data_record_count: symbols.len(),
+            ..SyncMessageSummary::kind("client.reconcile_symbols")
+        },
         ClientMessage::Close(reason) => SyncMessageSummary {
             close_reason: Some(close_reason_name(reason).to_owned()),
             ..SyncMessageSummary::kind("client.close")
@@ -514,6 +532,17 @@ fn server_message_summary(message: &ServerMessage) -> SyncMessageSummary {
             settlement_tier: Some(settlement_tier_name(tier).to_owned()),
             cursor: Some(cursor.0.to_string()),
             ..SyncMessageSummary::kind("server.settled")
+        },
+        ServerMessage::ReconcileMore {
+            subscription_id,
+            requested_symbols,
+            next_symbol_index,
+            ..
+        } => SyncMessageSummary {
+            subscription_id: Some(to_json_string(subscription_id)),
+            data_record_count: *requested_symbols as usize,
+            cursor: Some(next_symbol_index.to_string()),
+            ..SyncMessageSummary::kind("server.reconcile_more")
         },
         ServerMessage::Error(error) => SyncMessageSummary {
             error_code: Some(error.code.clone()),
@@ -661,6 +690,18 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn sync_direction_names_describe_actor_hops() {
+        assert_eq!(DIRECTION_MAIN_TO_WORKER, "main.to_worker");
+        assert_eq!(DIRECTION_WORKER_FROM_MAIN, "worker.from_main");
+        assert_eq!(DIRECTION_WORKER_TO_MAIN, "worker.to_main");
+        assert_eq!(DIRECTION_MAIN_FROM_WORKER, "main.from_worker");
+        assert_eq!(DIRECTION_WORKER_TO_SERVER, "worker.to_server");
+        assert_eq!(DIRECTION_SERVER_FROM_WORKER, "server.from_worker");
+        assert_eq!(DIRECTION_SERVER_TO_WORKER, "server.to_worker");
+        assert_eq!(DIRECTION_WORKER_FROM_SERVER, "worker.from_server");
+    }
+
+    #[test]
     fn native_sync_frames_round_trip_through_json() {
         let client_messages = vec![ClientMessage::Close(CloseReason::ClientClosed)];
         let encoded = encode_client_frame(client_messages.clone()).unwrap();
@@ -739,7 +780,7 @@ mod tests {
             }],
         };
         let records = client_sync_log_records(
-            "server.receive",
+            DIRECTION_SERVER_FROM_WORKER,
             Some(&NativeSyncLogContext {
                 session_id: Some("server-session-1".to_owned()),
                 probe: None,
@@ -755,7 +796,10 @@ mod tests {
             Some("server-session-1")
         );
         assert_eq!(record.attribute("sync.connection_id"), Some("7"));
-        assert_eq!(record.attribute("sync.direction"), Some("server.receive"));
+        assert_eq!(
+            record.attribute("sync.direction"),
+            Some("server.from_worker")
+        );
         assert_eq!(
             record.attribute("sync.message_kind"),
             Some("client.upload_tx")
@@ -807,7 +851,7 @@ mod tests {
             }),
         };
         let records = server_sync_log_records(
-            "client.receive",
+            DIRECTION_WORKER_FROM_SERVER,
             Some(&NativeSyncLogContext {
                 session_id: Some("server-session-1".to_owned()),
                 probe: None,

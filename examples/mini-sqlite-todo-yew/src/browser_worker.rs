@@ -1,16 +1,18 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+use crate::browser_telemetry::BrowserTelemetryConfig;
 #[cfg(target_arch = "wasm32")]
-use crate::browser_telemetry::{emit_log, emit_sync_log_records, BrowserTelemetryConfig};
+use crate::browser_telemetry::{emit_log, emit_sync_log_records};
+use crate::native_sync::{
+    client_sync_log_records, server_sync_log_records, NativeSyncLogContext, SyncLogRecord,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::native_sync::{
-    client_sync_log_records, decode_server_frame, encode_client_frame_with_context,
-    server_sync_log_records, NativeSyncLogContext,
+    decode_server_frame, encode_client_frame_with_context, DIRECTION_WORKER_FROM_MAIN,
+    DIRECTION_WORKER_FROM_SERVER, DIRECTION_WORKER_TO_MAIN, DIRECTION_WORKER_TO_SERVER,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::worker_bridge::WorkerResponder;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::{browser_telemetry::BrowserTelemetryConfig, native_sync::NativeSyncLogContext};
 use mini_jazz_sqlite::connection::UpstreamConnectionManager;
 #[cfg(target_arch = "wasm32")]
 use mini_jazz_sqlite::protocol::{ClientHello, SessionId, SUPPORTED_PROTOCOL_VERSION};
@@ -187,6 +189,8 @@ pub struct BrowserRuntimeWorker {
     runtime: Option<Runtime>,
     upstream_connection_manager: Option<UpstreamConnectionManager>,
     native_sync: Option<NativeSync>,
+    browser_telemetry: Option<BrowserTelemetryConfig>,
+    sync_session_id: Option<String>,
 }
 
 struct NativeSync {
@@ -218,6 +222,8 @@ impl BrowserRuntimeWorker {
             runtime: None,
             upstream_connection_manager: None,
             native_sync: None,
+            browser_telemetry: None,
+            sync_session_id: None,
         }
     }
 
@@ -240,6 +246,14 @@ impl BrowserRuntimeWorker {
                 browser_telemetry,
             } => {
                 spawn_local(async move {
+                    worker.borrow_mut().browser_telemetry = browser_telemetry.clone();
+                    let records = client_sync_log_records(
+                        DIRECTION_WORKER_FROM_MAIN,
+                        None,
+                        None,
+                        &client_messages,
+                    );
+                    emit_sync_log_records(browser_telemetry.as_ref(), &records);
                     let native_node_id = node_id.clone();
                     let output = match open_and_hydrate(
                         db_name,
@@ -298,6 +312,7 @@ impl BrowserRuntimeWorker {
                             message,
                         },
                     };
+                    worker.borrow().emit_worker_output_sync_logs(&output);
                     responder.send(output);
                 });
             }
@@ -306,6 +321,9 @@ impl BrowserRuntimeWorker {
     }
 
     fn handle_sync(&mut self, msg: RuntimeWorkerInput) -> RuntimeWorkerOutput {
+        #[cfg(target_arch = "wasm32")]
+        self.emit_worker_input_sync_logs(&msg);
+
         match msg {
             RuntimeWorkerInput::Open { .. } => RuntimeWorkerOutput::Error {
                 request_id: None,
@@ -325,12 +343,13 @@ impl BrowserRuntimeWorker {
                     return runtime_not_ready(request_id);
                 };
                 let native_client_messages = relayable_native_client_messages(&client_messages);
+                let local_client_messages = local_worker_client_messages(&client_messages);
                 let output = apply_bundles(
                     runtime,
                     upstream_connection_manager,
                     request_id,
                     bundles,
-                    client_messages,
+                    local_client_messages,
                     sync_context.clone(),
                 );
                 if let Err(message) =
@@ -341,6 +360,8 @@ impl BrowserRuntimeWorker {
                         message,
                     };
                 }
+                #[cfg(target_arch = "wasm32")]
+                self.emit_worker_output_sync_logs(&output);
                 output
             }
             RuntimeWorkerInput::Protocol {
@@ -356,11 +377,12 @@ impl BrowserRuntimeWorker {
                     return runtime_not_ready(request_id);
                 };
                 let native_client_messages = relayable_native_client_messages(&client_messages);
+                let local_client_messages = local_worker_client_messages(&client_messages);
                 let output = protocol_messages(
                     runtime,
                     upstream_connection_manager,
                     request_id,
-                    client_messages,
+                    local_client_messages,
                     sync_context.clone(),
                 );
                 if let Err(message) =
@@ -371,6 +393,8 @@ impl BrowserRuntimeWorker {
                         message,
                     };
                 }
+                #[cfg(target_arch = "wasm32")]
+                self.emit_worker_output_sync_logs(&output);
                 output
             }
             RuntimeWorkerInput::ExportQuery { request_id, query } => {
@@ -404,6 +428,132 @@ impl BrowserRuntimeWorker {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn runtime_worker_input_client_log_records(
+    direction: &'static str,
+    input: &RuntimeWorkerInput,
+) -> Vec<SyncLogRecord> {
+    runtime_worker_input_client_log_records_with_session(direction, input, None)
+}
+
+pub(crate) fn runtime_worker_input_client_log_records_with_session(
+    direction: &'static str,
+    input: &RuntimeWorkerInput,
+    fallback_session_id: Option<&str>,
+) -> Vec<SyncLogRecord> {
+    match input {
+        RuntimeWorkerInput::Open {
+            client_messages, ..
+        } => {
+            let sync_context = sync_context_with_fallback_session(None, fallback_session_id);
+            client_sync_log_records(direction, sync_context.as_ref(), None, client_messages)
+        }
+        RuntimeWorkerInput::ApplyBundles {
+            client_messages,
+            sync_context,
+            ..
+        }
+        | RuntimeWorkerInput::Protocol {
+            client_messages,
+            sync_context,
+            ..
+        } => {
+            let sync_context =
+                sync_context_with_fallback_session(sync_context.as_ref(), fallback_session_id);
+            client_sync_log_records(direction, sync_context.as_ref(), None, client_messages)
+        }
+        RuntimeWorkerInput::ExportQuery { .. }
+        | RuntimeWorkerInput::ExportQueries { .. }
+        | RuntimeWorkerInput::Query { .. }
+        | RuntimeWorkerInput::StorageStats { .. } => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_worker_output_server_log_records(
+    direction: &'static str,
+    output: &RuntimeWorkerOutput,
+) -> Vec<SyncLogRecord> {
+    runtime_worker_output_server_log_records_with_session(direction, output, None)
+}
+
+pub(crate) fn runtime_worker_output_server_log_records_with_session(
+    direction: &'static str,
+    output: &RuntimeWorkerOutput,
+    fallback_session_id: Option<&str>,
+) -> Vec<SyncLogRecord> {
+    match output {
+        RuntimeWorkerOutput::Opened {
+            server_messages, ..
+        } => {
+            let sync_context = sync_context_with_fallback_session(None, fallback_session_id);
+            server_sync_log_records(direction, sync_context.as_ref(), None, server_messages)
+        }
+        RuntimeWorkerOutput::Applied {
+            server_messages,
+            sync_context,
+            ..
+        }
+        | RuntimeWorkerOutput::Protocol {
+            server_messages,
+            sync_context,
+            ..
+        }
+        | RuntimeWorkerOutput::Pushed {
+            server_messages,
+            sync_context,
+            ..
+        } => {
+            let sync_context =
+                sync_context_with_fallback_session(sync_context.as_ref(), fallback_session_id);
+            server_sync_log_records(direction, sync_context.as_ref(), None, server_messages)
+        }
+        RuntimeWorkerOutput::Exported { .. }
+        | RuntimeWorkerOutput::ExportedQueries { .. }
+        | RuntimeWorkerOutput::QueryResult { .. }
+        | RuntimeWorkerOutput::StorageStats { .. }
+        | RuntimeWorkerOutput::Error { .. } => Vec::new(),
+    }
+}
+
+pub(crate) fn runtime_worker_output_session_id(output: &RuntimeWorkerOutput) -> Option<&str> {
+    match output {
+        RuntimeWorkerOutput::Applied { sync_context, .. }
+        | RuntimeWorkerOutput::Protocol { sync_context, .. }
+        | RuntimeWorkerOutput::Pushed { sync_context, .. } => sync_context
+            .as_ref()
+            .and_then(|context| context.session_id.as_deref()),
+        RuntimeWorkerOutput::Opened { .. }
+        | RuntimeWorkerOutput::Exported { .. }
+        | RuntimeWorkerOutput::ExportedQueries { .. }
+        | RuntimeWorkerOutput::QueryResult { .. }
+        | RuntimeWorkerOutput::StorageStats { .. }
+        | RuntimeWorkerOutput::Error { .. } => None,
+    }
+}
+
+fn sync_context_with_fallback_session(
+    sync_context: Option<&NativeSyncLogContext>,
+    fallback_session_id: Option<&str>,
+) -> Option<NativeSyncLogContext> {
+    let mut sync_context = sync_context.cloned();
+    if sync_context
+        .as_ref()
+        .and_then(|context| context.session_id.as_ref())
+        .is_none()
+    {
+        if let Some(session_id) = fallback_session_id {
+            sync_context
+                .get_or_insert_with(|| NativeSyncLogContext {
+                    session_id: None,
+                    probe: None,
+                })
+                .session_id = Some(session_id.to_owned());
+        }
+    }
+    sync_context
+}
+
 impl Default for BrowserRuntimeWorker {
     fn default() -> Self {
         Self::new()
@@ -411,6 +561,26 @@ impl Default for BrowserRuntimeWorker {
 }
 
 impl BrowserRuntimeWorker {
+    #[cfg(target_arch = "wasm32")]
+    fn emit_worker_input_sync_logs(&self, input: &RuntimeWorkerInput) {
+        let records = runtime_worker_input_client_log_records_with_session(
+            DIRECTION_WORKER_FROM_MAIN,
+            input,
+            self.sync_session_id.as_deref(),
+        );
+        emit_sync_log_records(self.browser_telemetry.as_ref(), &records);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn emit_worker_output_sync_logs(&self, output: &RuntimeWorkerOutput) {
+        let records = runtime_worker_output_server_log_records_with_session(
+            DIRECTION_WORKER_TO_MAIN,
+            output,
+            self.sync_session_id.as_deref(),
+        );
+        emit_sync_log_records(self.browser_telemetry.as_ref(), &records);
+    }
+
     fn send_native_client_messages(
         &mut self,
         client_messages: Vec<ClientMessage>,
@@ -634,9 +804,18 @@ fn relayable_native_client_messages(client_messages: &[ClientMessage]) -> Vec<Cl
             ClientMessage::Subscribe { .. }
             | ClientMessage::Replay { .. }
             | ClientMessage::UploadTx { .. }
-            | ClientMessage::Unsubscribe { .. } => Some(message.clone()),
+            | ClientMessage::Unsubscribe { .. }
+            | ClientMessage::ReconcileSymbols { .. } => Some(message.clone()),
             ClientMessage::Hello(_) | ClientMessage::Ack { .. } | ClientMessage::Close(_) => None,
         })
+        .collect()
+}
+
+fn local_worker_client_messages(client_messages: &[ClientMessage]) -> Vec<ClientMessage> {
+    client_messages
+        .iter()
+        .filter(|message| !matches!(message, ClientMessage::ReconcileSymbols { .. }))
+        .cloned()
         .collect()
 }
 
@@ -646,6 +825,7 @@ fn apply_native_server_messages(
     server_messages: Vec<ServerMessage>,
 ) -> Result<(Vec<ClientMessage>, Vec<ServerMessage>, BrowserStorageStats), String> {
     let mut client_messages = Vec::new();
+    let mut forwarded_server_messages = Vec::new();
     for message in server_messages {
         match message {
             ServerMessage::Hello(_) => {}
@@ -667,6 +847,13 @@ fn apply_native_server_messages(
                     .map_err(error_message)?;
             }
             ServerMessage::UploadAck { .. } | ServerMessage::Settled { .. } => {}
+            ServerMessage::ReconcileMore { .. } => forwarded_server_messages.push(message),
+            ServerMessage::Error(error)
+                if error.subscription_id.is_some()
+                    && error.retry_hint != mini_jazz_sqlite::protocol::RetryHint::Fatal =>
+            {
+                forwarded_server_messages.push(ServerMessage::Error(error));
+            }
             ServerMessage::Error(error) => {
                 return Err(format!(
                     "native sync error {}: {}",
@@ -681,8 +868,9 @@ fn apply_native_server_messages(
     let main_server_messages = upstream_connection_manager
         .refresh_active_subscriptions(runtime)
         .map_err(error_message)?;
+    forwarded_server_messages.extend(main_server_messages);
     let storage_stats = runtime.storage_stats().map_err(error_message)?.into();
-    Ok((client_messages, main_server_messages, storage_stats))
+    Ok((client_messages, forwarded_server_messages, storage_stats))
 }
 
 impl NativeSync {
@@ -745,7 +933,7 @@ impl NativeSync {
                     .and_then(|sync| sync.browser_telemetry.clone());
                 if logging_enabled {
                     let records = server_sync_log_records(
-                        "client.receive",
+                        DIRECTION_WORKER_FROM_SERVER,
                         frame.sync_context.as_ref(),
                         None,
                         &frame.server_messages,
@@ -771,6 +959,7 @@ impl NativeSync {
                         .as_ref()
                         .and_then(|context| context.session_id.clone())
                     {
+                        worker.sync_session_id = Some(session_id.clone());
                         if let Some(sync) = worker.native_sync.as_mut() {
                             sync.server_session_id = Some(session_id);
                         }
@@ -831,6 +1020,7 @@ impl NativeSync {
                         },
                     }
                 };
+                worker.borrow().emit_worker_output_sync_logs(&output);
                 responder.send(output);
             }
         }) as Box<dyn FnMut(MessageEvent)>);
@@ -921,7 +1111,7 @@ impl NativeSync {
             let sync_context = self.with_server_session(sync_context);
             if self.logging_enabled {
                 let records = client_sync_log_records(
-                    "client.send",
+                    DIRECTION_WORKER_TO_SERVER,
                     sync_context.as_ref(),
                     None,
                     &client_messages,
@@ -1161,9 +1351,130 @@ mod tests {
     }
 
     #[test]
+    fn worker_input_sync_log_records_track_worker_from_main_messages() {
+        let message = RuntimeWorkerInput::Protocol {
+            request_id: 99,
+            client_messages: vec![mini_jazz_sqlite::protocol::ClientMessage::Close(
+                mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
+            )],
+            sync_context: Some(NativeSyncLogContext {
+                session_id: Some("server-session-1".to_owned()),
+                probe: None,
+            }),
+        };
+
+        let records = runtime_worker_input_client_log_records(
+            crate::native_sync::DIRECTION_WORKER_FROM_MAIN,
+            &message,
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].attribute("sync.direction"),
+            Some("worker.from_main")
+        );
+        assert_eq!(
+            records[0].attribute("sync.session_id"),
+            Some("server-session-1")
+        );
+        assert_eq!(
+            records[0].attribute("sync.message_kind"),
+            Some("client.close")
+        );
+        assert!(records[0].body.contains("sync.message"));
+    }
+
+    #[test]
+    fn worker_output_sync_log_records_track_worker_to_main_messages() {
+        let output = RuntimeWorkerOutput::Protocol {
+            request_id: 99,
+            server_messages: vec![mini_jazz_sqlite::protocol::ServerMessage::Close(
+                mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
+            )],
+            storage_stats: BrowserStorageStats::default(),
+            sync_context: Some(NativeSyncLogContext {
+                session_id: Some("server-session-1".to_owned()),
+                probe: None,
+            }),
+        };
+
+        let records = runtime_worker_output_server_log_records(
+            crate::native_sync::DIRECTION_WORKER_TO_MAIN,
+            &output,
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].attribute("sync.direction"),
+            Some("worker.to_main")
+        );
+        assert_eq!(
+            records[0].attribute("sync.session_id"),
+            Some("server-session-1")
+        );
+        assert_eq!(
+            records[0].attribute("sync.message_kind"),
+            Some("server.close")
+        );
+        assert!(records[0].body.contains("sync.message"));
+    }
+
+    #[test]
+    fn worker_boundary_sync_log_records_use_fallback_session_id() {
+        let input = RuntimeWorkerInput::Protocol {
+            request_id: 99,
+            client_messages: vec![mini_jazz_sqlite::protocol::ClientMessage::Close(
+                mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
+            )],
+            sync_context: Some(NativeSyncLogContext {
+                session_id: None,
+                probe: Some(crate::native_sync::NativeSyncProbe {
+                    probe_id: "probe-1".to_owned(),
+                    operation: "insert".to_owned(),
+                    table: "todos".to_owned(),
+                    row_id: "todo-1".to_owned(),
+                    origin_browser_id: "browser-a".to_owned(),
+                }),
+            }),
+        };
+
+        let records = runtime_worker_input_client_log_records_with_session(
+            crate::native_sync::DIRECTION_MAIN_TO_WORKER,
+            &input,
+            Some("server-session-1"),
+        );
+
+        assert_eq!(
+            records[0].attribute("sync.session_id"),
+            Some("server-session-1")
+        );
+        assert_eq!(records[0].attribute("sync.probe.id"), Some("probe-1"));
+
+        let output = RuntimeWorkerOutput::Protocol {
+            request_id: 99,
+            server_messages: vec![mini_jazz_sqlite::protocol::ServerMessage::Close(
+                mini_jazz_sqlite::protocol::CloseReason::ClientClosed,
+            )],
+            storage_stats: BrowserStorageStats::default(),
+            sync_context: None,
+        };
+        let records = runtime_worker_output_server_log_records_with_session(
+            crate::native_sync::DIRECTION_MAIN_FROM_WORKER,
+            &output,
+            Some("server-session-1"),
+        );
+
+        assert_eq!(
+            records[0].attribute("sync.session_id"),
+            Some("server-session-1")
+        );
+    }
+
+    #[test]
     fn worker_relays_subscriptions_and_uploads_to_native_sync() {
         use mini_jazz_sqlite::protocol::{
-            ClientMessage, ClientTx, DataOp, SettlementTier, SubscriptionId, TxConflictMode,
+            ClientMessage, ClientTx, DataOp, ReconcileParameters, ReconcileSet, SettlementTier,
+            SubscriptionId, TxConflictMode,
         };
 
         let messages = vec![
@@ -1206,13 +1517,131 @@ mod tests {
                 message_id: mini_jazz_sqlite::protocol::MessageId(1),
                 cursor: None,
             },
+            ClientMessage::ReconcileSymbols {
+                subscription_id: SubscriptionId::new("todos"),
+                set: ReconcileSet::RowHeads,
+                parameters: ReconcileParameters {
+                    seed: 7,
+                    estimated_items: 0,
+                    target_degree: 3,
+                    symbol_count: 4,
+                },
+                symbols: Vec::new(),
+            },
         ];
 
         let relayed = relayable_native_client_messages(&messages);
 
-        assert_eq!(relayed.len(), 2);
+        assert_eq!(relayed.len(), 3);
         assert!(matches!(relayed[0], ClientMessage::Subscribe { .. }));
         assert!(matches!(relayed[1], ClientMessage::UploadTx { .. }));
+        assert!(matches!(relayed[2], ClientMessage::ReconcileSymbols { .. }));
+    }
+
+    #[test]
+    fn worker_keeps_reconcile_symbols_out_of_local_protocol() {
+        use mini_jazz_sqlite::protocol::{
+            ClientMessage, ReconcileParameters, ReconcileSet, ServerMessage, SubscriptionId,
+        };
+
+        let runtime =
+            Runtime::open_with_schema(Storage::Memory, "worker", "alice", todo_schema()).unwrap();
+        let schema_fingerprint = runtime.local_schema_fingerprint();
+        let policy_fingerprint = runtime.local_policy_fingerprint();
+        let mut worker = BrowserRuntimeWorker {
+            runtime: Some(runtime),
+            upstream_connection_manager: Some(UpstreamConnectionManager::new(
+                "worker-session",
+                "worker",
+                schema_fingerprint,
+                policy_fingerprint,
+            )),
+            native_sync: None,
+            browser_telemetry: None,
+            sync_session_id: None,
+        };
+
+        let output = worker.handle_sync(RuntimeWorkerInput::Protocol {
+            request_id: 7,
+            client_messages: vec![ClientMessage::ReconcileSymbols {
+                subscription_id: SubscriptionId::new("todos"),
+                set: ReconcileSet::RowHeads,
+                parameters: ReconcileParameters {
+                    seed: 7,
+                    estimated_items: 0,
+                    target_degree: 3,
+                    symbol_count: 4,
+                },
+                symbols: Vec::new(),
+            }],
+            sync_context: None,
+        });
+
+        let RuntimeWorkerOutput::Protocol {
+            server_messages, ..
+        } = output
+        else {
+            panic!("expected symbols to be ignored by the local worker protocol");
+        };
+        assert!(
+            server_messages
+                .iter()
+                .all(|message| !matches!(message, ServerMessage::Error(_))),
+            "local worker protocol should not emit reconciliation errors"
+        );
+    }
+
+    #[test]
+    fn worker_forwards_retryable_scoped_native_errors_to_main() {
+        use mini_jazz_sqlite::protocol::{
+            ClientHello, ClientMessage, ProtocolError, RetryHint, ServerMessage, SessionId,
+            SubscriptionId, SUPPORTED_PROTOCOL_VERSION,
+        };
+
+        let mut runtime =
+            Runtime::open_with_schema(Storage::Memory, "worker", "alice", todo_schema()).unwrap();
+        let schema_fingerprint = runtime.local_schema_fingerprint();
+        let policy_fingerprint = runtime.local_policy_fingerprint();
+        let mut upstream_connection_manager = UpstreamConnectionManager::new(
+            "worker-session",
+            "worker",
+            schema_fingerprint.clone(),
+            policy_fingerprint.clone(),
+        );
+        upstream_connection_manager
+            .receive(
+                &mut runtime,
+                vec![ClientMessage::Hello(ClientHello {
+                    protocol_version: SUPPORTED_PROTOCOL_VERSION,
+                    session_id: SessionId::new("main-session"),
+                    node_id: "main".to_owned(),
+                    schema_fingerprint,
+                    policy_fingerprint,
+                })],
+            )
+            .unwrap();
+        let subscription_id = SubscriptionId::new("downstream-subscription-0");
+
+        let (_client_messages, forwarded_server_messages, _storage_stats) =
+            apply_native_server_messages(
+                &mut runtime,
+                &mut upstream_connection_manager,
+                vec![ServerMessage::Error(ProtocolError {
+                    code: "reconciliation_decode_failed".to_owned(),
+                    message: "rateless reconciliation could not be decoded".to_owned(),
+                    subscription_id: Some(subscription_id.clone()),
+                    message_id: None,
+                    retry_hint: RetryHint::Retryable,
+                })],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &forwarded_server_messages[..],
+            [ServerMessage::Error(error)]
+                if error.code == "reconciliation_decode_failed"
+                    && error.subscription_id.as_ref() == Some(&subscription_id)
+        ));
     }
 
     #[test]
@@ -1291,6 +1720,8 @@ mod tests {
                 policy_fingerprint.clone(),
             )),
             native_sync: None,
+            browser_telemetry: None,
+            sync_session_id: None,
         };
 
         let output = worker.handle_sync(RuntimeWorkerInput::Protocol {
@@ -1412,6 +1843,8 @@ mod tests {
         mini_jazz_sqlite::protocol::ReconciliationSketch {
             set: mini_jazz_sqlite::protocol::ReconcileSet::RowHeads,
             algorithm: mini_jazz_sqlite::protocol::ReconcileAlgorithm::Exact,
+            parameters: None,
+            symbols: Vec::new(),
             row_heads: Vec::new(),
         }
     }

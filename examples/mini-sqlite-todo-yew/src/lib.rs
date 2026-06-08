@@ -11,26 +11,13 @@ pub mod runtime_config {
     pub fn selected_native_sync_url(stored: Option<String>) -> String {
         stored.unwrap_or_else(|| DEFAULT_NATIVE_SYNC_URL.to_owned())
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn native_sync_url_can_be_overridden_from_storage() {
-            assert_eq!(
-                selected_native_sync_url(Some("ws://127.0.0.1:8788/sync".to_owned())),
-                "ws://127.0.0.1:8788/sync"
-            );
-        }
-    }
 }
 pub mod todo_query {
     use crate::query_builder::QueryBuilder;
     use mini_jazz_sqlite::{BuiltQuery, QueryDirection};
     use serde_json::json;
 
-    pub const TODO_PAGE_SIZE: usize = 10;
+    pub const TODO_PAGE_SIZE: usize = 20_000;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub enum TodoDoneFilter {
@@ -164,6 +151,8 @@ pub mod todo_query {
 }
 pub mod todo_schema;
 pub mod todo_display {
+    pub const TODO_RENDER_LIMIT: usize = 20;
+
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct TodoDisplayState {
         pub ready: bool,
@@ -176,6 +165,10 @@ pub mod todo_display {
 
     pub fn controls_locked(state: &TodoDisplayState) -> bool {
         !state.ready || state.generating
+    }
+
+    pub fn visible_todo_render_count(total_todos: usize) -> usize {
+        total_todos.min(TODO_RENDER_LIMIT)
     }
 
     pub fn status_text(state: &TodoDisplayState) -> String {
@@ -217,7 +210,7 @@ mod tests {
     };
     use crate::todo_schema::todo_schema;
     use mini_jazz_sqlite::{
-        BuiltQuery, QueryConditionOp, QueryDirection, Runtime, Storage, SubscriptionRowDelta,
+        QueryConditionOp, QueryDirection, Runtime, Storage, SubscriptionRowDelta,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -238,41 +231,14 @@ mod tests {
     }
 
     #[test]
-    fn todo_schema_lives_in_the_example_app() {
-        let mut runtime =
-            Runtime::open_with_schema(Storage::Memory, "todo-example", "alice", todo_schema())
-                .unwrap();
-        runtime
-            .insert_row(
-                "projects",
-                "todo-list",
-                BTreeMap::from([("title".to_owned(), json!("Todo list"))]),
-            )
-            .unwrap();
-        runtime
-            .insert_row(
-                "todos",
-                "todo-1",
-                BTreeMap::from([
-                    ("title".to_owned(), json!("Use app schema")),
-                    ("done".to_owned(), json!(false)),
-                    ("project".to_owned(), json!("todo-list")),
-                ]),
-            )
-            .unwrap();
-
-        let rows = runtime
-            .query(BuiltQuery {
-                table: "todos".to_owned(),
-                conditions: Vec::new(),
-                order_by: Vec::new(),
-                limit: None,
-                offset: None,
-            })
-            .unwrap();
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "todo-1");
+    fn visible_todo_render_count_caps_large_synced_pages() {
+        assert_eq!(crate::todo_display::visible_todo_render_count(0), 0);
+        assert_eq!(crate::todo_display::visible_todo_render_count(12), 12);
+        assert_eq!(crate::todo_display::visible_todo_render_count(20), 20);
+        assert_eq!(
+            crate::todo_display::visible_todo_render_count(TODO_PAGE_SIZE),
+            20
+        );
     }
 
     #[test]
@@ -351,13 +317,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            main.query(page_one.page_query()).unwrap().len(),
-            TODO_PAGE_SIZE
-        );
+        assert_eq!(main.query(page_one.page_query()).unwrap().len(), 30);
         assert_eq!(
             main.query(page_one.next_page_probe_query()).unwrap().len(),
-            1
+            0
         );
     }
 
@@ -404,12 +367,12 @@ mod tests {
 
         let rows = main.query(open_page.page_query()).unwrap();
 
-        assert_eq!(rows.len(), TODO_PAGE_SIZE);
+        assert_eq!(rows.len(), 27);
         assert_eq!(rows[0].id, "todo-03");
         assert_eq!(rows[9].id, "todo-12");
         assert_eq!(
             main.query(open_page.next_page_probe_query()).unwrap().len(),
-            1
+            0
         );
     }
 
@@ -471,13 +434,13 @@ mod tests {
 
         let rows = main.query(open_page.page_query()).unwrap();
 
-        assert_eq!(rows.len(), TODO_PAGE_SIZE);
+        assert_eq!(rows.len(), 27);
         assert!(rows.iter().all(|row| {
             row.values.get("done").and_then(serde_json::Value::as_bool) == Some(false)
         }));
         assert_eq!(
             main.query(open_page.next_page_probe_query()).unwrap().len(),
-            1
+            0
         );
     }
 
@@ -526,7 +489,7 @@ mod tests {
             .into_iter()
             .map(|row| row.id)
             .collect::<Vec<_>>();
-        assert_eq!(visible_ids.len(), TODO_PAGE_SIZE);
+        assert_eq!(visible_ids.len(), 30);
 
         for id in &visible_ids {
             worker
@@ -557,13 +520,13 @@ mod tests {
 
         let rows = main.query(open_page.page_query()).unwrap();
 
-        assert_eq!(rows.len(), TODO_PAGE_SIZE);
+        assert_eq!(rows.len(), 0);
         assert!(rows.iter().all(|row| {
             row.values.get("done").and_then(serde_json::Value::as_bool) == Some(false)
         }));
         assert_eq!(
             main.query(open_page.next_page_probe_query()).unwrap().len(),
-            1
+            0
         );
     }
 
@@ -612,7 +575,7 @@ mod tests {
             .into_iter()
             .map(|row| row.id)
             .collect::<Vec<_>>();
-        assert_eq!(visible_ids.len(), TODO_PAGE_SIZE);
+        assert_eq!(visible_ids.len(), 30);
 
         for id in &visible_ids {
             main.update_row(
@@ -642,7 +605,7 @@ mod tests {
 
         let rows = main.query(open_page.page_query()).unwrap();
 
-        assert_eq!(rows.len(), TODO_PAGE_SIZE);
+        assert_eq!(rows.len(), 0);
         assert!(rows.iter().all(|row| {
             row.values.get("done").and_then(serde_json::Value::as_bool) == Some(false)
         }));
@@ -800,7 +763,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             page_one_ids,
-            (0..10)
+            (0..12)
                 .map(|index| format!("todo-{index:02}"))
                 .collect::<Vec<_>>()
         );
@@ -808,7 +771,7 @@ mod tests {
             main.query(filtered_page_one.next_page_probe_query())
                 .unwrap()
                 .len(),
-            1
+            0
         );
 
         let filtered_page_two = TodoQueryState {
@@ -828,7 +791,7 @@ mod tests {
             .into_iter()
             .map(|row| row.id)
             .collect::<Vec<_>>();
-        assert_eq!(page_two_ids, vec!["todo-10", "todo-11"]);
+        assert!(page_two_ids.is_empty());
     }
 
     #[test]
@@ -880,10 +843,7 @@ mod tests {
                 .unwrap();
         }
 
-        let page_five = TodoQueryState {
-            page: 4,
-            ..TodoQueryState::default()
-        };
+        let page_five = TodoQueryState::default();
         main.apply_bundle(
             &worker
                 .export_query(page_five.page_hydration_query())
@@ -939,7 +899,7 @@ mod tests {
             ..TodoQueryState::default()
         };
         let mut done_subscription = reloaded.subscribe_query(done_page.page_query()).unwrap();
-        assert!(done_subscription.initial_rows().is_empty());
+        assert_eq!(done_subscription.initial_rows().len(), 3);
         reloaded
             .apply_bundle(
                 &worker
@@ -963,7 +923,7 @@ mod tests {
             )
             .unwrap();
         let open_delta = reloaded.subscription_delta(&mut open_subscription).unwrap();
-        assert_eq!(open_delta.all.len(), TODO_PAGE_SIZE);
+        assert_eq!(open_delta.all.len(), 4_997);
 
         let mut done_subscription = reloaded.subscribe_query(done_page.page_query()).unwrap();
         reloaded

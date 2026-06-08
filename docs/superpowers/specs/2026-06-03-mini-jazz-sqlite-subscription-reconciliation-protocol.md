@@ -365,9 +365,8 @@ Both are kept on replay.
 
 ## Reconciliation Sketches
 
-The MVP algorithm is an exact sorted row-head list. This is not the final large
-subscription encoding, but it establishes the protocol shape and server/client
-semantics without another roundtrip.
+The implementation supports exact sorted row-head lists for focused/debug paths
+and uses rateless row-head symbols as the default subscription sketch.
 
 Implemented shape:
 
@@ -375,6 +374,8 @@ Implemented shape:
 struct ReconciliationSketch {
     set: ReconcileSet,
     algorithm: ReconcileAlgorithm,
+    parameters: Option<ReconcileParameters>,
+    symbols: Vec<ReconcileSymbol>,
     row_heads: Vec<RowHeadItem>,
 }
 
@@ -385,11 +386,9 @@ enum ReconcileSet {
 
 enum ReconcileAlgorithm {
     Exact,
+    Rateless,
 }
 ```
-
-The intended later algorithm is rateless set reconciliation over canonical
-row-head item encodings.
 
 The rateless layer answers only:
 
@@ -399,25 +398,6 @@ Which item ids are present on one side but not the other?
 
 It does not carry row data, history data, or policy payloads. Once the server
 identifies the set difference, normal `Data` messages carry the content.
-
-Future rateless shape:
-
-```rust
-struct ReconciliationSketch {
-    set: ReconcileSet,
-    algorithm: ReconcileAlgorithm,
-    symbols: Vec<ReconcileSymbol>,
-}
-
-enum ReconcileSet {
-    RowHeads,
-    PolicyDeps,
-}
-
-enum ReconcileAlgorithm {
-    Rateless,
-}
-```
 
 `RowHeads` is the normal client subscription set.
 
@@ -439,29 +419,33 @@ Subscribe carries initial symbols.
 Server tries to decode.
 If decode succeeds, send exact readable updates and safe obfuscated advances.
 If decode fails, ask for more symbols up to a limit.
-If still undecodable, fall back.
+If still undecodable, send a scoped retryable error.
 ```
 
-More-symbol messages are provisional:
+More-symbol messages are implemented:
 
 ```rust
 ServerMessage::ReconcileMore {
     subscription_id: SubscriptionId,
     set: ReconcileSet,
+    parameters: ReconcileParameters,
+    next_symbol_index: u32,
     requested_symbols: u32,
 }
 
 ClientMessage::ReconcileSymbols {
     subscription_id: SubscriptionId,
     set: ReconcileSet,
+    parameters: ReconcileParameters,
     symbols: Vec<ReconcileSymbol>,
 }
 ```
 
 ## Fallback
 
-If the row-head sketch cannot be decoded within the bounded attempt, the MVP
-fallback is to send the full readable current query result at snapshot `S`.
+If the row-head sketch cannot be decoded within the bounded attempt, the server
+sends a retryable `reconciliation_decode_failed` error scoped to the
+subscription. It does not fall back to a full query export.
 
 The server must not send obfuscated advances for unknown unreadable rows when it
 cannot decode which rows the client mentioned. Doing so would leak row

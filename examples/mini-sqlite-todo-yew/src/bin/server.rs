@@ -21,7 +21,8 @@ use mini_jazz_sqlite::{
 use mini_sqlite_todo_yew::{
     native_sync::{
         decode_client_frame, encode_server_frame_with_context, log_client_messages,
-        log_server_messages, NativeSyncLogContext,
+        log_server_messages, NativeSyncLogContext, DIRECTION_SERVER_FROM_WORKER,
+        DIRECTION_SERVER_TO_WORKER,
     },
     todo_schema::todo_schema,
 };
@@ -183,7 +184,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 );
                 if state.sync_logging_enabled {
                     log_client_messages(
-                        "server.receive",
+                        DIRECTION_SERVER_FROM_WORKER,
                         Some(&sync_context),
                         Some(connection_id),
                         &frame.client_messages,
@@ -534,7 +535,7 @@ async fn send_server_messages(
     let sync_context = sync_context_with_session(sync_session_id, sync_context.cloned());
     if sync_logging_enabled {
         log_server_messages(
-            "server.send",
+            DIRECTION_SERVER_TO_WORKER,
             Some(&sync_context),
             Some(connection_id),
             &server_messages,

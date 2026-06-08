@@ -170,7 +170,7 @@ mod app {
                     <p class="error-message" role="alert">{ &state.error }</p>
                 }
                 <ul class="todo-list">
-                    { for state.todos.iter().map(|todo| todo_item(todo, disabled, &runtime)) }
+                    { for state.todos.iter().take(todo_display::visible_todo_render_count(state.todos.len())).map(|todo| todo_item(todo, disabled, &runtime)) }
                 </ul>
                 if state.todos.is_empty() {
                     <p class="empty-state">{ "No todos in the synced page." }</p>

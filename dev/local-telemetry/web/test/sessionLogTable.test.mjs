@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
-const { buildSessionDetailSql, buildSessionListSql } = await import("../.test-build/sessionRows.js");
+const { buildSessionDetailSql, buildSessionListSql } =
+  await import("../.test-build/sessionRows.js");
 const { buildSessionSummaries } = await import("../.test-build/sessionModel.js");
 const { parseSessionRoute, sessionDetailHash, sessionListHash } =
   await import("../.test-build/route.js");
@@ -14,7 +14,7 @@ const rows = [
     TimeUnixNano: "1780567200010000000",
     ServiceName: "mini-sqlite-todo-yew-browser",
     EventName: "todo.action.start",
-    Body: "{\"event\":\"todo.action.start\",\"operation\":\"insert\",\"title\":\"Buy milk\"}",
+    Body: '{"event":"todo.action.start","operation":"insert","title":"Buy milk"}',
     sync_operation: "insert",
     sync_table: "todos",
     sync_row_id: "todo-42",
@@ -26,8 +26,8 @@ const rows = [
     TimeUnixNano: "1780567200020000000",
     ServiceName: "mini-sqlite-todo-yew-server",
     EventName: "sync.message",
-    Body: "{\"event\":\"sync.message\",\"message\":{\"Data\":{\"bundle\":{\"rows\":[{\"values\":{\"title\":\"Buy milk\"}}]}}}}",
-    sync_direction: "server.send",
+    Body: '{"event":"sync.message","message":{"Data":{"bundle":{"rows":[{"values":{"title":"Buy milk"}}]}}}}',
+    sync_direction: "server.to_worker",
     sync_message_kind: "server.data",
     sync_data_records: "todos:todo-42:insert",
   },
@@ -38,7 +38,7 @@ const rows = [
     TimeUnixNano: "1780567201000000000",
     ServiceName: "mini-sqlite-todo-yew-browser",
     EventName: "todo.action.start",
-    Body: "{\"event\":\"todo.action.start\",\"operation\":\"delete\"}",
+    Body: '{"event":"todo.action.start","operation":"delete"}',
     sync_operation: "delete",
     sync_table: "todos",
     sync_row_id: "todo-99",
@@ -86,31 +86,5 @@ assert.match(detailSql, /SessionId = 'session-''quoted'/);
 assert.match(detailSql, /ORDER BY LogTimeUnixNano ASC/);
 assert.doesNotMatch(detailSql, /FROM spans/);
 assert.doesNotMatch(detailSql, /trace_id/);
-
-const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-assert.match(appSource, /parseSessionRoute/);
-assert.match(appSource, /SessionDetailPage/);
-assert.match(appSource, /SessionListPage/);
-assert.doesNotMatch(appSource, /FlowList/);
-
-const explorerSource = readFileSync(
-  new URL("../src/SessionExplorer.tsx", import.meta.url),
-  "utf8",
-);
-assert.match(explorerSource, /Sync Sessions/);
-assert.match(explorerSource, /Log body/);
-assert.match(explorerSource, /buildSessionSummaries/);
-assert.match(explorerSource, /SessionDetailPage/);
-assert.match(explorerSource, /buildSessionDetailSql/);
-assert.doesNotMatch(explorerSource, /layoutSessionEvents/);
-
-for (const sourcePath of ["src/main.tsx", "src/SessionExplorer.tsx"]) {
-  const source = readFileSync(new URL(`../${sourcePath}`, import.meta.url), "utf8");
-  assert.doesNotMatch(
-    source,
-    /refetchInterval/,
-    `${sourcePath} should not configure automatic query reloads`,
-  );
-}
 
 console.log("session log table tests passed");

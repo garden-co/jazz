@@ -224,11 +224,6 @@ example-server debounce and broadcast plan.
 These appear in the spec as future or provisional machinery and are not in the
 current implementation:
 
-- rateless reconciliation symbols
-- bounded decode effort
-- `ServerMessage::ReconcileMore`
-- `ClientMessage::ReconcileSymbols`
-- stronger fallback after failed rateless decode
 - periodic repair driven by fresh client sketches
 - complete edge/server policy dependency sync
 
@@ -238,7 +233,12 @@ These parts do match the spec closely:
 
 - `Subscribe` carries optional reconciliation.
 - `ReplaySubscription` carries optional reconciliation.
-- MVP reconciliation uses exact row-head lists.
+- Subscription reconciliation supports exact row-head lists and defaults to
+  rateless row-head symbols.
+- `ServerMessage::ReconcileMore` and `ClientMessage::ReconcileSymbols` are used
+  for bounded rateless continuation.
+- Failed rateless decode is rejected with retryable
+  `reconciliation_decode_failed`; it does not fall back to full export.
 - Row-head versions use `head_tx_id`, not content hashes.
 - Exact reconciliation sends missing/stale readable rows as row data.
 - Client-mentioned deleted rows are repaired with delete row data.

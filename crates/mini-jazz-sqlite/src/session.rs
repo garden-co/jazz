@@ -1,10 +1,13 @@
 use crate::connection::{DownstreamEndpoint, UpstreamEndpoint};
 use crate::protocol::{
     ClientHello, ClientMessage, CloseReason, MessageId, ProtocolCapabilities, ProtocolError,
-    ProtocolVersion, ReconcileAlgorithm, ReconcileSet, ReconciliationSketch, ReplayCursor,
-    ReplaySubscription, RetryHint, ServerHello, ServerMessage, SessionId, SettlementTier,
-    SubscriptionId, TxStatusKind, SUPPORTED_PROTOCOL_VERSION,
+    ProtocolVersion, ReconcileAlgorithm, ReconcileParameters, ReconcileSet, ReconcileSymbol,
+    ReconciliationSketch, ReplayCursor, ReplaySubscription, RetryHint, RowHeadItem, ServerHello,
+    ServerMessage, SessionId, SettlementTier, SubscriptionId, TxStatusKind,
+    SUPPORTED_PROTOCOL_VERSION,
 };
+use crate::reconciliation::rateless_symbols;
+use crate::runtime::SubscriptionReconciliationExport;
 use crate::{BuiltQuery, Error, Result, Runtime};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +18,7 @@ struct DownstreamActiveSubscription {
     requested_tier: SettlementTier,
     last_applied_cursor: Option<ReplayCursor>,
     reconciliation: ReconciliationSketch,
+    reconciliation_row_heads: Option<Vec<RowHeadItem>>,
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +27,14 @@ struct UpstreamActiveSubscription {
     requested_tier: SettlementTier,
     last_sent_cursor: Option<ReplayCursor>,
     reconciliation: ReconciliationSketch,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRatelessSubscription {
+    query: BuiltQuery,
+    requested_tier: SettlementTier,
+    parameters: ReconcileParameters,
+    symbols: Vec<ReconcileSymbol>,
 }
 
 pub struct DownstreamSession {
@@ -42,6 +54,7 @@ pub struct UpstreamSession {
     connection_auth_user: Option<String>,
     peer_hello: Option<ClientHello>,
     active_subscriptions: BTreeMap<SubscriptionId, UpstreamActiveSubscription>,
+    pending_reconciliations: BTreeMap<SubscriptionId, PendingRatelessSubscription>,
     pending_messages: BTreeMap<MessageId, (SubscriptionId, ReplayCursor)>,
     last_acknowledged: BTreeMap<SubscriptionId, ReplayCursor>,
     last_error: Option<ProtocolError>,
@@ -124,6 +137,29 @@ impl DownstreamSession {
         requested_tier: SettlementTier,
         reconciliation: ReconciliationSketch,
     ) -> Result<()> {
+        let reconciliation_row_heads = match reconciliation.algorithm {
+            ReconcileAlgorithm::Exact => Some(reconciliation.row_heads.clone()),
+            ReconcileAlgorithm::Rateless => None,
+        };
+        self.subscribe_with_reconciliation_source(
+            conn,
+            subscription_id,
+            query,
+            requested_tier,
+            reconciliation,
+            reconciliation_row_heads,
+        )
+    }
+
+    pub(crate) fn subscribe_with_reconciliation_source(
+        &mut self,
+        conn: &mut impl DownstreamEndpoint,
+        subscription_id: SubscriptionId,
+        query: BuiltQuery,
+        requested_tier: SettlementTier,
+        reconciliation: ReconciliationSketch,
+        reconciliation_row_heads: Option<Vec<RowHeadItem>>,
+    ) -> Result<()> {
         ensure_open(self.closed)?;
         ensure_handshake(self.upstream_hello.is_some())?;
         if self.active_subscriptions.contains_key(&subscription_id) {
@@ -136,6 +172,7 @@ impl DownstreamSession {
                 requested_tier,
                 last_applied_cursor: None,
                 reconciliation: reconciliation.clone(),
+                reconciliation_row_heads,
             },
         );
         self.settled
@@ -169,8 +206,9 @@ impl DownstreamSession {
 
     pub fn refresh_subscription_reconciliations(&mut self, runtime: &Runtime) -> Result<()> {
         for subscription in self.active_subscriptions.values_mut() {
-            subscription.reconciliation =
-                runtime.subscription_reconciliation_for_query(&subscription.query)?;
+            let row_heads = runtime.subscription_row_heads_for_query(&subscription.query)?;
+            subscription.reconciliation = crate::reconciliation::rateless_sketch(&row_heads);
+            subscription.reconciliation_row_heads = Some(row_heads);
         }
         Ok(())
     }
@@ -267,6 +305,54 @@ impl DownstreamSession {
                     {
                         self.settled.insert((subscription_id, tier), cursor);
                     }
+                }
+                ServerMessage::ReconcileMore {
+                    subscription_id,
+                    set,
+                    parameters,
+                    next_symbol_index,
+                    requested_symbols,
+                } => {
+                    if self.upstream_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        return Err(Error::new("handshake is not established"));
+                    }
+                    if set != ReconcileSet::RowHeads {
+                        self.close_with_error(
+                            conn,
+                            "unsupported_reconciliation",
+                            "only row-head reconciliation is supported",
+                        );
+                        return Err(Error::new("unsupported reconciliation"));
+                    }
+                    let Some(subscription) = self.active_subscriptions.get(&subscription_id) else {
+                        self.close_with_error(conn, "unknown_subscription", "unknown subscription");
+                        return Err(Error::new("unknown subscription"));
+                    };
+                    let Some(row_heads) = subscription.reconciliation_row_heads.as_ref() else {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "rateless reconciliation source is unavailable",
+                        );
+                        return Err(Error::new("rateless reconciliation source is unavailable"));
+                    };
+                    let symbols = rateless_symbols(
+                        row_heads,
+                        &parameters,
+                        next_symbol_index,
+                        requested_symbols,
+                    );
+                    conn.send_client_message(ClientMessage::ReconcileSymbols {
+                        subscription_id,
+                        set,
+                        parameters,
+                        symbols,
+                    });
                 }
                 ServerMessage::UploadAck { .. } => {
                     if self.upstream_hello.is_none() {
@@ -413,6 +499,7 @@ impl UpstreamSession {
             connection_auth_user: None,
             peer_hello: None,
             active_subscriptions: BTreeMap::new(),
+            pending_reconciliations: BTreeMap::new(),
             pending_messages: BTreeMap::new(),
             last_acknowledged: BTreeMap::new(),
             last_error: None,
@@ -472,7 +559,9 @@ impl UpstreamSession {
                         );
                         continue;
                     }
-                    if self.active_subscriptions.contains_key(&subscription_id) {
+                    if self.active_subscriptions.contains_key(&subscription_id)
+                        || self.pending_reconciliations.contains_key(&subscription_id)
+                    {
                         self.send_protocol_error(
                             conn,
                             "duplicate_subscription",
@@ -522,6 +611,9 @@ impl UpstreamSession {
                     self.active_subscriptions.retain(|subscription_id, _| {
                         replay_subscription_ids.contains(subscription_id)
                     });
+                    self.pending_reconciliations.retain(|subscription_id, _| {
+                        replay_subscription_ids.contains(subscription_id)
+                    });
                     self.pending_messages.retain(|_, (subscription_id, _)| {
                         replay_subscription_ids.contains(subscription_id)
                     });
@@ -555,6 +647,60 @@ impl UpstreamSession {
                                 subscription.subscription_id,
                             );
                         }
+                    }
+                }
+                ClientMessage::ReconcileSymbols {
+                    subscription_id,
+                    set,
+                    parameters,
+                    symbols,
+                } => {
+                    ensure_open(self.closed)?;
+                    if self.peer_hello.is_none() {
+                        self.close_with_error(
+                            conn,
+                            "protocol_error",
+                            "handshake is not established",
+                        );
+                        continue;
+                    }
+                    if set != ReconcileSet::RowHeads {
+                        self.send_protocol_error(
+                            conn,
+                            "unsupported_reconciliation",
+                            "only row-head reconciliation is supported",
+                            Some(subscription_id),
+                            None,
+                            RetryHint::Retryable,
+                        );
+                        continue;
+                    }
+                    let Some(mut pending) = self.pending_reconciliations.remove(&subscription_id)
+                    else {
+                        continue;
+                    };
+                    if pending.parameters != parameters {
+                        self.pending_reconciliations
+                            .insert(subscription_id, pending);
+                        continue;
+                    }
+                    pending.symbols.extend(symbols);
+                    let reconciliation = ReconciliationSketch {
+                        set,
+                        algorithm: ReconcileAlgorithm::Rateless,
+                        parameters: Some(parameters),
+                        symbols: pending.symbols,
+                        row_heads: Vec::new(),
+                    };
+                    if let Err(error) = self.send_subscription_data(
+                        runtime,
+                        conn,
+                        subscription_id.clone(),
+                        pending.query,
+                        pending.requested_tier,
+                        Some(reconciliation),
+                    ) {
+                        self.send_scoped_error(conn, "query_rejected", error, subscription_id);
                     }
                 }
                 ClientMessage::Ack {
@@ -643,6 +789,7 @@ impl UpstreamSession {
                         continue;
                     }
                     self.active_subscriptions.remove(&subscription_id);
+                    self.pending_reconciliations.remove(&subscription_id);
                     self.pending_messages
                         .retain(|_, (pending_subscription_id, _)| {
                             pending_subscription_id != &subscription_id
@@ -776,13 +923,11 @@ impl UpstreamSession {
             );
             return Ok(());
         };
-        if reconciliation.set != ReconcileSet::RowHeads
-            || reconciliation.algorithm != ReconcileAlgorithm::Exact
-        {
+        if !supported_subscription_reconciliation(&reconciliation) {
             self.send_protocol_error(
                 conn,
                 "unsupported_reconciliation",
-                "only exact row-head subscription reconciliation is supported",
+                "only exact or rateless row-head subscription reconciliation is supported",
                 Some(subscription_id),
                 None,
                 RetryHint::Retryable,
@@ -790,10 +935,53 @@ impl UpstreamSession {
             return Ok(());
         }
 
-        let bundle = runtime.export_subscription_reconciliation(query.clone(), reconciliation)?;
+        let export = runtime.export_subscription_reconciliation_for_session(
+            query.clone(),
+            reconciliation.clone(),
+        )?;
+        let bundle = match export {
+            SubscriptionReconciliationExport::Complete(bundle) => bundle,
+            SubscriptionReconciliationExport::NeedMore {
+                parameters,
+                next_symbol_index,
+                requested_symbols,
+            } => {
+                let mut symbols = reconciliation.symbols;
+                symbols.sort_by_key(|symbol| symbol.index);
+                self.pending_reconciliations.insert(
+                    subscription_id.clone(),
+                    PendingRatelessSubscription {
+                        query,
+                        requested_tier,
+                        parameters: parameters.clone(),
+                        symbols,
+                    },
+                );
+                conn.send_server_message(ServerMessage::ReconcileMore {
+                    subscription_id,
+                    set: ReconcileSet::RowHeads,
+                    parameters,
+                    next_symbol_index,
+                    requested_symbols,
+                });
+                return Ok(());
+            }
+            SubscriptionReconciliationExport::Failed => {
+                self.send_protocol_error(
+                    conn,
+                    "reconciliation_decode_failed",
+                    "rateless reconciliation could not be decoded within the symbol budget",
+                    Some(subscription_id),
+                    None,
+                    RetryHint::Retryable,
+                );
+                return Ok(());
+            }
+        };
         let next_reconciliation = runtime.subscription_reconciliation_for_query(&query)?;
         let cursor = self.next_cursor();
         let message_id = self.next_message_id();
+        self.pending_reconciliations.remove(&subscription_id);
         self.active_subscriptions.insert(
             subscription_id.clone(),
             UpstreamActiveSubscription {
@@ -881,6 +1069,7 @@ impl UpstreamSession {
 
     fn clear_session_state(&mut self) {
         self.active_subscriptions.clear();
+        self.pending_reconciliations.clear();
         self.pending_messages.clear();
         self.last_acknowledged.clear();
     }
@@ -904,6 +1093,22 @@ fn empty_row_head_reconciliation() -> ReconciliationSketch {
     ReconciliationSketch {
         set: ReconcileSet::RowHeads,
         algorithm: ReconcileAlgorithm::Exact,
+        parameters: None,
+        symbols: Vec::new(),
         row_heads: Vec::new(),
+    }
+}
+
+fn supported_subscription_reconciliation(reconciliation: &ReconciliationSketch) -> bool {
+    if reconciliation.set != ReconcileSet::RowHeads {
+        return false;
+    }
+    match reconciliation.algorithm {
+        ReconcileAlgorithm::Exact => {
+            reconciliation.parameters.is_none() && reconciliation.symbols.is_empty()
+        }
+        ReconcileAlgorithm::Rateless => {
+            reconciliation.parameters.is_some() && reconciliation.row_heads.is_empty()
+        }
     }
 }

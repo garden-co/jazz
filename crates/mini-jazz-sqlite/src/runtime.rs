@@ -1,9 +1,13 @@
 use crate::protocol::{
-    ClientDataRecord, ClientTx, DataOp, ReconcileAlgorithm, ReconcileSet, ReconciliationSketch,
-    RowHeadItem, TxConflictMode, TxStatusKind,
+    ClientDataRecord, ClientTx, DataOp, ReconcileAlgorithm, ReconcileParameters, ReconcileSet,
+    ReconciliationSketch, RowHeadItem, TxConflictMode, TxStatusKind,
 };
 use crate::query_api::{predicate_query, BuiltQuery, QueryCondition, QueryConditionOp};
 use crate::read_visibility::ReadVisibility;
+use crate::reconciliation::{
+    decode_rateless_difference, exact_difference, exact_sketch, rateless_sketch, RatelessDecode,
+    RowHeadDifference,
+};
 use crate::rows::{
     ensure_row_id, ensure_row_id_with_status, existing_row_num, public_row_id, row_num,
 };
@@ -35,6 +39,16 @@ pub struct Runtime {
     auth: RuntimeAuth,
     node_num: i64,
     branch_num: i64,
+}
+
+pub(crate) enum SubscriptionReconciliationExport {
+    Complete(Bundle),
+    NeedMore {
+        parameters: ReconcileParameters,
+        next_symbol_index: u32,
+        requested_symbols: u32,
+    },
+    Failed,
 }
 
 #[derive(Clone, Debug)]
@@ -3457,6 +3471,22 @@ impl Runtime {
         &self,
         query: &BuiltQuery,
     ) -> Result<ReconciliationSketch> {
+        let row_heads = self.subscription_row_heads_for_query(query)?;
+        Ok(rateless_sketch(&row_heads))
+    }
+
+    pub fn exact_subscription_reconciliation_for_query(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<ReconciliationSketch> {
+        let row_heads = self.subscription_row_heads_for_query(query)?;
+        Ok(exact_sketch(row_heads))
+    }
+
+    pub(crate) fn subscription_row_heads_for_query(
+        &self,
+        query: &BuiltQuery,
+    ) -> Result<Vec<RowHeadItem>> {
         let branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
         let mut row_heads = self
             .read_rows_for_built_query(query)?
@@ -3469,11 +3499,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         row_heads.sort();
-        Ok(ReconciliationSketch {
-            set: ReconcileSet::RowHeads,
-            algorithm: ReconcileAlgorithm::Exact,
-            row_heads,
-        })
+        Ok(row_heads)
     }
 
     pub fn export_subscription_reconciliation(
@@ -3481,20 +3507,87 @@ impl Runtime {
         query: BuiltQuery,
         reconciliation: ReconciliationSketch,
     ) -> Result<Bundle> {
-        if reconciliation.set != ReconcileSet::RowHeads
-            || reconciliation.algorithm != ReconcileAlgorithm::Exact
-        {
-            return Err(Error::new("unsupported reconciliation"));
+        match self.export_subscription_reconciliation_for_session(query, reconciliation)? {
+            SubscriptionReconciliationExport::Complete(bundle) => Ok(bundle),
+            SubscriptionReconciliationExport::NeedMore { .. } => {
+                Err(Error::new("reconciliation needs more symbols"))
+            }
+            SubscriptionReconciliationExport::Failed => {
+                Err(Error::new("reconciliation decode failed"))
+            }
         }
+    }
 
+    pub(crate) fn export_subscription_reconciliation_for_session(
+        &self,
+        query: BuiltQuery,
+        reconciliation: ReconciliationSketch,
+    ) -> Result<SubscriptionReconciliationExport> {
         let branch_id = branch_id_for_num(&self.conn, self.branch_num)?;
-        let client_heads = reconciliation
-            .row_heads
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
         let server_rows = self.read_rows_for_built_query(&query)?;
-        let mut server_heads = BTreeSet::new();
+        let mut server_heads = Vec::new();
+        for row in &server_rows {
+            server_heads.push(RowHeadItem {
+                branch_id: branch_id.clone(),
+                table: row.table.clone(),
+                row_id: row.id.clone(),
+                head_tx_id: row.tx_id.clone(),
+            });
+        }
+        server_heads.sort();
+
+        let difference = match reconciliation.algorithm {
+            ReconcileAlgorithm::Exact => {
+                if reconciliation.set != ReconcileSet::RowHeads
+                    || reconciliation.parameters.is_some()
+                    || !reconciliation.symbols.is_empty()
+                {
+                    return Err(Error::new("unsupported reconciliation"));
+                }
+                exact_difference(reconciliation.row_heads, server_heads.clone())
+            }
+            ReconcileAlgorithm::Rateless => {
+                if reconciliation.set != ReconcileSet::RowHeads
+                    || !reconciliation.row_heads.is_empty()
+                {
+                    return Err(Error::new("unsupported reconciliation"));
+                }
+                let Some(parameters) = reconciliation.parameters.clone() else {
+                    return Err(Error::new("unsupported reconciliation"));
+                };
+                match decode_rateless_difference(
+                    &reconciliation.symbols,
+                    &server_heads,
+                    &parameters,
+                )? {
+                    RatelessDecode::Complete(difference) => difference,
+                    RatelessDecode::NeedMore {
+                        next_symbol_index,
+                        requested_symbols,
+                    } => {
+                        return Ok(SubscriptionReconciliationExport::NeedMore {
+                            parameters,
+                            next_symbol_index,
+                            requested_symbols,
+                        });
+                    }
+                    RatelessDecode::Failed => return Ok(SubscriptionReconciliationExport::Failed),
+                }
+            }
+        };
+
+        Ok(SubscriptionReconciliationExport::Complete(
+            self.export_subscription_difference(query, branch_id, server_rows, difference)?,
+        ))
+    }
+
+    fn export_subscription_difference(
+        &self,
+        _query: BuiltQuery,
+        branch_id: String,
+        server_rows: Vec<RowView>,
+        difference: RowHeadDifference,
+    ) -> Result<Bundle> {
         let mut server_identities = BTreeSet::new();
         let mut rows = Vec::new();
         let mut obfuscated = Vec::new();
@@ -3509,8 +3602,7 @@ impl Runtime {
                 head_tx_id: row.tx_id.clone(),
             };
             server_identities.insert(row_head_identity(&row_head));
-            server_heads.insert(row_head.clone());
-            if !client_heads.contains(&row_head) {
+            if difference.server_only.contains(&row_head) {
                 push_row_update(
                     &mut rows,
                     &mut row_keys,
@@ -3519,10 +3611,7 @@ impl Runtime {
             }
         }
 
-        for client_head in reconciliation.row_heads {
-            if server_heads.contains(&client_head) {
-                continue;
-            }
+        for client_head in difference.client_only {
             if server_identities.contains(&row_head_identity(&client_head)) {
                 continue;
             }

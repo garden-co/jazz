@@ -160,13 +160,15 @@ impl DownstreamConnectionManager {
         }
 
         let mut batch = DownstreamMessageBatch::empty();
-        let reconciliation = runtime.subscription_reconciliation_for_query(&query)?;
-        self.session.subscribe_with_reconciliation(
+        let row_heads = runtime.subscription_row_heads_for_query(&query)?;
+        let reconciliation = crate::reconciliation::rateless_sketch(&row_heads);
+        self.session.subscribe_with_reconciliation_source(
             &mut batch,
             id,
             query,
             requested_tier,
             reconciliation,
+            Some(row_heads),
         )?;
         Ok((subscription, batch.into_client_messages()))
     }
@@ -299,14 +301,15 @@ impl DownstreamConnectionManager {
     ) -> Result<()> {
         let pending = std::mem::take(&mut self.pending_subscriptions);
         for (subscription_id, subscription) in pending {
-            let reconciliation =
-                runtime.subscription_reconciliation_for_query(&subscription.query)?;
-            self.session.subscribe_with_reconciliation(
+            let row_heads = runtime.subscription_row_heads_for_query(&subscription.query)?;
+            let reconciliation = crate::reconciliation::rateless_sketch(&row_heads);
+            self.session.subscribe_with_reconciliation_source(
                 batch,
                 subscription_id,
                 subscription.query,
                 subscription.requested_tier,
                 reconciliation,
+                Some(row_heads),
             )?;
         }
         Ok(())
@@ -349,6 +352,9 @@ impl DownstreamConnectionManager {
                     ..
                 } => !self.dropped_subscriptions.contains(subscription_id),
                 ServerMessage::Settled {
+                    subscription_id, ..
+                } => !self.dropped_subscriptions.contains(subscription_id),
+                ServerMessage::ReconcileMore {
                     subscription_id, ..
                 } => !self.dropped_subscriptions.contains(subscription_id),
                 ServerMessage::Error(error) => {

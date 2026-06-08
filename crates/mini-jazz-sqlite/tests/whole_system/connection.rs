@@ -5,9 +5,10 @@ use mini_jazz_sqlite::connection::{
 use mini_jazz_sqlite::connection::{DownstreamConnectionManager, UpstreamConnectionManager};
 use mini_jazz_sqlite::protocol::{
     ClientDataRecord, ClientHello, ClientMessage, ClientTx, CloseReason, DataOp, MessageId,
-    ProtocolCapabilities, ProtocolError, ProtocolVersion, ReconcileAlgorithm, ReconcileSet,
-    ReconciliationSketch, ReplayCursor, ReplaySubscription, RetryHint, RowHeadItem, ServerHello,
-    ServerMessage, SessionId, SettlementTier, SubscriptionId, TxConflictMode, TxStatusKind,
+    ProtocolCapabilities, ProtocolError, ProtocolVersion, ReconcileAlgorithm, ReconcileParameters,
+    ReconcileSet, ReconcileSymbol, ReconciliationSketch, ReplayCursor, ReplaySubscription,
+    RetryHint, RowHeadItem, ServerHello, ServerMessage, SessionId, SettlementTier, SubscriptionId,
+    TxConflictMode, TxStatusKind,
 };
 use mini_jazz_sqlite::session::{DownstreamSession, UpstreamSession};
 use mini_jazz_sqlite::sync::{Bundle, ObfuscatedRowAdvance, ReadRecord};
@@ -304,16 +305,46 @@ fn connection_manager_subscribe_sends_local_row_head_reconciliation() {
         panic!("expected subscribe with reconciliation sketch");
     };
     assert_eq!(reconciliation.set, ReconcileSet::RowHeads);
-    assert_eq!(reconciliation.algorithm, ReconcileAlgorithm::Exact);
-    assert_eq!(
-        reconciliation.row_heads,
-        vec![RowHeadItem {
-            branch_id: "main".to_owned(),
-            table: "todos".to_owned(),
-            row_id: "todo-1".to_owned(),
-            head_tx_id: local_row.tx_id,
-        }]
+    assert_eq!(reconciliation.algorithm, ReconcileAlgorithm::Rateless);
+    assert!(reconciliation.row_heads.is_empty());
+    assert!(reconciliation.parameters.is_some());
+    assert!(!reconciliation.symbols.is_empty());
+    assert!(
+        reconciliation
+            .symbols
+            .iter()
+            .any(|symbol| symbol.count != 0),
+        "cached row {local_row:?} should contribute to at least one rateless symbol"
     );
+}
+
+#[test]
+fn rateless_reconciliation_sketch_round_trips_protocol_payload() {
+    let sketch = ReconciliationSketch {
+        set: ReconcileSet::RowHeads,
+        algorithm: ReconcileAlgorithm::Rateless,
+        row_heads: Vec::new(),
+        parameters: Some(ReconcileParameters {
+            seed: 42,
+            estimated_items: 20_000,
+            target_degree: 8,
+            symbol_count: 512,
+        }),
+        symbols: vec![ReconcileSymbol {
+            index: 7,
+            count: -1,
+            item_len_xor: 95,
+            item_bytes_xor: "AQIDBA==".to_owned(),
+            item_hash_xor: "BQYHCAkKCwwNDg8QERITFA==".to_owned(),
+        }],
+    };
+
+    let encoded = serde_json::to_string(&sketch).unwrap();
+    assert!(encoded.contains("Rateless"));
+    assert!(encoded.contains("AQIDBA=="));
+
+    let decoded: ReconciliationSketch = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, sketch);
 }
 
 #[test]
@@ -374,6 +405,199 @@ fn connection_manager_subscribe_sends_only_missing_rows_when_row_head_reconciles
         sorted_row_ids(tab.query(open_todos_query()).unwrap()),
         vec!["todo-1", "todo-2"]
     );
+}
+
+#[test]
+fn downstream_replies_to_reconcile_more_with_symbols_from_cached_snapshot() {
+    let harness = Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Already cached", false, "project-1")
+        .unwrap();
+    tab.apply_bundle(&worker.export_query(open_todos_query()).unwrap())
+        .unwrap();
+
+    let mut downstream = DownstreamConnectionManager::new(
+        "tab-session",
+        "alice-tab",
+        tab.local_schema_fingerprint(),
+        tab.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamConnectionManager::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+
+    let server_messages = upstream
+        .receive(&mut worker, downstream.open().unwrap())
+        .unwrap();
+    downstream.receive(&mut tab, server_messages).unwrap();
+    let (subscription, client_messages) = downstream
+        .subscribe(&tab, open_todos_query(), SettlementTier::Local)
+        .unwrap();
+    let [ClientMessage::Subscribe {
+        reconciliation: Some(reconciliation),
+        ..
+    }] = client_messages.as_slice()
+    else {
+        panic!("expected subscribe with reconciliation");
+    };
+    let parameters = reconciliation
+        .parameters
+        .clone()
+        .expect("rateless sketch should carry parameters");
+
+    let more_messages = vec![ServerMessage::ReconcileMore {
+        subscription_id: subscription.id().clone(),
+        set: ReconcileSet::RowHeads,
+        parameters,
+        next_symbol_index: 128,
+        requested_symbols: 16,
+    }];
+    let client_messages = downstream.receive(&mut tab, more_messages).unwrap();
+
+    let [ClientMessage::ReconcileSymbols {
+        subscription_id,
+        set,
+        symbols,
+        ..
+    }] = client_messages.as_slice()
+    else {
+        panic!("expected downstream to answer ReconcileMore with ReconcileSymbols");
+    };
+    assert_eq!(subscription_id, subscription.id());
+    assert_eq!(*set, ReconcileSet::RowHeads);
+    assert_eq!(symbols.len(), 16);
+    assert_eq!(symbols[0].index, 128);
+}
+
+#[test]
+fn upstream_requests_more_symbols_when_rateless_sketch_is_insufficient() {
+    let harness = Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Only on worker", false, "project-1")
+        .unwrap();
+    let subscription_id = SubscriptionId::new("open-todos");
+    let (mut downstream_conn, mut upstream_conn) = in_memory_connection_pair();
+    let mut downstream = DownstreamSession::new(
+        "tab-session",
+        "alice-tab",
+        tab.local_schema_fingerprint(),
+        tab.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamSession::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    downstream.open(&mut downstream_conn).unwrap();
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    downstream.pump(&mut tab, &mut downstream_conn).unwrap();
+
+    downstream_conn.send_client_message(ClientMessage::Subscribe {
+        subscription_id: subscription_id.clone(),
+        query: open_todos_query(),
+        requested_tier: SettlementTier::Local,
+        reconciliation: Some(empty_rateless_symbols(64)),
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+
+    let Some(ServerMessage::ReconcileMore {
+        subscription_id: more_subscription_id,
+        set,
+        parameters,
+        next_symbol_index,
+        requested_symbols,
+        ..
+    }) = downstream_conn.receive_server_message()
+    else {
+        panic!("expected ReconcileMore for empty rateless sketch");
+    };
+    assert_eq!(more_subscription_id, subscription_id);
+    assert_eq!(set, ReconcileSet::RowHeads);
+    assert_eq!(next_symbol_index, 0);
+    assert!(requested_symbols > 0);
+    assert!(downstream_conn.receive_server_message().is_none());
+    assert!(!upstream.has_active_subscription(&subscription_id));
+
+    let mut stale_parameters = parameters;
+    stale_parameters.seed ^= 1;
+    downstream_conn.send_client_message(ClientMessage::ReconcileSymbols {
+        subscription_id: subscription_id.clone(),
+        set: ReconcileSet::RowHeads,
+        parameters: stale_parameters,
+        symbols: Vec::new(),
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    assert!(downstream_conn.receive_server_message().is_none());
+    assert!(!upstream.has_active_subscription(&subscription_id));
+}
+
+#[test]
+fn upstream_returns_retryable_error_when_rateless_decode_exhausts_symbol_budget() {
+    let harness = Harness::new();
+    let mut tab = harness.memory("alice-tab", "alice").unwrap();
+    let mut worker = harness.memory("alice-worker", "alice").unwrap();
+    worker.create_project("project-1", "Launch notes").unwrap();
+    worker
+        .create_todo("todo-1", "Only on worker", false, "project-1")
+        .unwrap();
+    let subscription_id = SubscriptionId::new("open-todos");
+    let (mut downstream_conn, mut upstream_conn) = in_memory_connection_pair();
+    let mut downstream = DownstreamSession::new(
+        "tab-session",
+        "alice-tab",
+        tab.local_schema_fingerprint(),
+        tab.local_policy_fingerprint(),
+    );
+    let mut upstream = UpstreamSession::new(
+        "worker-session",
+        "alice-worker",
+        worker.local_schema_fingerprint(),
+        worker.local_policy_fingerprint(),
+    );
+    downstream.open(&mut downstream_conn).unwrap();
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    downstream.pump(&mut tab, &mut downstream_conn).unwrap();
+
+    downstream_conn.send_client_message(ClientMessage::Subscribe {
+        subscription_id: subscription_id.clone(),
+        query: open_todos_query(),
+        requested_tier: SettlementTier::Local,
+        reconciliation: Some(empty_rateless_symbols(0)),
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+
+    let messages = drain_server_messages(&mut downstream_conn);
+    assert_retryable_subscription_error(
+        &messages,
+        &subscription_id,
+        "reconciliation_decode_failed",
+    );
+    assert_no_subscription_data_or_settled(&messages);
+    assert!(!upstream.has_active_subscription(&subscription_id));
+
+    downstream_conn.send_client_message(ClientMessage::ReconcileSymbols {
+        subscription_id,
+        set: ReconcileSet::RowHeads,
+        parameters: ReconcileParameters {
+            seed: 0,
+            estimated_items: 0,
+            target_degree: 8,
+            symbol_count: 0,
+        },
+        symbols: Vec::new(),
+    });
+    upstream.pump(&mut worker, &mut upstream_conn).unwrap();
+    assert!(downstream_conn.receive_server_message().is_none());
 }
 
 #[test]
@@ -613,15 +837,11 @@ fn connection_manager_replay_recomputes_subscription_reconciliation() {
         .reconciliation
         .as_ref()
         .expect("replay should carry current reconciliation");
-    assert_eq!(
-        reconciliation.row_heads,
-        vec![RowHeadItem {
-            branch_id: "main".to_owned(),
-            table: "todos".to_owned(),
-            row_id: "todo-1".to_owned(),
-            head_tx_id: tab.query(open_todos_query()).unwrap().remove(0).tx_id,
-        }]
-    );
+    assert_eq!(reconciliation.set, ReconcileSet::RowHeads);
+    assert_eq!(reconciliation.algorithm, ReconcileAlgorithm::Rateless);
+    assert!(reconciliation.row_heads.is_empty());
+    assert!(reconciliation.parameters.is_some());
+    assert!(!reconciliation.symbols.is_empty());
 }
 
 #[test]
@@ -1764,6 +1984,8 @@ fn connection_replay_subscription_carries_reconciliation() {
     let reconciliation = ReconciliationSketch {
         set: ReconcileSet::RowHeads,
         algorithm: ReconcileAlgorithm::Exact,
+        parameters: None,
+        symbols: Vec::new(),
         row_heads: vec![RowHeadItem {
             branch_id: "main".to_owned(),
             table: "todos".to_owned(),
@@ -3505,6 +3727,8 @@ fn upstream_refresh_reexports_snapshot_rows_for_active_subscriptions() {
             ReconciliationSketch {
                 set: ReconcileSet::RowHeads,
                 algorithm: ReconcileAlgorithm::Exact,
+                parameters: None,
+                symbols: Vec::new(),
                 row_heads: Vec::new(),
             },
         )
@@ -3860,6 +4084,8 @@ fn empty_row_heads() -> ReconciliationSketch {
         set: ReconcileSet::RowHeads,
         algorithm: ReconcileAlgorithm::Exact,
         row_heads: Vec::new(),
+        parameters: None,
+        symbols: Vec::new(),
     }
 }
 
@@ -3868,6 +4094,23 @@ fn policy_deps_reconciliation() -> ReconciliationSketch {
         set: ReconcileSet::PolicyDeps,
         algorithm: ReconcileAlgorithm::Exact,
         row_heads: Vec::new(),
+        parameters: None,
+        symbols: Vec::new(),
+    }
+}
+
+fn empty_rateless_symbols(symbol_count: u32) -> ReconciliationSketch {
+    ReconciliationSketch {
+        set: ReconcileSet::RowHeads,
+        algorithm: ReconcileAlgorithm::Rateless,
+        row_heads: Vec::new(),
+        parameters: Some(ReconcileParameters {
+            seed: 42,
+            estimated_items: 1,
+            target_degree: 8,
+            symbol_count,
+        }),
+        symbols: Vec::new(),
     }
 }
 
