@@ -73,6 +73,7 @@ let currentLeadershipId = 0;
 const pendingFollowerAttachments = new Set<string>();
 const attachedFollowerPorts = new Set<string>();
 let replacementElectionInFlight = false;
+let replacementElectionGeneration = 0;
 let brokerPingTimer: ReturnType<typeof setTimeout> | null = null;
 let resetState: ResetState | null = null;
 
@@ -283,6 +284,7 @@ function updateVisibility(tabId: string, visibility: BrowserBrokerVisibility): v
 
 function electIfNeeded(): void {
   if (resetState) return;
+  if (replacementElectionInFlight) return;
   if (leader?.ready || tabs.size === 0) return;
   if (leader && !namespace?.schemaFingerprint) return;
 
@@ -334,6 +336,7 @@ function resetIfIdle(): void {
   pendingFollowerAttachments.clear();
   attachedFollowerPorts.clear();
   resetState = null;
+  replacementElectionGeneration += 1;
   replacementElectionInFlight = false;
   stopBrokerPingTimer();
 }
@@ -557,7 +560,7 @@ function continueStorageResetIfReady(activeReset: ResetState): void {
 
   activeReset.phase = "promoting";
   void (async () => {
-    await waitForPreviousLeaderLocks(activeReset.previousLeader);
+    await waitForPreviousLeaderLocks(activeReset.previousLeader, () => resetState === activeReset);
     if (activeReset.errors.length > 0) {
       finishStorageReset(activeReset, false, activeReset.errors.join("; "));
       return;
@@ -644,13 +647,23 @@ function finishStorageResetIfReconnected(activeReset: ResetState): void {
 function scheduleReplacementElection(previousLeader: ClearedLeaderState | null): void {
   if (replacementElectionInFlight) return;
   replacementElectionInFlight = true;
+  const electionGeneration = ++replacementElectionGeneration;
 
   void (async () => {
     try {
-      await waitForPreviousLeaderLocks(previousLeader);
+      await waitForPreviousLeaderLocks(
+        previousLeader,
+        () =>
+          replacementElectionInFlight &&
+          replacementElectionGeneration === electionGeneration &&
+          leader === null,
+      );
     } finally {
-      replacementElectionInFlight = false;
+      if (replacementElectionGeneration === electionGeneration) {
+        replacementElectionInFlight = false;
+      }
     }
+    if (replacementElectionGeneration !== electionGeneration) return;
     electIfNeeded();
   })();
 }
@@ -738,10 +751,13 @@ function evictTab(tabId: string, reason: string): void {
 
 async function waitForPreviousLeaderLocks(
   previousLeader: ClearedLeaderState | null,
+  shouldForceTakeover: () => boolean = () => true,
 ): Promise<void> {
   if (!previousLeader?.tabLockName || !previousLeader.workerLockName) {
     return;
   }
+
+  if (!shouldForceTakeover()) return;
 
   const takeoverLockNames = [previousLeader.tabLockName, previousLeader.workerLockName].filter(
     (lockName): lockName is string => lockName !== null,
@@ -752,6 +768,7 @@ async function waitForPreviousLeaderLocks(
   }
 
   await sleep(namespace?.forceTakeoverTimeoutMs ?? DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS);
+  if (!shouldForceTakeover()) return;
   for (const lockName of takeoverLockNames) {
     await stealAndReleaseWebLock(lockName).catch(() => undefined);
   }
