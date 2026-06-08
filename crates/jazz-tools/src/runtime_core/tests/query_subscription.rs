@@ -756,7 +756,7 @@ fn rc_query_local_direct_batch_overlay_handles_indexed_filters_until_commit() {
         "direct batch indexed reads should use the staged value while the batch is open"
     );
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     assert_eq!(
         core.storage().index_lookup(
@@ -1988,7 +1988,7 @@ fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_reject
         assert_eq!(decode_added_rows(&calls[1])[0].0, row_id);
     }
 
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
 
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
@@ -2069,7 +2069,7 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
         )
         .unwrap();
 
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
     s.b.batched_tick();
     s.b.sync_sender().take();

@@ -79,6 +79,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: false },
       },
       undefined,
+      undefined,
+      undefined,
     );
     expect(row).toEqual({
       id: "todo-1",
@@ -142,62 +144,6 @@ describe("Db runtime schema order", () => {
     ]);
   });
 
-  it("does not fetch runtime schema for client-backed queries that stay within the declared schema", async () => {
-    const generatedSchema: WasmSchema = {
-      todos: {
-        columns: [
-          { name: "title", column_type: { type: "Text" }, nullable: false },
-          { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        ],
-      },
-    };
-    const runtime = {
-      returnsDeclaredSchemaRows: true,
-      query: vi.fn(async () => [
-        {
-          id: "todo-1",
-          values: [
-            { type: "Text", value: "No schema fetch" },
-            { type: "Boolean", value: true },
-          ],
-        },
-      ]),
-      getSchema: vi.fn(() => new Map()),
-      getSchemaHash: vi.fn(() => "runtime-schema-hash"),
-      onMutationError: vi.fn(),
-      createSubscription: vi.fn(),
-      executeSubscription: vi.fn(),
-      unsubscribe: vi.fn(),
-    };
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "client-backed-schema-order",
-      schema: generatedSchema,
-    });
-    const db = createDbFromClient({ appId: "client-backed-schema-order" }, client);
-    const builder = {
-      _table: "todos",
-      _schema: generatedSchema,
-      _rowType: {} as { id: string; title: string; done: boolean },
-      _build: () =>
-        JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-        }),
-    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
-
-    await expect(db.all(builder)).resolves.toEqual([
-      {
-        id: "todo-1",
-        title: "No schema fetch",
-        done: true,
-      },
-    ]);
-    expect(runtime.getSchema).not.toHaveBeenCalled();
-    expect(runtime.getSchemaHash).not.toHaveBeenCalled();
-  });
-
   it("falls back to the generated schema when the runtime schema is missing a table", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
@@ -240,6 +186,8 @@ describe("Db runtime schema order", () => {
         title: { type: "Text", value: "Buy milk" },
         done: { type: "Boolean", value: false },
       },
+      undefined,
+      undefined,
       undefined,
     );
     expect(row).toEqual({
@@ -295,6 +243,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: false },
       },
       { id: externalId },
+      undefined,
+      undefined,
     );
     expect(row.value).toEqual({
       id: externalId,
@@ -342,6 +292,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: false },
       },
       { id: externalId },
+      undefined,
+      undefined,
     );
   });
 
@@ -401,6 +353,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: false },
       },
       { updatedAt },
+      undefined,
+      undefined,
     );
     expect(update).toHaveBeenCalledWith(
       "todo-1",
@@ -408,6 +362,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: true },
       },
       { updatedAt },
+      undefined,
+      undefined,
     );
     expect(upsert).toHaveBeenCalledWith(
       "todos",
@@ -415,6 +371,8 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: true },
       },
       { id: "todo-1", updatedAt },
+      undefined,
+      undefined,
     );
   });
 
@@ -428,7 +386,7 @@ describe("Db runtime schema order", () => {
       },
     };
     const updatedAt = 1_764_000_000_000_000;
-    const createHandleInternal = vi.fn(() =>
+    const create = vi.fn(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -438,13 +396,13 @@ describe("Db runtime schema order", () => {
         batchId: "batch-insert",
       }),
     );
-    const updateHandleInternal = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-update"));
-    const upsertHandleInternal = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-upsert"));
+    const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-update"));
+    const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-upsert"));
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
-      createHandleInternal,
-      updateHandleInternal,
-      upsertHandleInternal,
+      create,
+      update,
+      upsert,
     } as unknown as JazzClient;
     const db = createDbFromClient({ appId: "client-backed-db-test" }, client);
     const table = {
@@ -461,35 +419,33 @@ describe("Db runtime schema order", () => {
     db.update(table, "todo-1", { done: true }, { updatedAt });
     db.upsert(table, { done: true }, { id: "todo-1", updatedAt });
 
-    expect(createHandleInternal).toHaveBeenCalledWith(
+    expect(create).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
         done: { type: "Boolean", value: false },
       },
-      undefined,
-      undefined,
       { updatedAt },
+      undefined,
+      undefined,
     );
-    expect(updateHandleInternal).toHaveBeenCalledWith(
+    expect(update).toHaveBeenCalledWith(
       "todo-1",
       {
         done: { type: "Boolean", value: true },
       },
+      { updatedAt },
       undefined,
       undefined,
-      undefined,
-      updatedAt,
     );
-    expect(upsertHandleInternal).toHaveBeenCalledWith(
+    expect(upsert).toHaveBeenCalledWith(
       "todos",
       {
         done: { type: "Boolean", value: true },
       },
-      "todo-1",
+      { id: "todo-1", updatedAt },
       undefined,
       undefined,
-      updatedAt,
     );
   });
 

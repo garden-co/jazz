@@ -1064,7 +1064,7 @@ impl QueryManager {
         let data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
         // Deny anonymous writes before any policy evaluation.
