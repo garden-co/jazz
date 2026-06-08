@@ -93,13 +93,13 @@ export interface Runtime {
   getSchemaHash(): string;
   close?(): void | Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
-  connect?(url: string, auth_json: string): void;
+  connect(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */
-  disconnect?(): void;
+  disconnect(): void;
   /** Push updated auth credentials into the live Rust transport. */
-  updateAuth?(auth_json: string): void;
+  updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
-  onAuthFailure?(callback: (reason: string) => void): void;
+  onAuthFailure(callback: (reason: string) => void): void;
 }
 
 /**
@@ -862,7 +862,7 @@ export class JazzClient {
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
-      this.runtime.onAuthFailure?.((reason: string) => {
+      this.runtime.onAuthFailure((reason: string) => {
         handler(mapAuthReason(reason));
       });
     }
@@ -974,19 +974,17 @@ export class JazzClient {
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
     this.resolvedSession = this.resolveSessionFromContext();
-    // Push the refreshed credentials into the Rust transport. `updateAuth`
-    // is optional on the Runtime interface because not every binding exposes
-    // it yet; bindings that do will route this to TransportControl::UpdateAuth.
+    // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
-    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   updateCookieSession(cookieSession?: Session): void {
     this.context.cookieSession = cookieSession;
     this.resolvedSession = this.resolveSessionFromContext();
-    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   private normalizeQueryExecutionOptions(
@@ -1509,9 +1507,6 @@ export class JazzClient {
    * @param auth Authentication credentials for the connection.
    */
   connectTransport(url: string, auth: AuthConfig): void {
-    if (!this.runtime.connect) {
-      throw new Error("Underlying runtime does not support connect()");
-    }
     this.runtime.connect(httpUrlToWs(url, this.context.appId), JSON.stringify(auth));
   }
 
@@ -1562,8 +1557,7 @@ export class JazzClient {
     }
 
     this.shutdownPromise = (async () => {
-      // Disconnect Rust-owned transport if present.
-      this.runtime.disconnect?.();
+      this.runtime.disconnect();
 
       // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
       if (this.runtime.close) {

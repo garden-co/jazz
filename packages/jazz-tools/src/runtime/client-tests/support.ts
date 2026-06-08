@@ -50,6 +50,10 @@ export const runtimeBatchRecordStubs = {
   waitForBatch: async () => {},
   rollbackBatch: () => false,
   onMutationError: () => {},
+  connect: () => {},
+  disconnect: () => {},
+  updateAuth: () => {},
+  onAuthFailure: () => {},
 };
 
 export function makeClient() {
