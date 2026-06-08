@@ -116,6 +116,23 @@ describe("TS Update API", () => {
     expect(updated!.done).toBe(true);
   });
 
+  it("can use caller-supplied updatedAt on update", async () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const project = insertProject(db, "Test Project");
+
+    db.update(app.projects, project.id, { name: "Backfilled Project" }, { updatedAt });
+
+    const projected = await db.one(
+      app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),
+    );
+
+    expect(projected).toEqual({
+      id: project.id,
+      name: "Backfilled Project",
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
+
   it("trying to update an already-deleted row fails", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);

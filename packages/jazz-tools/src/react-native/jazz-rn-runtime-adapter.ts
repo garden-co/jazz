@@ -1,5 +1,6 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
+  BatchMode,
   DirectInsertResult,
   DirectMutationResult,
   MutationErrorEvent,
@@ -28,7 +29,6 @@ export interface JazzRnRuntimeBinding {
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
   delete_(objectId: string, writeContextJson: string | undefined): string;
-  flush(): void;
   getSchemaHash(): string;
   insert(
     table: string,
@@ -42,6 +42,14 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
+  upsert(
+    table: string,
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
+  beginBatch(batchMode: BatchMode): string;
+  rollbackBatch(batchId: string): boolean;
   waitForBatch(batchId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
@@ -55,6 +63,7 @@ export interface JazzRnRuntimeBinding {
     queryJson: string,
     sessionJson: string | undefined,
     tier: string | undefined,
+    optionsJson: string | undefined,
   ): Promise<string>;
   createSubscription(
     queryJson: string,
@@ -62,15 +71,9 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   executeSubscription(handle: bigint, callback: { onUpdate(deltaJson: string): void }): void;
-  subscribe(
-    queryJson: string,
-    callback: { onUpdate(deltaJson: string): void },
-    sessionJson: string | undefined,
-    tier: string | undefined,
-  ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
-  sealBatch(batchId: string): void;
+  commitBatch(batchId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -163,6 +166,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  beginBatch(batch_mode: BatchMode): string {
+    try {
+      return this.binding.beginBatch(batch_mode);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   insert(
     table: string,
     values: InsertValues,
@@ -218,6 +229,25 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  upsert(
+    table: string,
+    object_id: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+  ): DirectMutationResult {
+    try {
+      const resultJson = this.binding.upsert(
+        table,
+        object_id,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+      );
+      return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   delete(object_id: string, write_context_json?: string | null): DirectMutationResult {
     try {
       const resultJson = this.binding.delete_(object_id, write_context_json ?? undefined);
@@ -231,12 +261,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
     query_json: string,
     session_json?: string | null,
     tier?: string | null,
+    options_json?: string | null,
   ): Promise<any> {
     try {
       const rowsJson = await this.binding.query(
         query_json,
         session_json ?? undefined,
         tier ?? undefined,
+        options_json ?? undefined,
       );
       return JSON.parse(rowsJson);
     } catch (error) {
@@ -275,36 +307,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
         }
       },
     });
-  }
-
-  subscribe(
-    query_json: string,
-    on_update: Function,
-    session_json?: string | null,
-    tier?: string | null,
-  ): number {
-    const handle = this.binding.subscribe(
-      query_json,
-      {
-        onUpdate: (deltaJson: string) => {
-          try {
-            const parsed = JSON.parse(deltaJson) as unknown;
-            on_update(parsed);
-          } catch (error) {
-            swallowCallbackError("subscription", error);
-          }
-        },
-      },
-      session_json ?? undefined,
-      tier ?? undefined,
-    );
-
-    const numericHandle = Number(handle);
-    if (!Number.isSafeInteger(numericHandle)) {
-      throw new Error(`Subscription handle ${handle.toString()} is outside safe integer range`);
-    }
-    this.handleMap.set(numericHandle, handle);
-    return numericHandle;
   }
 
   unsubscribe(handle: number): void {
@@ -358,9 +360,17 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  sealBatch(batch_id: string): void {
+  commitBatch(batch_id: string): void {
     try {
-      this.binding.sealBatch(batch_id);
+      this.binding.commitBatch(batch_id);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  rollbackBatch(batch_id: string): boolean {
+    try {
+      return this.binding.rollbackBatch(batch_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

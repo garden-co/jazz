@@ -1,5 +1,5 @@
-//! [`DurabilityTracker`] — owns durability waiters and pending mutation error
-//! events that bindings still need to surface.
+//! [`DurabilityTracker`] — owns accepted durability tiers, durability waiters,
+//! and pending mutation error events that bindings still need to surface.
 //!
 //! Extracted from `RuntimeCore` so the orchestrator no longer carries the
 //! bookkeeping for who-is-waiting-on-which-tier; it only delegates the
@@ -17,6 +17,8 @@ use super::{MutationErrorEvent, PersistedWriteAck, PersistedWriteRejection};
 
 #[derive(Default)]
 pub(crate) struct DurabilityTracker {
+    /// Highest accepted durability tier observed for each batch in this runtime.
+    accepted_batch_tiers: HashMap<BatchId, DurabilityTier>,
     /// Watchers waiting for a batch to settle at a requested tier.
     batch_watchers: HashMap<BatchId, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
     /// Rejected replayable batch events surfaced once to bindings on next drain.
@@ -30,6 +32,7 @@ impl DurabilityTracker {
         events: BTreeMap<BatchId, MutationErrorEvent>,
     ) -> Self {
         Self {
+            accepted_batch_tiers: HashMap::new(),
             batch_watchers: HashMap::new(),
             pending_mutation_error_events: events,
         }
@@ -42,15 +45,33 @@ impl DurabilityTracker {
         tier: DurabilityTier,
         sender: oneshot::Sender<PersistedWriteAck>,
     ) {
+        if self.is_batch_accepted_at(batch_id, tier) {
+            let _ = sender.send(Ok(()));
+            return;
+        }
         self.batch_watchers
             .entry(batch_id)
             .or_default()
             .push((tier, sender));
     }
 
+    pub(crate) fn accepted_batch_tier(&self, batch_id: BatchId) -> Option<DurabilityTier> {
+        self.accepted_batch_tiers.get(&batch_id).copied()
+    }
+
+    pub(crate) fn is_batch_accepted_at(&self, batch_id: BatchId, tier: DurabilityTier) -> bool {
+        self.accepted_batch_tier(batch_id)
+            .is_some_and(|accepted_tier| accepted_tier >= tier)
+    }
+
     /// Resolve every watcher on `batch_id` whose requested tier is satisfied by
     /// `acked_tier`; keep the rest registered.
     pub(crate) fn record_batch_ack(&mut self, batch_id: BatchId, acked_tier: DurabilityTier) {
+        self.accepted_batch_tiers
+            .entry(batch_id)
+            .and_modify(|accepted_tier| *accepted_tier = (*accepted_tier).max(acked_tier))
+            .or_insert(acked_tier);
+
         let Some(watchers) = self.batch_watchers.remove(&batch_id) else {
             return;
         };
@@ -127,6 +148,7 @@ impl DurabilityTracker {
     /// removes it from the rejected set. Used when an explicit ack flushes
     /// the local batch record.
     pub(crate) fn forget_batch(&mut self, batch_id: BatchId) {
+        self.accepted_batch_tiers.remove(&batch_id);
         self.batch_watchers.remove(&batch_id);
         self.pending_mutation_error_events.remove(&batch_id);
     }

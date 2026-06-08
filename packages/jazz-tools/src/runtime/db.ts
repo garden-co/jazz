@@ -37,6 +37,7 @@ import {
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
   Scoped,
+  DeleteOptions,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
@@ -579,7 +580,7 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
   }
 
   batchId(): string {
-    return this.requireRuntimeHandle("batchId").batchId();
+    return this.requireRuntimeHandle("batchId").batchId;
   }
 
   /**
@@ -730,7 +731,7 @@ export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Scoped<DbTransaction>;
+export type TransactionScope = Scoped<DbTransaction>;
 
 /**
  * Direct batches group a set of writes that should become visible together on batch commit,
@@ -748,7 +749,7 @@ export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
 /**
  * Batch object available inside {@link Db.batch}'s callback.
  */
-export type DbBatchScope = Scoped<DbDirectBatch>;
+export type BatchScope = Scoped<DbDirectBatch>;
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -1697,15 +1698,13 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    const inserted = context
-      ? client.createHandleInternal(
-          table._table,
-          values,
-          context.session,
-          context.attribution,
-          options,
-        )
-      : client.create(table._table, values, options);
+    const inserted = client.create(
+      table._table,
+      values,
+      options,
+      context?.session,
+      context?.attribution,
+    );
     return inserted.mapValue((row) =>
       transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
@@ -1726,16 +1725,14 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    const restored = context
-      ? client.restoreHandleInternal(
-          table._table,
-          id,
-          values,
-          context.session,
-          context.attribution,
-          options,
-        )
-      : client.restore(table._table, id, values, options);
+    const restored = client.restore(
+      table._table,
+      id,
+      values,
+      options,
+      context?.session,
+      context?.attribution,
+    );
     return restored.mapValue((row) =>
       transformOutputRow(table, transformRow(row, table._schema, table._table)),
     );
@@ -1755,16 +1752,7 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.upsertHandleInternal(
-          table._table,
-          values,
-          options.id,
-          context.session,
-          context.attribution,
-          options.updatedAt,
-        )
-      : client.upsert(table._table, values, options);
+    return client.upsert(table._table, values, options, context?.session, context?.attribution);
   }
 
   /**
@@ -1782,16 +1770,7 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.updateHandleInternal(
-          id,
-          updates,
-          context.session,
-          context.attribution,
-          undefined,
-          options?.updatedAt,
-        )
-      : client.update(id, updates, options);
+    return client.update(id, updates, options, context?.session, context?.attribution);
   }
 
   /**
@@ -1799,12 +1778,10 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.deleteHandleInternal(id, context.session, context.attribution)
-      : client.delete(id);
+    return client.delete(id, options, context?.session, context?.attribution);
   }
 
   /**
@@ -1820,7 +1797,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
+      (client) => client.beginTransaction(context?.session, context?.attribution),
     );
   }
 
@@ -1832,11 +1809,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => Promise<TResult>,
+    callback: (tx: TransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: DbTransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInBatch(
@@ -1859,7 +1836,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(context?.session, context?.attribution),
+      (client) => client.beginBatch(context?.session, context?.attribution),
     );
   }
 
@@ -1871,11 +1848,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   batch<TResult>(
-    callback: (batch: DbBatchScope) => Promise<TResult>,
+    callback: (batch: BatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
   batch<TResult>(
-    callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginBatch();
     return runInBatch(
@@ -1972,12 +1949,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     const rows =
       context || usesRelationTraversal
-        ? await client.queryInternal(
-            wasmQuery,
-            context?.session,
-            runtimeQueryOptions,
-            runtimeSchema.peek(),
-          )
+        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session, runtimeSchema.peek())
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -2137,16 +2109,13 @@ export class Db {
 
     const queryOptions = ordinaryDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
-    const subId =
-      context || session
-        ? client.subscribeInternal(
-            wasmQuery,
-            handleDelta,
-            context?.session ?? session,
-            queryOptions,
-            runtimeSchema.peek(),
-          )
-        : client.subscribe(wasmQuery, handleDelta, queryOptions);
+    const subId = client.subscribe(
+      wasmQuery,
+      handleDelta,
+      queryOptions,
+      context?.session ?? session,
+      runtimeSchema.peek(),
+    );
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
       builtQuery.table,
