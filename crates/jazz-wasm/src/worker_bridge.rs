@@ -721,21 +721,23 @@ impl MessagePortBridgeInner {
             match entry {
                 SyncEntry::BareBytes(bytes) => {
                     let arr = Uint8Array::from(bytes.as_ref());
-                    let _ = self.runtime.on_sync_message_received(arr.into(), None);
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server(arr.into(), None);
                 }
                 SyncEntry::BareString(payload) => {
                     let _ = self
                         .runtime
-                        .on_sync_message_received(JsValue::from_str(&payload), None);
+                        .receive_sync_message_from_server(JsValue::from_str(&payload), None);
                 }
                 SyncEntry::SequencedBytes { payload, sequence } => {
                     let arr = Uint8Array::from(payload.as_ref());
                     let _ = self
                         .runtime
-                        .on_sync_message_received(arr.into(), Some(sequence as f64));
+                        .receive_sync_message_from_server(arr.into(), Some(sequence as f64));
                 }
                 SyncEntry::SequencedString { payload, sequence } => {
-                    let _ = self.runtime.on_sync_message_received(
+                    let _ = self.runtime.receive_sync_message_from_server(
                         JsValue::from_str(&payload),
                         Some(sequence as f64),
                     );
@@ -747,7 +749,9 @@ impl MessagePortBridgeInner {
     fn apply_peer_payloads(&self, payloads: Vec<serde_bytes::ByteBuf>) {
         for payload in payloads {
             let arr = Uint8Array::from(payload.as_ref());
-            let _ = self.runtime.on_sync_message_received(arr.into(), None);
+            let _ = self
+                .runtime
+                .receive_sync_message_from_server(arr.into(), None);
         }
     }
 
