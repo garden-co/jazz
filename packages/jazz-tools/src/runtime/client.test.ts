@@ -86,7 +86,6 @@ function makeFakeRuntime() {
     commitBatch: vi.fn<(batch_id: string) => void>(),
     waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
     rollbackBatch: vi.fn<Runtime["rollbackBatch"]>(() => false),
-    returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
@@ -278,47 +277,6 @@ describe("JazzClient runtime schema caching", () => {
     expect(client.getSchema()).toBe(secondSchema);
 
     expect(runtime.getSchema).toHaveBeenCalledTimes(2);
-  });
-
-  it("skips schema fetches for runtimes that already return declared-schema rows", async () => {
-    const schema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
-    };
-    const runtime = makeFakeRuntime();
-    runtime.returnsDeclaredSchemaRows = true;
-    runtime.query.mockResolvedValue([
-      {
-        id: "todo-1",
-        values: [{ type: "Text", value: "already aligned" }],
-      },
-    ]);
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "declared-row-runtime",
-      schema,
-    });
-
-    await expect(
-      client.query({
-        _schema: schema,
-        _build: () =>
-          JSON.stringify({
-            table: "todos",
-            conditions: [],
-            includes: {},
-            orderBy: [],
-          }),
-      }),
-    ).resolves.toEqual([
-      {
-        id: "todo-1",
-        values: [{ type: "Text", value: "already aligned" }],
-      },
-    ]);
-
-    expect(runtime.getSchemaHash).not.toHaveBeenCalled();
-    expect(runtime.getSchema).not.toHaveBeenCalled();
   });
 });
 
