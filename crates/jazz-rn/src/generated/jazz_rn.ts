@@ -79,30 +79,6 @@ const uniffiIsDebug =
   false;
 // Public interface members begin here.
 
-export function currentTimestampMs(): /*i64*/ bigint {
-  return FfiConverterInt64.lift(
-    uniffiCaller.rustCall(
-      /*caller:*/ (callStatus) => {
-        return nativeModule().ubrn_uniffi_jazz_rn_fn_func_current_timestamp_ms(
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    )
-  );
-}
-export function generateId(): string {
-  return FfiConverterString.lift(
-    uniffiCaller.rustCall(
-      /*caller:*/ (callStatus) => {
-        return nativeModule().ubrn_uniffi_jazz_rn_fn_func_generate_id(
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    )
-  );
-}
 /**
  * Mint an anonymous JWT from a base64url-encoded 32-byte seed.
  *
@@ -806,7 +782,6 @@ export interface RnRuntimeInterface {
     handle: /*u64*/ bigint,
     callback: SubscriptionCallback
   ) /*throws*/ : void;
-  flush() /*throws*/ : void;
   getSchemaHash() /*throws*/ : string;
   insert(
     table: string,
@@ -1087,21 +1062,6 @@ export class RnRuntime
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterUInt64.lower(handle),
           FfiConverterTypeSubscriptionCallback.lower(callback),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  flush(): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_flush(
-          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           callStatus
         );
       },
@@ -1548,21 +1508,6 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms() !==
-    20765
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_func_current_timestamp_ms'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_func_generate_id() !== 58723
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_func_generate_id'
-    );
-  }
-  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token() !==
     11470
   ) {
@@ -1648,14 +1593,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush() !==
-    62556
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_flush'
     );
   }
   if (
