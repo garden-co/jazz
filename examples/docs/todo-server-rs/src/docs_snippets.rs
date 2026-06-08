@@ -267,14 +267,12 @@ pub fn build_todo_lineage_query() -> jazz_tools::Query {
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = todo_values("Write docs", "");
 
-    let _new_row = client.insert("todos", values).await?;
-    client
-        .update(
-            existing_id,
-            vec![("done".to_string(), Value::Boolean(true))],
-        )
-        .await?;
-    client.delete(existing_id).await?;
+    let _new_row = client.insert("todos", values)?;
+    client.update(
+        existing_id,
+        vec![("done".to_string(), Value::Boolean(true))],
+    )?;
+    client.delete(existing_id)?;
     Ok(())
 }
 // #endregion writing-crud-rust
@@ -283,12 +281,10 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
 ) -> jazz_tools::Result<ObjectId> {
-    let (id, _row_values) = client
-        .insert(
-            "todos",
-            todo_values("Write docs with default durability behavior", ""),
-        )
-        .await?;
+    let (id, _row_values, _batch_id) = client.insert(
+        "todos",
+        todo_values("Write docs with default durability behavior", ""),
+    )?;
 
     // Rust currently does not expose per-write durability tier arguments.
     // Writes apply locally first, then sync asynchronously to higher tiers.
@@ -420,9 +416,7 @@ pub async fn clear_nullable_fields(
     todo_id: ObjectId,
 ) -> jazz_tools::Result<()> {
     // Set a nullable column to null
-    client
-        .update(todo_id, vec![("owner_id".to_string(), Value::Null)])
-        .await?;
+    client.update(todo_id, vec![("owner_id".to_string(), Value::Null)])?;
 
     // Only the specified columns are changed; omitted columns are left as-is.
     Ok(())
@@ -442,12 +436,10 @@ pub async fn create_file_from_bytes(
     let mut part_sizes = Vec::new();
 
     for chunk in data.chunks(CHUNK_SIZE) {
-        let (part_id, _) = client
-            .insert(
-                "file_parts",
-                jazz_tools::row_input!("data" => chunk.to_vec()),
-            )
-            .await?;
+        let (part_id, _, _) = client.insert(
+            "file_parts",
+            jazz_tools::row_input!("data" => chunk.to_vec()),
+        )?;
         part_ids.push(Value::Uuid(part_id));
         part_sizes.push(Value::Integer(chunk.len() as i32));
     }
@@ -461,7 +453,7 @@ pub async fn create_file_from_bytes(
         file_values.insert("name".to_string(), name.into());
     }
 
-    let (file_id, _) = client.insert("files", file_values).await?;
+    let (file_id, _, _) = client.insert("files", file_values)?;
     Ok(file_id)
 }
 // #endregion files-create-from-bytes-rust
@@ -474,16 +466,14 @@ pub async fn create_upload_from_bytes(
 ) -> jazz_tools::Result<ObjectId> {
     let file_id = create_file_from_bytes(client, data, Some("photo.jpg"), "image/jpeg").await?;
 
-    let (upload_id, _) = client
-        .insert(
-            "uploads",
-            jazz_tools::row_input!(
-                "owner_id" => owner_id,
-                "label" => "Profile photo",
-                "fileId" => file_id,
-            ),
-        )
-        .await?;
+    let (upload_id, _, _) = client.insert(
+        "uploads",
+        jazz_tools::row_input!(
+            "owner_id" => owner_id,
+            "label" => "Profile photo",
+            "fileId" => file_id,
+        ),
+    )?;
 
     Ok(upload_id)
 }
@@ -590,14 +580,14 @@ pub async fn delete_upload_with_file(
             // Delete chunks while the parent file row still exists.
             for part_ref in part_ids {
                 if let Value::Uuid(part_id) = part_ref {
-                    client.delete(*part_id).await?;
+                    client.delete(*part_id)?;
                 }
             }
         }
-        client.delete(*file_row_id).await?;
+        client.delete(*file_row_id)?;
     }
 
-    client.delete(upload_id).await?;
+    client.delete(upload_id)?;
     Ok(())
 }
 // #endregion files-delete-rust

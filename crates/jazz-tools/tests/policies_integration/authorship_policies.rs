@@ -36,7 +36,6 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
     client
         .for_session(Session::new(user_id))
         .insert("notes", note_input(title))
-        .await
         .expect("create note with session-authored provenance")
         .0
 }
@@ -44,7 +43,6 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
 async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
     client
         .insert("notes", note_input(title))
-        .await
         .expect("create note without attribution")
         .0
 }
@@ -195,16 +193,12 @@ async fn created_by_policies_scope_crud_to_creators() {
 
     let denied_update = bob
         .for_session(Session::new("bob"))
-        .update(alice_note, vec![("title".to_string(), "bob edit".into())])
-        .await;
+        .update(alice_note, vec![("title".to_string(), "bob edit".into())]);
     assert!(
         denied_update.is_err(),
         "bob should not be able to update alice's row under $createdBy policy"
     );
-    let denied_delete = bob
-        .for_session(Session::new("bob"))
-        .delete(alice_note)
-        .await;
+    let denied_delete = bob.for_session(Session::new("bob")).delete(alice_note);
     assert!(
         denied_delete.is_err(),
         "bob should not be able to delete alice's row under $createdBy policy"
@@ -500,7 +494,6 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     let note_id = alice
         .for_session(Session::new("alice"))
         .insert("notes", row_input!("title" => "draft", "shared" => true))
-        .await
         .expect("alice creates shared draft")
         .0;
 
@@ -542,7 +535,6 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
                 ("shared".to_string(), false.into()),
             ],
         )
-        .await
         .expect("bob becomes latest updater");
 
     let alice_rows = wait_for_rows(

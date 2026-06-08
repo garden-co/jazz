@@ -237,7 +237,6 @@ async fn create_recursive_folder(
             table_name,
             recursive_folder_input(owner_id, name, parent_id),
         )
-        .await
         .expect("create recursive folder")
         .0
 }
@@ -249,14 +248,12 @@ async fn update_recursive_folder_parent(
 ) {
     client
         .update(folder_id, vec![("parent_id".to_string(), parent_id.into())])
-        .await
         .expect("update recursive folder parent");
 }
 
 async fn create_team(client: &JazzClient, name: &str) -> ObjectId {
     client
         .insert("teams", row_input!("name" => name))
-        .await
         .expect("create team")
         .0
 }
@@ -267,7 +264,7 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
             "team_edges",
             row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)),
         )
-        .await
+
         .expect("create team edge");
 }
 
@@ -277,7 +274,6 @@ async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: Obj
             "team_memberships",
             row_input!("user_id" => user_id, "team_id" => Value::Uuid(team_id)),
         )
-        .await
         .expect("create team membership");
 }
 
@@ -292,14 +288,13 @@ async fn create_resource_access_edge(
             "resource_access_edges",
             row_input!("team_id" => Value::Uuid(team_id), "resource_id" => Value::Uuid(resource_id), "grant_role" => grant_role),
         )
-        .await
+
         .expect("create resource access edge");
 }
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
         .insert("documents", row_input!("title" => title))
-        .await
         .expect("create title document")
         .0
 }

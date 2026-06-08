@@ -9,6 +9,7 @@ use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -285,62 +286,21 @@ impl JazzClient {
     }
 
     /// Create a new row in a table.
-    pub async fn insert(
+    pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         self.insert_with_id(table, Option::<Uuid>::None, values)
-            .await
     }
 
     /// Create a new row in a table using a caller-supplied UUID.
-    pub async fn insert_with_id(
+    pub fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                None,
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
-    }
-
-    /// Create a new row and wait until it reaches the requested durability tier.
-    pub async fn create_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
-            .await
-    }
-
-    /// Create a new row with a caller-supplied UUID and wait for durability.
-    pub async fn create_persisted_with_id(
-        &self,
-        table: &str,
-        object_id: impl Into<Option<Uuid>>,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .runtime
             .insert_with_id(
@@ -359,91 +319,41 @@ impl JazzClient {
             ),
             Err(_) => row_values,
         };
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "create row", tier).await?;
-        Ok((object_id, row_values))
+        Ok((object_id, row_values, batch_id))
     }
 
     /// Create or update a row using a caller-supplied UUID.
-    pub async fn upsert(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<()> {
+    ) -> Result<BatchId> {
         self.runtime
             .upsert(table, ObjectId::from_uuid(object_id), values, None)
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    /// Create or update a row and wait until it reaches the requested durability tier.
-    pub async fn upsert_persisted(
-        &self,
-        table: &str,
-        object_id: Uuid,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .upsert(table, ObjectId::from_uuid(object_id), values, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "upsert row", tier).await
     }
 
     /// Update a row.
-    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         self.runtime
             .update(object_id, updates, None)
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    /// Update a row and wait until it reaches the requested durability tier.
-    pub async fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .update(object_id, updates, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "update row", tier).await
     }
 
     /// Delete a row.
-    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.runtime
             .delete(object_id, None)
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    /// Delete a row and wait until it reaches the requested durability tier.
-    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .delete(object_id, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
+    pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         let receiver = self
             .runtime
             .wait_for_batch(batch_id, tier)
             .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "delete row", tier).await
+        wait_for_batch_write(receiver, tier).await
     }
 
     /// Unsubscribe from a subscription.
@@ -456,7 +366,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub async fn schema(&self) -> Result<crate::query_manager::types::Schema> {
+    pub fn schema(&self) -> Result<crate::query_manager::types::Schema> {
         self.runtime
             .current_schema()
             .map_err(|e| JazzError::Query(e.to_string()))
@@ -547,60 +457,20 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn insert(
+    pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         self.insert_with_id(table, Option::<Uuid>::None, values)
-            .await
     }
 
-    pub async fn insert_with_id(
+    pub fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .client
-            .runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                Some(&self.session),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.client.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.client.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
-    }
-
-    pub async fn create_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
-            .await
-    }
-
-    pub async fn create_persisted_with_id(
-        &self,
-        table: &str,
-        object_id: impl Into<Option<Uuid>>,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .client
             .runtime
@@ -620,21 +490,15 @@ impl<'a> SessionClient<'a> {
             ),
             Err(_) => row_values,
         };
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "create row", tier).await?;
-        Ok((object_id, row_values))
+        Ok((object_id, row_values, batch_id))
     }
 
-    pub async fn upsert(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<()> {
+    ) -> Result<BatchId> {
         self.client
             .runtime
             .upsert(
@@ -643,82 +507,21 @@ impl<'a> SessionClient<'a> {
                 values,
                 Some(&self.session),
             )
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    pub async fn upsert_persisted(
-        &self,
-        table: &str,
-        object_id: Uuid,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .upsert(
-                table,
-                ObjectId::from_uuid(object_id),
-                values,
-                Some(&self.session),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "upsert row", tier).await
-    }
-
-    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         self.client
             .runtime
             .update(object_id, updates, Some(&self.session))
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    pub async fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .update(object_id, updates, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "update row", tier).await
-    }
-
-    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .delete(object_id, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "delete row", tier).await
     }
 
     pub async fn query(
@@ -765,19 +568,18 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
 
 async fn wait_for_batch_write(
     receiver: futures::channel::oneshot::Receiver<crate::runtime_core::PersistedWriteAck>,
-    operation: &str,
     tier: DurabilityTier,
 ) -> Result<()> {
     receiver
         .await
         .map_err(|_| {
             JazzError::Sync(format!(
-                "{operation} was cancelled before reaching {tier:?} durability"
+                "batch was cancelled before reaching {tier:?} durability"
             ))
         })?
         .map_err(|rejection| {
             JazzError::Sync(format!(
-                "{operation} was rejected before reaching {tier:?} durability ({}): {}",
+                "batch was rejected before reaching {tier:?} durability ({}): {}",
                 rejection.code, rejection.reason
             ))
         })?;

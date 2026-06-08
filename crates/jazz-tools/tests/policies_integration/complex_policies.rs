@@ -346,7 +346,6 @@ fn exists_update_policy_schema() -> Schema {
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
         .insert("documents", row_input!("title" => title.to_string()))
-        .await
         .expect("create title document")
         .0
 }
@@ -366,7 +365,6 @@ async fn create_chat(
                 "is_public" => is_public,
             ),
         )
-        .await
         .expect("create chat")
         .0
 }
@@ -377,7 +375,6 @@ async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group
             "document_grants",
             row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
         )
-        .await
         .expect("create document grant");
 }
 
@@ -387,7 +384,6 @@ async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug:
             "group_memberships",
             row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
         )
-        .await
         .expect("create group membership");
 }
 
@@ -453,7 +449,6 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
             "document_shares",
             row_input!("document_id" => doc_id, "user_id" => "bob"),
         )
-        .await
         .expect("create document share")
         .0;
     wait_for_subscription_update(
@@ -475,7 +470,6 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
 
     admin
         .update(share_id, row_changes([("user_id", "dave".into())]))
-        .await
         .expect("update document share user");
     wait_for_subscription_update(
         &mut bob_stream,
@@ -494,7 +488,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     )
     .await;
 
-    admin.delete(share_id).await.expect("delete share row");
+    admin.delete(share_id).expect("delete share row");
     wait_for_subscription_update(
         &mut dave_stream,
         &mut dave_log,
@@ -661,7 +655,6 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
                 "folders",
                 row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
             )
-            .await
             .expect("create folder")
             .0
     }
@@ -683,7 +676,6 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
                     "folder_id" => folder_id,
                 ),
             )
-            .await
             .expect("create complex document")
             .0
     }
@@ -694,7 +686,6 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
                 "document_flags",
                 row_input!("document_id" => document_id, "flag" => flag.to_string()),
             )
-            .await
             .expect("create document flag");
     }
 
@@ -847,12 +838,11 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
+    let batch_id = alice
+        .update(chat_id, row_changes([("name", "Project Room".into())]))
+        .expect("chat name update should satisfy same-table EXISTS with_check");
     alice
-        .update_persisted(
-            chat_id,
-            row_changes([("name", "Project Room".into())]),
-            DurabilityTier::EdgeServer,
-        )
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("chat name update should satisfy same-table EXISTS with_check");
 
@@ -870,13 +860,15 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
-    let protected_update = alice
-        .update_persisted(
-            chat_id,
-            row_changes([("is_public", true.into())]),
-            DurabilityTier::EdgeServer,
-        )
-        .await;
+    let batch_id = alice.update(chat_id, row_changes([("is_public", true.into())]));
+    let protected_update = match batch_id {
+        Ok(batch_id) => {
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+        }
+        Err(err) => Err(err),
+    };
     assert!(
         protected_update.is_err(),
         "is_public change should be rejected by same-table EXISTS with_check"
@@ -945,7 +937,6 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
             "document_editors",
             row_input!("document_id" => doc_id, "user_id" => "alice"),
         )
-        .await
         .expect("create document editor");
     wait_for_subscription_update(
         &mut observer_stream,
@@ -969,7 +960,6 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     .await;
 
     bob.update(doc_id, row_changes([("title", "Hacked".into())]))
-        .await
         .expect("optimistic local exists update");
 
     let rows_after_update = observer

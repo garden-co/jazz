@@ -176,7 +176,6 @@ async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
             "orgs",
             HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
         )
-        .await
         .expect("create org")
         .0
 }
@@ -202,7 +201,6 @@ async fn create_team(
                 ),
             ]),
         )
-        .await
         .expect("create team")
         .0
 }
@@ -219,7 +217,6 @@ async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>)
                 ),
             ]),
         )
-        .await
         .expect("create user")
         .0
 }
@@ -237,7 +234,6 @@ async fn create_team_edge(
                 ("parent_team".to_string(), Value::Uuid(parent_team)),
             ]),
         )
-        .await
         .expect("create team edge")
         .0
 }
@@ -245,7 +241,6 @@ async fn create_team_edge(
 async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
     client
         .insert("todos", seed.values())
-        .await
         .expect("create todo")
         .0
 }
@@ -256,7 +251,6 @@ async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
             "file_parts",
             HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
         )
-        .await
         .expect("create file part")
         .0
 }
@@ -273,7 +267,6 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
                 ),
             ]),
         )
-        .await
         .expect("create file")
         .0
 }
@@ -428,7 +421,6 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
                 Value::Text("watch-me-updated".to_string()),
             )],
         )
-        .await
         .expect("update todo title");
 
     wait_for_subscription_update(
@@ -442,7 +434,6 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 
     pair.writer
         .update(todo_id, vec![("done".to_string(), Value::Boolean(true))])
-        .await
         .expect("mark todo done");
 
     wait_for_subscription_update(
@@ -559,7 +550,6 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
                     Value::Text(format!("bulk-{revision:03}")),
                 )],
             )
-            .await
             .expect("apply rapid bulk update");
     }
 
@@ -840,7 +830,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
 
     let (_temp_dir, client) = start_local_client(subscription_schema()).await;
     let query = QueryBuilder::new("todos").build();
-    let runtime_schema = client.schema().await.expect("load local runtime schema");
+    let runtime_schema = client.schema().expect("load local runtime schema");
     let descriptor = todo_descriptor(&runtime_schema);
 
     let mut stream = client
@@ -881,7 +871,6 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
                     Value::Text(format!("local-bulk-{revision:03}")),
                 )],
             )
-            .await
             .expect("apply rapid local update");
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -1279,7 +1268,6 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
 
     pair.writer
         .update(user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
-        .await
         .expect("move user to new team");
 
     let rows = wait_for_rows(&pair.subscriber, query, "updated team row", |rows| {
@@ -1353,7 +1341,6 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
             file_id,
             vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
         )
-        .await
         .expect("swap file part ids");
 
     let rows = wait_for_rows(&pair.subscriber, query, "updated file part row", |rows| {
