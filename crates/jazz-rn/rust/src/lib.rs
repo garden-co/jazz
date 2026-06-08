@@ -15,12 +15,11 @@ use serde::Deserialize;
 
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
-    current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
-    generate_id as generate_binding_id, parse_batch_id_input, parse_batch_mode_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_read_durability_options, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_mutation_error_event, subscription_delta_to_json,
+    parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
+    parse_external_object_id, parse_query_input, parse_read_durability_options,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -876,16 +875,6 @@ impl RnRuntime {
         })
     }
 
-    pub fn flush(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("flush", || {
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.flush_storage().map_err(runtime_err)?;
-            Ok(())
-        })
-    }
-
     pub fn on_mutation_error(
         &self,
         callback: Box<dyn MutationErrorCallback>,
@@ -1144,16 +1133,6 @@ mod tests {
 // ============================================================================
 // Module-level utilities
 // ============================================================================
-
-#[uniffi::export]
-pub fn generate_id() -> String {
-    generate_binding_id()
-}
-
-#[uniffi::export]
-pub fn current_timestamp_ms() -> i64 {
-    binding_current_timestamp_ms()
-}
 
 /// Mint a local-first JWT from a base64url-encoded 32-byte seed.
 ///

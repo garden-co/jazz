@@ -17,7 +17,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
       JSON.stringify({ batchId: writeContextJson ? "batch-delete-2" : "batch-delete-1" }),
     ),
     executeSubscription: vi.fn(),
-    flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     waitForBatch: vi.fn(async () => undefined),
     beginBatch: vi.fn((batchMode) => `batch-${batchMode}`),
