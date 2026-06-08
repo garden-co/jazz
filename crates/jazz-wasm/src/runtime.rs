@@ -86,7 +86,6 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jazz_tools::batch_fate::LocalBatchRecord;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::binding_support::serialize_mutation_error_event;
 use jazz_tools::binding_support::{parse_batch_id_input, parse_read_durability_options};
@@ -1183,6 +1182,176 @@ impl WasmRuntime {
             .set_client_role_by_name(cid, client_role);
         Ok(())
     }
+
+    /// Drive the runtime's batched receive/apply/send loop immediately.
+    pub fn batched_tick(&self) {
+        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
+        self.batched_tick_and_emit_mutation_errors();
+    }
+
+    fn batched_tick_and_emit_mutation_errors(&self) {
+        self.core.borrow_mut().batched_tick();
+    }
+
+    pub fn replay_batch_rejection(
+        &self,
+        batch_id: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.replay_batch_rejection(batch_id, code, reason)
+            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
+    }
+
+    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
+        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
+            .schema;
+
+        let mut core = self.core.borrow_mut();
+        core.add_live_schema_and_persist_catalogue(schema)
+            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
+
+        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
+        core.immediate_tick();
+        core.batched_tick();
+
+        Ok(())
+    }
+
+    /// Flush all data to persistent storage (snapshot).
+    pub fn flush(&self) -> Result<(), JsValue> {
+        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
+        self.core
+            .borrow_mut()
+            .flush_storage()
+            .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
+    }
+
+    /// Flush only the WAL buffer to OPFS (not the snapshot).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn flush_wal(&self) -> Result<(), JsValue> {
+        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
+        self.core
+            .borrow_mut()
+            .flush_wal()
+            .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
+    }
+
+    /// Create a persistent WasmRuntime backed by OPFS.
+    ///
+    /// Opens a single OPFS file namespace and restores state from the latest
+    /// durable checkpoint.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn open_persistent(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+    ) -> Result<WasmRuntime, JsValue> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
+        let _span = info_span!(
+            "WasmRuntime::openPersistent",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening persistent OPFS runtime");
+
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let mut schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
+                .map_err(JsValue::from)?;
+
+        let storage: Box<dyn Storage> = Box::new(
+            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
+                .await
+                .map_err(|e| {
+                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
+                        let err = js_sys::Error::new(msg);
+                        err.set_name("SecurityError");
+                        JsValue::from(err)
+                    } else {
+                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
+                    }
+                })?,
+        );
+
+        if let Err(error) =
+            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
+        {
+            warn!(
+                %app_id,
+                ?error,
+                "failed to rehydrate schema manager from catalogue storage"
+            );
+        }
+
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
+            tier_label,
+            use_binary_encoding,
+        ))
+    }
+
+    /// Create an ephemeral WasmRuntime backed by in-memory storage.
+    ///
+    /// Data is not persisted across page loads. Used as a fallback when OPFS
+    /// is unavailable (e.g. Firefox private browsing mode).
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_ephemeral(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+    ) -> Result<WasmRuntime, JsError> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
+        let _span = info_span!(
+            "WasmRuntime::openEphemeral",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening ephemeral in-memory runtime (OPFS unavailable)");
+
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
+
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
+
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
+            tier_label,
+            use_binary_encoding,
+        ))
+    }
 }
 
 #[wasm_bindgen]
@@ -1294,17 +1463,6 @@ impl WasmRuntime {
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
         })
-    }
-
-    /// Drive the runtime's batched receive/apply/send loop immediately.
-    #[wasm_bindgen(js_name = batchedTick)]
-    pub fn batched_tick(&self) {
-        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
-        self.batched_tick_and_emit_mutation_errors();
-    }
-
-    fn batched_tick_and_emit_mutation_errors(&self) {
-        self.core.borrow_mut().batched_tick();
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1630,30 +1788,6 @@ impl WasmRuntime {
         }))
     }
 
-    #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
-    pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
-        let mut data = vec![0; bytes.length() as usize];
-        bytes.copy_to(&mut data);
-        let record = LocalBatchRecord::decode_storage_row(&data)
-            .map_err(|e| JsError::new(&format!("Decode local batch record failed: {e}")))?;
-        let mut core = self.core.borrow_mut();
-        core.hydrate_local_batch_record(record)
-            .map_err(|e| JsError::new(&format!("Hydrate local batch record failed: {e}")))
-    }
-
-    #[wasm_bindgen(js_name = replayBatchRejection)]
-    pub fn replay_batch_rejection(
-        &self,
-        batch_id: &str,
-        code: &str,
-        reason: &str,
-    ) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.replay_batch_rejection(batch_id, code, reason)
-            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
-    }
-
     #[wasm_bindgen(js_name = rollbackBatch)]
     pub fn rollback_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
@@ -1810,157 +1944,6 @@ impl WasmRuntime {
             ))
         })
     }
-
-    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
-    #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
-    pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
-            .schema;
-
-        let mut core = self.core.borrow_mut();
-        core.add_live_schema_and_persist_catalogue(schema)
-            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
-
-        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
-        core.immediate_tick();
-        core.batched_tick();
-
-        Ok(())
-    }
-
-    /// Flush all data to persistent storage (snapshot).
-    #[wasm_bindgen]
-    pub fn flush(&self) -> Result<(), JsValue> {
-        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
-        self.core
-            .borrow_mut()
-            .flush_storage()
-            .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
-    }
-
-    /// Flush only the WAL buffer to OPFS (not the snapshot).
-    #[wasm_bindgen(js_name = flushWal)]
-    pub fn flush_wal(&self) -> Result<(), JsValue> {
-        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
-        self.core
-            .borrow_mut()
-            .flush_wal()
-            .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
-    }
-
-    /// Create a persistent WasmRuntime backed by OPFS.
-    ///
-    /// Opens a single OPFS file namespace and restores state from the latest
-    /// durable checkpoint.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openPersistent)]
-    pub async fn open_persistent(
-        schema_json: &str,
-        app_id: &str,
-        env: &str,
-        user_branch: &str,
-        db_name: &str,
-        tier: Option<String>,
-        use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsValue> {
-        #[cfg(feature = "console_error_panic_hook")]
-        console_error_panic_hook::set_once();
-        init_tracing();
-
-        let tier_label = tier_label_for_node_tier(tier.as_deref());
-        let _span = info_span!(
-            "WasmRuntime::openPersistent",
-            tier = tier_label,
-            app_id,
-            env,
-            user_branch,
-            db_name
-        )
-        .entered();
-        info!("opening persistent OPFS runtime");
-
-        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let mut schema_manager =
-            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
-                .map_err(JsValue::from)?;
-
-        let storage: Box<dyn Storage> = Box::new(
-            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
-                .await
-                .map_err(|e| {
-                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
-                        let err = js_sys::Error::new(msg);
-                        err.set_name("SecurityError");
-                        JsValue::from(err)
-                    } else {
-                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
-                    }
-                })?,
-        );
-
-        if let Err(error) =
-            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
-        {
-            warn!(
-                %app_id,
-                ?error,
-                "failed to rehydrate schema manager from catalogue storage"
-            );
-        }
-
-        Ok(assemble_wasm_runtime(
-            schema_manager,
-            storage,
-            tier_label,
-            use_binary_encoding,
-        ))
-    }
-
-    /// Create an ephemeral WasmRuntime backed by in-memory storage.
-    ///
-    /// Data is not persisted across page loads. Used as a fallback when OPFS
-    /// is unavailable (e.g. Firefox private browsing mode).
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openEphemeral)]
-    pub fn open_ephemeral(
-        schema_json: &str,
-        app_id: &str,
-        env: &str,
-        user_branch: &str,
-        db_name: &str,
-        tier: Option<String>,
-        use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsError> {
-        #[cfg(feature = "console_error_panic_hook")]
-        console_error_panic_hook::set_once();
-        init_tracing();
-
-        let tier_label = tier_label_for_node_tier(tier.as_deref());
-        let _span = info_span!(
-            "WasmRuntime::openEphemeral",
-            tier = tier_label,
-            app_id,
-            env,
-            user_branch,
-            db_name
-        )
-        .entered();
-        info!("opening ephemeral in-memory runtime (OPFS unavailable)");
-
-        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let schema_manager =
-            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
-
-        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
-
-        Ok(assemble_wasm_runtime(
-            schema_manager,
-            storage,
-            tier_label,
-            use_binary_encoding,
-        ))
-    }
 }
 
 /// A `SyncSender` that drops every message. Installed on bridge shutdown so
@@ -2017,13 +2000,6 @@ impl WasmRuntime {
             now_seconds,
         )
         .map_err(|e| JsError::new(&e))
-    }
-
-    #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
-    pub fn get_public_key_b64_static(seed_b64: &str) -> Result<String, JsError> {
-        let seed = decode_seed(seed_b64)?;
-        let verifying_key = identity::derive_verifying_key(&seed);
-        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 
     /// Connect to a Jazz server over WebSocket.

@@ -86,9 +86,6 @@ export interface Runtime {
    * Options are parsed at attach time; `bridge.init()` is parameter-less.
    */
   createWorkerBridge?(worker: Worker, options: object): unknown;
-  /** Drive a synchronous batched tick. Used by callers that need to flush
-   * pending state before a synchronous teardown. */
-  batchedTick?(): void;
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
