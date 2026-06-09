@@ -587,107 +587,6 @@ export function runInBatch<
   return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
-abstract class BatchHandleBase {
-  constructor(
-    private readonly client: JazzClient,
-    readonly batchId: BatchId,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-  ) {}
-
-  commit(): WriteHandle {
-    return this.client.commitBatch(this.batchId);
-  }
-
-  rollback(): void {
-    this.client.rollbackBatch(this.batchId);
-  }
-
-  insert(table: string, values: InsertValues, options?: CreateOptions): Row {
-    const row = this.client.insertInternal(
-      table,
-      values,
-      options,
-      this.session,
-      this.attribution,
-      this.batchId,
-    );
-    return row;
-  }
-
-  restore(table: string, objectId: string, values: InsertValues, options?: RestoreOptions): Row {
-    const row = this.client.restoreInternal(
-      table,
-      objectId,
-      values,
-      options,
-      this.session,
-      this.attribution,
-      this.batchId,
-    );
-    return row;
-  }
-
-  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.client.upsertInternal(
-      table,
-      values,
-      options,
-      this.session,
-      this.attribution,
-      this.batchId,
-    );
-  }
-
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.client.updateInternal(
-      objectId,
-      updates,
-      undefined,
-      this.session,
-      this.attribution,
-      this.batchId,
-    );
-  }
-
-  delete(objectId: string): void {
-    this.client.deleteInternal(objectId, undefined, this.session, this.attribution, this.batchId);
-  }
-
-  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
-    return this.client.query(
-      query,
-      {
-        ...options,
-        localUpdates: "deferred",
-        transactionBatchId: this.batchId,
-      },
-      this.session,
-    );
-  }
-}
-
-/**
- * Transactions group a set of writes that should settle together after an authority validates them.
- *
- * Data read and written through this transaction is scoped to it, and will only be
- * globally visible once it's committed and accepted by the authority.
- */
-export class Transaction extends BatchHandleBase {
-  constructor(client: JazzClient, batchId: BatchId, session?: Session, attribution?: string) {
-    super(client, batchId, session, attribution);
-  }
-}
-
-/**
- * Direct batches group a set of writes under one batch id and publish them when committed.
- */
-export class DirectBatch extends BatchHandleBase {
-  constructor(client: JazzClient, batchId: BatchId, session?: Session, attribution?: string) {
-    super(client, batchId, session, attribution);
-  }
-}
-
 /**
  * High-level Jazz client.
  */
@@ -800,26 +699,8 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  private createBatch(batchMode: BatchMode): BatchId {
+  beginBatch(batchMode: BatchMode): BatchId {
     return this.runtime.beginBatch(batchMode);
-  }
-
-  beginTransaction(session?: Session, attribution?: string): Transaction {
-    return new Transaction(
-      this,
-      this.createBatch("transactional"),
-      this.resolveWriteSession(session, attribution),
-      attribution,
-    );
-  }
-
-  beginBatch(session?: Session, attribution?: string): DirectBatch {
-    return new DirectBatch(
-      this,
-      this.createBatch("direct"),
-      this.resolveWriteSession(session, attribution),
-      attribution,
-    );
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {

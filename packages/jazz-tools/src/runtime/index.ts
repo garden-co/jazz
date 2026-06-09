@@ -1,6 +1,5 @@
 export {
   type CreateOptions,
-  DirectBatch,
   JazzClient,
   type AuthConfig,
   type BatchMode,
@@ -9,7 +8,6 @@ export {
   type LocalUpdatesMode,
   type MutationErrorEvent,
   PersistedWriteRejectedError,
-  Transaction,
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
