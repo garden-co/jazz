@@ -347,10 +347,12 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         perform_upstream_connect(&runtime_rc, &ws_url, &auth_json);
     }
 
-    // 7. Sync retained local batch records to main. Rejected-batch error
-    //    replay already happened in step 4b; live rejections are handled by
-    //    normal sync payloads reaching the main runtime.
-    sync_retained_local_batch_records(&runtime_rc);
+    // 7. Sync retained local batch records to main only when an upstream can
+    //    promote local fates. Rejected-batch error replay already happened in
+    //    step 4b; live rejections are handled by normal sync payloads.
+    if init.fields.server_url.is_some() {
+        sync_retained_local_batch_records(&runtime_rc);
+    }
 
     // 8. Flip state to Ready before draining (so message handlers process
     //    directly via the dispatch path rather than re-buffering).
