@@ -102,12 +102,24 @@ Worker-side reconciliation stays in worker:
 - Worker forwards normal row and fate sync messages to main through the existing
   sync channel.
 
-Fate-only batches without a retained local batch record or sealed submission are
-not replayed as overlays. The assumption is that well-formed committed local
-batches retain a sealed submission even if their `LocalBatchRecord` is pruned.
-The existing commit path persists sealed submissions and does not delete them on
-ack. A fate-only retained batch therefore indicates incomplete or inconsistent
-metadata, not a normal startup overlay source.
+Correctness invariant for the no-scan claim:
+
+> Every row that still needs optimistic local overlay on main also still has a
+> retained `SealedBatchSubmission` on the worker.
+
+The design drops today's third retained-batch source: fate-only batches with no
+retained local batch record and no sealed submission, discovered by calling
+`local_batch_rows(fate.batch_id())` and falling into a full row-locator/history
+scan. Dropping that source is correct only because retained sealed submissions
+are the complete source for rows that still matter to main's optimistic overlay.
+
+That invariant follows from the current submission lifecycle: commit persists a
+sealed submission, and seal handling prunes submissions only for rejected batches
+or fates confirmed at `GlobalServer` or higher. A purely local batch keeps its
+sealed submission, so the worker can recover its overlay members from trusted
+retained metadata without scanning all rows. A fate-only retained batch therefore
+indicates incomplete or inconsistent metadata, not a normal startup overlay
+source.
 
 ## Main Data Flow
 
