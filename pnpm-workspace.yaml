@@ -5,6 +5,7 @@ packages:
   - examples/*
   - examples/docs/*
   - dev/stress-tests/*
+  - dev/opfs-btree-viewer
   - dev/local-telemetry/web
   - crates
   - crates/jazz-wasm

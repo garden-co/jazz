@@ -31,6 +31,11 @@ declare module "jazz-wasm" {
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): WasmTraceEntry[];
   export function subscribeTraceEntries(callback: () => void): () => void;
+  export function scanOpfsBTreeEntriesFromFileBytes(fileBytes: Uint8Array): Array<{
+    key: string;
+    keyBytes: Uint8Array;
+    value: Uint8Array;
+  }>;
   /**
    * Worker-side entry point. Called by the JS shim after WASM init.
    * Synchronously installs a Rust closure as `self.onmessage`, then opens

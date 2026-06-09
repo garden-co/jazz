@@ -347,6 +347,50 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(out)
     }
 
+    pub fn raw_entries(&mut self, limit: usize) -> Result<Vec<KvPair>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::raw_entries", limit).entered();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        let mut current = self.leftmost_leaf_page_id()?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
+
+            self.ensure_page_loaded(page_id)?;
+            let raw = self.raw_page_bytes(page_id)?;
+            let page = decode_page(raw, self.options.page_size)?;
+            let Page::Leaf { entries, next } = page else {
+                return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+            };
+
+            for (key, value) in entries {
+                let value = match value {
+                    ValueCell::Inline(value) => value,
+                    ValueCell::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => self.read_overflow_value(head_page_id, total_len as usize)?,
+                };
+                out.push((key, value));
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+
+            current = next;
+        }
+
+        Ok(out)
+    }
+
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
         let _span = tracing::debug_span!(
             "OpfsBTree::checkpoint",
@@ -955,6 +999,38 @@ impl<F: SyncFile> OpfsBTree<F> {
                     )));
                 }
                 PageKind::Freelist => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected freelist page {} in tree path",
+                        current
+                    )));
+                }
+            }
+        }
+    }
+
+    fn leftmost_leaf_page_id(&mut self) -> Result<Option<PageId>, BTreeError> {
+        let mut current = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        loop {
+            self.ensure_page_loaded(current)?;
+            let raw = self.raw_page_bytes(current)?;
+            match decode_page(raw, self.options.page_size)? {
+                Page::Leaf { .. } => return Ok(Some(current)),
+                Page::Internal { children, .. } => {
+                    current = *children.first().ok_or_else(|| {
+                        BTreeError::Corrupt("internal page has no children".to_string())
+                    })?;
+                }
+                Page::Overflow { .. } => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected overflow page {} in tree path",
+                        current
+                    )));
+                }
+                Page::Freelist { .. } => {
                     return Err(BTreeError::Corrupt(format!(
                         "unexpected freelist page {} in tree path",
                         current
@@ -1947,6 +2023,32 @@ mod tests {
 
         tree.delete(b"b").expect("delete b");
         assert_eq!(tree.get(b"b").expect("get b after delete"), None);
+    }
+
+    #[test]
+    fn raw_entries_scan_the_full_keyspace() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        tree.put(&[0x00], b"zero").expect("put zero");
+        tree.put(b"a", b"alpha").expect("put alpha");
+        tree.put(&[0xff], b"max").expect("put max");
+
+        assert_eq!(
+            tree.raw_entries(10).expect("raw entries"),
+            vec![
+                (vec![0x00], b"zero".to_vec()),
+                (b"a".to_vec(), b"alpha".to_vec()),
+                (vec![0xff], b"max".to_vec()),
+            ]
+        );
+        assert_eq!(
+            tree.raw_entries(2).expect("limited raw entries"),
+            vec![
+                (vec![0x00], b"zero".to_vec()),
+                (b"a".to_vec(), b"alpha".to_vec()),
+            ]
+        );
     }
 
     #[test]
