@@ -100,17 +100,18 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
 }
 
 /**
- * Convert an insert object to a named WasmValue record.
+ * Convert a mutation object to a named WasmValue record.
  *
  * Only includes fields that are present in the data object.
- * Undefined values are skipped so Rust can apply schema defaults.
+ * Undefined values are skipped so Rust can apply schema defaults or leave
+ * fields unchanged, depending on the write operation.
  *
- * @param data The Init object with field values
+ * @param data Object with fields to write
  * @param schema WasmSchema containing table definitions
- * @param tableName Name of the table to insert into
+ * @param tableName Name of the table being written
  * @returns Record mapping column names to WasmValues
  */
-export function toInsertRecord(
+export function toWriteRecord(
   data: Record<string, unknown>,
   schema: WasmSchema,
   tableName: string,
@@ -121,42 +122,6 @@ export function toInsertRecord(
   }
 
   const result: InsertValues = {};
-  for (const [key, value] of Object.entries(data)) {
-    if (value === undefined) continue;
-    const col = table.columns.find((c) => c.name === key);
-    if (!col) {
-      throw new Error(`Unknown column "${key}" on table "${tableName}"`);
-    }
-    if (value === null && !col.nullable) {
-      throw new Error(`Cannot set required field '${key}' to null`);
-    }
-    result[key] = toValue(value, col.column_type);
-  }
-  return result;
-}
-
-/**
- * Convert partial update object to Record<string, WasmValue>.
- *
- * Only includes fields that are present in the data object.
- * Undefined values are skipped.
- *
- * @param data Partial object with fields to update
- * @param schema WasmSchema containing table definitions
- * @param tableName Name of the table being updated
- * @returns Record mapping column names to WasmValues
- */
-export function toUpdateRecord(
-  data: Record<string, unknown>,
-  schema: WasmSchema,
-  tableName: string,
-): Record<string, WasmValue> {
-  const table = schema[tableName];
-  if (!table) {
-    throw new Error(`Unknown table "${tableName}"`);
-  }
-
-  const result: Record<string, WasmValue> = {};
   for (const [key, value] of Object.entries(data)) {
     if (value === undefined) continue;
     const col = table.columns.find((c) => c.name === key);

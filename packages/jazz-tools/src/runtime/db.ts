@@ -44,7 +44,7 @@ import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./wo
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
+import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
@@ -618,7 +618,7 @@ abstract class DbBatchHandleBase {
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const { client, batchId, session, attribution } = this.requireBinding("insert");
     const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
@@ -638,7 +638,7 @@ abstract class DbBatchHandleBase {
   ): T {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const { client, batchId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
@@ -661,7 +661,7 @@ abstract class DbBatchHandleBase {
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const { client, batchId, session, attribution } = this.requireBinding("upsert");
     client.upsertInternal(table._table, values, options, session, attribution, batchId);
   }
@@ -675,7 +675,7 @@ abstract class DbBatchHandleBase {
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecord(transformedData, table._schema, table._table);
     const { client, batchId, session, attribution } = this.requireBinding("update");
     client.updateInternal(id, updates, undefined, session, attribution, batchId);
   }
@@ -1723,7 +1723,7 @@ export class Db {
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     const inserted = client.insert(
       table._table,
@@ -1750,7 +1750,7 @@ export class Db {
   ): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     const restored = client.restore(
       table._table,
@@ -1777,7 +1777,7 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     return client.upsert(table._table, values, options, context?.session, context?.attribution);
   }
@@ -1795,7 +1795,7 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     return client.update(id, updates, options, context?.session, context?.attribution);
   }
