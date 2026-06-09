@@ -96,7 +96,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }));
         batch_ids.sort();
         batch_ids.dedup();
-        batch_ids.retain(|batch_id| !self.local_batch_rows(*batch_id).is_empty());
+        let batch_id_set = batch_ids.iter().copied().collect();
+        let local_rows_by_batch = self.local_batch_rows_for_batch_ids(&batch_id_set);
+        batch_ids.retain(|batch_id| local_rows_by_batch.contains_key(batch_id));
         batch_ids
     }
 

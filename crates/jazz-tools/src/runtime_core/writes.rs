@@ -854,6 +854,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| {
                 RuntimeError::WriteError(format!("scan authoritative batch fates: {err}"))
             })?;
+        let fate_batch_ids: std::collections::HashSet<_> = fates
+            .iter()
+            .filter(|fate| {
+                !retained_batch_ids.contains(&fate.batch_id())
+                    && Self::sealed_batch_still_needs_edge_reconciliation(Some(fate))
+            })
+            .map(|fate| fate.batch_id())
+            .collect();
+        let local_rows_by_batch = self.local_batch_rows_for_batch_ids(&fate_batch_ids);
         for fate in fates {
             if retained_batch_ids.contains(&fate.batch_id()) {
                 continue;
@@ -861,9 +870,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if !Self::sealed_batch_still_needs_edge_reconciliation(Some(&fate)) {
                 continue;
             }
-            let local_rows = self.local_batch_rows(fate.batch_id());
+            let local_rows = local_rows_by_batch
+                .get(&fate.batch_id())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if let Some(submission) =
-                Self::direct_sealed_submission_from_local_batch_rows(fate.batch_id(), &local_rows)
+                Self::direct_sealed_submission_from_local_batch_rows(fate.batch_id(), local_rows)
                 && let Some(record) =
                     self.local_batch_record_from_sealed_submission(submission, Some(fate.clone()))?
             {

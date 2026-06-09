@@ -4,7 +4,39 @@ use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 use crate::sync_manager::{RowMetadata, SyncPayload};
 
+pub(crate) type LocalBatchRow = (
+    LocalBatchMember,
+    crate::storage::RowLocator,
+    crate::row_histories::StoredRowBatch,
+);
+
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn sort_local_batch_rows(rows: &mut [LocalBatchRow]) {
+        rows.sort_by(
+            |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
+                left_member
+                    .object_id
+                    .uuid()
+                    .as_bytes()
+                    .cmp(right_member.object_id.uuid().as_bytes())
+                    .then_with(|| {
+                        left_locator
+                            .table
+                            .as_str()
+                            .cmp(right_locator.table.as_str())
+                    })
+                    .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
+                    .then_with(|| {
+                        left_member
+                            .schema_hash
+                            .as_bytes()
+                            .cmp(right_member.schema_hash.as_bytes())
+                    })
+                    .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
+            },
+        );
+    }
+
     fn local_batch_row_was_insert(
         &self,
         table: &str,
@@ -24,14 +56,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         })
     }
 
-    pub(crate) fn local_batch_rows(
+    fn local_batch_rows_without_locator_scan(
         &self,
         batch_id: crate::row_histories::BatchId,
-    ) -> Vec<(
-        LocalBatchMember,
-        crate::storage::RowLocator,
-        crate::row_histories::StoredRowBatch,
-    )> {
+    ) -> Vec<LocalBatchRow> {
         let mut rows = Vec::new();
         if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
             for sealed_member in submission.members {
@@ -135,6 +163,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 rows.push((member, row_locator, row));
             }
         }
+
+        Self::sort_local_batch_rows(&mut rows);
+        rows
+    }
+
+    pub(crate) fn local_batch_rows(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<LocalBatchRow> {
+        let mut rows = self.local_batch_rows_without_locator_scan(batch_id);
         if rows.is_empty()
             && let Ok(row_locators) = self.storage.scan_row_locators()
         {
@@ -167,39 +205,71 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
 
-        rows.sort_by(
-            |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
-                left_member
-                    .object_id
-                    .uuid()
-                    .as_bytes()
-                    .cmp(right_member.object_id.uuid().as_bytes())
-                    .then_with(|| {
-                        left_locator
-                            .table
-                            .as_str()
-                            .cmp(right_locator.table.as_str())
-                    })
-                    .then_with(|| left_row.branch.as_str().cmp(right_row.branch.as_str()))
-                    .then_with(|| {
-                        left_member
-                            .schema_hash
-                            .as_bytes()
-                            .cmp(right_member.schema_hash.as_bytes())
-                    })
-                    .then_with(|| left_row.batch_id.0.cmp(&right_row.batch_id.0))
-            },
-        );
+        Self::sort_local_batch_rows(&mut rows);
         rows
+    }
+
+    pub(crate) fn local_batch_rows_for_batch_ids(
+        &self,
+        batch_ids: &std::collections::HashSet<crate::row_histories::BatchId>,
+    ) -> std::collections::HashMap<crate::row_histories::BatchId, Vec<LocalBatchRow>> {
+        let mut rows_by_batch = std::collections::HashMap::new();
+        let mut missing_rows = std::collections::HashSet::new();
+
+        for batch_id in batch_ids {
+            let rows = self.local_batch_rows_without_locator_scan(*batch_id);
+            if rows.is_empty() {
+                missing_rows.insert(*batch_id);
+            } else {
+                rows_by_batch.insert(*batch_id, rows);
+            }
+        }
+
+        if !missing_rows.is_empty()
+            && let Ok(row_locators) = self.storage.scan_row_locators()
+        {
+            for (object_id, row_locator) in row_locators {
+                let Ok(history_rows) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+                else {
+                    continue;
+                };
+                for row in history_rows
+                    .into_iter()
+                    .filter(|row| missing_rows.contains(&row.batch_id))
+                {
+                    let batch_id = row.batch_id;
+                    let branch_name = BranchName::new(row.branch.as_str());
+                    let Ok(schema_hash) =
+                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
+                    else {
+                        continue;
+                    };
+                    let member = LocalBatchMember {
+                        object_id,
+                        table_name: row_locator.table.to_string(),
+                        branch_name,
+                        schema_hash,
+                        row_digest: row.content_digest(),
+                    };
+                    rows_by_batch
+                        .entry(batch_id)
+                        .or_insert_with(Vec::new)
+                        .push((member, row_locator.clone(), row));
+                }
+            }
+        }
+
+        for rows in rows_by_batch.values_mut() {
+            Self::sort_local_batch_rows(rows);
+        }
+        rows_by_batch
     }
 
     pub(crate) fn direct_sealed_submission_from_local_batch_rows(
         batch_id: crate::row_histories::BatchId,
-        rows: &[(
-            LocalBatchMember,
-            crate::storage::RowLocator,
-            crate::row_histories::StoredRowBatch,
-        )],
+        rows: &[LocalBatchRow],
     ) -> Option<SealedBatchSubmission> {
         let first_branch = rows.first()?.0.branch_name;
         if rows
