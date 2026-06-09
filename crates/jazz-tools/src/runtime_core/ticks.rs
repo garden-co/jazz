@@ -122,39 +122,44 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::row_histories::StoredRowBatch,
     )> {
         let mut rows = Vec::new();
-        if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
-            for sealed_member in submission.members {
-                let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
-                else {
-                    continue;
-                };
+        if let Ok(indexed_members) = self.storage.scan_batch_row_members(batch_id) {
+            for indexed_member in indexed_members {
+                let branch_name = BranchName::new(indexed_member.branch_name.as_str());
                 let Some(row) = self
                     .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
+                    .load_history_row_batch(
+                        indexed_member.table_name.as_str(),
+                        indexed_member.branch_name.as_str(),
+                        indexed_member.object_id,
+                        batch_id,
+                    )
                     .ok()
-                    .and_then(|rows| {
-                        rows.into_iter().find(|row| {
-                            row.batch_id == batch_id
-                                && row.branch.as_str() == submission.target_branch_name.as_str()
-                                && row.content_digest() == sealed_member.row_digest
-                        })
-                    })
+                    .flatten()
                 else {
                     continue;
                 };
                 let Ok(schema_hash) = self.local_batch_member_schema_hash(
-                    submission.target_branch_name,
-                    sealed_member.object_id,
+                    branch_name,
+                    indexed_member.object_id,
                     batch_id,
                 ) else {
                     continue;
                 };
+                let row_locator = self
+                    .storage
+                    .load_row_locator(indexed_member.object_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| crate::storage::RowLocator {
+                        table: indexed_member.table_name.clone().into(),
+                        origin_schema_hash: None,
+                    });
                 let member = LocalBatchMember {
-                    object_id: sealed_member.object_id,
-                    table_name: row_locator.table.to_string(),
-                    branch_name: submission.target_branch_name,
+                    object_id: indexed_member.object_id,
+                    table_name: indexed_member.table_name,
+                    branch_name,
                     schema_hash,
-                    row_digest: sealed_member.row_digest,
+                    row_digest: row.content_digest(),
                 };
                 rows.push((member, row_locator, row));
             }
@@ -173,27 +178,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         table: member.table_name.clone().into(),
                         origin_schema_hash: None,
                     });
-                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                    member.table_name.as_str(),
-                    member.schema_hash,
-                    member.branch_name.as_str(),
-                    member.object_id,
-                    batch_id,
-                ) else {
-                    let Some(row) = self
-                        .storage
-                        .scan_history_row_batches(member.table_name.as_str(), member.object_id)
-                        .ok()
-                        .and_then(|rows| {
-                            rows.into_iter().find(|row| {
-                                row.batch_id == batch_id
-                                    && row.branch.as_str() == member.branch_name.as_str()
-                            })
-                        })
-                    else {
-                        continue;
-                    };
-                    rows.push((member, row_locator, row));
+                let Some(row) = self
+                    .storage
+                    .load_history_row_batch_for_schema_hash(
+                        member.table_name.as_str(),
+                        member.schema_hash,
+                        member.branch_name.as_str(),
+                        member.object_id,
+                        batch_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        self.storage
+                            .load_history_row_batch(
+                                member.table_name.as_str(),
+                                member.branch_name.as_str(),
+                                member.object_id,
+                                batch_id,
+                            )
+                            .ok()
+                            .flatten()
+                    })
+                else {
                     continue;
                 };
                 rows.push((member, row_locator, row));
@@ -212,47 +219,71 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         table: member.table_name.clone().into(),
                         origin_schema_hash: None,
                     });
-                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                    member.table_name.as_str(),
-                    member.schema_hash,
-                    member.branch_name.as_str(),
-                    member.object_id,
-                    batch_id,
-                ) else {
+                let Some(row) = self
+                    .storage
+                    .load_history_row_batch_for_schema_hash(
+                        member.table_name.as_str(),
+                        member.schema_hash,
+                        member.branch_name.as_str(),
+                        member.object_id,
+                        batch_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        self.storage
+                            .load_history_row_batch(
+                                member.table_name.as_str(),
+                                member.branch_name.as_str(),
+                                member.object_id,
+                                batch_id,
+                            )
+                            .ok()
+                            .flatten()
+                    })
+                else {
                     continue;
                 };
                 rows.push((member, row_locator, row));
             }
         }
         if rows.is_empty()
-            && let Ok(row_locators) = self.storage.scan_row_locators()
+            && let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id)
         {
-            for (object_id, row_locator) in row_locators {
-                let Ok(history_rows) = self
-                    .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+            for sealed_member in submission.members {
+                let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
                 else {
                     continue;
                 };
-                for row in history_rows
-                    .into_iter()
-                    .filter(|row| row.batch_id == batch_id)
-                {
-                    let branch_name = BranchName::new(row.branch.as_str());
-                    let Ok(schema_hash) =
-                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
-                    else {
-                        continue;
-                    };
-                    let member = LocalBatchMember {
-                        object_id,
-                        table_name: row_locator.table.to_string(),
-                        branch_name,
-                        schema_hash,
-                        row_digest: row.content_digest(),
-                    };
-                    rows.push((member, row_locator.clone(), row));
-                }
+                let Some(row) = self
+                    .storage
+                    .load_history_row_batch(
+                        row_locator.table.as_str(),
+                        submission.target_branch_name.as_str(),
+                        sealed_member.object_id,
+                        batch_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .filter(|row| row.content_digest() == sealed_member.row_digest)
+                else {
+                    continue;
+                };
+                let Ok(schema_hash) = self.local_batch_member_schema_hash(
+                    submission.target_branch_name,
+                    sealed_member.object_id,
+                    batch_id,
+                ) else {
+                    continue;
+                };
+                let member = LocalBatchMember {
+                    object_id: sealed_member.object_id,
+                    table_name: row_locator.table.to_string(),
+                    branch_name: submission.target_branch_name,
+                    schema_hash,
+                    row_digest: sealed_member.row_digest,
+                };
+                rows.push((member, row_locator, row));
             }
         }
 

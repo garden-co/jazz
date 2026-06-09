@@ -12,7 +12,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .unwrap_or(DurabilityTier::Local)
         }
     }
-    fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
+    pub(crate) fn pending_batch_ids_needing_reconciliation(
+        &self,
+    ) -> Vec<crate::row_histories::BatchId> {
         let terminal_tier = self.retained_batch_terminal_tier();
 
         let mut batch_ids = self
@@ -56,26 +58,33 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 })
                 .map(|fate| fate.batch_id()),
         );
-        if let Ok(row_locators) = self.storage.scan_row_locators() {
-            for (object_id, row_locator) in row_locators {
-                let Ok(history_rows) = self
+        if let Ok(indexed_members) = self.storage.scan_all_batch_row_members() {
+            for member in indexed_members {
+                let fate = self
                     .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+                    .load_authoritative_batch_fate(member.batch_id)
+                    .ok()
+                    .flatten();
+                if !Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref()) {
+                    continue;
+                }
+                let Some(row) = self
+                    .storage
+                    .load_history_row_batch(
+                        member.table_name.as_str(),
+                        member.branch_name.as_str(),
+                        member.object_id,
+                        member.batch_id,
+                    )
+                    .ok()
+                    .flatten()
                 else {
                     continue;
                 };
-                batch_ids.extend(history_rows.into_iter().filter_map(|row| {
-                    if !matches!(row.state, crate::row_histories::RowState::VisibleDirect) {
-                        return None;
-                    }
-                    let fate = self
-                        .storage
-                        .load_authoritative_batch_fate(row.batch_id)
-                        .ok()
-                        .flatten();
-                    Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref())
-                        .then_some(row.batch_id)
-                }));
+                if !matches!(row.state, crate::row_histories::RowState::VisibleDirect) {
+                    continue;
+                }
+                batch_ids.push(row.batch_id);
             }
         }
         batch_ids.extend(self.local_batch_record_cache.values().filter_map(|record| {

@@ -832,6 +832,86 @@ fn rc_add_server_requests_pending_batch_fate_reconciliation() {
 }
 
 #[test]
+fn retained_batch_reconciliation_uses_batch_member_index_without_row_store_scans() {
+    let storage = RowRegionReadFailingStorage::with_row_locator_scan_failure();
+    let calls = storage.calls.clone();
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "retained-batch-reconciliation-index-no-scan-test",
+        Box::new(storage),
+    );
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut core,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+    core.commit_batch(batch_id).unwrap();
+
+    for index in 0..5 {
+        let unrelated_batch_id = BatchId::new();
+        let unrelated_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+            .with_batch_id(unrelated_batch_id);
+        core.insert(
+            "users",
+            user_insert_values(ObjectId::new(), &format!("Unrelated {index}")),
+            Some(&unrelated_context),
+        )
+        .unwrap();
+        core.commit_batch(unrelated_batch_id).unwrap();
+        core.storage_mut()
+            .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+                batch_id: unrelated_batch_id,
+                code: "test_terminal".to_string(),
+                reason: "unrelated terminal batch".to_string(),
+            })
+            .unwrap();
+    }
+
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.sync_sender().take();
+    let before = *calls.lock().unwrap();
+    let pending_batch_ids = core.pending_batch_ids_needing_reconciliation();
+    let after = *calls.lock().unwrap();
+
+    assert_eq!(pending_batch_ids, vec![batch_id]);
+    assert_eq!(
+        after.scan_row_locator_calls - before.scan_row_locator_calls,
+        0,
+        "retained batch reconciliation must not scan row locators"
+    );
+    assert_eq!(
+        after.scan_history_row_batches_calls - before.scan_history_row_batches_calls,
+        0,
+        "retained batch reconciliation must not scan history row batches"
+    );
+    assert_eq!(
+        after.load_history_row_batch_calls - before.load_history_row_batch_calls,
+        2,
+        "exact row loads should scale with retained batch members, not unrelated terminal rows"
+    );
+}
+
+#[test]
 fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
     // `captured_frontier` is compatibility payload now. This test only proves
     // old-format sealed submissions are preserved while retransmitting; it is

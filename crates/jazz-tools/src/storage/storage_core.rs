@@ -1,8 +1,11 @@
 use super::key_codec::{
-    history_row_raw_table_key, increment_string, raw_table_entry_key, raw_table_prefix,
-    raw_table_scan_prefix, strip_raw_table_key, visible_row_raw_table_key,
+    batch_row_member_key, history_row_raw_table_key, increment_string, raw_table_entry_key,
+    raw_table_prefix, raw_table_scan_prefix, strip_raw_table_key, visible_row_raw_table_key,
 };
-use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
+use super::{
+    BATCH_ROW_MEMBER_TABLE, HistoryRowBytes, RawTableKeys, RawTableRows, StorageError,
+    VisibleRowBytes,
+};
 
 pub(super) fn raw_table_put_core(
     table: &str,
@@ -108,6 +111,19 @@ pub(super) fn append_history_region_row_bytes_core(
     for row in rows {
         let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
         raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn put_batch_row_members_core(
+    table: &str,
+    rows: &[HistoryRowBytes<'_>],
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for row in rows {
+        let key = batch_row_member_key(row.batch_id, table, row.branch, row.row_id);
+        raw_table_put_core(BATCH_ROW_MEMBER_TABLE, &key, &[], &mut set)?;
     }
     Ok(())
 }

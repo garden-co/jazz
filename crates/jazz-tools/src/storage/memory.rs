@@ -220,6 +220,12 @@ impl Storage for MemoryStorage {
                     (encoded.branch.clone().into(), encoded.batch_id),
                     encoded.bytes.clone(),
                 );
+            self.put_batch_row_member(
+                table.as_str(),
+                encoded.branch.as_str(),
+                encoded.row_id,
+                encoded.batch_id,
+            )?;
         }
 
         for (entry, encoded) in visible_entries.iter().zip(encoded_visible_rows) {
@@ -305,6 +311,12 @@ impl Storage for MemoryStorage {
                 .entry(row.row_id)
                 .or_default()
                 .insert((row.branch.clone().into(), row.batch_id), row.bytes.clone());
+            self.put_batch_row_member(
+                table.as_str(),
+                row.branch.as_str(),
+                row.row_id,
+                row.batch_id,
+            )?;
         }
 
         for row in visible_rows {
@@ -623,6 +635,9 @@ impl Storage for MemoryStorage {
                 .or_default()
                 .insert((row.branch.clone().into(), row.batch_id), row.bytes);
         }
+        for row in rows {
+            self.put_batch_row_member(table, row.branch.as_str(), row.row_id, row.batch_id())?;
+        }
         Ok(())
     }
 
@@ -631,12 +646,17 @@ impl Storage for MemoryStorage {
         table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        let regions = self.row_history_bytes.entry(table.to_string()).or_default();
+        {
+            let regions = self.row_history_bytes.entry(table.to_string()).or_default();
+            for row in rows {
+                regions.entry(row.row_id).or_default().insert(
+                    (row.branch.to_string().into(), row.batch_id),
+                    row.bytes.to_vec(),
+                );
+            }
+        }
         for row in rows {
-            regions.entry(row.row_id).or_default().insert(
-                (row.branch.to_string().into(), row.batch_id),
-                row.bytes.to_vec(),
-            );
+            self.put_batch_row_member(table, row.branch, row.row_id, row.batch_id)?;
         }
         Ok(())
     }

@@ -719,6 +719,68 @@ pub trait Storage {
         Ok(settlements)
     }
 
+    fn put_batch_row_member(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+    ) -> Result<(), StorageError> {
+        ensure_raw_table_header(
+            self,
+            BATCH_ROW_MEMBER_TABLE,
+            &RawTableHeader::system(STORAGE_KIND_BATCH_ROW_MEMBER, BATCH_ROW_MEMBER_FORMAT_V1),
+        )?;
+        self.raw_table_put(
+            BATCH_ROW_MEMBER_TABLE,
+            &key_codec::batch_row_member_key(batch_id, table, branch, row_id),
+            &[],
+        )
+    }
+
+    fn scan_batch_row_members(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Vec<BatchRowMember>, StorageError> {
+        let prefix = key_codec::batch_row_member_prefix(Some(batch_id));
+        self.scan_batch_row_members_with_prefix(&prefix)
+    }
+
+    fn scan_all_batch_row_members(&self) -> Result<Vec<BatchRowMember>, StorageError> {
+        self.scan_batch_row_members_with_prefix("")
+    }
+
+    fn scan_batch_row_members_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<BatchRowMember>, StorageError> {
+        let mut members = Vec::new();
+        for (key, _) in self.raw_table_scan_prefix(BATCH_ROW_MEMBER_TABLE, prefix)? {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                BATCH_ROW_MEMBER_TABLE,
+                STORAGE_KIND_BATCH_ROW_MEMBER,
+                BATCH_ROW_MEMBER_FORMAT_V1,
+            )?;
+            let (batch_id, table_name, branch_name, object_id) =
+                key_codec::decode_batch_row_member_key(&key)?;
+            members.push(BatchRowMember {
+                batch_id,
+                table_name,
+                branch_name,
+                object_id,
+            });
+        }
+        members.sort_by(|left, right| {
+            left.batch_id
+                .cmp(&right.batch_id)
+                .then_with(|| left.table_name.cmp(&right.table_name))
+                .then_with(|| left.branch_name.cmp(&right.branch_name))
+                .then_with(|| left.object_id.cmp(&right.object_id))
+        });
+        Ok(members)
+    }
+
     // ================================================================
     // Row-history storage
     // ================================================================
@@ -852,6 +914,9 @@ pub trait Storage {
                 })
                 .collect::<Vec<_>>();
             self.append_history_region_row_bytes(table, &borrowed_rows)?;
+            for row in history_rows {
+                self.put_batch_row_member(table, row.branch.as_str(), row.row_id, row.batch_id)?;
+            }
         }
         if !visible_rows.is_empty() {
             let borrowed_rows = visible_rows

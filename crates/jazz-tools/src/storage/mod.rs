@@ -158,6 +158,7 @@ const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const ACKNOWLEDGED_REJECTED_BATCH_TABLE: &str = "__acknowledged_rejected_batch";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
+const BATCH_ROW_MEMBER_TABLE: &str = "__batch_row_member";
 const RAW_TABLE_HEADER_TABLE: &str = "__raw_table_header";
 const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
 const BRANCH_NAME_BY_ORD_TABLE: &str = "__branch_name_by_ord";
@@ -177,6 +178,7 @@ const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
 const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
 const ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1: i32 = 1;
 const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
+const BATCH_ROW_MEMBER_FORMAT_V1: i32 = 1;
 
 pub type BranchOrd = i32;
 
@@ -190,6 +192,7 @@ const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
 const STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH: &str = "acknowledged_rejected_batch";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
+const STORAGE_KIND_BATCH_ROW_MEMBER: &str = "batch_row_member";
 const STORAGE_KIND_CATALOGUE: &str = "catalogue";
 #[cfg(feature = "sqlite")]
 pub(crate) const SQLITE_STORE_KIND: &str = "sqlite";
@@ -333,6 +336,14 @@ pub struct ExactRowTableLocator {
     pub row_raw_table: SharedString,
     pub table_name: SharedString,
     pub schema_hash: SchemaHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchRowMember {
+    pub batch_id: BatchId,
+    pub table_name: String,
+    pub branch_name: String,
+    pub object_id: ObjectId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1076,6 +1087,7 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
         STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
         STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
         STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH => Ok(ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1),
+        STORAGE_KIND_BATCH_ROW_MEMBER => Ok(BATCH_ROW_MEMBER_FORMAT_V1),
         STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),
         "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V3),
         other => Err(StorageError::IoError(format!(

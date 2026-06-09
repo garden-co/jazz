@@ -315,6 +315,76 @@ pub(super) fn decode_history_row_raw_table_key(
     ))
 }
 
+pub(super) fn batch_row_member_key(
+    batch_id: BatchId,
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+) -> String {
+    let mut key = String::with_capacity(
+        6 + BATCH_ID_HEX_BYTES
+            + 7
+            + table.len() * 2
+            + 8
+            + branch.len() * 2
+            + 5
+            + INDEX_ENTRY_UUID_HEX_BYTES,
+    );
+    key.push_str("batch:");
+    append_batch_id_hex(&mut key, batch_id);
+    key.push_str(":table:");
+    append_hex_bytes(&mut key, table.as_bytes());
+    key.push_str(":branch:");
+    append_hex_bytes(&mut key, branch.as_bytes());
+    key.push_str(":row:");
+    append_uuid_hex(&mut key, row_id);
+    key
+}
+
+pub(super) fn batch_row_member_prefix(batch_id: Option<BatchId>) -> String {
+    match batch_id {
+        Some(batch_id) => {
+            let mut prefix = String::with_capacity(6 + BATCH_ID_HEX_BYTES + 1);
+            prefix.push_str("batch:");
+            append_batch_id_hex(&mut prefix, batch_id);
+            prefix.push(':');
+            prefix
+        }
+        None => String::new(),
+    }
+}
+
+fn decode_hex_utf8(raw: &str, context: &str, field: &str) -> Result<String, StorageError> {
+    let bytes = hex::decode(raw)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid {field} hex: {err}")))?;
+    String::from_utf8(bytes)
+        .map_err(|err| StorageError::IoError(format!("{context}: invalid {field} utf8: {err}")))
+}
+
+pub(super) fn decode_batch_row_member_key(
+    key: &str,
+) -> Result<(BatchId, String, String, ObjectId), StorageError> {
+    let context = format!("decode batch row member key '{key}'");
+    let rest = key
+        .strip_prefix("batch:")
+        .ok_or_else(|| StorageError::IoError(format!("{context}: missing batch prefix")))?;
+    let (batch_hex, rest) = rest
+        .split_once(":table:")
+        .ok_or_else(|| StorageError::IoError(format!("{context}: missing table segment")))?;
+    let (table_hex, rest) = rest
+        .split_once(":branch:")
+        .ok_or_else(|| StorageError::IoError(format!("{context}: missing branch segment")))?;
+    let (branch_hex, row_hex) = rest
+        .split_once(":row:")
+        .ok_or_else(|| StorageError::IoError(format!("{context}: missing row segment")))?;
+    Ok((
+        decode_hex_batch_id(batch_hex, &context)?,
+        decode_hex_utf8(table_hex, &context, "table")?,
+        decode_hex_utf8(branch_hex, &context, "branch")?,
+        decode_hex_object_id(row_hex, &context)?,
+    ))
+}
+
 pub(super) fn catalogue_entry_key(object_id: ObjectId) -> String {
     let mut key = String::with_capacity(7 + INDEX_ENTRY_UUID_HEX_BYTES);
     key.push_str("catrow:");

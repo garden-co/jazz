@@ -44,6 +44,7 @@ struct RowRegionReadCallCounts {
     scan_row_locator_calls: usize,
     load_row_locator_calls: usize,
     scan_history_row_batches_calls: usize,
+    load_history_row_batch_calls: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +372,7 @@ impl Storage for RowRegionReadFailingStorage {
         row_id: ObjectId,
         batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.calls.lock().unwrap().load_history_row_batch_calls += 1;
         self.inner
             .load_history_row_batch(table, branch, row_id, batch_id)
     }

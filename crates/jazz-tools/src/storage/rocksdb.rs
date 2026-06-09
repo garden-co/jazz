@@ -17,9 +17,9 @@ use super::{
     HistoryRowBytes, IndexMutation, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec,
     storage_core::{
-        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        append_history_region_row_bytes_core, put_batch_row_members_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
@@ -450,7 +450,22 @@ impl Storage for RocksDBStorage {
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
+            if !rows.is_empty() {
+                let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                    super::STORAGE_KIND_BATCH_ROW_MEMBER,
+                    super::BATCH_ROW_MEMBER_FORMAT_V1,
+                ))?;
+                raw_table_put_core(
+                    super::RAW_TABLE_HEADER_TABLE,
+                    super::BATCH_ROW_MEMBER_TABLE,
+                    &header,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
             append_history_region_row_bytes_core(table, rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            put_batch_row_members_core(table, rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
             Self::commit_txn(txn.into_inner())
@@ -564,6 +579,22 @@ impl Storage for RocksDBStorage {
                     |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
                 )?;
             }
+            if !encoded_history_rows.is_empty()
+                && inner
+                    .ensured_raw_table_headers
+                    .insert(super::BATCH_ROW_MEMBER_TABLE.to_string())
+            {
+                let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                    super::STORAGE_KIND_BATCH_ROW_MEMBER,
+                    super::BATCH_ROW_MEMBER_FORMAT_V1,
+                ))?;
+                raw_table_put_core(
+                    super::RAW_TABLE_HEADER_TABLE,
+                    super::BATCH_ROW_MEMBER_TABLE,
+                    &header,
+                    |storage_key, bytes| Self::put_on_txn_cell(&txn, storage_key, bytes),
+                )?;
+            }
             if encoded_visible_rows
                 .iter()
                 .any(|row| row.needs_exact_locator)
@@ -593,6 +624,9 @@ impl Storage for RocksDBStorage {
                 })
                 .collect::<Vec<_>>();
             append_history_region_row_bytes_core(table, &borrowed_history_rows, |key, bytes| {
+                Self::put_on_txn_cell(&txn, key, bytes)
+            })?;
+            put_batch_row_members_core(table, &borrowed_history_rows, |key, bytes| {
                 Self::put_on_txn_cell(&txn, key, bytes)
             })?;
             for row in encoded_history_rows {

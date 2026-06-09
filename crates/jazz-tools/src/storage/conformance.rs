@@ -22,8 +22,8 @@ use crate::row_histories::{
 };
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
-    IndexMutation, RawTableHeader, RowLocator, RowRawTableId, RowRawTableKind, Storage,
-    StorageError, scan_row_raw_table_headers_with_storage,
+    BatchRowMember, IndexMutation, RawTableHeader, RowLocator, RowRawTableId, RowRawTableKind,
+    Storage, StorageError, scan_row_raw_table_headers_with_storage,
 };
 use crate::sync_manager::DurabilityTier;
 use crate::test_support::persist_test_schema;
@@ -464,6 +464,74 @@ pub fn test_row_region_keeps_same_batch_id_distinct_across_branches(
         matches!(ambiguous_lookup, Err(StorageError::IoError(ref message)) if message.contains("ambiguous row history version")),
         "expected ambiguous unscoped lookup, got {ambiguous_lookup:?}"
     );
+}
+
+pub fn test_batch_row_members_index_tracks_history_writes(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+
+    let alice_id = ObjectId::new();
+    let bob_id = ObjectId::new();
+    let carol_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", alice_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", bob_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", carol_id, schema_hash);
+
+    let first_batch_id = BatchId([0x31; 16]);
+    let second_batch_id = BatchId([0x32; 16]);
+    let mut alice = make_row_batch(alice_id, "dev/main", 10, "alice");
+    alice.batch_id = first_batch_id;
+    let mut bob = make_row_batch(bob_id, "dev/draft", 20, "bob");
+    bob.batch_id = first_batch_id;
+    let mut carol = make_row_batch(carol_id, "dev/main", 30, "carol");
+    carol.batch_id = second_batch_id;
+
+    storage
+        .append_history_region_rows("users", &[alice, bob, carol])
+        .unwrap();
+
+    let mut expected_first = vec![
+        BatchRowMember {
+            batch_id: first_batch_id,
+            table_name: "users".to_string(),
+            branch_name: "dev/main".to_string(),
+            object_id: alice_id,
+        },
+        BatchRowMember {
+            batch_id: first_batch_id,
+            table_name: "users".to_string(),
+            branch_name: "dev/draft".to_string(),
+            object_id: bob_id,
+        },
+    ];
+    expected_first.sort_by(|left, right| {
+        left.batch_id
+            .cmp(&right.batch_id)
+            .then_with(|| left.table_name.cmp(&right.table_name))
+            .then_with(|| left.branch_name.cmp(&right.branch_name))
+            .then_with(|| left.object_id.cmp(&right.object_id))
+    });
+
+    let mut expected_all = expected_first.clone();
+    expected_all.push(BatchRowMember {
+        batch_id: second_batch_id,
+        table_name: "users".to_string(),
+        branch_name: "dev/main".to_string(),
+        object_id: carol_id,
+    });
+    expected_all.sort_by(|left, right| {
+        left.batch_id
+            .cmp(&right.batch_id)
+            .then_with(|| left.table_name.cmp(&right.table_name))
+            .then_with(|| left.branch_name.cmp(&right.branch_name))
+            .then_with(|| left.object_id.cmp(&right.object_id))
+    });
+
+    assert_eq!(
+        storage.scan_batch_row_members(first_batch_id).unwrap(),
+        expected_first
+    );
+    assert_eq!(storage.scan_all_batch_row_members().unwrap(), expected_all);
 }
 
 pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
@@ -1518,6 +1586,11 @@ macro_rules! storage_conformance_tests {
                 conformance::test_row_region_keeps_same_batch_id_distinct_across_branches(
                     &$factory,
                 );
+            }
+
+            #[test]
+            fn batch_row_members_index_tracks_history_writes() {
+                conformance::test_batch_row_members_index_tracks_history_writes(&$factory);
             }
 
             #[test]

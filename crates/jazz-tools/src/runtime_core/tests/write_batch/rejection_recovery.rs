@@ -1401,6 +1401,100 @@ fn rc_worker_overlay_sync_uses_point_locators_without_scans() {
 }
 
 #[test]
+fn local_batch_rows_uses_batch_member_index_without_history_scan() {
+    let schema = users_delete_denied_authorization_schema();
+    let app_id = AppId::from_name("local-batch-rows-index-no-scan-test");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(
+        schema_manager,
+        RowRegionReadFailingStorage::with_row_locator_scan_failure(),
+        NoopScheduler,
+    );
+    core.immediate_tick();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+    let ((first_row_id, _), first_batch_id) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Retained 1"),
+            Some(&write_context),
+        )
+        .unwrap();
+    let ((second_row_id, _), second_batch_id) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Retained 2"),
+            Some(&write_context),
+        )
+        .unwrap();
+    assert_eq!(first_batch_id, batch_id);
+    assert_eq!(second_batch_id, batch_id);
+    core.commit_batch(batch_id).unwrap();
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+    core.storage_mut()
+        .delete_sealed_batch_submission(batch_id)
+        .unwrap();
+
+    for index in 0..5 {
+        let unrelated_batch_id = BatchId::new();
+        let unrelated_context = WriteContext::default()
+            .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+            .with_batch_id(unrelated_batch_id);
+        core.insert(
+            "users",
+            user_insert_values(ObjectId::new(), &format!("Unrelated {index}")),
+            Some(&unrelated_context),
+        )
+        .unwrap();
+        core.commit_batch(unrelated_batch_id).unwrap();
+        core.storage_mut()
+            .delete_local_batch_record(unrelated_batch_id)
+            .unwrap();
+        core.storage_mut()
+            .delete_sealed_batch_submission(unrelated_batch_id)
+            .unwrap();
+    }
+
+    let before = core.storage().call_counts();
+    let local_rows = core.local_batch_rows(batch_id);
+    let after = core.storage().call_counts();
+
+    let mut row_ids = local_rows
+        .iter()
+        .map(|(member, _, _)| member.object_id)
+        .collect::<Vec<_>>();
+    row_ids.sort();
+    let mut expected_row_ids = vec![first_row_id, second_row_id];
+    expected_row_ids.sort();
+    assert_eq!(row_ids, expected_row_ids);
+    assert_eq!(
+        after.scan_row_locator_calls - before.scan_row_locator_calls,
+        0,
+        "local batch replay must not scan row locators"
+    );
+    assert_eq!(
+        after.scan_history_row_batches_calls - before.scan_history_row_batches_calls,
+        0,
+        "local batch replay must not scan history row batches"
+    );
+    assert_eq!(
+        after.load_history_row_batch_calls - before.load_history_row_batch_calls,
+        local_rows.len(),
+        "exact row loads should scale with retained batch members, not total stored rows"
+    );
+    assert!(
+        after.load_row_locator_calls - before.load_row_locator_calls <= local_rows.len() * 2,
+        "point locator lookups should scale with retained batch members, not total stored rows"
+    );
+}
+
+#[test]
 fn rc_overlay_only_global_fate_clears_without_local_batch_scans() {
     let schema = users_delete_denied_authorization_schema();
     let app_id = AppId::from_name("overlay-only-global-fate-no-scan-test");

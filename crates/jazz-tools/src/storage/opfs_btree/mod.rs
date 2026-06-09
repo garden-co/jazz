@@ -32,9 +32,9 @@ use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        append_history_region_row_bytes_core, put_batch_row_members_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
@@ -336,7 +336,22 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        append_history_region_row_bytes_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+        if !rows.is_empty() {
+            let header = super::encode_raw_table_header(&super::RawTableHeader::system(
+                super::STORAGE_KIND_BATCH_ROW_MEMBER,
+                super::BATCH_ROW_MEMBER_FORMAT_V1,
+            ))?;
+            raw_table_put_core(
+                super::RAW_TABLE_HEADER_TABLE,
+                super::BATCH_ROW_MEMBER_TABLE,
+                &header,
+                |key, bytes| self.tree_insert(key, bytes),
+            )?;
+        }
+        append_history_region_row_bytes_core(table, rows, |key, bytes| {
+            self.tree_insert(key, bytes)
+        })?;
+        put_batch_row_members_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
     }
 
     fn upsert_visible_region_row_bytes(
