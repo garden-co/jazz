@@ -27,11 +27,13 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 use web_sys::Worker;
 
-use jazz_tools::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
+use jazz_tools::batch_fate::BatchFate;
+use jazz_tools::object::{BranchName, ObjectId};
 use jazz_tools::row_histories::BatchId;
-use jazz_tools::sync_manager::DurabilityTier;
+use jazz_tools::sync_manager::{DurabilityTier, SyncPayload};
 use jazz_wasm::worker_protocol::{
-    encode_main_to_worker, encode_worker_to_main, MainToWorkerWire, WorkerToMainWire,
+    encode_main_to_worker, encode_worker_to_main, LocalOverlayEntryWire, MainToWorkerWire,
+    SyncEntry, WorkerToMainWire,
 };
 use jazz_wasm::WasmRuntime;
 
@@ -788,26 +790,32 @@ fn auth_failed_fires_listener() {
 }
 
 #[wasm_bindgen_test]
-async fn local_batch_records_sync_hydrates_main_runtime() {
+async fn local_overlay_sync_hydrates_main_runtime() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
     let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
         .expect("attach");
 
     let batch_id = BatchId::new();
-    let record = LocalBatchRecord::new(
-        batch_id,
-        BatchMode::Direct,
-        true,
-        Some(BatchFate::DurableDirect {
+    let object_id = ObjectId::new();
+    fw.emit_wire(&WorkerToMainWire::LocalOverlaySync {
+        entries: vec![LocalOverlayEntryWire {
+            table_name: "todos".to_string(),
+            object_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        }],
+    });
+
+    let sync_payload = postcard::to_allocvec(&SyncPayload::BatchFate {
+        fate: BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
-        }),
-    );
-    let encoded_record = record.encode_storage_row().expect("encode record");
-
-    fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
-        encoded_records: vec![ByteBuf::from(encoded_record)],
+        },
+    })
+    .expect("encode sync payload");
+    fw.emit_wire(&WorkerToMainWire::Sync {
+        payloads: vec![SyncEntry::BareBytes(ByteBuf::from(sync_payload))],
     });
 
     JsFuture::from(

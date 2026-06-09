@@ -15,7 +15,7 @@
 //!   3. bootstrap catalogue (internal server attach/detach while flag is set)
 //!   4. connect upstream (install Rust transport handle)
 //!   5. drain pending pre-init messages (sync, peer-sync, control)
-//!   6. sync retained local batch records + queue rejected-batch replay
+//!   6. sync retained local overlays + queue rejected-batch replay
 //!   7. flip state to `Ready`
 //!   8. post `init-ok`
 //!
@@ -46,15 +46,14 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
-use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
-    parse_main_to_worker, worker_to_main_post, InitPayload, MainToWorkerMessage, MainToWorkerWire,
-    WorkerLifecycleEvent, WorkerToMainWire,
+    parse_main_to_worker, worker_to_main_post, InitPayload, LocalOverlayEntryWire,
+    MainToWorkerMessage, MainToWorkerWire, WorkerLifecycleEvent, WorkerToMainWire,
 };
 
 // =============================================================================
@@ -347,10 +346,10 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         perform_upstream_connect(&runtime_rc, &ws_url, &auth_json);
     }
 
-    // 7. Sync retained local batch records to main. Rejected-batch error
+    // 7. Sync retained local overlays to main. Rejected-batch error
     //    replay already happened in step 4b; live rejections are handled by
     //    normal sync payloads reaching the main runtime.
-    sync_retained_local_batch_records(&runtime_rc);
+    sync_retained_local_overlay_rows(&runtime_rc);
 
     // 8. Flip state to Ready before draining (so message handlers process
     //    directly via the dispatch path rather than re-buffering).
@@ -469,29 +468,30 @@ fn make_peer_routing_lookup() -> Function {
 // Mutation-error replay
 // =============================================================================
 
-fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
-    match retained_local_batch_records_payload(runtime) {
-        Ok(encoded_records) => {
-            post_to_main(&WorkerToMainWire::LocalBatchRecordsSync { encoded_records })
-        }
-        Err(err) => tracing::warn!("load retained local batch records failed: {err:?}"),
+fn sync_retained_local_overlay_rows(runtime: &Rc<WasmRuntime>) {
+    match retained_local_overlay_entries_payload(runtime) {
+        Ok(entries) => post_to_main(&WorkerToMainWire::LocalOverlaySync { entries }),
+        Err(err) => tracing::warn!("load retained local overlay rows failed: {err:?}"),
     }
 }
 
-fn retained_local_batch_records_payload(runtime: &Rc<WasmRuntime>) -> Result<Vec<ByteBuf>, String> {
-    let records = runtime
+fn retained_local_overlay_entries_payload(
+    runtime: &Rc<WasmRuntime>,
+) -> Result<Vec<LocalOverlayEntryWire>, String> {
+    let rows = runtime
         .core
         .borrow()
-        .local_batch_records_for_worker_sync()
+        .retained_local_overlay_rows_for_worker_sync()
         .map_err(|err| format!("{err:?}"))?;
-    let mut encoded_records = Vec::with_capacity(records.len());
-    for record in &records {
-        match record.encode_storage_row() {
-            Ok(row) => encoded_records.push(ByteBuf::from(row)),
-            Err(err) => tracing::warn!("encode local batch record for sync: {err:?}"),
-        }
-    }
-    Ok(encoded_records)
+    Ok(rows
+        .into_iter()
+        .map(|row| LocalOverlayEntryWire {
+            table_name: row.table_name,
+            object_id: row.object_id,
+            branch_name: row.branch_name,
+            batch_id: row.batch_id,
+        })
+        .collect())
 }
 
 /// Drain mutation errors restored from persistent storage on startup and post

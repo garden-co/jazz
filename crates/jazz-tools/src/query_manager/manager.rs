@@ -2307,6 +2307,73 @@ impl QueryManager {
         self.mark_local_row_updated_in_subscriptions(table, id);
     }
 
+    pub(crate) fn hydrate_retained_local_overlay_row(&mut self, table: &str, row_key: RowBatchKey) {
+        self.pending_local_row_batches
+            .insert(row_key.row_id, row_key);
+        self.visible_rows_by_batch
+            .entry(row_key.batch_id)
+            .or_default()
+            .insert((table.to_string(), row_key.row_id));
+        self.mark_subscriptions_dirty_local(table);
+        self.mark_local_row_updated_in_subscriptions(table, row_key.row_id);
+    }
+
+    pub(crate) fn pending_local_overlay_rows_for_batch(
+        &self,
+        batch_id: BatchId,
+    ) -> Vec<(String, ObjectId)> {
+        self.pending_local_overlay_row_keys_for_batch(batch_id)
+            .into_iter()
+            .map(|(table_name, row_key)| (table_name, row_key.row_id))
+            .collect()
+    }
+
+    pub(crate) fn pending_local_overlay_row_keys_for_batch(
+        &self,
+        batch_id: BatchId,
+    ) -> Vec<(String, RowBatchKey)> {
+        let Some(rows) = self.visible_rows_by_batch.get(&batch_id) else {
+            return Vec::new();
+        };
+
+        let mut pending_rows = rows
+            .iter()
+            .filter_map(|(table_name, row_id)| {
+                self.pending_local_row_batches
+                    .get(row_id)
+                    .copied()
+                    .filter(|row_key| row_key.batch_id == batch_id)
+                    .map(|row_key| (table_name.clone(), row_key))
+            })
+            .collect::<Vec<_>>();
+        pending_rows.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.row_id.cmp(&right.1.row_id))
+                .then_with(|| {
+                    left.1
+                        .branch_name
+                        .as_str()
+                        .cmp(right.1.branch_name.as_str())
+                })
+                .then_with(|| left.1.batch_id.cmp(&right.1.batch_id))
+        });
+        pending_rows
+    }
+
+    pub(crate) fn clear_pending_local_overlay_rows_for_batch(
+        &mut self,
+        batch_id: BatchId,
+    ) -> Vec<(String, ObjectId)> {
+        let rows = self.pending_local_overlay_rows_for_batch(batch_id);
+        for (table, row_id) in &rows {
+            self.pending_local_row_batches.remove(row_id);
+            self.mark_subscriptions_dirty_local(table);
+            self.mark_local_row_updated_in_subscriptions(table, *row_id);
+        }
+        rows
+    }
+
     fn load_row_locator(storage: &dyn Storage, row_id: ObjectId) -> Option<RowLocator> {
         storage.load_row_locator(row_id).ok().flatten()
     }

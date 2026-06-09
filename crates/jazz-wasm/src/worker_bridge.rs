@@ -21,10 +21,9 @@ use std::rc::Rc;
 
 use futures::channel::oneshot;
 use futures::future::{select, Either};
-use jazz_tools::batch_fate::{BatchFate, LocalBatchRecord};
 use jazz_tools::binding_support::parse_batch_id_input;
 use jazz_tools::row_histories::BatchId;
-use jazz_tools::sync_manager::DurabilityTier;
+use jazz_tools::runtime_core::RetainedLocalOverlayRow;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -59,17 +58,6 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
         return;
     };
     let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
-}
-
-fn local_batch_record_needs_fate_reconciliation(record: &LocalBatchRecord) -> bool {
-    match record.latest_fate.as_ref() {
-        None => true,
-        Some(BatchFate::DurableDirect { confirmed_tier, .. })
-        | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
-            *confirmed_tier < DurabilityTier::EdgeServer
-        }
-        Some(BatchFate::Missing { .. } | BatchFate::Rejected { .. }) => false,
-    }
 }
 
 // =============================================================================
@@ -601,34 +589,18 @@ impl BridgeInner {
         );
     }
 
-    fn hydrate_worker_local_batch_records(&self, encoded_records: Vec<serde_bytes::ByteBuf>) {
-        for row in encoded_records {
-            match LocalBatchRecord::decode_storage_row(row.as_ref()) {
-                Ok(record) => self.hydrate_worker_local_batch_record(record),
-                Err(error) => tracing::warn!("decode worker local batch record: {error:?}"),
-            }
-        }
-    }
-
-    fn hydrate_worker_local_batch_record(&self, record: LocalBatchRecord) {
-        let should_reconcile = local_batch_record_needs_fate_reconciliation(&record);
-        let batch_id = record.batch_id;
+    fn hydrate_worker_local_overlay_entries(
+        &self,
+        entries: Vec<crate::worker_protocol::LocalOverlayEntryWire>,
+    ) {
         let mut core = self.runtime.core.borrow_mut();
-        if let Some(BatchFate::Rejected { code, reason, .. }) = record.latest_fate.clone() {
-            if let Err(error) = core.replay_batch_rejection(record.batch_id, &code, &reason) {
-                tracing::warn!(
-                    batch_id = ?record.batch_id,
-                    %error,
-                    "replay worker rejected batch during hydration failed"
-                );
-            }
-        }
-        if let Err(error) = core.hydrate_local_batch_record(record) {
-            tracing::warn!("hydrate worker local batch record: {error:?}");
-            return;
-        }
-        if should_reconcile {
-            core.reconcile_local_batch_with_server(batch_id);
+        for entry in entries {
+            core.hydrate_retained_local_overlay_row(RetainedLocalOverlayRow {
+                table_name: entry.table_name,
+                object_id: entry.object_id,
+                branch_name: entry.branch_name,
+                batch_id: entry.batch_id,
+            });
         }
     }
 
@@ -788,8 +760,8 @@ impl BridgeInner {
                     let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
                 }
             }
-            WorkerToMainWire::LocalBatchRecordsSync { encoded_records } => {
-                self.hydrate_worker_local_batch_records(encoded_records);
+            WorkerToMainWire::LocalOverlaySync { entries } => {
+                self.hydrate_worker_local_overlay_entries(entries);
             }
             WorkerToMainWire::MutationErrorReplay {
                 batch_id,

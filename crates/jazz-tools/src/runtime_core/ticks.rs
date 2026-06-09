@@ -5,6 +5,95 @@ use crate::storage::metadata_from_row_locator;
 use crate::sync_manager::{RowMetadata, SyncPayload};
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn pending_overlay_only_rows_for_batch(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(String, crate::sync_manager::RowBatchKey)> {
+        let rows = self
+            .schema_manager
+            .query_manager()
+            .pending_local_overlay_row_keys_for_batch(batch_id);
+        if rows.is_empty() {
+            return rows;
+        }
+        if self
+            .storage
+            .load_local_batch_record(batch_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Vec::new();
+        }
+        rows
+    }
+
+    fn reject_pending_overlay_only_rows_for_batch(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> bool {
+        let rows = self.pending_overlay_only_rows_for_batch(batch_id);
+        if rows.is_empty() {
+            return false;
+        }
+
+        for (table, row_key) in rows {
+            let branch = row_key.branch_name.as_str().to_string();
+            let visible_row = self
+                .storage
+                .load_visible_region_row(&table, &branch, row_key.row_id)
+                .ok()
+                .flatten()
+                .filter(|row| row.batch_id() == batch_id);
+            if let Some(row) = visible_row.as_ref() {
+                let _ = self.storage.patch_row_region_rows_by_batch(
+                    &table,
+                    batch_id,
+                    Some(RowState::Rejected),
+                    None,
+                );
+                let _ = self.storage.patch_exact_row_batch(
+                    &table,
+                    &branch,
+                    row_key.row_id,
+                    batch_id,
+                    Some(RowState::Rejected),
+                    None,
+                );
+                let query_manager = self.schema_manager.query_manager_mut();
+                if row.delete_kind.is_some() {
+                    query_manager.restore_local_rejected_delete_row(
+                        &mut self.storage,
+                        &table,
+                        &branch,
+                        row_key.row_id,
+                        &row.data,
+                    );
+                } else if row.parents.is_empty() {
+                    let _ = self
+                        .storage
+                        .delete_visible_region_row(&table, &branch, row_key.row_id);
+                    query_manager.retract_local_rejected_row(
+                        &mut self.storage,
+                        &table,
+                        &branch,
+                        row_key.row_id,
+                        &row.data,
+                        true,
+                    );
+                } else {
+                    query_manager.clear_local_pending_row_overlay(&table, row_key.row_id);
+                }
+            } else {
+                self.schema_manager
+                    .query_manager_mut()
+                    .clear_local_pending_row_overlay(&table, row_key.row_id);
+            }
+        }
+
+        true
+    }
+
     fn local_batch_row_was_insert(
         &self,
         table: &str,
@@ -239,7 +328,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         if let crate::batch_fate::BatchFate::Rejected { code, reason, .. } = &fate {
-            self.mark_local_batch_rows_rejected(batch_id);
+            if !self.reject_pending_overlay_only_rows_for_batch(batch_id) {
+                self.mark_local_batch_rows_rejected(batch_id);
+            }
             let acknowledged = self
                 .is_rejected_batch_acknowledged(batch_id)
                 .unwrap_or(false);
@@ -266,7 +357,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
             }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
-            self.retransmit_local_batch_to_servers(batch_id);
+            if self
+                .pending_overlay_only_rows_for_batch(batch_id)
+                .is_empty()
+            {
+                self.retransmit_local_batch_to_servers(batch_id);
+            }
         } else if matches!(
             fate,
             crate::batch_fate::BatchFate::AcceptedTransaction { .. }
@@ -280,13 +376,26 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager
                 .query_manager_mut()
                 .mark_subscriptions_visibility_recompute_for_tier(acked_tier);
-            for (member, row_locator, _) in self.local_batch_rows(batch_id) {
+            let overlay_rows = self.pending_overlay_only_rows_for_batch(batch_id);
+            if overlay_rows.is_empty() {
+                for (member, row_locator, _) in self.local_batch_rows(batch_id) {
+                    self.schema_manager
+                        .query_manager_mut()
+                        .mark_local_row_updated_in_subscriptions(
+                            row_locator.table.as_str(),
+                            member.object_id,
+                        );
+                }
+            } else if acked_tier >= DurabilityTier::GlobalServer {
                 self.schema_manager
                     .query_manager_mut()
-                    .mark_local_row_updated_in_subscriptions(
-                        row_locator.table.as_str(),
-                        member.object_id,
-                    );
+                    .clear_pending_local_overlay_rows_for_batch(batch_id);
+            } else {
+                for (table_name, row_key) in overlay_rows {
+                    self.schema_manager
+                        .query_manager_mut()
+                        .mark_local_row_updated_in_subscriptions(&table_name, row_key.row_id);
+                }
             }
             self.durability.record_batch_ack(batch_id, acked_tier);
         }

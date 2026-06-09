@@ -36,6 +36,14 @@ struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
     fail_visible_row_reads: bool,
     fail_row_locator_scans: bool,
+    calls: Arc<Mutex<RowRegionReadCallCounts>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RowRegionReadCallCounts {
+    scan_row_locator_calls: usize,
+    load_row_locator_calls: usize,
+    scan_history_row_batches_calls: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +78,7 @@ impl RowRegionReadFailingStorage {
             inner: MemoryStorage::new(),
             fail_visible_row_reads: true,
             fail_row_locator_scans: false,
+            calls: Arc::new(Mutex::new(RowRegionReadCallCounts::default())),
         }
     }
 
@@ -78,7 +87,12 @@ impl RowRegionReadFailingStorage {
             inner: MemoryStorage::new(),
             fail_visible_row_reads: false,
             fail_row_locator_scans: true,
+            calls: Arc::new(Mutex::new(RowRegionReadCallCounts::default())),
         }
+    }
+
+    fn call_counts(&self) -> RowRegionReadCallCounts {
+        *self.calls.lock().unwrap()
     }
 }
 
@@ -144,6 +158,7 @@ impl Storage for RowRegionReadFailingStorage {
     }
 
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        self.calls.lock().unwrap().scan_row_locator_calls += 1;
         if self.fail_row_locator_scans {
             return Err(StorageError::IoError(
                 "row-locator scans deliberately disabled in this test".to_string(),
@@ -156,6 +171,7 @@ impl Storage for RowRegionReadFailingStorage {
         &self,
         id: ObjectId,
     ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.calls.lock().unwrap().load_row_locator_calls += 1;
         self.inner.load_row_locator(id)
     }
 
@@ -344,6 +360,7 @@ impl Storage for RowRegionReadFailingStorage {
         table: &str,
         row_id: ObjectId,
     ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.calls.lock().unwrap().scan_history_row_batches_calls += 1;
         self.inner.scan_history_row_batches(table, row_id)
     }
 

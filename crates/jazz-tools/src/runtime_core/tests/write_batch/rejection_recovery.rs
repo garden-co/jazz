@@ -1264,10 +1264,10 @@ fn rc_transactional_rejected_replay_record_keeps_sealed_submission_mode() {
 }
 
 #[test]
-fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
+fn rc_worker_overlay_sync_includes_sealed_batches_pending_edge_reconciliation() {
     let mut core = create_runtime_with_schema(
         users_delete_denied_authorization_schema(),
-        "direct-pending-worker-sync-record-test",
+        "direct-pending-worker-overlay-test",
     );
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
@@ -1291,25 +1291,19 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
         .unwrap();
 
     assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
-    let records = core.local_batch_records_for_worker_sync().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].batch_id, batch_id);
-    assert!(matches!(
-        records[0].latest_fate,
-        Some(crate::batch_fate::BatchFate::DurableDirect {
-            confirmed_tier: DurabilityTier::Local,
-            ..
-        })
-    ));
-    assert_eq!(records[0].members.len(), 1);
-    assert_eq!(records[0].members[0].object_id, row_id);
+    let entries = core.retained_local_overlay_rows_for_worker_sync().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].batch_id, batch_id);
+    assert_eq!(entries[0].object_id, row_id);
+    assert_eq!(entries[0].table_name, "users");
+    assert_eq!(entries[0].branch_name, branch_name);
 }
 
 #[test]
-fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
+fn rc_worker_overlay_sync_excludes_local_only_fates_without_submissions() {
     let mut core = create_runtime_with_schema(
         users_delete_denied_authorization_schema(),
-        "direct-pending-fate-worker-sync-record-test",
+        "direct-pending-fate-worker-overlay-test",
     );
     let batch_id = BatchId::new();
 
@@ -1320,17 +1314,145 @@ fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
         })
         .unwrap();
 
-    let records = core.local_batch_records_for_worker_sync().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].batch_id, batch_id);
-    assert!(records[0].members.is_empty());
-    assert!(matches!(
-        records[0].latest_fate,
-        Some(crate::batch_fate::BatchFate::DurableDirect {
-            confirmed_tier: DurabilityTier::Local,
-            ..
-        })
-    ));
+    let entries = core.retained_local_overlay_rows_for_worker_sync().unwrap();
+    assert!(
+        entries.is_empty(),
+        "fate-only batches without retained submissions are not a startup overlay source"
+    );
+}
+
+#[test]
+fn rc_worker_overlay_sync_uses_point_locators_without_scans() {
+    let schema = users_delete_denied_authorization_schema();
+    let app_id = AppId::from_name("direct-pending-worker-overlay-no-scan-test");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(
+        schema_manager,
+        RowRegionReadFailingStorage::with_row_locator_scan_failure(),
+        NoopScheduler,
+    );
+    core.immediate_tick();
+
+    let ((retained_row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut core,
+        "users",
+        user_insert_values(ObjectId::new(), "Retained"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
+    let branch_name = core.schema_manager().branch_name();
+    let retained_batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), retained_row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+    core.storage_mut()
+        .delete_local_batch_record(retained_batch_id)
+        .unwrap();
+
+    for index in 0..5 {
+        let ((unrelated_row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+            &mut core,
+            "users",
+            user_insert_values(ObjectId::new(), &format!("Unrelated {index}")),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+        let unrelated_batch_id = core
+            .storage()
+            .load_visible_region_row("users", branch_name.as_str(), unrelated_row_id)
+            .unwrap()
+            .expect("persisted unrelated row should materialize a visible row")
+            .batch_id;
+        core.storage_mut()
+            .delete_local_batch_record(unrelated_batch_id)
+            .unwrap();
+        core.storage_mut()
+            .delete_sealed_batch_submission(unrelated_batch_id)
+            .unwrap();
+    }
+
+    let before = core.storage().call_counts();
+    let entries = core.retained_local_overlay_rows_for_worker_sync().unwrap();
+    let after = core.storage().call_counts();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].object_id, retained_row_id);
+    assert_eq!(entries[0].batch_id, retained_batch_id);
+    assert_eq!(
+        after.scan_row_locator_calls - before.scan_row_locator_calls,
+        0,
+        "retained overlay sync must not scan row locators"
+    );
+    assert_eq!(
+        after.scan_history_row_batches_calls - before.scan_history_row_batches_calls,
+        0,
+        "retained overlay sync must not scan history row batches"
+    );
+    assert_eq!(
+        after.load_row_locator_calls - before.load_row_locator_calls,
+        entries.len(),
+        "point locator lookups should scale with retained members, not total stored rows"
+    );
+}
+
+#[test]
+fn rc_overlay_only_global_fate_clears_without_local_batch_scans() {
+    let schema = users_delete_denied_authorization_schema();
+    let app_id = AppId::from_name("overlay-only-global-fate-no-scan-test");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(
+        schema_manager,
+        RowRegionReadFailingStorage::with_row_locator_scan_failure(),
+        NoopScheduler,
+    );
+    core.immediate_tick();
+
+    let batch_id = BatchId::new();
+    let row_id = ObjectId::new();
+    core.hydrate_retained_local_overlay_row(RetainedLocalOverlayRow {
+        table_name: "users".to_string(),
+        object_id: row_id,
+        branch_name: crate::object::BranchName::new("main"),
+        batch_id,
+    });
+
+    let before = core.storage().call_counts();
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+            },
+        },
+    });
+    core.batched_tick();
+    core.immediate_tick();
+    let after = core.storage().call_counts();
+
+    assert_eq!(
+        after.scan_row_locator_calls - before.scan_row_locator_calls,
+        0,
+        "overlay-only fate handling must not scan row locators"
+    );
+    assert_eq!(
+        after.scan_history_row_batches_calls - before.scan_history_row_batches_calls,
+        0,
+        "overlay-only fate handling must not scan history row batches"
+    );
+    assert!(
+        core.schema_manager()
+            .query_manager()
+            .pending_local_overlay_rows_for_batch(batch_id)
+            .is_empty(),
+        "global fate should clear the retained overlay"
+    );
 }
 
 #[test]
@@ -1367,12 +1489,12 @@ fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
     worker.batched_tick();
     worker.immediate_tick();
 
-    let records = worker.local_batch_records_for_worker_sync().unwrap();
+    let entries = worker
+        .retained_local_overlay_rows_for_worker_sync()
+        .unwrap();
     assert!(
-        records
-            .iter()
-            .any(|record| record.batch_id == batch_id && record.members.len() == 1),
-        "worker should retain memberful batch record after local replay; records={records:?}"
+        entries.is_empty(),
+        "worker startup overlay sync must not synthesize entries from replayed row history without a retained submission; entries={entries:?}"
     );
     assert!(
         worker

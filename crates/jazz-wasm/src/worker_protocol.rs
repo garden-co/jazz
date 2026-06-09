@@ -9,13 +9,14 @@
 //!
 //! Variant fields use `serde_bytes::ByteBuf` for binary payloads so postcard
 //! serialises them as length-prefixed bytes rather than Vec<u8>'s default
-//! sequence-of-u8s. Worker-retained local batch records ride as encoded
-//! storage rows so the main-thread Rust runtime can hydrate them directly.
+//! sequence-of-u8s. Worker-retained local overlays ride as typed row entries.
 //! Debug-only JS-shaped fields still ride as JSON strings inside the binary
 //! envelope.
 
 #![allow(dead_code)]
 
+use jazz_tools::object::{BranchName, ObjectId};
+use jazz_tools::row_histories::BatchId;
 use js_sys::{Array, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -122,6 +123,14 @@ pub enum MainToWorkerWire {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOverlayEntryWire {
+    pub table_name: String,
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub batch_id: BatchId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerToMainWire {
     InitOk {
@@ -137,10 +146,10 @@ pub enum WorkerToMainWire {
         term: u32,
         payloads: Vec<ByteBuf>,
     },
-    /// Encoded `LocalBatchRecord` storage rows for Rust-side main-runtime
+    /// Retained worker optimistic rows for Rust-side main-runtime overlay
     /// hydration.
-    LocalBatchRecordsSync {
-        encoded_records: Vec<ByteBuf>,
+    LocalOverlaySync {
+        entries: Vec<LocalOverlayEntryWire>,
     },
     /// Startup/restart replay for a rejected batch retained by the worker.
     MutationErrorReplay {
@@ -542,8 +551,8 @@ mod tests {
             term: 1,
             payloads: vec![ByteBuf::from(vec![0xff])],
         });
-        rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
-            encoded_records: Vec::new(),
+        rt_worker(&WorkerToMainWire::LocalOverlaySync {
+            entries: Vec::new(),
         });
         rt_worker(&WorkerToMainWire::MutationErrorReplay {
             batch_id: "b1".into(),

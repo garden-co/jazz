@@ -811,16 +811,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    /// Load retained local batch records plus sealed submissions that still
-    /// need edge reconciliation. Browser workers send this set to the main
-    /// runtime during startup so local queries know when they must wait for the
-    /// upstream fate before rendering locally durable optimistic rows.
-    pub fn local_batch_records_for_worker_sync(
+    pub fn retained_local_overlay_rows_for_worker_sync(
         &self,
-    ) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
-        let mut records = self.local_batch_records()?;
-        let retained_batch_ids: std::collections::HashSet<_> =
-            records.iter().map(|record| record.batch_id).collect();
+    ) -> Result<Vec<RetainedLocalOverlayRow>, RuntimeError> {
+        let mut rows = Vec::new();
+
+        for record in self.local_batch_records()? {
+            if !Self::sealed_batch_still_needs_edge_reconciliation(record.latest_fate.as_ref()) {
+                continue;
+            }
+            for member in record.members {
+                rows.push(RetainedLocalOverlayRow {
+                    table_name: member.table_name,
+                    object_id: member.object_id,
+                    branch_name: member.branch_name,
+                    batch_id: record.batch_id,
+                });
+            }
+        }
+
         let submissions = self
             .storage
             .scan_sealed_batch_submissions()
@@ -829,9 +838,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             })?;
 
         for submission in submissions {
-            if retained_batch_ids.contains(&submission.batch_id) {
-                continue;
-            }
             let fate = self
                 .storage
                 .load_authoritative_batch_fate(submission.batch_id)
@@ -839,47 +845,38 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if !Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref()) {
                 continue;
             }
-            if let Some(record) =
-                self.local_batch_record_from_sealed_submission(submission, fate)?
-            {
-                records.push(record);
+
+            for member in submission.members {
+                let Some(row_locator) = self
+                    .storage
+                    .load_row_locator(member.object_id)
+                    .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+                else {
+                    continue;
+                };
+                rows.push(RetainedLocalOverlayRow {
+                    table_name: row_locator.table.to_string(),
+                    object_id: member.object_id,
+                    branch_name: submission.target_branch_name,
+                    batch_id: submission.batch_id,
+                });
             }
         }
 
-        let retained_batch_ids: std::collections::HashSet<_> =
-            records.iter().map(|record| record.batch_id).collect();
-        let fates = self
-            .storage
-            .scan_authoritative_batch_fates()
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("scan authoritative batch fates: {err}"))
-            })?;
-        for fate in fates {
-            if retained_batch_ids.contains(&fate.batch_id()) {
-                continue;
-            }
-            if !Self::sealed_batch_still_needs_edge_reconciliation(Some(&fate)) {
-                continue;
-            }
-            let local_rows = self.local_batch_rows(fate.batch_id());
-            if let Some(submission) =
-                Self::direct_sealed_submission_from_local_batch_rows(fate.batch_id(), &local_rows)
-                && let Some(record) =
-                    self.local_batch_record_from_sealed_submission(submission, Some(fate.clone()))?
-            {
-                records.push(record);
-                continue;
-            }
-            records.push(LocalBatchRecord::new(
-                fate.batch_id(),
-                BatchMode::Direct,
-                true,
-                Some(fate),
-            ));
-        }
-
-        records.sort_by_key(|record| record.batch_id);
-        Ok(records)
+        rows.sort_by(|left, right| {
+            left.table_name
+                .cmp(&right.table_name)
+                .then_with(|| left.object_id.cmp(&right.object_id))
+                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+                .then_with(|| left.batch_id.cmp(&right.batch_id))
+        });
+        rows.dedup_by(|left, right| {
+            left.table_name == right.table_name
+                && left.object_id == right.object_id
+                && left.branch_name == right.branch_name
+                && left.batch_id == right.batch_id
+        });
+        Ok(rows)
     }
 
     /// Scan all replayable local batch records currently retained by this

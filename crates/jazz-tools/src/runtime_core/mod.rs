@@ -49,7 +49,9 @@ use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::{Storage, StorageError};
-use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowBatchKey, ServerId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationErrorEvent {
@@ -77,6 +79,14 @@ pub(crate) struct QueryLocalOverlay {
     pub(crate) batch_id: BatchId,
     pub(crate) branch_name: BranchName,
     pub(crate) row_ids: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedLocalOverlayRow {
+    pub table_name: String,
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub batch_id: BatchId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -834,6 +844,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Attach a transport handle. Replaces any existing transport.
     pub fn set_transport(&mut self, handle: crate::transport_manager::TransportHandle) {
         self.transport = Some(handle);
+    }
+
+    pub fn hydrate_retained_local_overlay_row(&mut self, row: RetainedLocalOverlayRow) {
+        let row_key = RowBatchKey::new(row.object_id, row.branch_name, row.batch_id);
+        self.schema_manager
+            .query_manager_mut()
+            .hydrate_retained_local_overlay_row(&row.table_name, row_key);
+        self.immediate_tick();
     }
 
     pub(crate) fn mark_transport_catalogue_state_hash_dirty(&mut self) {
