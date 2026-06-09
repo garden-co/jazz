@@ -815,11 +815,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         &self,
     ) -> Result<Vec<RetainedLocalOverlayRow>, RuntimeError> {
         let mut rows = Vec::new();
+        let mut covered_batch_ids = std::collections::HashSet::new();
 
         for record in self.local_batch_records()? {
             if !Self::sealed_batch_still_needs_edge_reconciliation(record.latest_fate.as_ref()) {
                 continue;
             }
+            covered_batch_ids.insert(record.batch_id);
             for member in record.members {
                 rows.push(RetainedLocalOverlayRow {
                     table_name: member.table_name,
@@ -838,6 +840,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             })?;
 
         for submission in submissions {
+            // A batch already contributed by a retained local record carries the
+            // same members; skip the per-member locator lookups instead of
+            // re-deriving identical rows only to drop them in the final dedup.
+            if covered_batch_ids.contains(&submission.batch_id) {
+                continue;
+            }
             let fate = self
                 .storage
                 .load_authoritative_batch_fate(submission.batch_id)
@@ -925,21 +933,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Drain replayable mutation error events that should be surfaced by bindings.
     pub fn drain_mutation_error_events(&mut self) -> Vec<MutationErrorEvent> {
         self.durability.drain_mutation_error_events()
-    }
-
-    pub fn hydrate_local_batch_record(
-        &mut self,
-        record: LocalBatchRecord,
-    ) -> Result<(), RuntimeError> {
-        self.storage
-            .upsert_local_batch_record(&record)
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("persist local batch record: {err}"))
-            })?;
-        self.local_batch_record_cache
-            .insert(record.batch_id, record);
-        self.mark_storage_write_pending_flush();
-        Ok(())
     }
 
     pub fn replay_batch_rejection(

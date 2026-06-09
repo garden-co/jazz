@@ -165,24 +165,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.immediate_tick();
     }
 
-    pub fn reconcile_local_batch_with_server(&mut self, batch_id: crate::row_histories::BatchId) {
-        let Some(server_id) = self
-            .schema_manager
-            .query_manager()
-            .sync_manager()
-            .server_ids()
-            .next()
-        else {
-            return;
-        };
-        self.retransmit_local_batch_to_servers(batch_id);
-        self.schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .request_batch_fates_from_server(server_id, vec![batch_id]);
-        self.immediate_tick();
-    }
-
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.schema_manager

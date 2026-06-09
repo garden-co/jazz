@@ -2367,9 +2367,7 @@ impl QueryManager {
     ) -> Vec<(String, ObjectId)> {
         let rows = self.pending_local_overlay_rows_for_batch(batch_id);
         for (table, row_id) in &rows {
-            self.pending_local_row_batches.remove(row_id);
-            self.mark_subscriptions_dirty_local(table);
-            self.mark_local_row_updated_in_subscriptions(table, *row_id);
+            self.clear_local_pending_row_overlay(table, *row_id);
         }
         rows
     }
