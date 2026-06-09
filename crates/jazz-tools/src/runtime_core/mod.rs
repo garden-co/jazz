@@ -787,11 +787,35 @@ where
     W: crate::transport_manager::StreamAdapter + 'static,
     T: crate::transport_manager::TickNotifier + 'static,
 {
+    install_transport_with_retry_config(
+        core,
+        url,
+        auth,
+        tick,
+        crate::transport_manager::TransportRetryConfig::default(),
+    )
+}
+
+#[cfg(feature = "transport")]
+pub fn install_transport_with_retry_config<S, Sch, W, T>(
+    core: &mut RuntimeCore<S, Sch>,
+    url: String,
+    auth: crate::transport_manager::AuthConfig,
+    tick: T,
+    retry_config: crate::transport_manager::TransportRetryConfig,
+) -> crate::transport_manager::TransportManager<W, T>
+where
+    S: crate::storage::Storage,
+    Sch: Scheduler,
+    W: crate::transport_manager::StreamAdapter + 'static,
+    T: crate::transport_manager::TickNotifier + 'static,
+{
     debug_assert!(
         core.transport().is_none(),
         "install_transport called while a transport is already installed; call clear_transport / disconnect first"
     );
-    let (handle, manager) = crate::transport_manager::create::<W, T>(url, auth, tick);
+    let (handle, manager) =
+        crate::transport_manager::create_with_retry_config::<W, T>(url, auth, tick, retry_config);
     handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
     handle.set_declared_schema_hash(
         core.schema_manager()
