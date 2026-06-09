@@ -61,7 +61,7 @@ export {
 } from "./introspection-fetch.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
-export { toInsertRecord, toValue, toUpdateRecord } from "./value-converter.js";
+export { toValue, toWriteRecord } from "./value-converter.js";
 export {
   DEFAULT_FILE_CHUNK_SIZE_BYTES,
   MAX_FILE_PART_BYTES,
