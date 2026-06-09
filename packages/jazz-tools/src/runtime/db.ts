@@ -428,7 +428,6 @@ function resolveNativeSubscriptionColumns(
 
 function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
   get: () => WasmSchema;
-  peek: () => WasmSchema | undefined;
 } {
   let cachedRuntimeSchema: WasmSchema | undefined;
 
@@ -439,7 +438,6 @@ function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
       }
       return cachedRuntimeSchema;
     },
-    peek: () => cachedRuntimeSchema,
   };
 }
 
@@ -1949,7 +1947,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     const rows =
       context || usesRelationTraversal
-        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session, runtimeSchema.peek())
+        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -2114,7 +2112,6 @@ export class Db {
       handleDelta,
       queryOptions,
       context?.session ?? session,
-      runtimeSchema.peek(),
     );
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
