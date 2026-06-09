@@ -159,9 +159,9 @@ describe("db transaction reads browser integration", () => {
 
     tx.rollback();
 
-    const coreError = `transaction ${batchId} has already been rolled back`;
-    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
+    const coreError = `batch ${batchId} has already been completed or was never opened`;
+    expect(() => tx.commit()).toThrow(`Commit batch failed: Write error: ${coreError}`);
+    expect(() => tx.rollback()).toThrow(`Rollback batch failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
       `Insert failed: WriteError("${coreError}")`,
     );
@@ -370,9 +370,9 @@ describe("db batch reads browser integration", () => {
 
     batch.rollback();
 
-    const coreError = `batch ${batchId} has already been rolled back`;
-    expect(() => batch.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.rollback()).toThrow(`Write error: ${coreError}`);
+    const coreError = `batch ${batchId} has already been completed or was never opened`;
+    expect(() => batch.commit()).toThrow(`Commit batch failed: Write error: ${coreError}`);
+    expect(() => batch.rollback()).toThrow(`Rollback batch failed: Write error: ${coreError}`);
     expect(() => batch.insert(todos, { title: "Nope", done: false })).toThrow(
       `Insert failed: WriteError("${coreError}")`,
     );
