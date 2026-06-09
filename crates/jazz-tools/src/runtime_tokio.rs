@@ -30,7 +30,7 @@ use crate::runtime_core::{
     SubscriptionDelta, SyncSender,
 };
 use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
-use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
+use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
@@ -790,20 +790,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.schema_manager()))
-    }
-
-    /// Subscribe to a query with explicit schema context (for server use).
-    pub fn subscribe_with_schema_context(
-        &self,
-        query: Query,
-        schema_context: &QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core
-            .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
-        Ok(result)
     }
 
     /// Return a reference to the scheduler stored on this runtime handle.

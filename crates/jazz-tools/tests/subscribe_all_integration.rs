@@ -507,7 +507,6 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     let runtime_schema = pair
         .subscriber
         .schema()
-        .await
         .expect("load subscriber runtime schema");
     let descriptor = todo_descriptor(&runtime_schema);
 

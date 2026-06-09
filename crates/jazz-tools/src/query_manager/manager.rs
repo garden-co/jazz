@@ -30,8 +30,8 @@ use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
     ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple,
-    Value, build_ordered_delta_with_post_ids,
+    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, Tuple, Value,
+    build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -1130,17 +1130,6 @@ impl QueryManager {
             .into_iter()
             .map(|b| b.as_str().to_string())
             .collect()
-    }
-
-    /// No-op: Storage manages its own index storage.
-    /// Kept as public API for SchemaManager compatibility.
-    pub fn ensure_indices_for_branch(
-        &mut self,
-        _table: &str,
-        _branch: &str,
-        _table_schema: &TableSchema,
-    ) {
-        // No-op: Storage manages index storage directly
     }
 
     /// Get the underlying SyncManager.
