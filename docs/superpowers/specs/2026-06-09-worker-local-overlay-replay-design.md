@@ -179,7 +179,11 @@ Add focused tests that prove the boundary:
 
 - Worker retained overlay payload includes entries for retained local records
   and memberful sealed submissions.
-- Worker retained overlay payload generation does not call `scan_row_locators`.
+- Worker retained overlay payload generation calls neither `scan_row_locators`
+  nor `scan_history_row_batches`; per-member `load_row_locator` point lookups
+  are allowed.
+- Worker retained overlay payload generation has lookup counts that scale with
+  retained members, not total unrelated rows in storage.
 - Main bridge hydration updates query overlay state without persisting a
   `LocalBatchRecord`.
 - Main bridge hydration does not call `reconcile_local_batch_with_server`.
