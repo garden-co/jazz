@@ -12,7 +12,6 @@ import type { AuthFailureReason } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
@@ -309,13 +308,6 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-type RelationIrNode = Record<string, unknown>;
-type ArraySubqueryPlan = {
-  table: string;
-  selectColumns: string[];
-  nested: ArraySubqueryPlan[];
-};
-
 function resolveQueryJson(query: string | QueryInput): string {
   if (typeof query === "string") {
     return query;
@@ -338,115 +330,6 @@ function resolveQueryJson(query: string | QueryInput): string {
   }
 
   return translateQuery(builtQuery, schema);
-}
-
-function resolveRelationIrOutputTable(node: unknown): string | null {
-  if (!node || typeof node !== "object") {
-    return null;
-  }
-
-  const relation = node as RelationIrNode;
-
-  if ("TableScan" in relation) {
-    const tableScan = relation.TableScan as { table?: unknown } | undefined;
-    return typeof tableScan?.table === "string" ? tableScan.table : null;
-  }
-
-  if ("Filter" in relation) {
-    return resolveRelationIrOutputTable(
-      (relation.Filter as { input?: unknown } | undefined)?.input,
-    );
-  }
-
-  if ("OrderBy" in relation) {
-    return resolveRelationIrOutputTable(
-      (relation.OrderBy as { input?: unknown } | undefined)?.input,
-    );
-  }
-
-  if ("Limit" in relation) {
-    return resolveRelationIrOutputTable((relation.Limit as { input?: unknown } | undefined)?.input);
-  }
-
-  if ("Offset" in relation) {
-    return resolveRelationIrOutputTable(
-      (relation.Offset as { input?: unknown } | undefined)?.input,
-    );
-  }
-
-  if ("Project" in relation) {
-    return resolveRelationIrOutputTable(
-      (relation.Project as { input?: unknown } | undefined)?.input,
-    );
-  }
-
-  if ("Gather" in relation) {
-    const gather = relation.Gather as { seed?: unknown } | undefined;
-    return resolveRelationIrOutputTable(gather?.seed);
-  }
-
-  return null;
-}
-
-function parseArraySubqueryPlans(value: unknown): ArraySubqueryPlan[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const plans: ArraySubqueryPlan[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const plan = entry as {
-      table?: unknown;
-      select_columns?: unknown;
-      nested_arrays?: unknown;
-    };
-    if (typeof plan.table !== "string") {
-      continue;
-    }
-    plans.push({
-      table: plan.table,
-      selectColumns: Array.isArray(plan.select_columns)
-        ? plan.select_columns.filter((column): column is string => typeof column === "string")
-        : [],
-      nested: parseArraySubqueryPlans(plan.nested_arrays),
-    });
-  }
-
-  return plans;
-}
-
-function resolveQueryAlignmentPlan(queryJson: string): {
-  outputTable: string | null;
-  arraySubqueries: ArraySubqueryPlan[];
-  selectColumns: string[];
-} {
-  try {
-    const parsed = JSON.parse(queryJson) as {
-      table?: unknown;
-      relation_ir?: unknown;
-      array_subqueries?: unknown;
-      select_columns?: unknown;
-    };
-    return {
-      outputTable:
-        typeof parsed.table === "string"
-          ? parsed.table
-          : resolveRelationIrOutputTable(parsed.relation_ir),
-      arraySubqueries: parseArraySubqueryPlans(parsed.array_subqueries),
-      selectColumns: Array.isArray(parsed.select_columns)
-        ? parsed.select_columns.filter((column): column is string => typeof column === "string")
-        : [],
-    };
-  } catch {
-    return {
-      outputTable: null,
-      arraySubqueries: [],
-      selectColumns: [],
-    };
-  }
 }
 
 function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
@@ -1039,181 +922,6 @@ export class JazzClient {
     return this.resolvedSession ?? undefined;
   }
 
-  private alignRowValuesToDeclaredSchema(
-    table: string,
-    values: Value[],
-    runtimeSchema?: WasmSchema,
-    arraySubqueries: ArraySubqueryPlan[] = [],
-    selectColumns: string[] = [],
-  ): Value[] {
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
-    const declaredTable = this.context.schema[table];
-    const runtimeTable = effectiveRuntimeSchema[table];
-
-    if (!declaredTable || !runtimeTable) {
-      return values;
-    }
-
-    const projectedVisibleColumnCount =
-      selectColumns.length > 0
-        ? resolveSelectedColumns(table, this.context.schema, selectColumns).filter(
-            (columnName) => !isHiddenIncludeColumnName(columnName),
-          ).length
-        : 0;
-
-    if (projectedVisibleColumnCount > 0) {
-      if (values.length < projectedVisibleColumnCount) {
-        return values;
-      }
-
-      const projectedValues = values.slice(0, projectedVisibleColumnCount);
-      const trailingValues = values.slice(projectedVisibleColumnCount);
-      if (arraySubqueries.length === 0) {
-        return projectedValues.concat(trailingValues);
-      }
-
-      const alignedTrailingValues = trailingValues.map((value, index) => {
-        const plan = arraySubqueries[index];
-        if (!plan) {
-          return value;
-        }
-        return this.alignIncludedValueToDeclaredSchema(value, plan, effectiveRuntimeSchema);
-      });
-
-      return projectedValues.concat(alignedTrailingValues);
-    }
-
-    if (values.length < runtimeTable.columns.length) {
-      return values;
-    }
-
-    const valuesByColumn = new Map<string, Value>();
-    for (let index = 0; index < runtimeTable.columns.length; index += 1) {
-      const column = runtimeTable.columns[index];
-      if (!column) {
-        return values;
-      }
-      const value = values[index];
-      if (value === undefined) {
-        return values;
-      }
-      valuesByColumn.set(column.name, value);
-    }
-
-    const reorderedValues: Value[] = [];
-    for (const column of declaredTable.columns) {
-      const value = valuesByColumn.get(column.name);
-      if (value === undefined) {
-        return values;
-      }
-      reorderedValues.push(value);
-    }
-
-    const trailingValues = values.slice(runtimeTable.columns.length);
-    if (arraySubqueries.length === 0) {
-      return reorderedValues.concat(trailingValues);
-    }
-
-    const alignedTrailingValues = trailingValues.map((value, index) => {
-      const plan = arraySubqueries[index];
-      if (!plan) {
-        return value;
-      }
-      return this.alignIncludedValueToDeclaredSchema(value, plan, effectiveRuntimeSchema);
-    });
-
-    return reorderedValues.concat(alignedTrailingValues);
-  }
-
-  private alignIncludedValueToDeclaredSchema(
-    value: Value,
-    plan: ArraySubqueryPlan,
-    runtimeSchema?: WasmSchema,
-  ): Value {
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
-    if (value.type !== "Array") {
-      return value;
-    }
-
-    return {
-      ...value,
-      value: value.value.map((entry) => {
-        if (entry.type !== "Row") {
-          return entry;
-        }
-
-        return {
-          ...entry,
-          value: {
-            ...entry.value,
-            values: this.alignRowValuesToDeclaredSchema(
-              plan.table,
-              entry.value.values,
-              effectiveRuntimeSchema,
-              plan.nested,
-              plan.selectColumns,
-            ),
-          },
-        };
-      }),
-    };
-  }
-
-  private alignQueryRowsToDeclaredSchema(
-    queryJson: string,
-    rows: Row[],
-    runtimeSchema?: WasmSchema,
-  ): Row[] {
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
-    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
-    if (!outputTable) {
-      return rows;
-    }
-
-    return rows.map((row) => ({
-      ...row,
-      values: this.alignRowValuesToDeclaredSchema(
-        outputTable,
-        row.values,
-        effectiveRuntimeSchema,
-        arraySubqueries,
-        selectColumns,
-      ),
-    }));
-  }
-
-  private alignSubscriptionDeltaToDeclaredSchema(
-    queryJson: string,
-    delta: SubscriptionWireDelta,
-    runtimeSchema?: WasmSchema,
-  ): SubscriptionWireDelta {
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
-    const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
-    if (!outputTable || !Array.isArray(delta)) {
-      return delta;
-    }
-
-    return delta.map((change) => {
-      if ((change.kind === 0 || change.kind === 2) && change.row) {
-        return {
-          ...change,
-          row: {
-            ...change.row,
-            values: this.alignRowValuesToDeclaredSchema(
-              outputTable,
-              change.row.values as Value[],
-              effectiveRuntimeSchema,
-              arraySubqueries,
-              selectColumns,
-            ),
-          },
-        };
-      }
-
-      return change;
-    });
-  }
-
   /**
    * Insert a new row into a table without waiting for durability.
    */
@@ -1249,11 +957,7 @@ export class JazzClient {
     const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(
-        table,
-        row.values as Value[],
-        this.context.schema,
-      ),
+      values: row.values as Value[],
     };
   }
 
@@ -1294,11 +998,7 @@ export class JazzClient {
     const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(
-        table,
-        row.values as Value[],
-        this.context.schema,
-      ),
+      values: row.values as Value[],
     };
   }
 
@@ -1348,14 +1048,12 @@ export class JazzClient {
     query: string | QueryInput,
     options?: InternalQueryExecutionOptions,
     session?: Session,
-    runtimeSchema?: WasmSchema,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
@@ -1364,7 +1062,7 @@ export class JazzClient {
         : (options?.runtimeSettledTier ?? normalizedOptions.tier),
       optionsJson,
     );
-    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], effectiveRuntimeSchema);
+    return results as Row[];
   }
 
   /**
@@ -1445,14 +1143,12 @@ export class JazzClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
     session?: Session,
-    runtimeSchema?: WasmSchema,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
 
     // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
     // a handle synchronously (zero work), then `executeSubscription` is deferred
@@ -1474,9 +1170,7 @@ export class JazzClient {
 
         const delta: SubscriptionWireDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(
-          this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
-        );
+        callback(delta);
       });
     });
 
