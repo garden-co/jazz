@@ -21,6 +21,10 @@ In scope:
 - Stop hydrating worker `LocalBatchRecord`s into the main runtime.
 - Stop main from calling batch reconciliation as a result of worker startup
   replay.
+- Make main batch-fate processing tolerate overlay-only batch state without
+  falling back to full row-locator/history scans.
+- Clear hydrated overlay entries when durable row or fate processing makes them
+  obsolete.
 - Prove retained overlay replay does not use row-locator or row-history
   forensic scans.
 
@@ -48,6 +52,12 @@ The new boundary is:
 This is intentionally smaller than a full one-runtime architecture rewrite while
 removing the duplicated batch cache and manual reconciliation responsibility from
 main.
+
+The implementation should reuse the existing query overlay mechanism. Main's
+overlay hydration API is a thin runtime wrapper around
+`QueryManager::pending_local_row_batches` / `local_overlay_rows` behavior, using
+the same semantics as `maybe_track_local_pending_batch_overlay` or its exact
+equivalent. It must not introduce a parallel overlay state machine.
 
 ## Wire Shape
 
@@ -92,6 +102,13 @@ Worker-side reconciliation stays in worker:
 - Worker forwards normal row and fate sync messages to main through the existing
   sync channel.
 
+Fate-only batches without a retained local batch record or sealed submission are
+not replayed as overlays. The assumption is that well-formed committed local
+batches retain a sealed submission even if their `LocalBatchRecord` is pruned.
+The existing commit path persists sealed submissions and does not delete them on
+ack. A fate-only retained batch therefore indicates incomplete or inconsistent
+metadata, not a normal startup overlay source.
+
 ## Main Data Flow
 
 On `LocalOverlaySync`:
@@ -104,8 +121,16 @@ On `LocalOverlaySync`:
 5. Do not persist a `LocalBatchRecord`.
 6. Do not call `reconcile_local_batch_with_server`.
 
-Later normal row and fate sync messages continue to update main storage and
-clear or supersede local overlay state through existing visibility processing.
+Main batch-fate processing must handle overlay-only state. Before invoking any
+scan-enabled row reconstruction helper for a batch, fate handling should consult
+overlay entries for that batch. This covers fate-before-seal ordering and
+prevents one full database scan per fate after reload.
+
+Main sync processing must also clear stale overlay entries. When the
+corresponding row arrives through `RowBatchCreated`, or when a batch fate settles
+the row so the visible region can answer the subscription without local overlay,
+main removes the matching `RowBatchKey` and dirties affected subscriptions. This
+prevents replayed overlay state from shadowing durable rows indefinitely.
 
 ## Runtime API
 
@@ -123,6 +148,10 @@ pub fn hydrate_retained_local_overlay_row(
 
 This API should update query overlay state only. It should not touch local batch
 record storage and should not start sync reconciliation.
+
+Add a matching query-manager/runtime helper for clearing overlay rows by
+`RowBatchKey` or `(object_id, batch_id)` so row and fate sync processing can
+evict retained overlay entries once durable state supersedes them.
 
 ## Error Handling
 
@@ -142,6 +171,10 @@ Add focused tests that prove the boundary:
 - Main bridge hydration updates query overlay state without persisting a
   `LocalBatchRecord`.
 - Main bridge hydration does not call `reconcile_local_batch_with_server`.
+- Main fate processing with overlay-only state marks subscriptions dirty without
+  scanning row locators or requiring a local batch record.
+- Main clears a retained overlay entry when the same row arrives through normal
+  sync or when its batch fate makes the overlay obsolete.
 - Existing rejected mutation-error replay tests remain separate.
 
 ## Non-Goals And Follow-Ups
@@ -149,6 +182,13 @@ Add focused tests that prove the boundary:
 This design does not solve retained-batch accumulation. A later pass should add
 a lifecycle rule for pruning terminal batch envelopes once their retention
 boundary is satisfied.
+
+This design also does not fix worker-side
+`pending_batch_ids_needing_reconciliation`. The worker may still scan visible
+rows while discovering batches that need upstream reconciliation. That remaining
+cost delays sync/reconciliation rather than forcing main to hydrate duplicate
+batch metadata, and should be addressed as a separate worker reconciliation
+cleanup.
 
 This design also does not collapse the two runtimes. If that becomes the goal,
 main should become an RPC client for worker-owned query execution. That is a
