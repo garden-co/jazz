@@ -225,9 +225,23 @@ describe("JazzClient runtime helpers", () => {
       "edge",
     );
 
-    const tx = client.beginTransaction();
-    tx.insert("todos", { done: { type: "Boolean", value: false } });
-    await tx.query('{"table":"todos"}');
+    const batchId = client.beginBatch("transactional");
+    client.insertInternal(
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      undefined,
+      undefined,
+      undefined,
+      batchId,
+    );
+    await client.query(
+      '{"table":"todos"}',
+      {
+        localUpdates: "deferred",
+        transactionBatchId: batchId,
+      },
+      undefined,
+    );
 
     const writeContext = JSON.parse(writeContextJson ?? "{}");
     expect(queryCalls[0]![3]).toBe(

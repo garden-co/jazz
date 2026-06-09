@@ -20,12 +20,11 @@ import type {
 import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
-  DirectBatch as RuntimeDirectBatch,
   WriteResult,
   JazzClient,
   type MutationErrorEvent,
-  Transaction as RuntimeTransaction,
   WriteHandle,
+  type BatchMode,
   type CreateOptions,
   type RestoreOptions,
   type UpdateOptions,
@@ -37,7 +36,7 @@ import {
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
   Scoped,
-  DeleteOptions,
+  type DeleteOptions,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
@@ -484,9 +483,11 @@ export type ColumnTransformMap = Record<string, ColumnTransform>;
 
 type DbBatchHandleBinding = {
   client: JazzClient;
-  runtimeHandle: RuntimeTransaction;
+  batchId: string;
+  session?: Session;
+  attribution?: string;
 };
-type AnyDbBatchHandle = DbBatchHandleBase<RuntimeTransaction | RuntimeDirectBatch>;
+type AnyDbBatchHandle = DbBatchHandleBase;
 
 const dbBatchHandleBindings = new WeakMap<AnyDbBatchHandle, DbBatchHandleBinding>();
 
@@ -547,11 +548,13 @@ function transformInputColumns(
 /**
  * Shared implementation for batches and transactions.
  */
-abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | RuntimeDirectBatch> {
+abstract class DbBatchHandleBase {
   constructor(
     private readonly bindingName: "DbTransaction" | "DbDirectBatch",
+    private readonly batchMode: BatchMode,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly beginRuntimeHandle: (client: JazzClient) => TRuntimeHandle,
+    private readonly session?: Session,
+    private readonly attribution?: string,
   ) {}
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
@@ -562,8 +565,13 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     }
 
     const client = this.resolveClient(table._schema);
-    const runtimeHandle = this.beginRuntimeHandle(client);
-    const binding = { client, runtimeHandle };
+    const batchId = client.beginBatch(this.batchMode);
+    const binding = {
+      client,
+      batchId,
+      session: this.session,
+      attribution: this.attribution,
+    };
     dbBatchHandleBindings.set(this, binding);
     return binding;
   }
@@ -572,20 +580,20 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     return this.bindTable(query as unknown as TableProxy<T, never>, this.bindingName);
   }
 
-  private requireRuntimeHandle(operation: string): TRuntimeHandle {
-    return getDbBatchHandleBinding(this, operation, this.bindingName)
-      .runtimeHandle as TRuntimeHandle;
+  private requireBinding(operation: string): DbBatchHandleBinding {
+    return getDbBatchHandleBinding(this, operation, this.bindingName);
   }
 
   batchId(): string {
-    return this.requireRuntimeHandle("batchId").batchId;
+    return this.requireBinding("batchId").batchId;
   }
 
   /**
    * Commit this batch.
    */
   commit(): WriteHandle {
-    return this.requireRuntimeHandle("commit").commit();
+    const { client, batchId } = this.requireBinding("commit");
+    return client.commitBatch(batchId);
   }
 
   /**
@@ -597,7 +605,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): void {
-    this.requireRuntimeHandle("rollback").rollback();
+    const { client, batchId } = this.requireBinding("rollback");
+    client.rollbackBatch(batchId);
   }
 
   /**
@@ -610,8 +619,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
-    const runtimeHandle = this.requireRuntimeHandle("insert");
-    const row = runtimeHandle.insert(table._table, values, options);
+    const { client, batchId, session, attribution } = this.requireBinding("insert");
+    const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -630,8 +639,16 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
-    const runtimeHandle = this.requireRuntimeHandle("restore");
-    const row = runtimeHandle.restore(table._table, id, values, options);
+    const { client, batchId, session, attribution } = this.requireBinding("restore");
+    const row = client.restoreInternal(
+      table._table,
+      id,
+      values,
+      options,
+      session,
+      attribution,
+      batchId,
+    );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -645,7 +662,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeHandle("upsert").upsert(table._table, values, options);
+    const { client, batchId, session, attribution } = this.requireBinding("upsert");
+    client.upsertInternal(table._table, values, options, session, attribution, batchId);
   }
 
   /**
@@ -658,7 +676,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeHandle("update").update(id, updates);
+    const { client, batchId, session, attribution } = this.requireBinding("update");
+    client.updateInternal(id, updates, undefined, session, attribution, batchId);
   }
 
   /**
@@ -668,8 +687,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { runtimeHandle } = this.bindTable(table, this.bindingName);
-    runtimeHandle.delete(id);
+    const { client, batchId, session, attribution } = this.bindTable(table, this.bindingName);
+    client.deleteInternal(id, undefined, session, attribution, batchId);
   }
 
   /**
@@ -678,14 +697,22 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * Read data is scoped to this batch.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, runtimeHandle } = this.bindQuery(query);
+    const { client, batchId, session } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const rows = await runtimeHandle.query(translateQuery(builderJson, planningSchema), options);
+    const rows = await client.query(
+      translateQuery(builderJson, planningSchema),
+      {
+        ...options,
+        localUpdates: "deferred",
+        transactionBatchId: batchId,
+      },
+      session,
+    );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -717,12 +744,13 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
  * globally visible once it's committed using {@link DbTransaction.commit} and
  * accepted by the authority.
  */
-export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
+export class DbTransaction extends DbBatchHandleBase {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
-    beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
+    session?: Session,
+    attribution?: string,
   ) {
-    super("DbTransaction", resolveClient, beginRuntimeTransaction);
+    super("DbTransaction", "transactional", resolveClient, session, attribution);
   }
 }
 
@@ -735,12 +763,13 @@ export type TransactionScope = Scoped<DbTransaction>;
  * Direct batches group a set of writes that should become visible together on batch commit,
  * without waiting for an authority approval.
  */
-export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
+export class DbDirectBatch extends DbBatchHandleBase {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
-    beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
+    session?: Session,
+    attribution?: string,
   ) {
-    super("DbDirectBatch", resolveClient, beginRuntimeBatch);
+    super("DbDirectBatch", "direct", resolveClient, session, attribution);
   }
 }
 
@@ -1795,7 +1824,8 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransaction(context?.session, context?.attribution),
+      context?.session,
+      context?.attribution,
     );
   }
 
@@ -1834,7 +1864,8 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatch(context?.session, context?.attribution),
+      context?.session,
+      context?.attribution,
     );
   }
 
