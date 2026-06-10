@@ -111,6 +111,19 @@ struct SplitResult {
 
 type KvPair = (Vec<u8>, Vec<u8>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEntryCursor {
+    page_id: PageId,
+    entry_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawEntryBatch {
+    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub next_cursor: Option<RawEntryCursor>,
+    pub done: bool,
+}
+
 enum StagedValue {
     Inline(Vec<u8>),
     Overflow {
@@ -354,7 +367,41 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         let mut out = Vec::new();
-        let mut current = self.leftmost_leaf_page_id()?;
+        let mut cursor = None;
+
+        while out.len() < limit {
+            let remaining = limit - out.len();
+            let batch = self.raw_entries_batch(cursor, remaining)?;
+            out.extend(batch.entries);
+            if batch.done {
+                break;
+            }
+            cursor = batch.next_cursor;
+        }
+
+        Ok(out)
+    }
+
+    pub fn raw_entries_batch(
+        &mut self,
+        cursor: Option<RawEntryCursor>,
+        limit: usize,
+    ) -> Result<RawEntryBatch, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::raw_entries_batch", limit).entered();
+        if limit == 0 {
+            return Ok(RawEntryBatch {
+                entries: Vec::new(),
+                next_cursor: cursor,
+                done: false,
+            });
+        }
+
+        let mut out = Vec::new();
+        let mut current = match cursor {
+            Some(cursor) => Some(cursor.page_id),
+            None => self.leftmost_leaf_page_id()?,
+        };
+        let mut entry_index = cursor.map_or(0, |cursor| cursor.entry_index);
         let mut visited = OpfsSet::default();
 
         while let Some(page_id) = current {
@@ -371,7 +418,15 @@ impl<F: SyncFile> OpfsBTree<F> {
                 return Err(BTreeError::Corrupt("expected leaf page".to_string()));
             };
 
-            for (key, value) in entries {
+            if entry_index > entries.len() {
+                return Err(BTreeError::Corrupt(format!(
+                    "raw entry cursor points past leaf page {}",
+                    page_id
+                )));
+            }
+
+            let entry_count = entries.len();
+            for (index, (key, value)) in entries.into_iter().enumerate().skip(entry_index) {
                 let value = match value {
                     ValueCell::Inline(value) => value,
                     ValueCell::Overflow {
@@ -381,14 +436,34 @@ impl<F: SyncFile> OpfsBTree<F> {
                 };
                 out.push((key, value));
                 if out.len() == limit {
-                    return Ok(out);
+                    let next_cursor = if index + 1 < entry_count {
+                        Some(RawEntryCursor {
+                            page_id,
+                            entry_index: index + 1,
+                        })
+                    } else {
+                        next.map(|page_id| RawEntryCursor {
+                            page_id,
+                            entry_index: 0,
+                        })
+                    };
+                    return Ok(RawEntryBatch {
+                        entries: out,
+                        next_cursor,
+                        done: next_cursor.is_none(),
+                    });
                 }
             }
 
             current = next;
+            entry_index = 0;
         }
 
-        Ok(out)
+        Ok(RawEntryBatch {
+            entries: out,
+            next_cursor: None,
+            done: true,
+        })
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
@@ -2049,6 +2124,43 @@ mod tests {
                 (b"a".to_vec(), b"alpha".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn raw_entries_batch_advances_cursor() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        for index in 0..9 {
+            let key = format!("key-{index}");
+            let value = format!("value-{index}");
+            tree.put(key.as_bytes(), value.as_bytes())
+                .expect("put entry");
+        }
+
+        let first = tree.raw_entries_batch(None, 4).expect("first batch");
+        assert_eq!(first.entries.len(), 4);
+        assert!(!first.done);
+
+        let second = tree
+            .raw_entries_batch(first.next_cursor, 4)
+            .expect("second batch");
+        assert_eq!(second.entries.len(), 4);
+        assert!(!second.done);
+
+        let third = tree
+            .raw_entries_batch(second.next_cursor, 4)
+            .expect("third batch");
+        assert_eq!(third.entries.len(), 1);
+        assert!(third.done);
+
+        let combined: Vec<_> = first
+            .entries
+            .into_iter()
+            .chain(second.entries)
+            .chain(third.entries)
+            .collect();
+        assert_eq!(combined, tree.raw_entries(usize::MAX).expect("raw entries"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ mod superblock;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_bench;
 
-pub use db::{BTreeOptions, CheckpointState, OpfsBTree};
+pub use db::{BTreeOptions, CheckpointState, OpfsBTree, RawEntryBatch, RawEntryCursor};
 pub use error::BTreeError;
 #[cfg(target_arch = "wasm32")]
 pub use file::OpfsFile;

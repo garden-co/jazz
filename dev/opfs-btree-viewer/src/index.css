@@ -309,6 +309,26 @@ button {
   padding: 0 10px;
 }
 
+.text-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 16px;
+  border-top: 1px solid #edf0ea;
+  color: #52615d;
+}
+
+.pagination + .entry-table {
+  border-top: 1px solid #edf0ea;
+}
+
 .empty-state {
   padding: 28px;
 }

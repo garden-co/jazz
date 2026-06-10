@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import initWasm, { scanOpfsBTreeEntriesFromFileBytes } from "jazz-wasm";
+import initWasm, { OpfsBTreeEntryScanner } from "jazz-wasm";
 import { decodeStorageBundle, type StorageBundle } from "./storage-bundle.js";
 
 type PreviewMode = "utf8" | "hex" | "base64";
@@ -24,6 +24,8 @@ interface LoadedBundle {
 
 const utf8Decoder = new TextDecoder();
 let wasmInit: Promise<void> | null = null;
+const SCAN_BATCH_SIZE = 250;
+const ENTRY_PAGE_SIZE = 100;
 
 function ensureWasm(): Promise<void> {
   wasmInit ??= initWasm();
@@ -39,6 +41,7 @@ export default function App() {
   const [isOpening, setIsOpening] = useState(false);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("utf8");
   const [filter, setFilter] = useState("");
+  const [entryPage, setEntryPage] = useState(0);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
 
   const selectedFile = useMemo(() => {
@@ -55,17 +58,35 @@ export default function App() {
       [selectedFile.path]: { status: "loading", entries: [] },
     }));
 
-    void ensureWasm()
-      .then(() => scanOpfsBTreeEntriesFromFileBytes(selectedFile.bytes))
-      .then((entries) => normalizeEntries(entries))
-      .then((entries) => {
+    void (async () => {
+      try {
+        await ensureWasm();
         if (cancelled) return;
-        setScanStates((current) => ({
-          ...current,
-          [selectedFile.path]: { status: "ready", entries },
-        }));
-      })
-      .catch((cause: unknown) => {
+
+        const scanner = new OpfsBTreeEntryScanner(selectedFile.bytes);
+        let done = false;
+
+        while (!done && !cancelled) {
+          const batch = normalizeEntryBatch(scanner.nextBatch(SCAN_BATCH_SIZE));
+          done = batch.done;
+
+          setScanStates((current) => {
+            const currentScan = current[selectedFile.path];
+            if (!currentScan || currentScan.status === "error") return current;
+            return {
+              ...current,
+              [selectedFile.path]: {
+                status: done ? "ready" : "loading",
+                entries: [...currentScan.entries, ...batch.entries],
+              },
+            };
+          });
+
+          if (!done) {
+            await yieldToBrowser();
+          }
+        }
+      } catch (cause: unknown) {
         if (cancelled) return;
         setScanStates((current) => ({
           ...current,
@@ -75,12 +96,17 @@ export default function App() {
             message: cause instanceof Error ? cause.message : String(cause),
           },
         }));
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
   }, [selectedFile]);
+
+  useEffect(() => {
+    setEntryPage(0);
+  }, [filter, selectedPath]);
 
   const selectedScan = selectedPath ? scanStates[selectedPath] : undefined;
   const filteredEntries = useMemo(() => {
@@ -93,6 +119,18 @@ export default function App() {
       return keyText.includes(query) || keyHex.includes(query);
     });
   }, [filter, selectedScan]);
+  const entryPageCount = Math.max(1, Math.ceil(filteredEntries.length / ENTRY_PAGE_SIZE));
+  const selectedEntryPage = Math.min(entryPage, entryPageCount - 1);
+  const pagedEntries = useMemo(() => {
+    const start = selectedEntryPage * ENTRY_PAGE_SIZE;
+    return filteredEntries.slice(start, start + ENTRY_PAGE_SIZE);
+  }, [filteredEntries, selectedEntryPage]);
+
+  useEffect(() => {
+    if (entryPage !== selectedEntryPage) {
+      setEntryPage(selectedEntryPage);
+    }
+  }, [entryPage, selectedEntryPage]);
 
   async function openBundle(file: File): Promise<void> {
     setIsOpening(true);
@@ -105,10 +143,12 @@ export default function App() {
       setSelectedPath(bundle.files[0]?.path ?? null);
       setScanStates({});
       setFilter("");
+      setEntryPage(0);
     } catch (cause) {
       setLoaded(null);
       setSelectedPath(null);
       setScanStates({});
+      setEntryPage(0);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setIsOpening(false);
@@ -206,7 +246,16 @@ export default function App() {
             </div>
 
             {copyStatus ? <p className="status-line">{copyStatus}</p> : null}
-            {renderEntries(selectedScan, filteredEntries, previewMode, copyEntryValue)}
+            {renderEntries(
+              selectedScan,
+              filteredEntries,
+              pagedEntries,
+              selectedEntryPage,
+              entryPageCount,
+              previewMode,
+              setEntryPage,
+              copyEntryValue,
+            )}
           </section>
         </section>
       ) : (
@@ -244,10 +293,14 @@ function SegmentedPreviewMode(props: {
 function renderEntries(
   scan: EntryScanState | undefined,
   entries: RawEntry[],
+  pagedEntries: RawEntry[],
+  pageIndex: number,
+  pageCount: number,
   previewMode: PreviewMode,
+  setPageIndex: (pageIndex: number) => void,
   copyEntryValue: (entry: RawEntry) => Promise<void>,
 ) {
-  if (!scan || scan.status === "loading") {
+  if (!scan) {
     return <p className="loading-state">Scanning opfs-btree file...</p>;
   }
 
@@ -256,6 +309,9 @@ function renderEntries(
   }
 
   if (scan.entries.length === 0) {
+    if (scan.status === "loading") {
+      return <p className="loading-state">Scanning opfs-btree file...</p>;
+    }
     return <p className="loading-state">No raw entries found.</p>;
   }
 
@@ -264,37 +320,93 @@ function renderEntries(
   }
 
   return (
-    <div className="entry-table" role="table" aria-label="Raw opfs-btree entries">
-      <div className="entry-row entry-heading" role="row">
-        <span role="columnheader">Key</span>
-        <span role="columnheader">Key bytes</span>
-        <span role="columnheader">Value bytes</span>
-        <span role="columnheader">Value preview</span>
-        <span role="columnheader">Actions</span>
-      </div>
-      {entries.map((entry, index) => (
-        <div className="entry-row" role="row" key={`${bytesToHex(entry.keyBytes, 64)}:${index}`}>
-          <code role="cell" title={bytesToHex(entry.keyBytes, Number.POSITIVE_INFINITY)}>
-            {entry.key || bytesToHex(entry.keyBytes, 48)}
-          </code>
-          <span role="cell">{formatBytes(entry.keyBytes.byteLength)}</span>
-          <span role="cell">{formatBytes(entry.value.byteLength)}</span>
-          <code role="cell" className="value-preview">
-            {formatValue(entry.value, previewMode, 320)}
-          </code>
-          <span role="cell">
-            <button
-              type="button"
-              className="text-action"
-              onClick={() => void copyEntryValue(entry)}
-            >
-              Copy value
-            </button>
-          </span>
+    <>
+      <p className="status-line">
+        {scan.status === "loading" ? "Scanning..." : "Scanned"} {scan.entries.length} raw entries
+        {entries.length !== scan.entries.length ? `, ${entries.length} matching filter` : ""}.
+      </p>
+      <PaginationControls pageIndex={pageIndex} pageCount={pageCount} onChange={setPageIndex} />
+      <div className="entry-table" role="table" aria-label="Raw opfs-btree entries">
+        <div className="entry-row entry-heading" role="row">
+          <span role="columnheader">Key</span>
+          <span role="columnheader">Key bytes</span>
+          <span role="columnheader">Value bytes</span>
+          <span role="columnheader">Value preview</span>
+          <span role="columnheader">Actions</span>
         </div>
-      ))}
+        {pagedEntries.map((entry, index) => (
+          <div
+            className="entry-row"
+            role="row"
+            key={`${bytesToHex(entry.keyBytes, 64)}:${pageIndex * ENTRY_PAGE_SIZE + index}`}
+          >
+            <code role="cell" title={bytesToHex(entry.keyBytes, Number.POSITIVE_INFINITY)}>
+              {entry.key || bytesToHex(entry.keyBytes, 48)}
+            </code>
+            <span role="cell">{formatBytes(entry.keyBytes.byteLength)}</span>
+            <span role="cell">{formatBytes(entry.value.byteLength)}</span>
+            <code role="cell" className="value-preview">
+              {formatValue(entry.value, previewMode, 320)}
+            </code>
+            <span role="cell">
+              <button
+                type="button"
+                className="text-action"
+                onClick={() => void copyEntryValue(entry)}
+              >
+                Copy value
+              </button>
+            </span>
+          </div>
+        ))}
+      </div>
+      <PaginationControls pageIndex={pageIndex} pageCount={pageCount} onChange={setPageIndex} />
+    </>
+  );
+}
+
+function PaginationControls(props: {
+  pageIndex: number;
+  pageCount: number;
+  onChange: (pageIndex: number) => void;
+}) {
+  if (props.pageCount <= 1) return null;
+  return (
+    <div className="pagination">
+      <button
+        type="button"
+        className="text-action"
+        disabled={props.pageIndex === 0}
+        onClick={() => props.onChange(props.pageIndex - 1)}
+      >
+        Previous
+      </button>
+      <span>
+        Page {props.pageIndex + 1} of {props.pageCount}
+      </span>
+      <button
+        type="button"
+        className="text-action"
+        disabled={props.pageIndex + 1 >= props.pageCount}
+        onClick={() => props.onChange(props.pageIndex + 1)}
+      >
+        Next
+      </button>
     </div>
   );
+}
+
+function normalizeEntryBatch(batch: unknown): { entries: RawEntry[]; done: boolean } {
+  if (!batch || typeof batch !== "object") {
+    throw new Error("Scanner returned an invalid batch.");
+  }
+
+  const record = batch as Record<string, unknown>;
+  if (typeof record.done !== "boolean") {
+    throw new Error("Scanner returned an invalid batch status.");
+  }
+
+  return { entries: normalizeEntries(record.entries), done: record.done };
 }
 
 function normalizeEntries(entries: unknown): RawEntry[] {
@@ -364,4 +476,8 @@ function bytesToBase64(bytes: Uint8Array, limit: number): string {
 
 function finiteLimit(limit: number, fallback: number): number {
   return Number.isFinite(limit) ? limit : fallback;
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
