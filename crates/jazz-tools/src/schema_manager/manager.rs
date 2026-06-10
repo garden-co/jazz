@@ -17,8 +17,8 @@ use blake3::Hasher;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
-use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::{Session, WriteContext};
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
@@ -31,7 +31,7 @@ use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
-use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
+use super::context::{SchemaContext, SchemaError};
 use super::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
     decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
@@ -1565,84 +1565,6 @@ impl SchemaManager {
     /// Create a query builder for a table.
     pub fn query(&self, table: &str) -> QueryBuilder {
         QueryBuilder::new(table)
-    }
-
-    /// Subscribe to a query with explicit schema context (for server use).
-    ///
-    /// Servers don't have a fixed "current" schema - they serve multiple clients
-    /// with different schema versions. This method allows subscribing to a query
-    /// using the client's schema as the "current" for that subscription.
-    ///
-    /// The schema must be in `known_schemas` (received via catalogue sync).
-    /// Returns `UnknownSchema` error if the schema is not known.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to subscribe to
-    /// * `ctx` - Schema context from the client (env, schema_hash, user_branch)
-    /// * `session` - Optional session for policy evaluation
-    pub fn subscribe_with_schema_context(
-        &mut self,
-        query: Query,
-        ctx: &QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::query_manager::QuerySubscriptionId, QueryError> {
-        // Look up the target schema in known_schemas
-        let target_schema = self
-            .known_schemas
-            .get(&ctx.schema_hash)
-            .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
-            .clone();
-
-        // Build a SchemaContext with target as current
-        let mut temp_context =
-            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
-
-        // Copy lenses from our main context for multi-schema queries
-        for ((_source, _target), lens) in &self.context.lenses {
-            temp_context.register_lens(lens.clone());
-        }
-
-        // Add other known schemas as potential live schemas
-        for (hash, schema) in self.known_schemas.iter() {
-            if *hash != ctx.schema_hash {
-                // Add to pending - will activate if lens path exists to target
-                temp_context.add_pending_schema(schema.clone());
-            }
-        }
-
-        // Try to activate any pending schemas that now have lens paths
-        temp_context.try_activate_pending();
-
-        // Ensure the client's branch is registered for indexing (server-mode)
-        let client_branch =
-            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
-        self.query_manager
-            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
-
-        // Ensure indices exist for all branches in the temp context
-        for branch_name in temp_context.all_branch_names() {
-            let branch_str = branch_name.as_str();
-            if let Some(composed) = ComposedBranchName::parse(&branch_name)
-                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
-            {
-                for (table_name, table_schema) in schema {
-                    self.query_manager.ensure_indices_for_branch(
-                        table_name.as_str(),
-                        branch_str,
-                        table_schema,
-                    );
-                }
-            }
-        }
-
-        // Subscribe using the temporary context
-        self.query_manager.subscribe_with_explicit_context(
-            query,
-            &target_schema,
-            &temp_context,
-            session,
-        )
     }
 
     /// Insert a row into the current schema's branch.

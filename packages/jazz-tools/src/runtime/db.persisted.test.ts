@@ -94,16 +94,16 @@ describe("Db write handles", () => {
       runtimeRow,
       "batch-insert",
     );
-    const create = vi.fn(() => writeResult);
+    const insert = vi.fn(() => writeResult);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      create,
+      insert,
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
     const pending = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
@@ -178,12 +178,12 @@ describe("Db write handles", () => {
     );
     const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-session-update");
     const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-session-delete");
-    const create = vi.fn(() => insertHandle);
+    const insert = vi.fn(() => insertHandle);
     const update = vi.fn(() => updateHandle);
     const deleteRow = vi.fn(() => deleteHandle);
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      create,
+      insert,
       update,
       delete: deleteRow,
     };
@@ -199,7 +199,7 @@ describe("Db write handles", () => {
     const updated = db.update(table, "todo-2", { done: false });
     const deleted = db.delete(table, "todo-2");
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "With session" },
