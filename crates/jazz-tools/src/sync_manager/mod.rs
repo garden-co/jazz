@@ -342,8 +342,10 @@ impl SyncManager {
     }
 
     /// True when a batch with `fate` still pends settlement reconciliation at
-    /// `target`. `Missing` is excluded here too: the retransmission path owns
-    /// it, so it is neither pending nor retired.
+    /// `target`. `Missing` is excluded: it never retires bookkeeping, but it
+    /// is owned by the retransmission paths: the live fate handler resends
+    /// immediately, and the pending-set derivation special-cases stored
+    /// `Missing` fates for submissions it still retains.
     pub fn fate_needs_settlement_at(fate: Option<&BatchFate>, target: DurabilityTier) -> bool {
         match fate {
             None => true,

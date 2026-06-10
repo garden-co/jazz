@@ -121,6 +121,74 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
 }
 
 #[test]
+fn rc_stored_missing_fate_replays_seal_and_rows_after_restart() {
+    // A live `Missing` fate triggers an immediate retransmit, but if the app
+    // restarts before that retransmit settles, the stored `Missing` fate is all
+    // that's left. `add_server` must still re-offer the retained seal.
+    let schema = test_schema();
+    let mut core = create_runtime_with_storage_and_sync_manager(
+        schema.clone(),
+        "missing-fate-restart-replay-test",
+        MemoryStorage::new(),
+        SyncManager::new(),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let ((row_id, _row_values), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
+        },
+    });
+    core.batched_tick();
+    core.sync_sender().take();
+    assert_eq!(
+        core.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::Missing { batch_id }),
+        "the restart path must read back a stored Missing fate"
+    );
+
+    let storage = core.into_storage();
+    let mut restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "missing-fate-restart-replay-test",
+        storage,
+        SyncManager::new(),
+    );
+    let server_id = ServerId::new();
+    restarted.add_server(server_id);
+    restarted.batched_tick();
+
+    let outbox = restarted.sync_sender().take();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::SealBatch { submission } if submission.batch_id == batch_id
+        )),
+        "a stored Missing fate must keep the batch pending so add_server resends the seal"
+    );
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::RowBatchCreated { row, .. }
+                if row.row_id == row_id && row.batch_id == batch_id
+        )),
+        "add_server must also resend the batch rows"
+    );
+}
+
+#[test]
 fn rc_non_durable_client_seals_direct_batch_without_self_confirming_local_fate() {
     let mut s = create_3tier_rc();
     s.a.set_non_durable_client_runtime();
