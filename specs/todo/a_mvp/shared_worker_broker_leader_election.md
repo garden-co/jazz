@@ -81,22 +81,10 @@ Current files and concepts to replace:
   - `${primaryDbName}__fallback__${tabId}`
 
 The new broker must preserve the app-facing behavior while removing these
-cross-tab peer coordination paths.
-
-During the migration window, a new brokered leader must also acquire the old
-leader lock name:
-
-```text
-jazz-leader-lock:<appId>:<dbName>
-```
-
-This is a compatibility gate for already-open tabs running the old
-BroadcastChannel implementation. If the old lock is unavailable during
-promotion, the candidate must fail promotion with an explicit mixed-version or
-stale-tab error. The brokered implementation must not steal the old lock; users
-should close or reload older tabs instead. A brokered leader holds this
-compatibility lock until clean demotion/shutdown so old code cannot promote a
-second primary OPFS worker while the new implementation is active.
+cross-tab peer coordination paths. It does not acquire the old
+`jazz-leader-lock:<appId>:<dbName>` lock. A tab contending with an old-version
+leader hangs in the OPFS open retry for up to ~3.4 minutes and then fails with a
+generic handle-conflict error; there is no explicit mixed-version detection.
 
 ## Architecture
 
@@ -228,10 +216,6 @@ Leadership uses exclusive Web Locks:
   - held by the leader tab
   - exists to keep the page active where Web Locks prevent freezing
   - monitored by the broker
-- `jazz-leader-lock:<appId>:<dbName>`
-  - held by the leader tab during the migration window only
-  - prevents already-open old-version tabs from promoting an old leader
-  - acquired with fail-fast semantics and never stolen by the broker
 - `jazz-leader-worker:<appId>:<dbName>`
   - held by the leader dedicated worker
   - must be acquired before opening the primary OPFS namespace
@@ -281,16 +265,14 @@ Promotion flow:
 1. Broker chooses a candidate by the visibility ranking.
 2. Broker sends `become-leader` with a new leadership ID.
 3. Candidate acquires `jazz-leader-tab:<appId>:<dbName>`.
-4. Candidate acquires the old `jazz-leader-lock:<appId>:<dbName>` compatibility
-   lock when migration compatibility is enabled.
-5. Candidate spawns the dedicated Jazz worker with the broker instance and leadership ID.
-6. Worker acquires `jazz-leader-worker:<appId>:<dbName>`.
-7. Worker opens the primary OPFS namespace and persistent runtime.
-8. Leader tab reports `leader-ready` to the broker with the leadership ID and lock names
+4. Candidate spawns the dedicated Jazz worker with the broker instance and leadership ID.
+5. Worker acquires `jazz-leader-worker:<appId>:<dbName>`.
+6. Worker opens the primary OPFS namespace and persistent runtime.
+7. Leader tab reports `leader-ready` to the broker with the leadership ID and lock names
    it successfully holds.
-9. Broker starts tab-lock and worker-lock monitors for the same leadership ID.
-10. Broker announces the durable-ready leader and starts assigning follower
-    ports.
+8. Broker starts tab-lock and worker-lock monitors for the same leadership ID.
+9. Broker announces the durable-ready leader and starts assigning follower
+   ports.
 
 The broker must not announce a leader as durable-ready before both locks are
 held and the worker has opened the persistent runtime.
@@ -305,8 +287,8 @@ the durable path for that tab is ready. For followers, that means the broker has
 a durable-ready leader, the follower data port has been transferred, and the
 leader worker has acknowledged the follower attachment. Jazz must not expose a
 Db instance that buffers durable writes while waiting for this state. Promotion
-failures caused by unsupported APIs, configuration mismatch, old-version lock
-contention, or stale-worker OPFS open failures reject with explicit errors.
+failures caused by unsupported APIs, configuration mismatch, or stale-worker
+OPFS open failures reject with explicit errors.
 
 ## Demotion And Forced Takeover
 
@@ -321,7 +303,7 @@ Normal demotion:
    then flushes and closes the persistent runtime.
 7. Worker closes OPFS and releases the worker lock.
 8. Leader tab terminates the dedicated worker.
-9. Leader tab releases the tab lock and migration compatibility lock.
+9. Leader tab releases the tab lock.
 
 The leader tab and leader worker must also enter this stale/poisoned state if
 they observe any of these signals:
@@ -552,8 +534,6 @@ Representative coverage:
 - first visible tab becomes leader and spawns the only dedicated persistent
   worker
 - mismatched configuration fingerprints are rejected with explicit errors
-- a held old `jazz-leader-lock:<appId>:<dbName>` prevents brokered promotion
-  with an explicit mixed-version/stale-tab error
 - follower tab does not spawn a dedicated worker
 - follower startup waits for leader-worker follower-port acknowledgement
 - `createDb` does not resolve before the durable leader/follower path is ready
@@ -587,9 +567,10 @@ surface the conflict during implementation.
 - `createDb` and framework bindings keep their public shape.
 - Persistent browser mode becomes stricter: unsupported environments throw an
   explicit initialization error instead of falling back to peer election.
-- During the migration window, brokered leaders hold the old
-  `jazz-leader-lock:<appId>:<dbName>` compatibility lock and fail explicitly if
-  an old-version tab already holds it.
+- Brokered leaders do not hold the old `jazz-leader-lock:<appId>:<dbName>` lock;
+  a tab contending with an old-version leader hangs in the OPFS open retry for up
+  to ~3.4 minutes and then fails with a generic handle-conflict error; there is
+  no explicit mixed-version detection.
 - Memory mode remains unaffected and does not require SharedWorker or Web Locks.
 - The follower fallback namespace model is removed because followers no longer
   open OPFS workers.

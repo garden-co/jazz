@@ -40,15 +40,13 @@ type LeaderState = {
   ready: boolean;
   tabLockName: string | null;
   workerLockName: string | null;
-  compatibilityLockName: string | null;
   tabLockMonitor: WebLockMonitor | null;
   workerLockMonitor: WebLockMonitor | null;
-  compatibilityLockMonitor: WebLockMonitor | null;
 };
 
 type ClearedLeaderState = Pick<
   LeaderState,
-  "tabId" | "leadershipId" | "tabLockName" | "workerLockName" | "compatibilityLockName"
+  "tabId" | "leadershipId" | "tabLockName" | "workerLockName"
 >;
 
 type ResetState = {
@@ -205,7 +203,6 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       leader.ready = true;
       leader.tabLockName = message.tabLockName;
       leader.workerLockName = message.workerLockName;
-      leader.compatibilityLockName = message.compatibilityLockName ?? null;
       announceLeaderReady(leader);
       startLeaderLockMonitors(leader);
       if (resetState?.promotedLeadershipId === message.leadershipId) {
@@ -337,10 +334,8 @@ function electIfNeeded(): void {
     ready: false,
     tabLockName: null,
     workerLockName: null,
-    compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
-    compatibilityLockMonitor: null,
   };
 
   post(tab.port, {
@@ -506,16 +501,6 @@ function startLeaderLockMonitors(nextLeader: LeaderState): void {
       handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
     },
   });
-  if (nextLeader.compatibilityLockName) {
-    nextLeader.compatibilityLockMonitor = monitorWebLockRelease(nextLeader.compatibilityLockName, {
-      onGranted: () => {
-        handleLeaderLockReleased(nextLeader.leadershipId, "compatibility-lock-released");
-      },
-      onError: (error) => {
-        handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
-      },
-    });
-  }
 }
 
 function handleLeaderLockReleased(leadershipId: number, reason: string): void {
@@ -563,7 +548,6 @@ function clearLeader(
     leadershipId: current.leadershipId,
     tabLockName: current.tabLockName,
     workerLockName: current.workerLockName,
-    compatibilityLockName: current.compatibilityLockName,
   };
 }
 
@@ -572,8 +556,6 @@ function cancelLeaderMonitors(current: LeaderState): void {
   current.tabLockMonitor = null;
   current.workerLockMonitor?.cancel();
   current.workerLockMonitor = null;
-  current.compatibilityLockMonitor?.cancel();
-  current.compatibilityLockMonitor = null;
 }
 
 function startStorageReset(requestId: string): void {
@@ -683,10 +665,8 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     ready: false,
     tabLockName: null,
     workerLockName: null,
-    compatibilityLockName: null,
     tabLockMonitor: null,
     workerLockMonitor: null,
-    compatibilityLockMonitor: null,
   };
 
   post(tab.port, {

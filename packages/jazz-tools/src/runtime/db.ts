@@ -819,7 +819,6 @@ export class Db {
   private brokerPromotion: Promise<void> | null = null;
   private activeBrokerPromotion: BrokerPromotionState | null = null;
   private tabLockLease: LeaderLockLease | null = null;
-  private compatibilityLockLease: LeaderLockLease | null = null;
   private brokerLeaderReadyLeadershipId: number | null = null;
   private followerDataPort: MessagePort | null = null;
   private followerPortBridge: MessagePortRuntimeBridge | null = null;
@@ -1420,10 +1419,6 @@ export class Db {
     return `jazz-leader-worker:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
   }
 
-  private brokerCompatibilityLockName(): string {
-    return `jazz-leader-lock:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
-  }
-
   private async promoteViaBroker(leadershipId: number, resetRequestId?: string): Promise<void> {
     if (this.isShuttingDown || !this.primaryDbName) return;
 
@@ -1451,18 +1446,6 @@ export class Db {
         throw new Error(`Unable to acquire ${tabLockName}`);
       }
       this.tabLockLease = tabLockLease;
-      if (await this.finishCancelledBrokerPromotion(promotion)) return;
-
-      const compatibilityLockName = this.brokerCompatibilityLockName();
-      const compatibilityLockLease = await acquireWebLockWithRetry(compatibilityLockName, {
-        onLost: (reason) => {
-          void this.handleBrokerLeaderLockLost(leadershipId, compatibilityLockName, reason);
-        },
-      });
-      if (!compatibilityLockLease) {
-        throw new Error(`Unable to acquire ${compatibilityLockName}`);
-      }
-      this.compatibilityLockLease = compatibilityLockLease;
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
 
       if (resetRequestId) {
@@ -1588,7 +1571,6 @@ export class Db {
       leadershipId: this.currentLeadershipId,
       tabLockName: this.brokerTabLockName(),
       workerLockName: this.brokerWorkerLockName(),
-      compatibilityLockName: this.brokerCompatibilityLockName(),
     });
   }
 
@@ -1846,10 +1828,6 @@ export class Db {
     const tabLockLease = this.tabLockLease;
     this.tabLockLease = null;
     tabLockLease?.release();
-
-    const compatibilityLockLease = this.compatibilityLockLease;
-    this.compatibilityLockLease = null;
-    compatibilityLockLease?.release();
   }
 
   private attachLifecycleHooks(): void {

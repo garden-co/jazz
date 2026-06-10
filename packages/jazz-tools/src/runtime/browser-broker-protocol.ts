@@ -80,7 +80,6 @@ export interface BrowserBrokerLeaderReadyMessage {
   leadershipId: number;
   tabLockName: string;
   workerLockName: string;
-  compatibilityLockName?: string;
 }
 
 export interface BrowserBrokerLeaderFailedMessage {
