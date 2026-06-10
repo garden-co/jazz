@@ -161,6 +161,7 @@ async fn seed_document(
         .insert(
             table_name,
             boolean_policy_document_input(owner_id, title, archived),
+            None,
         )
         .expect("create document")
         .0
@@ -168,14 +169,14 @@ async fn seed_document(
 
 async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> ObjectId {
     client
-        .insert("documents", document_input(owner_id, title))
+        .insert("documents", document_input(owner_id, title), None)
         .expect("create document")
         .0
 }
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .insert("orgs", row_input!("name" => name))
+        .insert("orgs", row_input!("name" => name), None)
         .expect("create org")
         .0
 }
@@ -185,6 +186,7 @@ async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> Objec
         .insert(
             "teams",
             row_input!("name" => name, "org_id" => Value::Uuid(org_id)),
+            None,
         )
         .expect("create team")
         .0
@@ -199,6 +201,7 @@ async fn create_team_membership(
         .insert(
             "team_memberships",
             row_input!("owner_id" => owner_id, "team_id" => Value::Uuid(team_id)),
+            None,
         )
         .expect("create team membership")
         .0
@@ -206,14 +209,14 @@ async fn create_team_membership(
 
 async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &str) -> ObjectId {
     client
-        .insert("team_documents", team_document_input(team_id, title))
+        .insert("team_documents", team_document_input(team_id, title), None)
         .expect("create team document")
         .0
 }
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())])
+        .update(document_id, vec![("title".to_string(), title.into())], None)
         .expect("update document title");
 }
 
@@ -588,6 +591,7 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
                 ("owner_id".to_string(), "bob".into()),
                 ("title".to_string(), "transferred".into()),
             ],
+            None,
         )
         .expect("optimistic local ownership transfer");
 
@@ -628,7 +632,7 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
         "bob should still be unable to see alice's row after alice's rejected transfer"
     );
 
-    bob.delete(bob_doc).expect("delete bob owned row");
+    bob.delete(bob_doc, None).expect("delete bob owned row");
     let bob_reader_after_delete =
         connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let bob_rows = wait_for_rows(
@@ -734,6 +738,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
                 ("owner_id".to_string(), "bob".into()),
                 ("title".to_string(), "active transferred".into()),
             ],
+            None,
         )
         .expect("optimistic local active transfer");
 
@@ -789,6 +794,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
                 ("title".to_string(), "transfer while archiving".into()),
                 ("archived".to_string(), true.into()),
             ],
+            None,
         )
         .expect("optimistic local transfer with archived=true");
 
@@ -819,6 +825,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
                 ("owner_id".to_string(), "bob".into()),
                 ("title".to_string(), "archived transferred".into()),
             ],
+            None,
         )
         .expect("optimistic local archived transfer");
 
@@ -1105,7 +1112,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let mut observer_log = Vec::new();
 
     let forged_id = intruder
-        .insert("documents", document_input("alice", "forged"))
+        .insert("documents", document_input("alice", "forged"), None)
         .expect("optimistic local create")
         .0;
 
@@ -1218,7 +1225,7 @@ async fn update_policies_block_unauthorized_server_mutations() {
     })
     .await;
 
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
+    bob.update(doc_id, vec![("title".to_string(), "hacked".into())], None)
         .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
@@ -1289,7 +1296,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
 
     // Mallory tries to insert a row claiming alice's ownership.
     let forged_id = mallory
-        .insert("documents", document_input("alice", "forged"))
+        .insert("documents", document_input("alice", "forged"), None)
         .expect("optimistic local create")
         .0;
 
@@ -1420,7 +1427,7 @@ async fn update_policy_read_clause_differs_from_write_clause() {
 
     // Bob's update is applied optimistically on his local client but the
     // with_check policy fails on the server: owner_id="alice" ≠ bob's user_id.
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
+    bob.update(doc_id, vec![("title".to_string(), "hacked".into())], None)
         .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier.
@@ -1496,7 +1503,7 @@ async fn delete_then_reinsert_by_owner_visible_to_others() {
     )
     .await;
 
-    alice.delete(doc1_id).expect("delete first document");
+    alice.delete(doc1_id, None).expect("delete first document");
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1605,7 +1612,7 @@ async fn delete_policies_block_unauthorized_server_mutations() {
     })
     .await;
 
-    bob.delete(doc_id).expect("optimistic local delete");
+    bob.delete(doc_id, None).expect("optimistic local delete");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted delete has been accepted or rejected.
@@ -1692,7 +1699,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
 
     // Transfer ownership (allowed — USING checks current owner_id = "alice").
     alice
-        .update(doc_id, vec![("owner_id".to_string(), "bob".into())])
+        .update(doc_id, vec![("owner_id".to_string(), "bob".into())], None)
         .expect("optimistic local update: transfer ownership");
 
     // Yield to the runtime so the transport's background sender can pick up
@@ -1706,7 +1713,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
     // order, ownership has already moved to bob.
     for i in 0..500 {
         alice
-            .update(doc_id, vec![("title".to_string(), "nope".into())])
+            .update(doc_id, vec![("title".to_string(), "nope".into())], None)
             .expect(&format!(
                 "optimistic local update: title change after lockout {}",
                 i
@@ -1806,11 +1813,11 @@ async fn originating_client_receives_rollback_for_rejected_mutation() {
     .await;
 
     alice
-        .update(doc_id, vec![("owner_id".to_string(), "bob".into())])
+        .update(doc_id, vec![("owner_id".to_string(), "bob".into())], None)
         .expect("optimistic local update: transfer ownership");
 
     alice
-        .update(doc_id, vec![("title".to_string(), "nope".into())])
+        .update(doc_id, vec![("title".to_string(), "nope".into())], None)
         .expect("optimistic local update: title change after lockout");
 
     // Use the marker as a causal barrier so we know the server has settled

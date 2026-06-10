@@ -339,9 +339,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
-        self.insert_with_id(table, values, None, session)
+        self.insert_with_id(table, values, None, write_context)
     }
 
     /// Insert a row into a table with an optional external row id.
@@ -350,12 +350,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: HashMap<String, Value>,
         object_id: Option<ObjectId>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
         let ((row_id, row_values), batch_id) =
-            core.insert_with_id(table, values, object_id, owned.as_ref())?;
+            core.insert_with_id(table, values, object_id, write_context)?;
         Ok((row_id, row_values, batch_id))
     }
 
@@ -364,11 +363,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         object_id: ObjectId,
         values: Vec<(String, Value)>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.update(object_id, values, owned.as_ref())?)
+        Ok(core.update(object_id, values, write_context)?)
     }
 
     /// Create or update a row with a caller-supplied external row id.
@@ -377,22 +375,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         object_id: ObjectId,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.upsert(table, object_id, values, owned.as_ref())?)
+        Ok(core.upsert(table, object_id, values, write_context)?)
     }
 
     /// Delete a row.
     pub fn delete(
         &self,
         object_id: ObjectId,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.delete(object_id, owned.as_ref())?)
+        Ok(core.delete(object_id, write_context)?)
     }
 
     /// Wait for a batch to settle at the requested durability tier.

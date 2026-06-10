@@ -379,6 +379,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
                     ("title".to_string(), Value::Text(title)),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
+                None,
             )
             .expect("create todo");
     }
@@ -392,6 +393,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
                 ("title".to_string(), Value::Text(final_title)),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create final persisted todo");
     alice
@@ -461,6 +463,7 @@ async fn update_and_delete(server: &TestingServer) {
                     ("title".to_string(), Value::Text(format!("original-{i}"))),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
+                None,
             )
             .expect("create todo");
         ids.push(id);
@@ -486,13 +489,14 @@ async fn update_and_delete(server: &TestingServer) {
             .update(
                 *id,
                 vec![("title".to_string(), Value::Text(format!("updated-{i}")))],
+                None,
             )
             .expect("update todo");
     }
 
     // Delete last 2.
     for id in ids.iter().skip(3) {
-        alice.delete(*id).expect("delete todo");
+        alice.delete(*id, None).expect("delete todo");
     }
 
     // Wait for alice to see the deletes reflected.
@@ -568,6 +572,7 @@ async fn deep_update_history(server: &TestingServer) {
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create persisted todo");
     alice
@@ -586,6 +591,7 @@ async fn deep_update_history(server: &TestingServer) {
                     "title".to_string(),
                     Value::Text(format!("revision-{rev:03}")),
                 )],
+                None,
             )
             .expect("persist todo update");
         alice
@@ -659,6 +665,7 @@ async fn multi_table_isolation(server: &TestingServer) {
                     ("title".to_string(), Value::Text(format!("mt-todo-{i}"))),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
+                None,
             )
             .expect("create todo");
         todo_ids.push(id);
@@ -673,6 +680,7 @@ async fn multi_table_isolation(server: &TestingServer) {
                     ("body".to_string(), Value::Text(format!("mt-note-{i}"))),
                     ("priority".to_string(), Value::Integer(i as i32)),
                 ]),
+                None,
             )
             .expect("create note");
         note_ids.push(id);
@@ -787,6 +795,7 @@ async fn index_queries(server: &TestingServer) {
                     ("price".to_string(), Value::Double(i as f64 * 10.0)),
                     ("category".to_string(), Value::Text(category.to_string())),
                 ]),
+                None,
             )
             .expect("create product");
         product_ids.push(id);
@@ -918,6 +927,7 @@ async fn restart_preserves_data() {
                     ),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
+                None,
             )
             .expect("create before restart");
         before_ids.push(id);
@@ -997,6 +1007,7 @@ async fn restart_preserves_data() {
                     ),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
+                None,
             )
             .expect("create after restart");
     }
@@ -1066,6 +1077,7 @@ async fn catalogue_entries_survive_restart() {
                 ),
                 ("completed".to_string(), Value::Boolean(true)),
             ]),
+            None,
         )
         .expect("create todo");
 

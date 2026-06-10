@@ -72,7 +72,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 
     // Alice creates a todo
     let (todo_id, _, _) = alice
-        .insert("todos", todo_values("original"))
+        .insert("todos", todo_values("original"), None)
         .expect("alice creates todo");
 
     // Wait for Bob to see it
@@ -100,6 +100,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+                None,
             )
             .expect("alice updates title");
     });
@@ -107,6 +108,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
         bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
+            None,
         )
         .expect("bob updates title");
     });
@@ -197,11 +199,11 @@ async fn concurrent_creates_both_survive() {
     let bob2 = Arc::clone(&bob);
     let alice_handle = tokio::spawn(async move {
         alice2
-            .insert("todos", todo_values("buy milk"))
+            .insert("todos", todo_values("buy milk"), None)
             .expect("alice creates");
     });
     let bob_handle = tokio::spawn(async move {
-        bob2.insert("todos", todo_values("buy eggs"))
+        bob2.insert("todos", todo_values("buy eggs"), None)
             .expect("bob creates");
     });
 
@@ -276,7 +278,9 @@ async fn rapid_concurrent_updates_converge() {
         .await;
 
     // Alice creates, wait for Bob to see it
-    let (todo_id, _, _) = alice.insert("todos", todo_values("start")).expect("create");
+    let (todo_id, _, _) = alice
+        .insert("todos", todo_values("start"), None)
+        .expect("create");
 
     let query = QueryBuilder::new("todos").build();
     wait_for_query(
@@ -302,6 +306,7 @@ async fn rapid_concurrent_updates_converge() {
                 .update(
                     todo_id,
                     vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
+                    None,
                 )
                 .expect("alice rapid update");
         });
@@ -309,6 +314,7 @@ async fn rapid_concurrent_updates_converge() {
             bob2.update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
+                None,
             )
             .expect("bob rapid update");
         });
@@ -397,7 +403,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 
     // Alice creates, Bob sees it
     let (todo_id, _, _) = alice
-        .insert("todos", todo_values("original"))
+        .insert("todos", todo_values("original"), None)
         .expect("create");
 
     let query = QueryBuilder::new("todos").build();
@@ -422,6 +428,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+                None,
             )
             .expect("alice updates");
     });
@@ -429,6 +436,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
         bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
+            None,
         )
         .expect("bob updates");
     });
@@ -549,7 +557,9 @@ async fn subscription_reflects_concurrent_update() {
         .await;
 
     // Alice creates a todo
-    let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
+    let (todo_id, _, _) = alice
+        .insert("todos", todo_values("task"), None)
+        .expect("create");
 
     // Wait for Bob to see it
     let query = QueryBuilder::new("todos").build();
@@ -571,6 +581,7 @@ async fn subscription_reflects_concurrent_update() {
     bob.update(
         todo_id,
         vec![("title".to_string(), Value::Text("bob-updated".to_string()))],
+        None,
     )
     .expect("bob updates");
 
@@ -618,7 +629,9 @@ async fn sequential_updates_preserve_latest() {
         .await;
 
     // Alice creates, Bob sees the shared starting point, then Alice updates 3 times.
-    let (todo_id, _, _) = alice.insert("todos", todo_values("v0")).expect("create");
+    let (todo_id, _, _) = alice
+        .insert("todos", todo_values("v0"), None)
+        .expect("create");
 
     let query = QueryBuilder::new("todos").build();
     wait_for_query(
@@ -641,6 +654,7 @@ async fn sequential_updates_preserve_latest() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(version.to_string()))],
+                None,
             )
             .expect("update");
     }
@@ -709,7 +723,9 @@ async fn concurrent_edits_on_different_fields() {
         .await;
 
     // Alice creates a todo: title="task", completed=false
-    let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
+    let (todo_id, _, _) = alice
+        .insert("todos", todo_values("task"), None)
+        .expect("create");
 
     // Bob sees it
     let query = QueryBuilder::new("todos").build();
@@ -735,6 +751,7 @@ async fn concurrent_edits_on_different_fields() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
+                None,
             )
             .expect("alice updates title");
     });
@@ -743,6 +760,7 @@ async fn concurrent_edits_on_different_fields() {
         bob2.update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
+            None,
         )
         .expect("bob updates completed");
     });
@@ -846,7 +864,9 @@ async fn post_conflict_update_rebases_on_merged_preview() {
         .connect()
         .await;
 
-    let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
+    let (todo_id, _, _) = alice
+        .insert("todos", todo_values("task"), None)
+        .expect("create");
 
     let query = QueryBuilder::new("todos").build();
     wait_for_query(
@@ -877,6 +897,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
+                None,
             )
             .expect("alice updates title");
     });
@@ -884,6 +905,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
         bob2.update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
+            None,
         )
         .expect("bob updates completed");
     });
@@ -912,6 +934,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
                 "title".to_string(),
                 Value::Text("charlie-title".to_string()),
             )],
+            None,
         )
         .expect("charlie updates title");
 
@@ -983,7 +1006,7 @@ async fn establish_offline_reconnect_baseline(
         .await;
 
     let (todo_id, _, _) = alice
-        .insert("todos", todo_values("create"))
+        .insert("todos", todo_values("create"), None)
         .expect("alice creates todo");
 
     let query = QueryBuilder::new("todos").build();
@@ -1007,6 +1030,7 @@ async fn establish_offline_reconnect_baseline(
         .update(
             todo_id,
             vec![("title".to_string(), Value::Text("alice-v1".to_string()))],
+            None,
         )
         .expect("alice updates to v1");
 
@@ -1120,6 +1144,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
+                None,
             )
             .expect("alice update while bob offline");
     }
@@ -1159,6 +1184,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin() {
                 "title".to_string(),
                 Value::Text("bob-offline-edit".to_string()),
             )],
+            None,
         )
         .expect("bob offline edit");
 
@@ -1295,6 +1321,7 @@ async fn online_user_wins_on_reconnect() {
                 "title".to_string(),
                 Value::Text("bob-offline-edit".to_string()),
             )],
+            None,
         )
         .expect("bob offline edit");
 
@@ -1307,6 +1334,7 @@ async fn online_user_wins_on_reconnect() {
             .update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
+                None,
             )
             .expect("alice update while bob offline");
     }

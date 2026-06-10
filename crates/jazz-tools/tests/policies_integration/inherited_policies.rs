@@ -292,7 +292,7 @@ async fn create_folder(
     archived: bool,
 ) -> ObjectId {
     client
-        .insert(table_name, folder_input(title, owners, archived))
+        .insert(table_name, folder_input(title, owners, archived), None)
         .expect("create folder")
         .0
 }
@@ -309,6 +309,7 @@ async fn create_folder_document(
         .insert(
             table_name,
             folder_document_input(owner_id, title, archived, folder_id),
+            None,
         )
         .expect("create folder document")
         .0
@@ -333,6 +334,7 @@ async fn create_multi_folder_document(
                 primary_folder_id,
                 secondary_folder_id,
             ),
+            None,
         )
         .expect("create multi-folder document")
         .0
@@ -340,7 +342,7 @@ async fn create_multi_folder_document(
 
 async fn create_file(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
     client
-        .insert("files", file_input(owner_id, name))
+        .insert("files", file_input(owner_id, name), None)
         .expect("create file")
         .0
 }
@@ -352,7 +354,7 @@ async fn create_scalar_ref_todo(
     image: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .insert("todos", todo_scalar_ref_input(owner_id, title, image))
+        .insert("todos", todo_scalar_ref_input(owner_id, title, image), None)
         .expect("create scalar-ref todo")
         .0
 }
@@ -364,13 +366,13 @@ async fn create_array_ref_todo(
     images: &[ObjectId],
 ) -> ObjectId {
     client
-        .insert("todos", todo_array_ref_input(owner_id, title, images))
+        .insert("todos", todo_array_ref_input(owner_id, title, images), None)
         .expect("create array-ref todo")
         .0
 }
 
 async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+    client.update(row_id, changes, None).expect("update row");
 }
 
 // -- Tests --
@@ -611,7 +613,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     );
 
     alice_writer
-        .delete(folder_id)
+        .delete(folder_id, None)
         .expect("delete inherited parent folder");
     let bob = TestingClient::builder()
         .with_server(&server)
@@ -1158,7 +1160,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(doc_id)
+        .delete(doc_id, None)
         .expect("folder owner deletes folder-backed document");
 
     let rows_after_doc_delete = wait_for_query(
@@ -1185,7 +1187,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(folder_id)
+        .delete(folder_id, None)
         .expect("folder owner deletes folder");
 
     let rows_after_folder_delete = wait_for_query(
@@ -1313,7 +1315,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
                 == folder_document_values("charlie", "Charlie Folder Doc", false, Some(folder_id))
     }));
 
-    bob.delete(bob_doc_id)
+    bob.delete(bob_doc_id, None)
         .expect("document owner deletes owned folder-backed document");
 
     let rows_after_owned_delete = wait_for_rows(
@@ -1342,7 +1344,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         "only charlie's document should remain after bob deletes his own: {rows_after_owned_delete:?}"
     );
 
-    bob.delete(charlie_doc_id)
+    bob.delete(charlie_doc_id, None)
         .expect("optimistic local delete for unauthorized attempt");
 
     let rows_after_unauthorized_delete = wait_for_query(
@@ -1772,7 +1774,9 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     ));
 
     log.clear();
-    alice.delete(todo_id).expect("delete referencing todo");
+    alice
+        .delete(todo_id, None)
+        .expect("delete referencing todo");
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -1975,6 +1979,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
                 "title" => "Spec.pdf",
                 "folder_id" => Value::Uuid(folder_id)
             ),
+            None,
         )
         .expect("create file")
         .0;
@@ -1985,6 +1990,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
                 "title" => "Page 1",
                 "file_id" => Value::Uuid(file_id)
             ),
+            None,
         )
         .expect("create file part")
         .0;

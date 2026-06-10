@@ -9,7 +9,7 @@ use crate::Schema;
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{OrderedRowDelta, Value};
 use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
@@ -302,8 +302,9 @@ impl JazzClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
+        write_context: Option<WriteContext>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        self.insert_with_id(table, Option::<Uuid>::None, values)
+        self.insert_with_id(table, Option::<Uuid>::None, values, write_context)
     }
 
     /// Create a new row in a table using a caller-supplied UUID.
@@ -312,6 +313,7 @@ impl JazzClient {
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
+        write_context: Option<WriteContext>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .runtime
@@ -319,7 +321,7 @@ impl JazzClient {
                 table,
                 values,
                 object_id.into().map(ObjectId::from_uuid),
-                None,
+                write_context.as_ref(),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         Ok((object_id, row_values, batch_id))
@@ -331,23 +333,38 @@ impl JazzClient {
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
+        write_context: Option<WriteContext>,
     ) -> Result<BatchId> {
         self.runtime
-            .upsert(table, ObjectId::from_uuid(object_id), values, None)
+            .upsert(
+                table,
+                ObjectId::from_uuid(object_id),
+                values,
+                write_context.as_ref(),
+            )
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Update a row.
-    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
+    pub fn update(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        write_context: Option<WriteContext>,
+    ) -> Result<BatchId> {
         self.runtime
-            .update(object_id, updates, None)
+            .update(object_id, updates, write_context.as_ref())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Delete a row.
-    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
+    pub fn delete(
+        &self,
+        object_id: ObjectId,
+        write_context: Option<WriteContext>,
+    ) -> Result<BatchId> {
         self.runtime
-            .delete(object_id, None)
+            .delete(object_id, write_context.as_ref())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -443,6 +460,31 @@ impl JazzClient {
             .await
             .expect("connect local JazzClient")
     }
+
+    pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
+        let app_id = crate::AppId::random();
+        let storage: DynStorage = Box::new(MemoryStorage::new());
+        let schema_manager = SchemaManager::new_with_policy_mode(
+            SyncManager::new(),
+            schema,
+            app_id,
+            "client",
+            "main",
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        )
+        .expect("create test schema manager");
+
+        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
+        runtime.persist_schema().expect("persist test schema");
+
+        crate::JazzClient {
+            default_session: None,
+            runtime,
+            has_server: false,
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            next_handle: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +526,7 @@ impl<'a> SessionClient<'a> {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+        let write_context = WriteContext::from_session(self.session.clone());
         let (object_id, row_values, batch_id) = self
             .client
             .runtime
@@ -491,7 +534,7 @@ impl<'a> SessionClient<'a> {
                 table,
                 values,
                 object_id.into().map(ObjectId::from_uuid),
-                Some(&self.session),
+                Some(&write_context),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         Ok((object_id, row_values, batch_id))
@@ -503,28 +546,31 @@ impl<'a> SessionClient<'a> {
         object_id: Uuid,
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
+        let write_context = WriteContext::from_session(self.session.clone());
         self.client
             .runtime
             .upsert(
                 table,
                 ObjectId::from_uuid(object_id),
                 values,
-                Some(&self.session),
+                Some(&write_context),
             )
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
+        let write_context = WriteContext::from_session(self.session.clone());
         self.client
             .runtime
-            .update(object_id, updates, Some(&self.session))
+            .update(object_id, updates, Some(&write_context))
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
+        let write_context = WriteContext::from_session(self.session.clone());
         self.client
             .runtime
-            .delete(object_id, Some(&self.session))
+            .delete(object_id, Some(&write_context))
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::batch_fate::BatchFate;
-use crate::metadata::{
-    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
-};
+#[cfg(feature = "client")]
+use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
 use crate::storage::{MemoryStorage, Storage};
@@ -24,15 +24,18 @@ use crate::test_support::{
     seeded_memory_storage,
 };
 
-use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::{Session, WriteContext};
+#[cfg(feature = "client")]
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::Session;
+#[cfg(feature = "client")]
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
-    SchemaBuilder, SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
+    SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
 
@@ -40,16 +43,6 @@ use crate::row_histories::{RowState, StoredRowBatch};
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
-    qm
-}
-
-fn create_query_manager_with_policy_mode(
-    sync_manager: SyncManager,
-    schema: Schema,
-    row_policy_mode: RowPolicyMode,
-) -> QueryManager {
-    let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema_with_policy_mode(schema, "dev", "main", row_policy_mode);
     qm
 }
 
@@ -271,6 +264,7 @@ fn rebac_test_schema() -> Schema {
         .build()
 }
 
+#[cfg(feature = "client")]
 fn magic_introspection_schema() -> Schema {
     let is_admin = pe::eq("user_id", pe::session("user_id"));
     let protected_policies = permissions(|p| {
@@ -297,12 +291,14 @@ fn magic_introspection_schema() -> Schema {
         .build()
 }
 
+#[cfg(feature = "client")]
 fn provenance_notes_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("notes").column("title", ColumnType::Text))
         .build()
 }
 
+#[cfg(feature = "client")]
 fn authorship_permissions_schema() -> Schema {
     let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
     let notes_policies = permissions(|p| {
@@ -321,25 +317,19 @@ fn authorship_permissions_schema() -> Schema {
         .build()
 }
 
-fn query_rows(
-    qm: &mut QueryManager,
-    storage: &mut MemoryStorage,
-    query: Query,
-    session: Option<Session>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    let sub_id = qm
-        .subscribe_with_session(query, session, None)
-        .expect("query subscription should be created");
-
-    for _ in 0..10 {
-        qm.process(storage);
-    }
-
-    let results = qm.get_subscription_results(sub_id);
-    qm.unsubscribe_with_sync(sub_id);
-    results
+#[cfg(feature = "client")]
+fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
+    let crate::JazzError::Write(message) = err else {
+        panic!("expected policy denial write error, got {err:?}");
+    };
+    let expected = format!("policy denied {operation} on table {table}");
+    assert!(
+        message.ends_with(&expected),
+        "expected denial ending in {expected:?}, got {message:?}",
+    );
 }
 
+#[cfg(feature = "client")]
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let select_inherited = match max_depth {
         Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
@@ -589,6 +579,7 @@ fn enqueue_inherited_insert(
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
 
+#[cfg(feature = "client")]
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let source_fk_column = if array_edge { "images" } else { "image" };
     let files_policies = permissions(|p| {
@@ -634,12 +625,15 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
         .build()
 }
 
+#[cfg(feature = "client")]
 mod declared_fk_inheritance;
 mod exists_policies;
+#[cfg(feature = "client")]
 mod exists_rel_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
+#[cfg(feature = "client")]
 mod magic_provenance;
 mod mutations;
 #[cfg(feature = "client")]
