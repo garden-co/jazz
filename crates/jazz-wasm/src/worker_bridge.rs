@@ -63,13 +63,8 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
 
 fn local_batch_record_needs_fate_reconciliation(
     record: &LocalBatchRecord,
-    expects_upstream: bool,
+    terminal_tier: DurabilityTier,
 ) -> bool {
-    let terminal_tier = if expects_upstream {
-        DurabilityTier::EdgeServer
-    } else {
-        DurabilityTier::Local
-    };
     match record.latest_fate.as_ref() {
         None => true,
         Some(BatchFate::DurableDirect { confirmed_tier, .. })
@@ -619,8 +614,15 @@ impl BridgeInner {
     }
 
     fn hydrate_worker_local_batch_record(&self, record: LocalBatchRecord) {
-        let should_reconcile =
-            local_batch_record_needs_fate_reconciliation(&record, self.expects_upstream.get());
+        // Main's terminal tier mirrors what its worker can settle: anything
+        // local-only is terminal at `Local`; with an upstream the worker owes
+        // edge reconciliation before the record stops pending here.
+        let terminal_tier = if self.expects_upstream.get() {
+            DurabilityTier::EdgeServer
+        } else {
+            DurabilityTier::Local
+        };
+        let should_reconcile = local_batch_record_needs_fate_reconciliation(&record, terminal_tier);
         let batch_id = record.batch_id;
         let mut core = self.runtime.core.borrow_mut();
         if let Some(BatchFate::Rejected { code, reason, .. }) = record.latest_fate.clone() {

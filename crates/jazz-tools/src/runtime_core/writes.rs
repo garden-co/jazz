@@ -176,20 +176,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     /// The strongest durability tier some configured producer can still
-    /// confirm for this runtime's batches.
+    /// confirm for this runtime's batches: with any producer available that
+    /// is exactly the settlement target; a non-durable client with no
+    /// upstream has no producer at all.
     fn max_attainable_wait_tier(&self) -> Option<DurabilityTier> {
         let sync_manager = self.schema_manager.query_manager().sync_manager();
-        if sync_manager.has_servers_or_pending_servers() {
-            return Some(DurabilityTier::GlobalServer);
-        }
-        if self.synthesize_direct_write_fate {
-            return Some(
-                sync_manager
-                    .max_local_durability_tier()
-                    .unwrap_or(DurabilityTier::Local),
-            );
-        }
-        sync_manager.max_local_durability_tier()
+        let has_producer = sync_manager.has_servers_or_pending_servers()
+            || self.synthesize_direct_write_fate
+            || sync_manager.max_local_durability_tier().is_some();
+        has_producer.then(|| sync_manager.settlement_target())
     }
 
     fn completed_batch_wait_receiver(
@@ -1120,9 +1115,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
                 settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
-                if let Some(acked_tier) = settlement.confirmed_tier() {
-                    self.durability.record_batch_ack(batch_id, acked_tier);
-                }
+                self.durability.record_batch_ack(batch_id, confirmed_tier);
             }
             self.publish_direct_batch_rows(&record)?;
         }

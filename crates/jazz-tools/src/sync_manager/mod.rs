@@ -333,6 +333,36 @@ impl SyncManager {
         }
     }
 
+    /// True when `fate` is terminal at `target`: rejected outright, or
+    /// confirmed at/above it. `Missing` is neither — it pends retransmission,
+    /// not retirement.
+    pub fn fate_settled_at(fate: &BatchFate, target: DurabilityTier) -> bool {
+        matches!(fate, BatchFate::Rejected { .. })
+            || fate.confirmed_tier().is_some_and(|tier| tier >= target)
+    }
+
+    /// True when a batch with `fate` still pends settlement reconciliation at
+    /// `target`. `Missing` is excluded here too: the retransmission path owns
+    /// it, so it is neither pending nor retired.
+    pub fn fate_needs_settlement_at(fate: Option<&BatchFate>, target: DurabilityTier) -> bool {
+        match fate {
+            None => true,
+            Some(BatchFate::Missing { .. }) => false,
+            Some(fate) => !Self::fate_settled_at(fate, target),
+        }
+    }
+
+    /// [`Self::fate_settled_at`] against this node's settlement target.
+    pub fn batch_fate_is_settled(&self, fate: &BatchFate) -> bool {
+        Self::fate_settled_at(fate, self.settlement_target())
+    }
+
+    /// [`Self::fate_needs_settlement_at`] against this node's settlement
+    /// target.
+    pub fn batch_needs_settlement(&self, fate: Option<&BatchFate>) -> bool {
+        Self::fate_needs_settlement_at(fate, self.settlement_target())
+    }
+
     /// Approximate heap-backed memory owned by sync state, grouped for benches.
     ///
     /// Returns `(catalogue, connections, subscriptions, queues, total)`.
@@ -471,6 +501,9 @@ impl SyncManager {
     pub fn has_servers_or_pending_servers(&self) -> bool {
         if !self.servers.is_empty() {
             return true;
+        }
+        if self.pending_servers.is_empty() {
+            return false;
         }
         let now = Instant::now();
         self.pending_servers

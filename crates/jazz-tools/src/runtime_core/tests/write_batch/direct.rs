@@ -664,11 +664,11 @@ fn rc_local_only_runtime_settles_direct_batches_and_replays_nothing_on_worker_sy
     // browser worker. After commit the batch is settled at this runtime's own
     // settlement target, so nothing should remain pending for worker sync or
     // reconciliation.
-    let app_id = AppId::from_name("local-only-settlement");
-    let sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
-    let mgr = SchemaManager::new(sm, test_schema(), app_id, "dev", "main").unwrap();
-    let mut core = new_test_core(mgr, MemoryStorage::new(), NoopScheduler);
-    core.immediate_tick();
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "local-only-settlement",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
 
     let ((_row_id, _), batch_id) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
@@ -719,11 +719,11 @@ fn rc_worker_with_upstream_retains_settled_submission_until_target_tier() {
 fn rc_serverless_authority_prunes_submission_at_local_settlement() {
     // A Local-tier authority with no upstream settles at its own tier, so the
     // submission retires immediately.
-    let app_id = AppId::from_name("serverless-authority-prune");
-    let sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
-    let mgr = SchemaManager::new(sm, test_schema(), app_id, "dev", "main").unwrap();
-    let mut b = new_test_core(mgr, MemoryStorage::new(), NoopScheduler);
-    b.immediate_tick();
+    let mut b = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "serverless-authority-prune",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
 
     let client_id = ClientId::new();
     b.add_client(client_id, None);
@@ -732,10 +732,7 @@ fn rc_serverless_authority_prunes_submission_at_local_settlement() {
         .sync_manager_mut()
         .set_client_role(client_id, ClientRole::Peer);
 
-    let sm_a = SyncManager::new();
-    let mgr_a = SchemaManager::new(sm_a, test_schema(), app_id, "dev", "main").unwrap();
-    let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
-    a.immediate_tick();
+    let mut a = create_runtime_with_schema(test_schema(), "serverless-authority-prune");
     let server_id = ServerId::new();
     a.add_server(server_id);
     a.batched_tick();
@@ -744,15 +741,7 @@ fn rc_serverless_authority_prunes_submission_at_local_settlement() {
     let ((_row_id, _), batch_id) = a
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
-    a.batched_tick();
-    for entry in a.sync_sender().take() {
-        b.push_sync_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: entry.payload,
-        });
-    }
-    b.batched_tick();
-    b.immediate_tick();
+    pump_client_messages_to_server(&mut a, &mut b, server_id, client_id);
 
     assert!(
         b.storage()
@@ -855,11 +844,8 @@ fn rc_wait_for_unattainable_tier_errors_instead_of_hanging() {
 
 #[test]
 fn rc_non_durable_client_without_server_errors_on_local_wait() {
-    let app_id = AppId::from_name("non-durable-no-server-wait");
-    let mgr = SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
-    let mut core = new_test_core(mgr, MemoryStorage::new(), NoopScheduler);
+    let mut core = create_runtime_with_schema(test_schema(), "non-durable-no-server-wait");
     core.set_non_durable_client_runtime();
-    core.immediate_tick();
 
     let ((_row_id, _), batch_id) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
