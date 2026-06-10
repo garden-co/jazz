@@ -161,14 +161,15 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   });
 
   startBrokerPingTimer();
+  post(port, { type: "broker-hello", brokerInstanceId });
+  // Redeliver on every hello, including mid-reset rejoins: a requester that
+  // reconnects after its reset finished must not wait out the client timeout.
+  redeliverFinishedStorageResets(port);
   if (resetState) {
-    post(port, { type: "broker-hello", brokerInstanceId });
     addTabToActiveReset(message.tabId);
     return message.tabId;
   }
   if (leader?.ready) {
-    post(port, { type: "broker-hello", brokerInstanceId });
-    redeliverFinishedStorageResets(port);
     post(port, {
       type: "leader-ready",
       brokerInstanceId,
@@ -178,8 +179,6 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     assignFollowerPorts(leader);
   } else {
     electIfNeeded();
-    post(port, { type: "broker-hello", brokerInstanceId });
-    redeliverFinishedStorageResets(port);
   }
 
   return message.tabId;
@@ -733,6 +732,9 @@ function rememberStorageResetOutcomes(
       ...(errorMessage ? { errorMessage } : {}),
       finishedAt: now,
     };
+    // Delete first: re-setting an existing key keeps its Map position, which
+    // would make the size eviction below treat a re-finished id as oldest.
+    completedStorageResetOutcomes.delete(requestId);
     completedStorageResetOutcomes.set(requestId, outcome);
     outcomes.push(outcome);
   }

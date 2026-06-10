@@ -122,6 +122,15 @@ function getBrowserContextId(context: BrowserContext): number {
   return id;
 }
 
+function activeBlockedPatterns(
+  contextRoutes: Map<string, TestingServerRouteBlock> | undefined,
+): string[] {
+  if (!contextRoutes) return [];
+  return [...contextRoutes.entries()]
+    .filter(([, routeBlock]) => routeBlock.blocked)
+    .map(([pattern]) => pattern);
+}
+
 export interface TestingServerNetworkDebugState {
   contextId: number;
   pattern: string;
@@ -139,11 +148,7 @@ export async function debugTestingServerNetwork(
     contextId: getBrowserContextId(context),
     pattern,
     blocked: contextRoutes?.get(pattern)?.blocked ?? false,
-    activePatterns: contextRoutes
-      ? [...contextRoutes.entries()]
-          .filter(([, routeBlock]) => routeBlock.blocked)
-          .map(([activePattern]) => activePattern)
-      : [],
+    activePatterns: activeBlockedPatterns(contextRoutes),
   };
 }
 
@@ -164,9 +169,7 @@ export async function blockTestingServerNetwork(
       action: "block-skip",
       contextId,
       pattern,
-      activePatterns: [...contextRoutes.entries()]
-        .filter(([, activeRouteBlock]) => activeRouteBlock.blocked)
-        .map(([activePattern]) => activePattern),
+      activePatterns: activeBlockedPatterns(contextRoutes),
     });
     return;
   }
@@ -203,9 +206,7 @@ export async function blockTestingServerNetwork(
     contextId,
     pattern,
     webSocketPattern: routeBlock.webSocketPattern,
-    activePatterns: [...contextRoutes.entries()]
-      .filter(([, activeRouteBlock]) => activeRouteBlock.blocked)
-      .map(([activePattern]) => activePattern),
+    activePatterns: activeBlockedPatterns(contextRoutes),
   });
 }
 
@@ -222,11 +223,7 @@ export async function unblockTestingServerNetwork(
       action: "unblock-skip",
       contextId,
       pattern,
-      activePatterns: contextRoutes
-        ? [...contextRoutes.entries()]
-            .filter(([, activeRouteBlock]) => activeRouteBlock.blocked)
-            .map(([activePattern]) => activePattern)
-        : [],
+      activePatterns: activeBlockedPatterns(contextRoutes),
     });
     return;
   }
@@ -238,10 +235,6 @@ export async function unblockTestingServerNetwork(
     contextId,
     pattern,
     webSocketPattern: routeBlock.webSocketPattern,
-    activePatterns: contextRoutes
-      ? [...contextRoutes.entries()]
-          .filter(([, activeRouteBlock]) => activeRouteBlock.blocked)
-          .map(([activePattern]) => activePattern)
-      : [],
+    activePatterns: activeBlockedPatterns(contextRoutes),
   });
 }

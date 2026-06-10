@@ -1,3 +1,5 @@
+import { normalizePositiveTimeout } from "./browser-broker-protocol.js";
+
 export interface LeaderLockLease {
   release(): void;
 }
@@ -154,11 +156,8 @@ export async function acquireWebLockWithRetry(
   lockName: string,
   options: WebLockRetryOptions = {},
 ): Promise<LeaderLockLease | null> {
-  const timeoutMs = normalizePositiveMilliseconds(
-    options.timeoutMs,
-    DEFAULT_WEB_LOCK_RETRY_TIMEOUT_MS,
-  );
-  const retryDelayMs = normalizePositiveMilliseconds(
+  const timeoutMs = normalizePositiveTimeout(options.timeoutMs, DEFAULT_WEB_LOCK_RETRY_TIMEOUT_MS);
+  const retryDelayMs = normalizePositiveTimeout(
     options.retryDelayMs,
     DEFAULT_WEB_LOCK_RETRY_DELAY_MS,
   );
@@ -266,13 +265,6 @@ function isAbortError(error: unknown): boolean {
     error instanceof DOMException &&
     (error.name === "AbortError" || error.name === "InvalidStateError")
   );
-}
-
-function normalizePositiveMilliseconds(value: unknown, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback;
-  }
-  return Math.max(1, Math.floor(value));
 }
 
 function sleep(ms: number): Promise<void> {
