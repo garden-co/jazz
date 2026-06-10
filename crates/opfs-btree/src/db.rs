@@ -1,4 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::collections::BinaryHeap;
 
 use crate::file::SyncFile;
@@ -33,18 +34,11 @@ const WAL_COMMIT_CHECKSUM_OFFSET: usize = 28;
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
 
-enum CheckpointPage<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
-}
-
-impl<'a> CheckpointPage<'a> {
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(raw) => raw,
-            Self::Owned(raw) => raw,
-        }
-    }
+struct PageWrite<'a> {
+    page_id: PageId,
+    is_blob: bool,
+    is_freelist: bool,
+    raw: Cow<'a, [u8]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,6 +227,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
         }
         tree.sanitize_free_pages();
+        // Loading the persisted freelist is not a modification; only replayed
+        // WAL commits or later alloc/free calls should mark it dirty.
+        tree.freelist_dirty = false;
         tree.replay_wal()?;
 
         Ok(tree)
@@ -322,7 +319,6 @@ impl<F: SyncFile> OpfsBTree<F> {
         {
             self.remove_page(root_page_id);
             self.add_free_page(root_page_id);
-            self.freelist_dirty = true;
             self.root_page_id = None;
         }
 
@@ -871,7 +867,6 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.remove_page(page_id);
             self.add_free_page(page_id);
         }
-        self.freelist_dirty = true;
 
         Ok(())
     }
@@ -1222,53 +1217,19 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.persisted_pages = self.total_pages;
         }
 
-        let mut checkpoint_pages: Vec<(PageId, CheckpointPage<'_>)> =
-            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
-        for page_id in dirty_page_ids {
-            if let Some(raw) = self.pages.get(page_id) {
-                self.validate_writable_page_id(*page_id)?;
-                if !self.blob_pages.contains(page_id) {
-                    let _ = validate_page(raw, self.options.page_size)?;
-                } else if raw.len() != self.options.page_size {
-                    return Err(BTreeError::Corrupt(format!(
-                        "blob page {} has invalid length {}",
-                        page_id,
-                        raw.len()
-                    )));
-                }
-                checkpoint_pages.push((*page_id, CheckpointPage::Borrowed(raw)));
-            }
-        }
-        for (page_id, page) in freelist_pages {
-            self.validate_writable_page_id(*page_id)?;
-            checkpoint_pages.push((
-                *page_id,
-                CheckpointPage::Owned(encode_page(page, self.options.page_size)?),
-            ));
-        }
-
+        let checkpoint_pages = self.collect_pages_for_write(dirty_page_ids, freelist_pages)?;
         if checkpoint_pages.is_empty() {
             return Ok(());
-        }
-
-        checkpoint_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
-        for pair in checkpoint_pages.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                return Err(BTreeError::Corrupt(format!(
-                    "duplicate checkpoint page {}",
-                    pair[0].0
-                )));
-            }
         }
 
         let page_size = self.options.page_size;
         let mut idx = 0usize;
         while idx < checkpoint_pages.len() {
-            let start_page_id = checkpoint_pages[idx].0;
+            let start_page_id = checkpoint_pages[idx].page_id;
             let mut end = idx + 1;
             while end < checkpoint_pages.len() {
-                let prev_page_id = checkpoint_pages[end - 1].0;
-                if prev_page_id.checked_add(1) != Some(checkpoint_pages[end].0) {
+                let prev_page_id = checkpoint_pages[end - 1].page_id;
+                if prev_page_id.checked_add(1) != Some(checkpoint_pages[end].page_id) {
                     break;
                 }
                 end += 1;
@@ -1279,8 +1240,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .checked_mul(page_size)
                 .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
             let mut run = Vec::with_capacity(run_capacity);
-            for (_, raw) in &checkpoint_pages[idx..end] {
-                run.extend_from_slice(raw.as_slice());
+            for write in &checkpoint_pages[idx..end] {
+                run.extend_from_slice(&write.raw);
             }
 
             let offset = start_page_id.checked_mul(page_size as u64).ok_or_else(|| {
@@ -1292,6 +1253,58 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         Ok(())
+    }
+
+    fn collect_pages_for_write<'a>(
+        &'a self,
+        dirty_page_ids: &[PageId],
+        freelist_pages: &'a [(PageId, Page)],
+    ) -> Result<Vec<PageWrite<'a>>, BTreeError> {
+        let mut writes: Vec<PageWrite<'a>> =
+            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
+        for page_id in dirty_page_ids {
+            if let Some(raw) = self.pages.get(page_id) {
+                self.validate_writable_page_id(*page_id)?;
+                let is_blob = self.blob_pages.contains(page_id);
+                if is_blob {
+                    if raw.len() != self.options.page_size {
+                        return Err(BTreeError::Corrupt(format!(
+                            "blob page {} has invalid length {}",
+                            page_id,
+                            raw.len()
+                        )));
+                    }
+                } else {
+                    let _ = validate_page(raw, self.options.page_size)?;
+                }
+                writes.push(PageWrite {
+                    page_id: *page_id,
+                    is_blob,
+                    is_freelist: false,
+                    raw: Cow::Borrowed(raw.as_slice()),
+                });
+            }
+        }
+        for (page_id, page) in freelist_pages {
+            self.validate_writable_page_id(*page_id)?;
+            writes.push(PageWrite {
+                page_id: *page_id,
+                is_blob: false,
+                is_freelist: true,
+                raw: Cow::Owned(encode_page(page, self.options.page_size)?),
+            });
+        }
+
+        writes.sort_unstable_by_key(|write| write.page_id);
+        for pair in writes.windows(2) {
+            if pair[0].page_id == pair[1].page_id {
+                return Err(BTreeError::Corrupt(format!(
+                    "duplicate page {} in write batch",
+                    pair[0].page_id
+                )));
+            }
+        }
+        Ok(writes)
     }
 
     fn truncate_wal_tail(&mut self) -> Result<(), BTreeError> {
@@ -1317,47 +1330,9 @@ impl<F: SyncFile> OpfsBTree<F> {
         dirty_page_ids: &[PageId],
         freelist_pages: &[(PageId, Page)],
     ) -> Result<(), BTreeError> {
-        let mut frames: Vec<(PageId, bool, bool, CheckpointPage<'_>)> =
-            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
-        for page_id in dirty_page_ids {
-            if let Some(raw) = self.pages.get(page_id) {
-                self.validate_writable_page_id(*page_id)?;
-                let is_blob = self.blob_pages.contains(page_id);
-                if is_blob {
-                    if raw.len() != self.options.page_size {
-                        return Err(BTreeError::Corrupt(format!(
-                            "blob page {} has invalid length {}",
-                            page_id,
-                            raw.len()
-                        )));
-                    }
-                } else {
-                    let _ = validate_page(raw, self.options.page_size)?;
-                }
-                frames.push((*page_id, is_blob, false, CheckpointPage::Borrowed(raw)));
-            }
-        }
-        for (page_id, page) in freelist_pages {
-            self.validate_writable_page_id(*page_id)?;
-            frames.push((
-                *page_id,
-                false,
-                true,
-                CheckpointPage::Owned(encode_page(page, self.options.page_size)?),
-            ));
-        }
+        let frames = self.collect_pages_for_write(dirty_page_ids, freelist_pages)?;
         if frames.is_empty() {
             return Ok(());
-        }
-
-        frames.sort_unstable_by_key(|(page_id, _, _, _)| *page_id);
-        for pair in frames.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                return Err(BTreeError::Corrupt(format!(
-                    "duplicate WAL page {}",
-                    pair[0].0
-                )));
-            }
         }
 
         let frame_count = u64::try_from(frames.len())
@@ -1388,24 +1363,16 @@ impl<F: SyncFile> OpfsBTree<F> {
         )?;
 
         let mut cursor = start_page_id + 1;
-        for (page_id, is_blob, is_freelist, raw) in &frames {
-            let raw = raw.as_slice();
-            if raw.len() != self.options.page_size {
-                return Err(BTreeError::Corrupt(format!(
-                    "WAL page {} has invalid length {}",
-                    page_id,
-                    raw.len()
-                )));
-            }
+        for frame in &frames {
             let meta = encode_wal_frame_meta_page(
                 self.options.page_size,
-                *page_id,
-                *is_blob,
-                *is_freelist,
-                raw,
+                frame.page_id,
+                frame.is_blob,
+                frame.is_freelist,
+                &frame.raw,
             )?;
             self.write_wal_page(cursor, &meta)?;
-            self.write_wal_page(cursor + 1, raw)?;
+            self.write_wal_page(cursor + 1, &frame.raw)?;
             cursor += 2;
         }
 
@@ -1732,8 +1699,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn alloc_page(&mut self) -> PageId {
         while let Some(page_id) = self.free_pages.pop() {
-            if self.free_set.remove(&page_id) {
-                self.freelist_dirty = true;
+            if self.claim_free_page(page_id) {
                 tracing::trace!(page_id, reused = true, "alloc_page");
                 return page_id;
             }
@@ -1777,9 +1743,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                     let page_id = run_start.checked_add(i as u64).ok_or_else(|| {
                         BTreeError::Corrupt("extent free-run page id overflow".to_string())
                     })?;
-                    self.free_set.remove(&page_id);
+                    self.claim_free_page(page_id);
                 }
-                self.freelist_dirty = true;
                 tracing::trace!(
                     head_page_id = run_start,
                     page_count,
@@ -1809,16 +1774,14 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn alloc_page_near(&mut self, preferred: PageId) -> PageId {
         for delta in 1..=ALLOC_NEAR_WINDOW {
             if let Some(hi) = preferred.checked_add(delta)
-                && self.free_set.remove(&hi)
+                && self.claim_free_page(hi)
             {
-                self.freelist_dirty = true;
                 return hi;
             }
             if let Some(lo) = preferred.checked_sub(delta)
                 && lo >= 2
-                && self.free_set.remove(&lo)
+                && self.claim_free_page(lo)
             {
-                self.freelist_dirty = true;
                 return lo;
             }
         }
@@ -1838,6 +1801,16 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         if self.free_set.insert(page_id) {
             self.free_pages.push(page_id);
+            self.freelist_dirty = true;
+        }
+    }
+
+    fn claim_free_page(&mut self, page_id: PageId) -> bool {
+        if self.free_set.remove(&page_id) {
+            self.freelist_dirty = true;
+            true
+        } else {
+            false
         }
     }
 
