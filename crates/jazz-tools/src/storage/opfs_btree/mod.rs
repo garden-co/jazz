@@ -31,14 +31,16 @@ use crate::sync_manager::DurabilityTier;
 use super::{
     HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
-    key_codec::{history_row_raw_table_key, raw_table_entry_key, visible_row_raw_table_key},
+    key_codec::raw_table_entry_key,
     storage_core::{
-        raw_table_delete_core, raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
-        raw_table_scan_prefix_keys_core, raw_table_scan_range_core, raw_table_scan_range_keys_core,
+        history_row_storage_key, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
+        raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core, raw_table_scan_range_core,
+        raw_table_scan_range_keys_core, visible_row_storage_key,
     },
 };
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_PAGE_SIZE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) enum AnyFile {
@@ -158,6 +160,7 @@ impl OpfsBTreeStorage {
 
     fn options(cache_size_bytes: usize) -> BTreeOptions {
         BTreeOptions {
+            page_size: DEFAULT_PAGE_SIZE_BYTES,
             cache_bytes: cache_size_bytes.max(MIN_CACHE_SIZE_BYTES),
             pin_internal_pages: true,
             read_coalesce_pages: 4,
@@ -180,9 +183,12 @@ impl OpfsBTreeStorage {
         self.with_tree_mut(|tree| tree.put(key.as_bytes(), value).map_err(map_storage_err))
     }
 
-    fn tree_insert_many_sorted(&self, entries: &[(String, &[u8])]) -> Result<(), StorageError> {
+    /// Inserts entries in key order so consecutive puts land in nearby
+    /// B-tree leaves; correctness does not depend on the ordering.
+    fn tree_insert_batch(&self, mut entries: Vec<(String, &[u8])>) -> Result<(), StorageError> {
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
         self.with_tree_mut(|tree| {
-            for (key, value) in entries {
+            for (key, value) in &entries {
                 tree.put(key.as_bytes(), value).map_err(map_storage_err)?;
             }
             Ok(())
@@ -361,15 +367,11 @@ impl Storage for OpfsBTreeStorage {
         _table: &str,
         rows: &[HistoryRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        let mut entries: Vec<(String, &[u8])> = rows
-            .iter()
-            .map(|row| {
-                let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
-                (raw_table_entry_key(row.row_raw_table, &key), row.bytes)
-            })
-            .collect();
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        self.tree_insert_many_sorted(&entries)
+        self.tree_insert_batch(
+            rows.iter()
+                .map(|row| (history_row_storage_key(row), row.bytes))
+                .collect(),
+        )
     }
 
     fn upsert_visible_region_row_bytes(
@@ -377,15 +379,11 @@ impl Storage for OpfsBTreeStorage {
         _table: &str,
         rows: &[VisibleRowBytes<'_>],
     ) -> Result<(), StorageError> {
-        let mut entries: Vec<(String, &[u8])> = rows
-            .iter()
-            .map(|row| {
-                let key = visible_row_raw_table_key(row.branch, row.row_id);
-                (raw_table_entry_key(row.row_raw_table, &key), row.bytes)
-            })
-            .collect();
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        self.tree_insert_many_sorted(&entries)
+        self.tree_insert_batch(
+            rows.iter()
+                .map(|row| (visible_row_storage_key(row), row.bytes))
+                .collect(),
+        )
     }
 
     fn patch_row_region_rows_by_batch(
