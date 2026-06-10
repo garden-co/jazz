@@ -270,11 +270,22 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        self.query_internal(query, self.default_session.clone(), durability_tier)
+            .await
+    }
+
+    /// Internal one-shot query with optional session.
+    async fn query_internal(
+        &self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .runtime
             .query(
                 query,
-                self.default_session.clone(),
+                session,
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
@@ -522,21 +533,9 @@ impl<'a> SessionClient<'a> {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        let future = self
-            .client
-            .runtime
-            .query(
-                query,
-                Some(self.session.clone()),
-                ReadDurabilityOptions {
-                    tier: durability_tier,
-                    local_updates: LocalUpdates::Immediate,
-                },
-            )
-            .map_err(|e| JazzError::Query(e.to_string()))?;
-        future
+        self.client
+            .query_internal(query, Some(self.session.clone()), durability_tier)
             .await
-            .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
