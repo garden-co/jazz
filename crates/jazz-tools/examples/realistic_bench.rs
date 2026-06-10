@@ -391,7 +391,7 @@ async fn seed_dataset(
     for i in 0..profile.users {
         report_loop_progress("seed users", i, profile.users);
         let (id, _row_values) = client
-            .create(
+            .insert(
                 "users",
                 row([
                     ("display_name", Value::Text(format!("User {}", i))),
@@ -405,7 +405,7 @@ async fn seed_dataset(
     for i in 0..profile.organizations {
         report_loop_progress("seed organizations", i, profile.organizations);
         let (id, _row_values) = client
-            .create(
+            .insert(
                 "organizations",
                 row([
                     ("name", Value::Text(format!("Org {}", i))),
@@ -421,7 +421,7 @@ async fn seed_dataset(
         let org = organizations[i % organizations.len()];
         let user = users[i];
         let _ = client
-            .create(
+            .insert(
                 "memberships",
                 row([
                     ("organization_id", Value::Uuid(org)),
@@ -439,7 +439,7 @@ async fn seed_dataset(
         report_loop_progress("seed projects", i, profile.projects);
         let org = organizations[i % organizations.len()];
         let (id, _row_values) = client
-            .create(
+            .insert(
                 "projects",
                 row([
                     ("organization_id", Value::Uuid(org)),
@@ -458,7 +458,7 @@ async fn seed_dataset(
         let project_idx = i % projects.len();
         let assignee_idx = i % users.len();
         let (id, _row_values) = client
-            .create(
+            .insert(
                 "tasks",
                 row([
                     ("project_id", Value::Uuid(projects[project_idx])),
@@ -482,7 +482,7 @@ async fn seed_dataset(
         let task_idx = i % tasks.len();
         let author = users[(i * 7) % users.len()];
         let _ = client
-            .create(
+            .insert(
                 "task_comments",
                 row([
                     ("task_id", Value::Uuid(tasks[task_idx].id)),
@@ -500,7 +500,7 @@ async fn seed_dataset(
         for w in 0..profile.watchers_per_task {
             let watcher = users[(task_idx + w) % users.len()];
             let _ = client
-                .create(
+                .insert(
                     "task_watchers",
                     row([
                         ("task_id", Value::Uuid(task.id)),
@@ -517,7 +517,7 @@ async fn seed_dataset(
         let task = &tasks[task_idx];
         let actor = users[(i * 11) % users.len()];
         let _ = client
-            .create(
+            .insert(
                 "activity_events",
                 row([
                     ("project_id", Value::Uuid(projects[task.project_idx])),
@@ -706,7 +706,7 @@ async fn run_w1_interactive(
                 let task_idx = rng.next_usize(seed.tasks.len());
                 let author = seed.users[rng.next_usize(seed.users.len())];
                 client
-                    .create(
+                    .insert(
                         "task_comments",
                         row([
                             ("task_id", Value::Uuid(seed.tasks[task_idx].id)),
@@ -796,7 +796,7 @@ async fn run_w3_offline_reconnect(
     for i in 0..offline_writes {
         let author = seed.users[rng.next_usize(seed.users.len())];
         let _ = offline_client
-            .create(
+            .insert(
                 "task_comments",
                 row([
                     ("task_id", Value::Uuid(target_task_id)),

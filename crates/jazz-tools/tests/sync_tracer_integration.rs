@@ -59,17 +59,19 @@ async fn alice_write_bob_read() {
     // Clear catalogue/schema setup noise
     tracer.clear();
 
-    alice
-        .create_persisted(
+    let (_, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("traced-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("alice creates todo");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice creates todo reaches edge");
 
     wait_for_query(
         &bob,
@@ -184,15 +186,14 @@ async fn bob_updates_alice_todo() {
     tracer.clear();
 
     // Alice creates
-    let (todo_id, _) = alice
-        .create(
+    let (todo_id, _, _) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("collab-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("alice creates todo");
 
     // Bob sees it
@@ -209,13 +210,15 @@ async fn bob_updates_alice_todo() {
     tracer.clear();
 
     // Bob updates
-    bob.update_persisted(
-        todo_id,
-        vec![("completed".to_string(), Value::Boolean(true))],
-        DurabilityTier::EdgeServer,
-    )
-    .await
-    .expect("bob updates todo");
+    let batch_id = bob
+        .update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .expect("bob updates todo");
+    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("bob update reaches edge");
 
     // Alice sees the update
     wait_for_query(
@@ -300,17 +303,19 @@ async fn single_writer_flow() {
 
     tracer.clear();
 
-    alice
-        .create_persisted(
+    let (_, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("solo-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create todo");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("created todo reaches edge");
 
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
@@ -350,17 +355,19 @@ async fn named_object_trace() {
 
     tracer.clear();
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("buy milk".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create todo");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("created todo reaches edge");
 
     tracer.register_object(todo_id, "my-todo");
 

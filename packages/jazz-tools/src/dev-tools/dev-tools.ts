@@ -348,7 +348,7 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          const result = await client.create(table, values as InsertValues);
+          const result = await client.insert(table, values as InsertValues);
           const row = tier ? await result.wait({ tier }) : result.value;
           respond({ ok: true, payload: row });
           return;

@@ -62,6 +62,8 @@ pub use query_manager::types::{
     Value,
 };
 #[cfg(feature = "client")]
+pub use row_histories::BatchId;
+#[cfg(feature = "client")]
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;

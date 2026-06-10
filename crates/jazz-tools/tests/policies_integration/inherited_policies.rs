@@ -292,8 +292,7 @@ async fn create_folder(
     archived: bool,
 ) -> ObjectId {
     client
-        .create(table_name, folder_input(title, owners, archived))
-        .await
+        .insert(table_name, folder_input(title, owners, archived))
         .expect("create folder")
         .0
 }
@@ -307,11 +306,10 @@ async fn create_folder_document(
     folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             folder_document_input(owner_id, title, archived, folder_id),
         )
-        .await
         .expect("create folder document")
         .0
 }
@@ -326,7 +324,7 @@ async fn create_multi_folder_document(
     secondary_folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             multi_folder_document_input(
                 owner_id,
@@ -336,15 +334,13 @@ async fn create_multi_folder_document(
                 secondary_folder_id,
             ),
         )
-        .await
         .expect("create multi-folder document")
         .0
 }
 
 async fn create_file(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
     client
-        .create("files", file_input(owner_id, name))
-        .await
+        .insert("files", file_input(owner_id, name))
         .expect("create file")
         .0
 }
@@ -356,8 +352,7 @@ async fn create_scalar_ref_todo(
     image: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create("todos", todo_scalar_ref_input(owner_id, title, image))
-        .await
+        .insert("todos", todo_scalar_ref_input(owner_id, title, image))
         .expect("create scalar-ref todo")
         .0
 }
@@ -369,14 +364,13 @@ async fn create_array_ref_todo(
     images: &[ObjectId],
 ) -> ObjectId {
     client
-        .create("todos", todo_array_ref_input(owner_id, title, images))
-        .await
+        .insert("todos", todo_array_ref_input(owner_id, title, images))
         .expect("create array-ref todo")
         .0
 }
 
 async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).await.expect("update row");
+    client.update(row_id, changes).expect("update row");
 }
 
 // -- Tests --
@@ -618,7 +612,6 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
 
     alice_writer
         .delete(folder_id)
-        .await
         .expect("delete inherited parent folder");
     let bob = TestingClient::builder()
         .with_server(&server)
@@ -1166,7 +1159,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 
     alice
         .delete(doc_id)
-        .await
         .expect("folder owner deletes folder-backed document");
 
     let rows_after_doc_delete = wait_for_query(
@@ -1194,7 +1186,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 
     alice
         .delete(folder_id)
-        .await
         .expect("folder owner deletes folder");
 
     let rows_after_folder_delete = wait_for_query(
@@ -1323,7 +1314,6 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     }));
 
     bob.delete(bob_doc_id)
-        .await
         .expect("document owner deletes owned folder-backed document");
 
     let rows_after_owned_delete = wait_for_rows(
@@ -1353,7 +1343,6 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     );
 
     bob.delete(charlie_doc_id)
-        .await
         .expect("optimistic local delete for unauthorized attempt");
 
     let rows_after_unauthorized_delete = wait_for_query(
@@ -1783,10 +1772,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     ));
 
     log.clear();
-    alice
-        .delete(todo_id)
-        .await
-        .expect("delete referencing todo");
+    alice.delete(todo_id).expect("delete referencing todo");
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -1983,25 +1969,23 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
 
     let folder_id = create_folder(&admin, "folders", "Shared Folder", &["alice"], false).await;
     let file_id = admin
-        .create(
+        .insert(
             "files",
             row_input!(
                 "title" => "Spec.pdf",
                 "folder_id" => Value::Uuid(folder_id)
             ),
         )
-        .await
         .expect("create file")
         .0;
     let part_id = admin
-        .create(
+        .insert(
             "file_parts",
             row_input!(
                 "title" => "Page 1",
                 "file_id" => Value::Uuid(file_id)
             ),
         )
-        .await
         .expect("create file part")
         .0;
 

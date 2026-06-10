@@ -45,7 +45,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -57,7 +57,7 @@ describe("Db runtime schema order", () => {
     );
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
-      create,
+      insert,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const table = {
@@ -72,7 +72,7 @@ describe("Db runtime schema order", () => {
 
     const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
@@ -153,7 +153,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -165,7 +165,7 @@ describe("Db runtime schema order", () => {
     );
     const client = {
       getSchema: () => new Map(),
-      create,
+      insert,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const table = {
@@ -180,7 +180,7 @@ describe("Db runtime schema order", () => {
 
     const { value: row } = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
@@ -207,7 +207,7 @@ describe("Db runtime schema order", () => {
       },
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const create = vi.fn<
+    const insert = vi.fn<
       (...args: [string, InsertValues, { id: string }]) => WriteResult<DirectInsertResult>
     >(() =>
       makeWriteResult({
@@ -221,7 +221,7 @@ describe("Db runtime schema order", () => {
     );
     const client = {
       getSchema: () => new Map(),
-      create,
+      insert,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const table = {
@@ -236,7 +236,7 @@ describe("Db runtime schema order", () => {
 
     const row = db.insert(table, { title: "Buy milk", done: false }, { id: externalId });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
@@ -307,7 +307,7 @@ describe("Db runtime schema order", () => {
       },
     };
     const updatedAt = 1_764_000_000_000_000;
-    const create = vi.fn<
+    const insert = vi.fn<
       (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<DirectInsertResult>
     >(() =>
       makeWriteResult({
@@ -327,7 +327,7 @@ describe("Db runtime schema order", () => {
     >(() => makeWriteHandle("batch-upsert"));
     const client = {
       getSchema: () => new Map(),
-      create,
+      insert,
       update,
       upsert,
     } as unknown as JazzClient;
@@ -346,7 +346,7 @@ describe("Db runtime schema order", () => {
     db.update(table, "todo-1", { done: true }, { updatedAt });
     db.upsert(table, { done: true }, { id: "todo-1", updatedAt });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
@@ -386,7 +386,7 @@ describe("Db runtime schema order", () => {
       },
     };
     const updatedAt = 1_764_000_000_000_000;
-    const create = vi.fn(() =>
+    const insert = vi.fn(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
@@ -400,7 +400,7 @@ describe("Db runtime schema order", () => {
     const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-upsert"));
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
-      create,
+      insert,
       update,
       upsert,
     } as unknown as JazzClient;
@@ -419,7 +419,7 @@ describe("Db runtime schema order", () => {
     db.update(table, "todo-1", { done: true }, { updatedAt });
     db.upsert(table, { done: true }, { id: "todo-1", updatedAt });
 
-    expect(create).toHaveBeenCalledWith(
+    expect(insert).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
