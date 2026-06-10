@@ -287,19 +287,25 @@ describe("JazzClient batch query plumbing", () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([{ id: "todo-batch-query", values: [] }]);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const batch = client.beginBatch();
+    const batchId = client.beginBatch("direct");
 
-    batch.create("todos", {});
+    client.insertInternal("todos", {}, undefined, undefined, undefined, batchId);
 
     await expect(
-      batch.query({ _build: () => JSON.stringify({ table: "todos" }) }),
+      client.query(
+        { _build: () => JSON.stringify({ table: "todos" }) },
+        {
+          localUpdates: "deferred",
+          transactionBatchId: batchId,
+        },
+      ),
     ).resolves.toEqual([{ id: "todo-batch-query", values: [] }]);
 
     expect(runtime.query).toHaveBeenCalledTimes(1);
     const optionsJson = runtime.query.mock.calls[0][3];
     expect(JSON.parse(optionsJson as string)).toMatchObject({
       local_updates: "deferred",
-      transaction_batch_id: batch.batchId,
+      transaction_batch_id: batchId,
     });
   });
 });

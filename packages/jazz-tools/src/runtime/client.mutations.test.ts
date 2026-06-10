@@ -110,7 +110,7 @@ describe("JazzClient write attribution", () => {
     const updates = { done: { type: "Boolean" as const, value: true } };
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
-    client.create("todos", insertValues, undefined, undefined, "alice");
+    client.insert("todos", insertValues, undefined, undefined, "alice");
     client.update("row-1", updates, undefined, undefined, "alice");
     client.delete("row-1", undefined, undefined, "alice");
 
@@ -128,7 +128,7 @@ describe("JazzClient write attribution", () => {
     };
     const insertValues = { title: { type: "Text" as const, value: "Attributed" } };
 
-    client.create("todos", insertValues, undefined, session, "alice");
+    client.insert("todos", insertValues, undefined, session, "alice");
 
     expect(insertCalls).toEqual([
       [

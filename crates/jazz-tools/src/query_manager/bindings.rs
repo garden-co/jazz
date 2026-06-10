@@ -1,9 +1,7 @@
 //! Shared helpers used by native bindings.
 //!
-//! These utilities keep wrapper crates thin by centralizing JSON parsing,
-//! schema-alignment, and subscription payload shaping in the core crate.
-
-use std::collections::HashMap;
+//! These utilities keep wrapper crates thin by centralizing JSON parsing
+//! and subscription payload shaping in the core crate.
 
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
@@ -15,7 +13,7 @@ use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
-use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::Schema;
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::runtime_core::{MutationErrorEvent, ReadDurabilityOptions, SubscriptionDelta};
@@ -49,95 +47,6 @@ struct RuntimeSchemaEnvelopeWire {
 enum RuntimeSchemaWire {
     Envelope(RuntimeSchemaEnvelopeWire),
     Schema(Schema),
-}
-
-pub fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
-}
-
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
-pub fn align_values_to_declared_schema(
-    declared_schema: &Schema,
-    table: &TableName,
-    source_descriptor: &RowDescriptor,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(source_descriptor, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
-pub fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
-}
-
-pub fn align_query_rows_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    query: &Query,
-    rows: Vec<(ObjectId, Vec<Value>)>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    if !query_rows_can_be_schema_aligned(query) {
-        return rows;
-    }
-
-    let Some(declared_table) = declared_schema.get(&query.table) else {
-        return rows;
-    };
-    let Some(runtime_table) = runtime_schema.get(&query.table) else {
-        return rows;
-    };
-
-    rows.into_iter()
-        .map(|(id, values)| {
-            let values = reorder_values_by_column_name(
-                &runtime_table.columns,
-                &declared_table.columns,
-                &values,
-            )
-            .unwrap_or(values);
-            (id, values)
-        })
-        .collect()
 }
 
 pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
@@ -392,23 +301,13 @@ pub fn parse_read_durability_options(
     ))
 }
 
-pub fn subscription_delta_to_json(
-    delta: &SubscriptionDelta,
-    declared_schema: Option<&Schema>,
-    table: Option<&TableName>,
-) -> serde_json::Value {
+pub fn subscription_delta_to_json(delta: &SubscriptionDelta) -> serde_json::Value {
     let row_to_json = |row: &crate::query_manager::types::Row,
                        descriptor: &crate::query_manager::types::RowDescriptor|
      -> serde_json::Value {
         let values = decode_row(descriptor, &row.data)
             .map(|vals| vals.into_iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        let values = match (declared_schema, table) {
-            (Some(schema), Some(table)) => {
-                align_values_to_declared_schema(schema, table, descriptor, values)
-            }
-            _ => values,
-        };
         serde_json::json!({
             "id": row.id.uuid().to_string(),
             "values": values,
@@ -473,69 +372,11 @@ pub fn current_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_query_rows_to_declared_schema, align_values_to_declared_schema,
         parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
-        query_rows_can_be_schema_aligned,
     };
     use crate::batch_fate::BatchMode;
-    use crate::object::ObjectId;
-    use crate::query_manager::query::Query;
-    use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
-        Value,
-    };
+    use crate::query_manager::types::TableName;
     use crate::row_histories::BatchId;
-
-    fn declared_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("description", ColumnType::Text),
-            )
-            .build()
-    }
-
-    fn runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("description", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("title", ColumnType::Text),
-            )
-            .build()
-    }
-
-    #[test]
-    fn query_rows_are_reordered_back_to_declared_schema() {
-        let rows = vec![(
-            ObjectId::new(),
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(false),
-                Value::Text("buy milk".to_string()),
-            ],
-        )];
-        let query = Query::new("todos");
-
-        let aligned = align_query_rows_to_declared_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &query,
-            rows,
-        );
-
-        assert_eq!(
-            aligned[0].1,
-            vec![
-                Value::Text("buy milk".to_string()),
-                Value::Boolean(false),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
 
     #[test]
     fn parse_external_object_id_accepts_any_valid_uuid() {
@@ -546,40 +387,6 @@ mod tests {
             parsed.expect("object id").uuid().to_string(),
             "550e8400-e29b-41d4-a716-446655440000"
         );
-    }
-
-    #[test]
-    fn descriptor_values_are_reordered_back_to_declared_schema() {
-        let runtime_descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("description", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-            ColumnDescriptor::new("title", ColumnType::Text),
-        ]);
-
-        let aligned = align_values_to_declared_schema(
-            &declared_todo_schema(),
-            &TableName::new("todos"),
-            &runtime_descriptor,
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(true),
-                Value::Text("ship fix".to_string()),
-            ],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![
-                Value::Text("ship fix".to_string()),
-                Value::Boolean(true),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn simple_queries_are_schema_alignable() {
-        assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
     }
 
     #[test]

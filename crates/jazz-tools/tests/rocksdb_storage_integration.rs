@@ -376,30 +376,31 @@ async fn large_dataset_correctness(server: &TestingServer) {
         let title = format!("todo-{i:03}");
         expected_titles.insert(title.clone());
         alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(title)),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
             )
-            .await
             .expect("create todo");
     }
 
     let final_title = format!("todo-{:03}", ROW_COUNT - 1);
     expected_titles.insert(final_title.clone());
-    alice
-        .create_persisted(
+    let (_, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text(final_title)),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create final persisted todo");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("final persisted todo reaches edge");
 
     wait_for_query(
         &alice,
@@ -456,15 +457,14 @@ async fn update_and_delete(server: &TestingServer) {
 
     let mut ids = Vec::new();
     for i in 0..5u32 {
-        let (id, _) = alice
-            .create(
+        let (id, _, _) = alice
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(format!("original-{i}"))),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
             )
-            .await
             .expect("create todo");
         ids.push(id);
     }
@@ -490,13 +490,12 @@ async fn update_and_delete(server: &TestingServer) {
                 *id,
                 vec![("title".to_string(), Value::Text(format!("updated-{i}")))],
             )
-            .await
             .expect("update todo");
     }
 
     // Delete last 2.
     for id in ids.iter().skip(3) {
-        alice.delete(*id).await.expect("delete todo");
+        alice.delete(*id).expect("delete todo");
     }
 
     // Wait for alice to see the deletes reflected.
@@ -565,33 +564,37 @@ async fn deep_update_history(server: &TestingServer) {
     let schema = todos_schema();
     let alice = make_client(server, schema.clone(), "alice-deep", "todos").await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create persisted todo");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("persisted todo reaches edge");
 
     // This test is about replaying a deep server history for a fresh client,
     // not about transport reordering. Make each revision edge-durable before
     // sending the next so Bob observes one causal history.
     for rev in 1..=UPDATE_COUNT {
-        alice
-            .update_persisted(
+        let batch_id = alice
+            .update(
                 todo_id,
                 vec![(
                     "title".to_string(),
                     Value::Text(format!("revision-{rev:03}")),
                 )],
-                DurabilityTier::EdgeServer,
             )
-            .await
             .expect("persist todo update");
+        alice
+            .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .await
+            .expect("persist todo update reaches edge");
     }
 
     let final_title = format!("revision-{UPDATE_COUNT:03}");
@@ -652,30 +655,28 @@ async fn multi_table_isolation(server: &TestingServer) {
 
     let mut todo_ids = Vec::new();
     for i in 0..5 {
-        let (id, _) = alice
-            .create(
+        let (id, _, _) = alice
+            .insert(
                 "todos",
                 HashMap::from([
                     ("title".to_string(), Value::Text(format!("mt-todo-{i}"))),
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
             )
-            .await
             .expect("create todo");
         todo_ids.push(id);
     }
 
     let mut note_ids = Vec::new();
     for i in 0..3 {
-        let (id, _) = alice
-            .create(
+        let (id, _, _) = alice
+            .insert(
                 "notes",
                 HashMap::from([
                     ("body".to_string(), Value::Text(format!("mt-note-{i}"))),
                     ("priority".to_string(), Value::Integer(i as i32)),
                 ]),
             )
-            .await
             .expect("create note");
         note_ids.push(id);
     }
@@ -781,8 +782,8 @@ async fn index_queries(server: &TestingServer) {
     let mut product_ids = Vec::new();
     for i in 0..20u32 {
         let category = if i % 2 == 0 { "electronics" } else { "books" };
-        let (id, _) = alice
-            .create(
+        let (id, _, _) = alice
+            .insert(
                 "products",
                 HashMap::from([
                     ("name".to_string(), Value::Text(format!("product-{i:02}"))),
@@ -790,7 +791,6 @@ async fn index_queries(server: &TestingServer) {
                     ("category".to_string(), Value::Text(category.to_string())),
                 ]),
             )
-            .await
             .expect("create product");
         product_ids.push(id);
     }
@@ -911,8 +911,8 @@ async fn restart_preserves_data() {
 
     let mut before_ids = Vec::new();
     for i in 0..BEFORE_COUNT {
-        let (id, _) = alice
-            .create(
+        let (id, _, _) = alice
+            .insert(
                 "todos",
                 HashMap::from([
                     (
@@ -922,7 +922,6 @@ async fn restart_preserves_data() {
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
             )
-            .await
             .expect("create before restart");
         before_ids.push(id);
     }
@@ -992,7 +991,7 @@ async fn restart_preserves_data() {
     let alice = make_client_external_jwks(&server2, schema, "alice-restart", "todos").await;
     for i in 0..AFTER_COUNT {
         alice
-            .create(
+            .insert(
                 "todos",
                 HashMap::from([
                     (
@@ -1002,7 +1001,6 @@ async fn restart_preserves_data() {
                     ("completed".to_string(), Value::Boolean(false)),
                 ]),
             )
-            .await
             .expect("create after restart");
     }
 
@@ -1061,8 +1059,8 @@ async fn catalogue_entries_survive_restart() {
     let alice =
         make_client_external_jwks(&server1, schema.clone(), "alice-catalogue", "todos").await;
 
-    let (todo_id, _) = alice
-        .create(
+    let (todo_id, _, _) = alice
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -1072,7 +1070,6 @@ async fn catalogue_entries_survive_restart() {
                 ("completed".to_string(), Value::Boolean(true)),
             ]),
         )
-        .await
         .expect("create todo");
 
     wait_for_query(

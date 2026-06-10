@@ -46,7 +46,7 @@ fn rc_committed_transaction_rejects_later_handle_operations_with_transaction_wor
 }
 
 #[test]
-fn rc_rolled_back_transaction_rejects_later_handle_operations_with_transaction_wording() {
+fn rc_rolled_back_transaction_rejects_later_handle_operations() {
     let mut core = create_test_runtime();
     let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Transactional);
     let write_context = WriteContext::default().with_batch_id(batch_id);
@@ -60,7 +60,7 @@ fn rc_rolled_back_transaction_rejects_later_handle_operations_with_transaction_w
     core.rollback_batch(batch_id).unwrap();
 
     let expected_error =
-        format!("Write error: transaction {batch_id} has already been rolled back");
+        format!("Write error: batch {batch_id} has already been completed or was never opened");
 
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);
