@@ -28,15 +28,11 @@ use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
-};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
-    SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    SchemaBuilder, SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
 
@@ -244,13 +240,19 @@ fn test_row_tip_ids(
 
 /// Schema for ReBAC tests: documents with owner_id policy + folders for INHERITS
 fn rebac_test_schema() -> Schema {
-    let folders_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+        p.allow_insert()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+    });
 
-    let docs_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    let docs_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+        p.allow_insert()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+    });
 
     SchemaBuilder::new()
         .table(
@@ -270,33 +272,22 @@ fn rebac_test_schema() -> Schema {
 }
 
 fn magic_introspection_schema() -> Schema {
-    let protected_policies = TablePolicies::new()
-        .with_select(PolicyExpr::True)
-        .with_update(
-            Some(PolicyExpr::Exists {
-                table: "admins".into(),
-                condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
-            }),
-            PolicyExpr::True,
-        )
-        .with_delete(PolicyExpr::ExistsRel {
-            rel: RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
-                    table: TableName::new("admins"),
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
-                },
-            },
-        });
+    let is_admin = pe::eq("user_id", pe::session("user_id"));
+    let protected_policies = permissions(|p| {
+        p.allow_read().always();
+        p.allow_update()
+            .where_old(pe::exists(pe::table("admins").where_(is_admin.clone())))
+            .where_new(pe::always());
+        p.allow_delete().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
+    });
 
     SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("protected")
@@ -313,15 +304,13 @@ fn provenance_notes_schema() -> Schema {
 }
 
 fn authorship_permissions_schema() -> Schema {
-    let created_by_is_session = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
-    let notes_policies = TablePolicies::new()
-        .with_select(created_by_is_session.clone())
-        .with_insert(created_by_is_session.clone())
-        .with_update(
-            Some(created_by_is_session.clone()),
-            created_by_is_session.clone(),
-        )
-        .with_delete(created_by_is_session);
+    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
+    let notes_policies = permissions(|p| {
+        p.allow_read().where_(created_by_is_session.clone());
+        p.allow_insert().where_(created_by_is_session.clone());
+        p.allow_update().where_(created_by_is_session.clone());
+        p.allow_delete().where_(created_by_is_session);
+    });
 
     SchemaBuilder::new()
         .table(
@@ -352,27 +341,27 @@ fn query_rows(
 }
 
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
-    let select_policy = PolicyExpr::Or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::Inherits {
-            operation: Operation::Select,
-            via_column: "parent_id".into(),
-            max_depth,
-        },
-    ]);
+    let select_inherited = match max_depth {
+        Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
+        None => pe::allowed_to_read("parent_id"),
+    };
+    let update_inherited = match max_depth {
+        Some(max_depth) => pe::allowed_to_update_with_depth("parent_id", max_depth),
+        None => pe::allowed_to_update("parent_id"),
+    };
 
-    let update_using = PolicyExpr::Or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent_id".into(),
-            max_depth,
-        },
-    ]);
-
-    let folders_policies = TablePolicies::new()
-        .with_select(select_policy)
-        .with_update(Some(update_using), PolicyExpr::True);
+    let folders_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            select_inherited,
+        ]));
+        p.allow_update()
+            .where_old(pe::any_of([
+                pe::eq("owner_id", pe::session("user_id")),
+                update_inherited,
+            ]))
+            .where_new(pe::always());
+    });
 
     SchemaBuilder::new()
         .table(
@@ -436,18 +425,17 @@ fn inherited_insert_schema() -> (Schema, RowDescriptor, SchemaHash) {
         .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text);
     let folders_descriptor = folders_table.clone().build().columns;
-    let folders_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+    });
 
-    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::And(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::Or(vec![
-            PolicyExpr::IsNull {
-                column: "folder_id".into(),
-            },
-            PolicyExpr::inherits(Operation::Select, "folder_id"),
-        ]),
-    ]));
+    let documents_policies = permissions(|p| {
+        p.allow_insert().where_(pe::all_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::any_of([pe::is_null("folder_id"), pe::allowed_to_read("folder_id")]),
+        ]));
+    });
 
     let schema = SchemaBuilder::new()
         .table(folders_table.policies(folders_policies))
@@ -714,31 +702,18 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let source_fk_column = if array_edge { "images" } else { "image" };
-    let inherited_read = PolicyExpr::InheritsReferencing {
-        operation: Operation::Select,
-        source_table: "todos".into(),
-        via_column: source_fk_column.into(),
-        max_depth: None,
-    };
-    let inherited_update = PolicyExpr::InheritsReferencing {
-        operation: Operation::Update,
-        source_table: "todos".into(),
-        via_column: source_fk_column.into(),
-        max_depth: None,
-    };
-
-    let files_policies = TablePolicies::new()
-        .with_select(PolicyExpr::or(vec![
-            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-            inherited_read,
-        ]))
-        .with_update(
-            Some(PolicyExpr::or(vec![
-                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-                inherited_update,
-            ])),
-            PolicyExpr::True,
-        );
+    let files_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::allowed_to_read_referencing("todos", source_fk_column),
+        ]));
+        p.allow_update()
+            .where_old(pe::any_of([
+                pe::eq("owner_id", pe::session("user_id")),
+                pe::allowed_to_update_referencing("todos", source_fk_column),
+            ]))
+            .where_new(pe::always());
+    });
 
     let todos_table = if array_edge {
         TableSchema::builder("todos")
@@ -751,12 +726,13 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
             .column("title", ColumnType::Text)
             .nullable_fk_column("image", "files")
     };
-    let todos_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_update(
-            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-            PolicyExpr::True,
-        );
+    let todos_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::always());
+    });
 
     SchemaBuilder::new()
         .table(

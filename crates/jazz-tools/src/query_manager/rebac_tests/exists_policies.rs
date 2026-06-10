@@ -3,15 +3,16 @@ use super::*;
 #[test]
 fn rebac_exists_clause_denies_non_matching_insert() {
     // Schema with EXISTS policy: only admins can insert
-    let protected_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
-        table: "admins".into(),
-        condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
+    let protected_policies = permissions(|p| {
+        p.allow_insert().where_(pe::exists(
+            pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+        ));
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("protected")
@@ -100,20 +101,20 @@ fn rebac_update_denied_by_using_exists_policy() {
     // Schema with EXISTS policy: only admins can update
     let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
     let protected_descriptor = protected_table.clone().build().columns;
-    let protected_policies = TablePolicies::new().with_update(
+    let protected_policies = permissions(|p| {
         // USING: EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
-        Some(PolicyExpr::Exists {
-            table: "admins".into(),
-            condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
-        }),
-        // WITH CHECK: no restriction on new row
-        PolicyExpr::True,
-    );
+        p.allow_update()
+            .where_old(pe::exists(
+                pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+            ))
+            // WITH CHECK: no restriction on new row
+            .where_new(pe::always());
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(protected_table.policies(protected_policies))
         .build();
@@ -284,18 +285,18 @@ fn rebac_update_denied_by_using_exists_policy() {
 
 #[test]
 fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
-    let protected_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::Exists {
-            table: "admins".into(),
-            condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
-        }),
-        PolicyExpr::True,
-    );
+    let protected_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::exists(
+                pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+            ))
+            .where_new(pe::always());
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("protected")

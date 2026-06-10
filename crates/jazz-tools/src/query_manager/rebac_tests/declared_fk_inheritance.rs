@@ -153,24 +153,18 @@ fn rebac_declared_fk_inheritance_array_membership_grants_access() {
 fn rebac_declared_fk_inheritance_cycle_fails_closed() {
     use crate::query_manager::query::QueryBuilder;
 
-    let a_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::InheritsReferencing {
-            operation: Operation::Select,
-            source_table: "table_b".into(),
-            via_column: "a_id".into(),
-            max_depth: None,
-        },
-    ]));
-    let b_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::InheritsReferencing {
-            operation: Operation::Select,
-            source_table: "table_a".into(),
-            via_column: "b_id".into(),
-            max_depth: None,
-        },
-    ]));
+    let a_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::allowed_to_read_referencing("table_b", "a_id"),
+        ]));
+    });
+    let b_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::allowed_to_read_referencing("table_a", "b_id"),
+        ]));
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("table_a")

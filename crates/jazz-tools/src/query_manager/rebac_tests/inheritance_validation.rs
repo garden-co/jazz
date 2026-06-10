@@ -75,16 +75,12 @@ fn rebac_recursive_inherits_cycle_does_not_overgrant() {
 fn rebac_inherits_cycle_detection() {
     use crate::query_manager::types::validate_no_inherits_cycles;
 
-    let a_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "b_id".into(),
-        max_depth: None,
+    let a_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("b_id"));
     });
 
-    let b_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "a_id".into(),
-        max_depth: None,
+    let b_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("a_id"));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -114,10 +110,8 @@ fn rebac_inherits_cycle_detection() {
 fn rebac_inherits_self_reference_detection() {
     use crate::query_manager::types::validate_no_inherits_cycles;
 
-    let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "parent_id".into(),
-        max_depth: None,
+    let folder_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("parent_id"));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -146,10 +140,9 @@ fn rebac_inherits_self_reference_detection() {
 fn rebac_inherits_bounded_self_reference_passes_validation() {
     use crate::query_manager::types::validate_no_inherits_cycles;
 
-    let folder_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "parent_id".into(),
-        max_depth: Some(10),
+    let folder_policy = permissions(|p| {
+        p.allow_read()
+            .where_(pe::allowed_to_read_with_depth("parent_id", 10));
     });
     let schema = SchemaBuilder::new()
         .table(

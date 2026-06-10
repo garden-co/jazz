@@ -10,12 +10,13 @@ fn rebac_update_denied_by_using_policy() {
 
     // UPDATE policy: USING (owner_id = @user_id) WITH CHECK (owner_id = @user_id)
     // This means: you can only update rows you own, and the result must still be owned by you
-    let docs_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_update(
-            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])), // USING
-            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),       // WITH CHECK
-        );
+    let owner_is_session = pe::eq("owner_id", pe::session("user_id"));
+    let docs_policies = permissions(|p| {
+        p.allow_read().where_(owner_is_session.clone());
+        p.allow_update()
+            .where_old(owner_is_session.clone()) // USING
+            .where_new(owner_is_session); // WITH CHECK
+    });
 
     let schema = SchemaBuilder::new()
         .table(docs_table.policies(docs_policies))
@@ -119,23 +120,16 @@ fn rebac_update_denied_by_using_policy() {
 fn synced_soft_delete_should_use_delete_policy() {
     let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
     let protected_descriptor = protected_table.clone().build().columns;
-    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let protected_policies = permissions(|p| {
+        p.allow_delete().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(protected_table.policies(protected_policies))
         .build();

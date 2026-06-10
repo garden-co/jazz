@@ -4,8 +4,9 @@ use super::*;
 fn rebac_select_policy_with_null_literal_filters_query_results() {
     use crate::query_manager::query::QueryBuilder;
 
-    let documents_policies =
-        TablePolicies::new().with_select(PolicyExpr::eq_literal("deleted_at", Value::Null));
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::eq("deleted_at", pe::null()));
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("documents")
@@ -70,8 +71,8 @@ fn rebac_select_policy_with_null_literal_filters_query_results() {
 fn rebac_select_policy_with_is_null_filters_query_results() {
     use crate::query_manager::query::QueryBuilder;
 
-    let documents_policies = TablePolicies::new().with_select(PolicyExpr::IsNull {
-        column: "deleted_at".into(),
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::is_null("deleted_at"));
     });
     let schema = SchemaBuilder::new()
         .table(

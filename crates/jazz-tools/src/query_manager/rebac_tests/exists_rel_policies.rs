@@ -2,30 +2,15 @@ use super::*;
 
 #[test]
 fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
-        table: "admins".into(),
-        condition: Box::new(PolicyExpr::And(vec![
-            PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
-            PolicyExpr::ExistsRel {
-                rel: RelExpr::Filter {
-                    input: Box::new(RelExpr::TableScan {
-                        table: TableName::new("team_memberships"),
-                    }),
-                    predicate: PredicateExpr::And(vec![
-                        PredicateExpr::Cmp {
-                            left: ColumnRef::unscoped("team_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::OuterColumn(ColumnRef::unscoped("team_id")),
-                        },
-                        PredicateExpr::Cmp {
-                            left: ColumnRef::unscoped("user_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
-                        },
-                    ]),
-                },
-            },
-        ])),
+    let projects_policies = permissions(|p| {
+        p.allow_insert()
+            .where_(pe::exists(pe::table("admins").where_(pe::all_of([
+                pe::eq("user_id", pe::session("user_id")),
+                pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
+                    pe::rel::eq_outer("team_id", "team_id"),
+                    pe::rel::eq_session("user_id", "user_id"),
+                ]))),
+            ]))));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -83,23 +68,16 @@ fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_re
 
 #[test]
 fn local_insert_with_exists_rel_policy_denies_non_admin() {
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("projects")
@@ -142,17 +120,10 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 
 #[test]
 fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("admins").column("user_id", ColumnType::Text))
@@ -191,31 +162,19 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
 
 #[test]
 fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("revoked_at"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Null),
-                },
-            ]),
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert()
+            .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_session("user_id", "user_id"),
+                pe::rel::eq_literal("revoked_at", Value::Null),
+            ]))));
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
                 .nullable_column("revoked_at", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("projects")
@@ -271,23 +230,16 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
 
 #[test]
 fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
-    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let protected_policies = permissions(|p| {
+        p.allow_delete().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                .policies(permissions(|p| p.allow_read().always())),
         )
         .table(
             TableSchema::builder("protected")
