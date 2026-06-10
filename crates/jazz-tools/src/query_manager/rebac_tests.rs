@@ -534,117 +534,6 @@ fn enqueue_inherited_insert(
     commit
 }
 
-fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
-    let schema = recursive_folders_schema(max_depth);
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let root_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("alice".into()),
-                Value::Text("Root".into()),
-                Value::Null,
-            ],
-        )
-        .unwrap();
-    let child_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Child".into()),
-                Value::Uuid(root_handle.row_id),
-            ],
-        )
-        .unwrap();
-    let grand_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Grandchild".into()),
-                Value::Uuid(child_handle.row_id),
-            ],
-        )
-        .unwrap();
-
-    let grand_id = grand_handle.row_id;
-    let branch = get_branch(&qm);
-
-    let client_id = ClientId::new();
-    connect_client(&mut qm, &storage, client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("alice"));
-
-    let mut scope = HashSet::new();
-    scope.insert((grand_id, branch.clone().into()));
-    set_client_query_scope(&mut qm, &storage, client_id, QueryId(100), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-
-    let update_content = encode_row(
-        &folders_descriptor,
-        &[
-            Value::Text("bob".into()),
-            Value::Text("Renamed by Alice".into()),
-            Value::Uuid(child_handle.row_id),
-        ],
-    )
-    .unwrap();
-
-    let update_commit = stored_row_commit(
-        smallvec![grand_handle.batch_id],
-        update_content,
-        4200,
-        ObjectId::new().to_string(),
-        None,
-    );
-
-    let object_metadata = test_row_metadata(&storage, grand_id).unwrap_or_default();
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: row_batch_created_payload(
-            grand_id,
-            &branch,
-            Some(RowMetadata {
-                id: grand_id,
-                metadata: object_metadata,
-            }),
-            &update_commit,
-        ),
-    });
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = client_write_was_rejected(
-        &outbox,
-        client_id,
-        row_batch_id_for_commit(grand_id, &branch, &update_commit),
-    );
-
-    let tips = test_row_tip_ids(&storage, grand_id, &branch).unwrap();
-    let applied = tips.contains(&row_batch_id_for_commit(grand_id, &branch, &update_commit));
-
-    (denied, applied)
-}
-
 /// Test that EXISTS clause in INSERT policy correctly denies writes.
 ///
 /// Scenario: Insert policy requires EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
@@ -753,6 +642,7 @@ mod inherited_policies;
 mod insert_policies;
 mod magic_provenance;
 mod mutations;
+#[cfg(feature = "client")]
 mod recursive_inheritance;
 #[cfg(feature = "client")]
 mod select_policies;
