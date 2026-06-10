@@ -102,6 +102,9 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
+    // Pages >= active.total_pages are WAL tail pages, not home locations.
+    // Page ids in wal_pages have newer bytes only in the cache/WAL and must
+    // not be evicted until a checkpoint writes them to their home locations.
     persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: OpfsSet<PageId>,
