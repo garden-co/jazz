@@ -574,6 +574,7 @@ impl WasmMessagePortBridge {
         runtime
             .add_server(None, Some(1.0))
             .map_err(|e| JsError::new(&format!("addServer: {e:?}")))?;
+        runtime.batched_tick();
 
         let inner = Rc::new(MessagePortBridgeInner {
             port: port.clone(),
