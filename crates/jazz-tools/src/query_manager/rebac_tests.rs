@@ -36,7 +36,7 @@ use crate::query_manager::relation_ir::{
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
 
@@ -244,57 +244,32 @@ fn test_row_tip_ids(
 
 /// Schema for ReBAC tests: documents with owner_id policy + folders for INHERITS
 fn rebac_test_schema() -> Schema {
-    let mut schema = Schema::new();
-
-    // Folders table (parent for documents)
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
     let folders_policies = TablePolicies::new()
         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
         .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
 
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor, folders_policies),
-    );
-
-    // Documents table with owner_id policy
-    let docs_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
     let docs_policies = TablePolicies::new()
         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
         .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
 
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(docs_descriptor, docs_policies),
-    );
-
-    schema
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .policies(folders_policies),
+        )
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(docs_policies),
+        )
+        .build()
 }
 
 fn magic_introspection_schema() -> Schema {
-    let mut schema = Schema::new();
-
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor,
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new()
         .with_select(PolicyExpr::True)
         .with_update(
@@ -316,29 +291,28 @@ fn magic_introspection_schema() -> Schema {
                 },
             },
         });
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor, protected_policies),
-    );
 
-    schema
-}
-
-fn provenance_notes_descriptor() -> RowDescriptor {
-    RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)])
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build()
 }
 
 fn provenance_notes_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("notes"),
-        TableSchema::new(provenance_notes_descriptor()),
-    );
-    schema
+    SchemaBuilder::new()
+        .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+        .build()
 }
 
 fn authorship_permissions_schema() -> Schema {
-    let mut schema = Schema::new();
     let created_by_is_session = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
     let notes_policies = TablePolicies::new()
         .with_select(created_by_is_session.clone())
@@ -348,11 +322,14 @@ fn authorship_permissions_schema() -> Schema {
             created_by_is_session.clone(),
         )
         .with_delete(created_by_is_session);
-    schema.insert(
-        TableName::new("notes"),
-        TableSchema::with_policies(provenance_notes_descriptor(), notes_policies),
-    );
-    schema
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .policies(notes_policies),
+        )
+        .build()
 }
 
 fn query_rows(
@@ -375,16 +352,6 @@ fn query_rows(
 }
 
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
-    let mut schema = Schema::new();
-
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-
     let select_policy = PolicyExpr::Or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Inherits {
@@ -407,12 +374,15 @@ fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
         .with_select(select_policy)
         .with_update(Some(update_using), PolicyExpr::True);
 
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor, folders_policies),
-    );
-
-    schema
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(folders_policies),
+        )
+        .build()
 }
 
 /// Helper to encode a document row
@@ -462,26 +432,13 @@ fn folder_metadata() -> std::collections::HashMap<String, String> {
 }
 
 fn inherited_insert_schema() -> (Schema, RowDescriptor, SchemaHash) {
-    let mut schema = Schema::new();
-
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
+    let folders_table = TableSchema::builder("folders")
+        .column("owner_id", ColumnType::Text)
+        .column("name", ColumnType::Text);
+    let folders_descriptor = folders_table.clone().build().columns;
     let folders_policies = TablePolicies::new()
         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
-    );
 
-    let documents_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
     let documents_policies = TablePolicies::new().with_insert(PolicyExpr::And(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::Or(vec![
@@ -491,10 +448,17 @@ fn inherited_insert_schema() -> (Schema, RowDescriptor, SchemaHash) {
             PolicyExpr::inherits(Operation::Select, "folder_id"),
         ]),
     ]));
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(documents_descriptor, documents_policies),
-    );
+
+    let schema = SchemaBuilder::new()
+        .table(folders_table.policies(folders_policies))
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(documents_policies),
+        )
+        .build();
 
     let schema_hash = SchemaHash::compute(&schema);
     (schema, folders_descriptor, schema_hash)
@@ -749,8 +713,6 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
 
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
-    let mut schema = Schema::new();
-
     let source_fk_column = if array_edge { "images" } else { "image" };
     let inherited_read = PolicyExpr::InheritsReferencing {
         operation: Operation::Select,
@@ -765,10 +727,6 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
         max_depth: None,
     };
 
-    let files_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
     let files_policies = TablePolicies::new()
         .with_select(PolicyExpr::or(vec![
             PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
@@ -781,41 +739,34 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
             ])),
             PolicyExpr::True,
         );
-    schema.insert(
-        TableName::new("files"),
-        TableSchema::with_policies(files_descriptor, files_policies),
-    );
 
-    let image_column = if array_edge {
-        ColumnDescriptor::new(
-            "images",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Uuid),
-            },
-        )
-        .references("files")
+    let todos_table = if array_edge {
+        TableSchema::builder("todos")
+            .column("owner_id", ColumnType::Text)
+            .column("title", ColumnType::Text)
+            .array_fk_column("images", "files")
     } else {
-        ColumnDescriptor::new("image", ColumnType::Uuid)
-            .nullable()
-            .references("files")
+        TableSchema::builder("todos")
+            .column("owner_id", ColumnType::Text)
+            .column("title", ColumnType::Text)
+            .nullable_fk_column("image", "files")
     };
-    let todos_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        image_column,
-    ]);
     let todos_policies = TablePolicies::new()
         .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
         .with_update(
             Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
             PolicyExpr::True,
         );
-    schema.insert(
-        TableName::new("todos"),
-        TableSchema::with_policies(todos_descriptor, todos_policies),
-    );
 
-    schema
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("files")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .policies(files_policies),
+        )
+        .table(todos_table.policies(todos_policies))
+        .build()
 }
 
 mod declared_fk_inheritance;

@@ -3,12 +3,10 @@ use super::*;
 #[test]
 fn rebac_update_denied_by_using_policy() {
     // Schema with both USING and WITH CHECK for updates
-    let mut schema = Schema::new();
-
-    let docs_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("content", ColumnType::Text),
-    ]);
+    let docs_table = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("content", ColumnType::Text);
+    let docs_descriptor = docs_table.clone().build().columns;
 
     // UPDATE policy: USING (owner_id = @user_id) WITH CHECK (owner_id = @user_id)
     // This means: you can only update rows you own, and the result must still be owned by you
@@ -19,10 +17,9 @@ fn rebac_update_denied_by_using_policy() {
             PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),       // WITH CHECK
         );
 
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(docs_descriptor.clone(), docs_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(docs_table.policies(docs_policies))
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -120,19 +117,8 @@ fn rebac_update_denied_by_using_policy() {
 
 #[test]
 fn synced_soft_delete_should_use_delete_policy() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
+    let protected_descriptor = protected_table.clone().build().columns;
     let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
         rel: RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -145,10 +131,14 @@ fn synced_soft_delete_should_use_delete_policy() {
             },
         },
     });
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(protected_table.policies(protected_policies))
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);

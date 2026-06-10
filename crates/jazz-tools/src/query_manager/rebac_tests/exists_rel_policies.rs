@@ -2,24 +2,6 @@ use super::*;
 
 #[test]
 fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::new(RowDescriptor::new(vec![
-            ColumnDescriptor::new("user_id", ColumnType::Text),
-            ColumnDescriptor::new("team_id", ColumnType::Text),
-        ])),
-    );
-    schema.insert(
-        TableName::new("team_memberships"),
-        TableSchema::new(RowDescriptor::new(vec![
-            ColumnDescriptor::new("team_id", ColumnType::Text),
-            ColumnDescriptor::new("user_id", ColumnType::Text),
-        ])),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
     let projects_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
         table: "admins".into(),
         condition: Box::new(PolicyExpr::And(vec![
@@ -45,10 +27,23 @@ fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_re
             },
         ])),
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .column("team_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("team_memberships")
+                .column("team_id", ColumnType::Text)
+                .column("user_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -88,19 +83,6 @@ fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_re
 
 #[test]
 fn local_insert_with_exists_rel_policy_denies_non_admin() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
     let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
         rel: RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -113,10 +95,18 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
             },
         },
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -152,17 +142,6 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 
 #[test]
 fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
-            "user_id",
-            ColumnType::Text,
-        )])),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
     let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
         rel: RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -175,10 +154,14 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
             },
         },
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("admins").column("user_id", ColumnType::Text))
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -208,21 +191,6 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
 
 #[test]
 fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
-    let mut schema = Schema::new();
-    let admins_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("user_id", ColumnType::Text),
-        ColumnDescriptor::new("revoked_at", ColumnType::Text).nullable(),
-    ]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
     let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
         rel: RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -242,10 +210,19 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
             ]),
         },
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .nullable_column("revoked_at", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -294,19 +271,6 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
 
 #[test]
 fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
         rel: RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -319,10 +283,18 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
             },
         },
     });
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
