@@ -877,6 +877,11 @@ impl SyncManager {
                     BatchFate::Missing { batch_id }
                 } else {
                     let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
+                        tracing::warn!(
+                            ?batch_id,
+                            "received a sealed batch but this node has no durability tier; \
+                             dropping settlement - the origin's wait() can only resolve via another peer"
+                        );
                         return;
                     };
                     let fate = match mode {
@@ -905,7 +910,12 @@ impl SyncManager {
             }
         };
 
-        if !matches!(fate, BatchFate::Missing { .. })
+        let settled_at_target = matches!(fate, BatchFate::Rejected { .. })
+            || fate
+                .confirmed_tier()
+                .is_some_and(|tier| tier >= self.settlement_target());
+        if settled_at_target
+            && !matches!(fate, BatchFate::Missing { .. })
             && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
         {
             tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
@@ -965,7 +975,7 @@ impl SyncManager {
                     let should_prune_submission = matches!(fate, BatchFate::Rejected { .. })
                         || fate
                             .confirmed_tier()
-                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
+                            .is_some_and(|tier| tier >= self.settlement_target());
                     let prune_result = if should_prune_submission {
                         storage.delete_sealed_batch_submission(batch_id)
                     } else {
@@ -1074,6 +1084,30 @@ impl SyncManager {
 
         let mut recovered_any = false;
         for submission in submissions {
+            match storage.load_authoritative_batch_fate(submission.batch_id) {
+                Ok(Some(BatchFate::DurableDirect { confirmed_tier, .. }))
+                    if self
+                        .my_tiers
+                        .iter()
+                        .copied()
+                        .max()
+                        .is_some_and(|authority_tier| confirmed_tier < authority_tier) =>
+                {
+                    // Continue into validation so this authority can promote a
+                    // direct fate that was previously confirmed by a lower tier.
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        batch_id = ?submission.batch_id,
+                        %error,
+                        "failed to load authoritative batch fate during sealed batch recovery"
+                    );
+                    continue;
+                }
+            }
+
             let batch_rows = self.transactional_batch_rows(
                 storage,
                 submission.batch_id,

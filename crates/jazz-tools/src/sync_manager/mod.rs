@@ -316,6 +316,23 @@ impl SyncManager {
         self.my_tiers.iter().copied().max()
     }
 
+    /// The durability tier at which this runtime considers a batch settled:
+    /// batches confirmed at or above this tier need no further reconciliation,
+    /// replay, or retained bookkeeping on this node.
+    ///
+    /// With an upstream server registered or pending the target is
+    /// `GlobalServer` (local fates are provisional until the upstream
+    /// confirms). Without one, this node's own strongest tier is terminal:
+    /// there is nobody else to wait for.
+    pub fn settlement_target(&self) -> DurabilityTier {
+        if self.has_servers_or_pending_servers() {
+            DurabilityTier::GlobalServer
+        } else {
+            self.max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local)
+        }
+    }
+
     /// Approximate heap-backed memory owned by sync state, grouped for benches.
     ///
     /// Returns `(catalogue, connections, subscriptions, queues, total)`.
