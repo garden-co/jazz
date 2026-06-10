@@ -12,19 +12,35 @@ struct FlowRow {
     timestamp: String,
     service_name: String,
     span_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_string_for_null", rename = "thread")]
     thread: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_string_for_null", rename = "fields")]
     fields: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "empty_string_for_null",
+        rename = "payload"
+    )]
     payload: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "empty_string_for_null",
+        rename = "payload_json"
+    )]
     payload_json: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "empty_string_for_null",
+        rename = "peer_kind"
+    )]
     peer_kind: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "empty_string_for_null",
+        rename = "peer_id"
+    )]
     peer_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_string_for_null", rename = "tier")]
     tier: String,
 }
 
@@ -51,6 +67,13 @@ struct SqlErrorEnvelope {
 #[derive(Clone, Debug, Serialize)]
 struct SqlRequest {
     query: String,
+}
+
+fn empty_string_for_null<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[function_component(App)]
