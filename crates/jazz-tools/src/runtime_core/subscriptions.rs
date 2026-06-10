@@ -277,22 +277,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    /// Subscribe with explicit schema context (for server use).
-    pub fn subscribe_with_schema_context(
-        &mut self,
-        query: Query,
-        schema_context: &crate::schema_manager::QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
-        let query_sub_id = self
-            .schema_manager
-            .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
-
-        self.immediate_tick();
-        Ok(crate::sync_manager::QueryId(query_sub_id.0))
-    }
-
     // =========================================================================
     // Queries
     // =========================================================================
