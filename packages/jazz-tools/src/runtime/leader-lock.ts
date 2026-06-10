@@ -1,3 +1,5 @@
+import { normalizePositiveTimeout } from "./browser-broker-protocol.js";
+
 export interface LeaderLockLease {
   release(): void;
 }
@@ -10,6 +12,14 @@ export interface WebLockAcquireOptions {
   lockManager?: LockManagerLike | null;
   onLost?: (reason: unknown) => void;
 }
+
+export interface WebLockRetryOptions extends WebLockAcquireOptions {
+  timeoutMs?: number;
+  retryDelayMs?: number;
+}
+
+const DEFAULT_WEB_LOCK_RETRY_TIMEOUT_MS = 250;
+const DEFAULT_WEB_LOCK_RETRY_DELAY_MS = 20;
 
 interface LockManagerLike {
   request<T>(
@@ -142,6 +152,27 @@ export async function tryAcquireWebLock(
   return await acquiredPromise;
 }
 
+export async function acquireWebLockWithRetry(
+  lockName: string,
+  options: WebLockRetryOptions = {},
+): Promise<LeaderLockLease | null> {
+  const timeoutMs = normalizePositiveTimeout(options.timeoutMs, DEFAULT_WEB_LOCK_RETRY_TIMEOUT_MS);
+  const retryDelayMs = normalizePositiveTimeout(
+    options.retryDelayMs,
+    DEFAULT_WEB_LOCK_RETRY_DELAY_MS,
+  );
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    const lease = await tryAcquireWebLock(lockName, options);
+    if (lease) return lease;
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return null;
+    await sleep(Math.min(retryDelayMs, remainingMs));
+  }
+}
+
 function normalizeAcquireOptions(
   optionsOrLockManager: WebLockAcquireOptions | LockManagerLike | null | undefined,
 ): { lockManager: LockManagerLike | null; onLost?: (reason: unknown) => void } {
@@ -234,4 +265,8 @@ function isAbortError(error: unknown): boolean {
     error instanceof DOMException &&
     (error.name === "AbortError" || error.name === "InvalidStateError")
   );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BrowserBrokerClient } from "../../src/runtime/browser-broker-client.js";
-import { tryAcquireWebLock, type LeaderLockLease } from "../../src/runtime/leader-lock.js";
+import {
+  acquireWebLockWithRetry,
+  tryAcquireWebLock,
+  type LeaderLockLease,
+} from "../../src/runtime/leader-lock.js";
 
 function uniqueName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -78,10 +82,10 @@ describe("SharedWorker browser broker", () => {
     const tabLockName = `jazz-leader-tab:broker-test-app:${dbName}`;
     const workerLockName = `jazz-leader-worker:broker-test-app:${dbName}`;
     const compatibilityLockName = `jazz-leader-lock:broker-test-app:${dbName}`;
-    const tabLease = await tryAcquireWebLock(tabLockName);
-    const workerLease = await tryAcquireWebLock(workerLockName);
+    const tabLease = await acquireWebLockWithRetry(tabLockName);
+    const workerLease = await acquireWebLockWithRetry(workerLockName);
     const compatibilityLease = options.compatibility
-      ? await tryAcquireWebLock(compatibilityLockName)
+      ? await acquireWebLockWithRetry(compatibilityLockName)
       : null;
     if (!tabLease || !workerLease || !compatibilityLease) {
       if (!options.compatibility && tabLease && workerLease) {
@@ -740,6 +744,84 @@ describe("SharedWorker browser broker", () => {
     expect(resetBegun).toContain(`tab-a:${firstRequestId}`);
     expect(resetBegun).toContain(`tab-b:${firstRequestId}`);
     expect(resetPromotions.some((entry) => entry.endsWith(`:${firstRequestId}`))).toBe(true);
+  });
+
+  it("redelivers storage reset completion after the requester reconnects", async () => {
+    const dbName = uniqueName("broker-storage-reset-redeliver");
+    const requestId = `reset-${dbName}`;
+    const resetBegun: string[] = [];
+    const reconnects: string[] = [];
+    const clientByTabId = new Map<string, BrowserBrokerClient>();
+    let releaseLeaderPreparation!: () => void;
+    const leaderPreparation = new Promise<void>((resolve) => {
+      releaseLeaderPreparation = resolve;
+    });
+
+    function createResetRedeliveryOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        brokerPingIntervalMs: 50,
+        brokerPongTimeoutMs: 100,
+        storageResetTimeoutMs: 2_500,
+        onStorageResetBegin: async (requestId) => {
+          resetBegun.push(`${tabId}:${requestId}`);
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          if (tabId === "tab-a") {
+            await leaderPreparation;
+          }
+        },
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          port.close();
+          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+        onReconnected: (client) => {
+          reconnects.push(tabId);
+          client.reportSchemaReady("schema-a");
+        },
+      };
+    }
+
+    const first = await BrowserBrokerClient.connect(createResetRedeliveryOptions("tab-a"));
+    clientByTabId.set("tab-a", first);
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createResetRedeliveryOptions("tab-b"));
+    clientByTabId.set("tab-b", second);
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    first.reportSchemaReady("schema-a");
+    second.reportSchemaReady("schema-a");
+    await second.waitForRole("follower", 2000);
+
+    const reset = second.requestStorageReset(requestId);
+    reset.catch(() => undefined);
+
+    await waitFor(
+      () => resetBegun.includes(`tab-a:${requestId}`) && resetBegun.includes(`tab-b:${requestId}`),
+      2000,
+      "broker should ask both tabs to prepare storage reset",
+    );
+
+    (second as unknown as { port?: MessagePort | null }).port?.close();
+    releaseLeaderPreparation();
+
+    await withTimeout(reset, 3000, "reset requester should receive redelivered completion");
+    expect(reconnects).toContain("tab-b");
   });
 
   it("reattaches a same-tab follower after shutdown and reconnect", async () => {

@@ -1,4 +1,4 @@
-import type { BrowserContext, Route } from "playwright";
+import type { BrowserContext, Route, WebSocketRoute } from "playwright";
 type JazzNapiTestingServer = import("jazz-napi").TestingServer;
 
 interface StartedTestingServer {
@@ -10,7 +10,15 @@ interface StartedTestingServer {
 
 const DEFAULT_TESTING_SERVER_KEY = "__default__";
 const testingServerPromises = new Map<string, Promise<StartedTestingServer>>();
-const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
+interface TestingServerRouteBlock {
+  blocked: boolean;
+  httpHandler: (route: Route) => void;
+  webSocketHandler: (route: WebSocketRoute) => void | Promise<void>;
+  webSocketPattern: string;
+  webSocketRouted: boolean;
+}
+
+const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, TestingServerRouteBlock>>();
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
@@ -99,6 +107,12 @@ function testingServerUrlPattern(serverUrl: string): string {
   return `${serverUrl.replace(/\/+$/, "")}/**`;
 }
 
+function testingServerWebSocketUrlPattern(serverUrl: string): string {
+  const url = new URL(serverUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return `${url.toString().replace(/\/+$/, "")}/**`;
+}
+
 function getBrowserContextId(context: BrowserContext): number {
   let id = browserContextIds.get(context);
   if (!id) {
@@ -106,6 +120,15 @@ function getBrowserContextId(context: BrowserContext): number {
     browserContextIds.set(context, id);
   }
   return id;
+}
+
+function activeBlockedPatterns(
+  contextRoutes: Map<string, TestingServerRouteBlock> | undefined,
+): string[] {
+  if (!contextRoutes) return [];
+  return [...contextRoutes.entries()]
+    .filter(([, routeBlock]) => routeBlock.blocked)
+    .map(([pattern]) => pattern);
 }
 
 export interface TestingServerNetworkDebugState {
@@ -124,8 +147,8 @@ export async function debugTestingServerNetwork(
   return {
     contextId: getBrowserContextId(context),
     pattern,
-    blocked: contextRoutes?.has(pattern) ?? false,
-    activePatterns: contextRoutes ? [...contextRoutes.keys()] : [],
+    blocked: contextRoutes?.get(pattern)?.blocked ?? false,
+    activePatterns: activeBlockedPatterns(contextRoutes),
   };
 }
 
@@ -140,26 +163,50 @@ export async function blockTestingServerNetwork(
     contextRoutes = new Map();
     blockedServerRoutes.set(context, contextRoutes);
   }
-  if (contextRoutes.has(pattern)) {
+  let routeBlock = contextRoutes.get(pattern);
+  if (routeBlock?.blocked) {
     console.info("[testing-server-network]", {
       action: "block-skip",
       contextId,
       pattern,
-      activePatterns: [...contextRoutes.keys()],
+      activePatterns: activeBlockedPatterns(contextRoutes),
     });
     return;
   }
 
-  const handler = (route: Route) => {
-    void route.abort("internetdisconnected");
-  };
-  contextRoutes.set(pattern, handler);
-  await context.route(pattern, handler);
+  if (!routeBlock) {
+    const webSocketPattern = testingServerWebSocketUrlPattern(serverUrl);
+    routeBlock = {
+      blocked: false,
+      httpHandler: (route) => {
+        void route.abort("internetdisconnected");
+      },
+      webSocketHandler: async (webSocketRoute) => {
+        const currentRouteBlock = contextRoutes?.get(pattern);
+        if (!currentRouteBlock?.blocked) {
+          webSocketRoute.connectToServer();
+          return;
+        }
+        await webSocketRoute.close().catch(() => undefined);
+      },
+      webSocketPattern,
+      webSocketRouted: false,
+    };
+    contextRoutes.set(pattern, routeBlock);
+  }
+
+  routeBlock.blocked = true;
+  if (!routeBlock.webSocketRouted) {
+    await context.routeWebSocket(routeBlock.webSocketPattern, routeBlock.webSocketHandler);
+    routeBlock.webSocketRouted = true;
+  }
+  await context.route(pattern, routeBlock.httpHandler);
   console.info("[testing-server-network]", {
     action: "block",
     contextId,
     pattern,
-    activePatterns: [...contextRoutes.keys()],
+    webSocketPattern: routeBlock.webSocketPattern,
+    activePatterns: activeBlockedPatterns(contextRoutes),
   });
 }
 
@@ -170,23 +217,24 @@ export async function unblockTestingServerNetwork(
   const pattern = testingServerUrlPattern(serverUrl);
   const contextId = getBrowserContextId(context);
   const contextRoutes = blockedServerRoutes.get(context);
-  const handler = contextRoutes?.get(pattern);
-  if (!handler) {
+  const routeBlock = contextRoutes?.get(pattern);
+  if (!routeBlock?.blocked) {
     console.info("[testing-server-network]", {
       action: "unblock-skip",
       contextId,
       pattern,
-      activePatterns: contextRoutes ? [...contextRoutes.keys()] : [],
+      activePatterns: activeBlockedPatterns(contextRoutes),
     });
     return;
   }
 
-  await context.unroute(pattern, handler);
-  contextRoutes?.delete(pattern);
+  await context.unroute(pattern, routeBlock.httpHandler);
+  routeBlock.blocked = false;
   console.info("[testing-server-network]", {
     action: "unblock",
     contextId,
     pattern,
-    activePatterns: contextRoutes ? [...contextRoutes.keys()] : [],
+    webSocketPattern: routeBlock.webSocketPattern,
+    activePatterns: activeBlockedPatterns(contextRoutes),
   });
 }
