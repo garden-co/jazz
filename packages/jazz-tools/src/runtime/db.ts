@@ -486,7 +486,6 @@ type DbBatchHandleBinding = {
   batchId: string;
   session?: Session;
   attribution?: string;
-  rolledBack?: boolean;
 };
 type AnyDbBatchHandle = DbBatchHandleBase;
 
@@ -502,23 +501,6 @@ function getDbBatchHandleBinding(
     throw new Error(`${bindingName}.${operation}() requires at least one table operation first`);
   }
   return binding;
-}
-
-function dbBatchHandleKind(
-  bindingName: "DbTransaction" | "DbDirectBatch",
-): "transaction" | "batch" {
-  return bindingName === "DbTransaction" ? "transaction" : "batch";
-}
-
-function rolledBackBatchHandleCoreError(
-  bindingName: "DbTransaction" | "DbDirectBatch",
-  binding: DbBatchHandleBinding,
-): string {
-  return `${dbBatchHandleKind(bindingName)} ${binding.batchId} has already been rolled back`;
-}
-
-function unavailableBatchHandleCoreError(binding: DbBatchHandleBinding): string {
-  return `batch ${binding.batchId} has already been completed or was never opened`;
 }
 
 function transformOutputRow<T>(
@@ -573,7 +555,6 @@ abstract class DbBatchHandleBase {
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly session?: Session,
     private readonly attribution?: string,
-    private readonly useRuntimeUnavailableRollbackErrors = false,
   ) {}
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
@@ -603,41 +584,6 @@ abstract class DbBatchHandleBase {
     return getDbBatchHandleBinding(this, operation, this.bindingName);
   }
 
-  private rollbackCoreError(binding: DbBatchHandleBinding): string {
-    return this.useRuntimeUnavailableRollbackErrors
-      ? unavailableBatchHandleCoreError(binding)
-      : rolledBackBatchHandleCoreError(this.bindingName, binding);
-  }
-
-  private assertCanComplete(operation: "commit" | "rollback", binding: DbBatchHandleBinding): void {
-    if (!binding.rolledBack) {
-      return;
-    }
-
-    const coreError = this.rollbackCoreError(binding);
-    if (this.useRuntimeUnavailableRollbackErrors) {
-      const prefix = operation === "commit" ? "Commit batch failed" : "Rollback batch failed";
-      throw new Error(`${prefix}: Write error: ${coreError}`);
-    }
-    throw new Error(`Write error: ${coreError}`);
-  }
-
-  private assertCanWrite(operation: string, binding: DbBatchHandleBinding): void {
-    if (!binding.rolledBack) {
-      return;
-    }
-
-    throw new Error(`${operation} failed: WriteError("${this.rollbackCoreError(binding)}")`);
-  }
-
-  private assertCanQuery(binding: DbBatchHandleBinding): void {
-    if (!binding.rolledBack) {
-      return;
-    }
-
-    throw new Error(`Query setup failed: Write error: ${this.rollbackCoreError(binding)}`);
-  }
-
   batchId(): string {
     return this.requireBinding("batchId").batchId;
   }
@@ -646,9 +592,8 @@ abstract class DbBatchHandleBase {
    * Commit this batch.
    */
   commit(): WriteHandle {
-    const binding = this.requireBinding("commit");
-    this.assertCanComplete("commit", binding);
-    return binding.client.commitBatch(binding.batchId);
+    const { client, batchId } = this.requireBinding("commit");
+    return client.commitBatch(batchId);
   }
 
   /**
@@ -660,10 +605,8 @@ abstract class DbBatchHandleBase {
    * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): void {
-    const binding = this.requireBinding("rollback");
-    this.assertCanComplete("rollback", binding);
-    binding.client.rollbackBatch(binding.batchId);
-    binding.rolledBack = true;
+    const { client, batchId } = this.requireBinding("rollback");
+    client.rollbackBatch(batchId);
   }
 
   /**
@@ -673,11 +616,10 @@ abstract class DbBatchHandleBase {
    * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    const binding = this.bindTable(table, this.bindingName);
-    this.assertCanWrite("Insert", binding);
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = binding;
+    const { client, batchId, session, attribution } = this.requireBinding("insert");
     const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
@@ -694,11 +636,10 @@ abstract class DbBatchHandleBase {
     data: Init,
     options?: RestoreOptions,
   ): T {
-    const binding = this.bindTable(table, this.bindingName);
-    this.assertCanWrite("Restore", binding);
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = binding;
+    const { client, batchId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
       id,
@@ -718,11 +659,10 @@ abstract class DbBatchHandleBase {
    * once it's committed.
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    const binding = this.bindTable(table, this.bindingName);
-    this.assertCanWrite("Upsert", binding);
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = binding;
+    const { client, batchId, session, attribution } = this.requireBinding("upsert");
     client.upsertInternal(table._table, values, options, session, attribution, batchId);
   }
 
@@ -733,11 +673,10 @@ abstract class DbBatchHandleBase {
    * once it's committed.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    const binding = this.bindTable(table, this.bindingName);
-    this.assertCanWrite("Update", binding);
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = binding;
+    const { client, batchId, session, attribution } = this.requireBinding("update");
     client.updateInternal(id, updates, undefined, session, attribution, batchId);
   }
 
@@ -748,15 +687,8 @@ abstract class DbBatchHandleBase {
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const binding = this.bindTable(table, this.bindingName);
-    this.assertCanWrite("Delete", binding);
-    binding.client.deleteInternal(
-      id,
-      undefined,
-      binding.session,
-      binding.attribution,
-      binding.batchId,
-    );
+    const { client, batchId, session, attribution } = this.bindTable(table, this.bindingName);
+    client.deleteInternal(id, undefined, session, attribution, batchId);
   }
 
   /**
@@ -765,9 +697,7 @@ abstract class DbBatchHandleBase {
    * Read data is scoped to this batch.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const binding = this.bindQuery(query);
-    this.assertCanQuery(binding);
-    const { client, batchId, session } = binding;
+    const { client, batchId, session } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
@@ -819,16 +749,8 @@ export class DbTransaction extends DbBatchHandleBase {
     resolveClient: (schema: WasmSchema) => JazzClient,
     session?: Session,
     attribution?: string,
-    useRuntimeUnavailableRollbackErrors = false,
   ) {
-    super(
-      "DbTransaction",
-      "transactional",
-      resolveClient,
-      session,
-      attribution,
-      useRuntimeUnavailableRollbackErrors,
-    );
+    super("DbTransaction", "transactional", resolveClient, session, attribution);
   }
 }
 
@@ -846,16 +768,8 @@ export class DbDirectBatch extends DbBatchHandleBase {
     resolveClient: (schema: WasmSchema) => JazzClient,
     session?: Session,
     attribution?: string,
-    useRuntimeUnavailableRollbackErrors = false,
   ) {
-    super(
-      "DbDirectBatch",
-      "direct",
-      resolveClient,
-      session,
-      attribution,
-      useRuntimeUnavailableRollbackErrors,
-    );
+    super("DbDirectBatch", "direct", resolveClient, session, attribution);
   }
 }
 
@@ -1912,7 +1826,6 @@ export class Db {
       (schema) => this.getClient(schema),
       context?.session,
       context?.attribution,
-      this.worker !== null,
     );
   }
 
@@ -1953,7 +1866,6 @@ export class Db {
       (schema) => this.getClient(schema),
       context?.session,
       context?.attribution,
-      this.worker !== null,
     );
   }
 
