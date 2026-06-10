@@ -14,17 +14,16 @@ use futures::future::FutureExt;
 use serde::Deserialize;
 
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
     default_read_durability_options as default_binding_read_durability_options,
     parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
     parse_external_object_id, parse_query_input, parse_read_durability_options,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_mutation_error_event, subscription_delta_to_json,
+    parse_session_input, parse_write_context_input, serialize_mutation_error_event,
+    subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
     MutationErrorCallback as CoreMutationErrorCallback, ReadDurabilityOptions, RuntimeCore,
     Scheduler, SubscriptionDelta, SubscriptionHandle,
@@ -221,11 +220,9 @@ fn parse_subscription_inputs(
 
 fn make_subscription_callback(
     callback: Box<dyn SubscriptionCallback>,
-    declared_schema: Option<Schema>,
-    table: Option<TableName>,
 ) -> impl Fn(SubscriptionDelta) + Send + 'static {
     move |delta: SubscriptionDelta| {
-        let payload = subscription_delta_to_json(&delta, declared_schema.as_ref(), table.as_ref());
+        let payload = subscription_delta_to_json(&delta);
         if let Ok(json) = serde_json::to_string(&payload) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 callback.on_update(json);
@@ -379,8 +376,6 @@ fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Arc<Mutex<RnCoreType>>,
-    declared_schema: Schema,
-    subscription_queries: Mutex<HashMap<u64, Query>>,
 }
 
 #[uniffi::export]
@@ -396,7 +391,6 @@ impl RnRuntime {
     ) -> Result<Arc<Self>, JazzRnError> {
         with_panic_boundary("new", || {
             let schema: Schema = serde_json::from_str(&schema_json).map_err(json_err)?;
-            let declared_schema = schema.clone();
 
             let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
 
@@ -459,11 +453,7 @@ impl RnRuntime {
                 core_guard.scheduler().set_core_ref(Arc::downgrade(&core));
             }
 
-            Ok(Arc::new(Self {
-                core,
-                declared_schema,
-                subscription_queries: Mutex::new(HashMap::new()),
-            }))
+            Ok(Arc::new(Self { core }))
         })
     }
 
@@ -520,12 +510,6 @@ impl RnRuntime {
             let ((id, row_values), batch_id) = core
                 .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
@@ -557,12 +541,6 @@ impl RnRuntime {
             let ((id, row_values), batch_id) = core
                 .restore(&table, oid, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
@@ -620,7 +598,7 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
             let batch_id = core
-                .upsert_with_id(&table, oid, named_values, write_context.as_ref())
+                .upsert(&table, oid, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
                 "batchId": batch_id.to_string(),
@@ -730,35 +708,25 @@ impl RnRuntime {
     ) -> Result<String, JazzRnError> {
         with_async_panic_boundary("query", || async move {
             let query = parse_query(&query_json)?;
-            let query_for_alignment = query.clone();
             let session = parse_session(session_json)?;
             let (durability, propagation, transaction_batch_id) =
                 parse_read_durability_options(tier.as_deref(), options_json.as_deref())
                     .map_err(|message| JazzRnError::InvalidJson { message })?;
 
-            let (fut, runtime_schema) = {
+            let fut = {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                (
-                    core.query_with_local_batch(
-                        query,
-                        session,
-                        durability,
-                        propagation,
-                        transaction_batch_id,
-                    )
-                    .map_err(runtime_err)?,
-                    core.current_schema().clone(),
+                core.query_with_local_batch(
+                    query,
+                    session,
+                    durability,
+                    propagation,
+                    transaction_batch_id,
                 )
+                .map_err(runtime_err)?
             };
             let results = fut.await.map_err(runtime_err)?;
-            let results = align_query_rows_to_declared_schema(
-                &self.declared_schema,
-                &runtime_schema,
-                &query_for_alignment,
-                results,
-            );
 
             let rows_json: Vec<serde_json::Value> = results
                 .into_iter()
@@ -781,12 +749,6 @@ impl RnRuntime {
 
     pub fn unsubscribe(&self, handle: u64) -> Result<(), JazzRnError> {
         with_panic_boundary("unsubscribe", || {
-            self.subscription_queries
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .remove(&handle);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
@@ -805,7 +767,6 @@ impl RnRuntime {
         with_panic_boundary("create_subscription", || {
             let (query, session, durability) =
                 parse_subscription_inputs(&query_json, session_json, tier)?;
-            let query_for_alignment = query.clone();
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
@@ -813,16 +774,6 @@ impl RnRuntime {
 
             let handle =
                 core.create_subscription(query, session, durability, QueryPropagation::Full);
-            drop(core);
-
-            if query_rows_can_be_schema_aligned(&query_for_alignment) {
-                self.subscription_queries
-                    .lock()
-                    .map_err(|_| JazzRnError::Internal {
-                        message: "lock poisoned".into(),
-                    })?
-                    .insert(handle.0, query_for_alignment);
-            }
 
             Ok(handle.0)
         })
@@ -835,24 +786,10 @@ impl RnRuntime {
         callback: Box<dyn SubscriptionCallback>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("execute_subscription", || {
-            let alignment_table = self
-                .subscription_queries
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .get(&handle)
-                .map(|query| query.table);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let callback = make_subscription_callback(
-                callback,
-                alignment_table
-                    .as_ref()
-                    .map(|_| self.declared_schema.clone()),
-                alignment_table,
-            );
+            let callback = make_subscription_callback(callback);
 
             core.execute_subscription(SubscriptionHandle(handle), callback)
                 .map_err(runtime_err)?;
@@ -1028,105 +965,6 @@ struct RnTickNotifier {
 impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use jazz_tools::binding_support::{
-        align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        query_rows_can_be_schema_aligned,
-    };
-    use jazz_tools::object::ObjectId;
-    use jazz_tools::query_manager::query::Query;
-    use jazz_tools::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
-        Value,
-    };
-
-    fn declared_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("description", ColumnType::Text),
-            )
-            .build()
-    }
-
-    fn runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("description", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("title", ColumnType::Text),
-            )
-            .build()
-    }
-
-    #[test]
-    fn query_rows_are_reordered_back_to_declared_schema() {
-        let rows = vec![(
-            ObjectId::new(),
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(false),
-                Value::Text("buy milk".to_string()),
-            ],
-        )];
-        let query = Query::new("todos");
-
-        let aligned = align_query_rows_to_declared_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &query,
-            rows,
-        );
-
-        assert_eq!(
-            aligned[0].1,
-            vec![
-                Value::Text("buy milk".to_string()),
-                Value::Boolean(false),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn descriptor_values_are_reordered_back_to_declared_schema() {
-        let runtime_descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("description", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-            ColumnDescriptor::new("title", ColumnType::Text),
-        ]);
-
-        let aligned = align_values_to_declared_schema(
-            &declared_todo_schema(),
-            &TableName::new("todos"),
-            &runtime_descriptor,
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(true),
-                Value::Text("ship fix".to_string()),
-            ],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![
-                Value::Text("ship fix".to_string()),
-                Value::Boolean(true),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn simple_queries_are_schema_alignable() {
-        assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
     }
 }
 

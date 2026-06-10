@@ -98,9 +98,8 @@ async fn same_seed_syncs_across_devices() {
     .await
     .expect("connect alice device A");
 
-    let (todo_id, expected_values) = alice_device_a
-        .create("todos", todo_values("buy milk", false))
-        .await
+    let (todo_id, expected_values, _) = alice_device_a
+        .insert("todos", todo_values("buy milk", false))
         .expect("alice device A creates todo");
 
     let alice_device_b = JazzClient::connect(local_first_context(
@@ -157,13 +156,11 @@ async fn different_seeds_produce_distinct_principals() {
     .await
     .expect("connect bob");
 
-    let (alice_todo_id, alice_values) = alice
-        .create("todos", todo_values("alice's task", false))
-        .await
+    let (alice_todo_id, alice_values, _) = alice
+        .insert("todos", todo_values("alice's task", false))
         .expect("alice creates todo");
-    let (bob_todo_id, bob_values) = bob
-        .create("todos", todo_values("bob's task", true))
-        .await
+    let (bob_todo_id, bob_values, _) = bob
+        .insert("todos", todo_values("bob's task", true))
         .expect("bob creates todo");
 
     wait_for_rows(
@@ -212,9 +209,8 @@ async fn persistent_seed_reconnects_as_same_principal() {
     let first = JazzClient::connect(context.clone())
         .await
         .expect("first connect");
-    let (todo_id, expected_values) = first
-        .create("todos", todo_values("remember this", false))
-        .await
+    let (todo_id, expected_values, _) = first
+        .insert("todos", todo_values("remember this", false))
         .expect("create todo");
 
     // Let the row settle at EdgeServer so we can verify the server recognized
@@ -281,10 +277,9 @@ async fn local_first_writes_carry_derived_principal_as_created_by() {
 
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
-    let (todo_id, _) = alice
+    let (todo_id, _, _) = alice
         .for_session(Session::new(&alice_user_id))
-        .create("todos", todo_values("provenance check", false))
-        .await
+        .insert("todos", todo_values("provenance check", false))
         .expect("alice creates todo");
 
     let expected = vec![
@@ -332,15 +327,13 @@ async fn local_first_and_jwt_clients_coexist() {
         .await
         .expect("connect bob (jwt)");
 
-    let (alice_id, _) = alice
+    let (alice_id, _, _) = alice
         .for_session(Session::new(&alice_user_id))
-        .create("todos", todo_values("alice via ed25519", false))
-        .await
+        .insert("todos", todo_values("alice via ed25519", false))
         .expect("alice creates todo");
-    let (bob_id, _) = bob
+    let (bob_id, _, _) = bob
         .for_session(Session::new("bob"))
-        .create("todos", todo_values("bob via jwt", true))
-        .await
+        .insert("todos", todo_values("bob via jwt", true))
         .expect("bob creates todo");
 
     let alice_row = vec![
@@ -418,9 +411,8 @@ async fn expired_token_reconnect_flushes_queued_writes() {
         .expect("connect with short-lived token");
 
     // Pre-expiry write: confirm the session is healthy and reaches the edge.
-    let (pre_id, pre_values) = client
-        .create("todos", todo_values("pre-expiry", false))
-        .await
+    let (pre_id, pre_values, _) = client
+        .insert("todos", todo_values("pre-expiry", false))
         .expect("pre-expiry create");
     wait_for_rows(
         &client,
@@ -436,9 +428,8 @@ async fn expired_token_reconnect_flushes_queued_writes() {
 
     // Post-expiry write: commit succeeds locally even though the server would
     // now reject the bearer token on sync.
-    let (queued_id, queued_values) = client
-        .create("todos", todo_values("post-expiry", true))
-        .await
+    let (queued_id, queued_values, _) = client
+        .insert("todos", todo_values("post-expiry", true))
         .expect("post-expiry create");
 
     client.shutdown().await.expect("shutdown expired client");

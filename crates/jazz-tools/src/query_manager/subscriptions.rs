@@ -198,88 +198,6 @@ impl QueryManager {
         Ok(id)
     }
 
-    /// Subscribe with explicit schema and context (for server use).
-    ///
-    /// This is the core subscription method for server-side query processing.
-    /// The regular `subscribe_with_session()` calls the internal context,
-    /// but servers need to use the client's schema context.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to subscribe to
-    /// * `schema` - The target schema (client's schema)
-    /// * `schema_context` - Context with current schema and any live schemas
-    /// * `session` - Optional session for policy evaluation
-    pub fn subscribe_with_explicit_context(
-        &mut self,
-        query: Query,
-        schema: &Schema,
-        schema_context: &crate::schema_manager::SchemaContext,
-        session: Option<Session>,
-    ) -> Result<QuerySubscriptionId, QueryError> {
-        let compile_schema: Schema = schema
-            .iter()
-            .map(|(table_name, table_schema)| {
-                let mut structural = table_schema.clone();
-                structural.policies = crate::query_manager::types::TablePolicies::default();
-                (*table_name, structural)
-            })
-            .collect();
-
-        // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
-
-        // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(
-            &query,
-            &compile_schema,
-            session.clone(),
-            schema_context,
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
-        )
-        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
-        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
-
-        let id = QuerySubscriptionId(self.next_subscription_id);
-        self.next_subscription_id += 1;
-
-        self.subscriptions.insert(
-            id,
-            QuerySubscription {
-                query,
-                graph,
-                branches,
-                session,
-                needs_recompile: false,
-                settled_once: false,
-                needs_visibility_recompute: true,
-                durability_tier: None,
-                local_updates: LocalUpdates::Immediate,
-                has_pending_local_updates: false,
-                pending_local_row_ids: HashSet::new(),
-                local_overlay_rows: HashMap::new(),
-                query_frontier_settled_tier: Some(DurabilityTier::GlobalServer),
-                current_ordered_ids: Vec::new(),
-                current_visible_rows: HashMap::new(),
-                policy_context_tables,
-                uses_explicit_authorization_filtering: false,
-                sync_backed: false,
-                propagation: QueryPropagation::Full,
-                reported_schema_warnings: HashSet::new(),
-            },
-        );
-
-        Ok(id)
-    }
-
     /// Subscribe to query results and sync matching objects from servers.
     ///
     /// This method:
@@ -586,14 +504,6 @@ impl QueryManager {
     pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
         self.authorization_context_cache.clear();
-    }
-
-    /// Add a branch → schema hash mapping (for server-mode schema activation).
-    ///
-    /// Used when a subscription arrives with explicit schema context.
-    pub fn add_schema_branch(&mut self, branch: &str, schema_hash: SchemaHash) {
-        self.branch_schema_map
-            .insert(branch.to_string(), schema_hash);
     }
 
     /// Find a schema in known_schemas by its short hash prefix.
