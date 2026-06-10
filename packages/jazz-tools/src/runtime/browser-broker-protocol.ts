@@ -1,7 +1,32 @@
-import type { RuntimeSourcesConfig, Session } from "./context.js";
+import type { RuntimeSourcesConfig } from "./context.js";
 
 export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v1";
 export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
+
+// Liveness defaults shared by the broker worker and the tab client — a drift
+// between the two desynchronizes ping cadence from eviction timing.
+export const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
+export const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
+
+export function normalizePositiveTimeout(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.floor(value));
+}
+
+export function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function createRandomId(prefix?: string): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  const raw =
+    cryptoObj && typeof cryptoObj.randomUUID === "function"
+      ? cryptoObj.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return prefix ? `${prefix}-${raw}` : raw;
+}
 
 export type BrowserBrokerVisibility = "visible" | "hidden";
 export type BrowserBrokerRole = "leader" | "follower";
@@ -162,6 +187,12 @@ export interface BrowserBrokerCloseFollowerPortMessage extends BrokerInstanceMes
   leadershipId: number;
 }
 
+export interface BrowserBrokerDetachFollowerPortMessage extends BrokerInstanceMessage {
+  type: "detach-follower-port";
+  followerTabId: string;
+  leadershipId: number;
+}
+
 export interface BrowserBrokerStorageResetBeginMessage extends BrokerInstanceMessage {
   type: "storage-reset-begin";
   requestId: string;
@@ -180,6 +211,11 @@ export interface BrowserBrokerUnsupportedMessage extends BrokerInstanceMessage {
   reason: string;
 }
 
+export interface BrowserBrokerSchemaBlockedMessage extends BrokerInstanceMessage {
+  type: "schema-blocked";
+  reason: string;
+}
+
 export type BrowserBrokerControlMessage =
   | BrowserBrokerHelloResponse
   | BrowserBrokerPingMessage
@@ -190,9 +226,11 @@ export type BrowserBrokerControlMessage =
   | BrowserBrokerUseFollowerPortMessage
   | BrowserBrokerFollowerReadyMessage
   | BrowserBrokerCloseFollowerPortMessage
+  | BrowserBrokerDetachFollowerPortMessage
   | BrowserBrokerStorageResetBeginMessage
   | BrowserBrokerStorageResetFinishedMessage
-  | BrowserBrokerUnsupportedMessage;
+  | BrowserBrokerUnsupportedMessage
+  | BrowserBrokerSchemaBlockedMessage;
 
 export type BrowserBrokerCapabilityGlobal = {
   SharedWorker?: unknown;
@@ -254,6 +292,18 @@ export function selectLeaderCandidate(
   return selected;
 }
 
+// Leadership ids increase monotonically per namespace. "Stale" means the
+// message belongs to a leadership that has been superseded on this receiver;
+// "future" means the receiver has not observed that leadership yet. Exact
+// matches are compared with plain equality at the call sites.
+export function isStaleLeadershipId(incoming: number, current: number): boolean {
+  return incoming < current;
+}
+
+export function isFutureLeadershipId(incoming: number, current: number): boolean {
+  return incoming > current;
+}
+
 export function createBrowserBrokerFingerprint(input: BrowserBrokerFingerprintInput): string {
   return stableStringify({
     protocolVersion: BROKER_CONTROL_PROTOCOL_VERSION,
@@ -286,23 +336,6 @@ export function createRuntimeSourceIdentity(runtimeSources?: RuntimeSourcesConfi
       ? getBufferSourceRuntimeSourceIdentity(runtimeSources.wasmSource)
       : null,
   });
-}
-
-export function createAuthCompatibilityClass(input: {
-  jwtToken?: string;
-  cookieSession?: Session;
-  adminSecret?: string;
-}): string {
-  if (input.adminSecret) {
-    return "admin";
-  }
-
-  const session = input.cookieSession;
-  if (session?.user_id) {
-    return `${session.authMode ?? "user"}:${session.user_id}`;
-  }
-
-  return input.jwtToken ? "jwt-authenticated" : "anonymous";
 }
 
 function stableStringify(value: unknown): string {

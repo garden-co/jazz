@@ -481,7 +481,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             transport: None,
             transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
-            buffer_outbox_without_sync_sender: false,
+            buffer_outbox_without_sync_sender: true,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),

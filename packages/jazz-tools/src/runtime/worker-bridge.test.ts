@@ -39,4 +39,24 @@ describe("MessagePortRuntimeBridge", () => {
     expect(handle.detachForReconnect).toHaveBeenCalledTimes(1);
     expect(handle.shutdown).not.toHaveBeenCalled();
   });
+
+  it("registers auth failure callbacks on follower data port bridges", () => {
+    const handle = {
+      detachForReconnect: vi.fn(),
+      shutdown: vi.fn(),
+      updateAuth: vi.fn(),
+      onAuthFailure: vi.fn(),
+    };
+    const runtime = {
+      createMessagePortBridge: vi.fn(() => handle),
+    } as unknown as Runtime;
+    const port = {} as MessagePort;
+    const onAuthFailure = vi.fn();
+
+    const bridge = new MessagePortRuntimeBridge(port, runtime);
+    bridge.init();
+    bridge.onAuthFailure(onAuthFailure);
+
+    expect(handle.onAuthFailure).toHaveBeenCalledWith(onAuthFailure);
+  });
 });

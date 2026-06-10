@@ -259,6 +259,18 @@ async function rethrowWithWorkerDiagnostics(
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = app.todos;
 
+/**
+ * Structurally valid JWT with a deliberately invalid signature: parses fine on
+ * the client (sub/exp claims) but the testing server rejects it at handshake.
+ */
+function makeStructurallyValidJwt(userId: string): string {
+  const encode = (value: unknown) =>
+    btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const header = encode({ alg: "HS256", typ: "JWT" });
+  const payload = encode({ sub: userId, exp: Math.floor(Date.now() / 1000) + 3600 });
+  return `${header}.${payload}.invalid-signature`;
+}
+
 /** QueryBuilder that selects all todos by project. */
 function todosByProject(projectId: string): QueryBuilder<Todo> {
   return app.todos.where({ projectId });
@@ -2248,15 +2260,127 @@ describe("Worker Bridge with OPFS", () => {
       "Late second tab should join as a follower without spawning a worker",
     );
 
+    const followerRows = await withTimeout(
+      follower.all(allTodos, { tier: "local" }),
+      8000,
+      "Late follower initial query should wait for the leader data port",
+    );
+    expect(followerRows.some((row) => row.title === "Created before second tab")).toBe(true);
+  });
+
+  it("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
+    const dbName = uniqueDbName("schema-mismatch-recovery");
+    const oldTab = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    oldTab.insert(todos, { title: "Old schema row", done: false });
     await waitForCondition(
       async () => {
-        const rows = await follower.all(allTodos, { tier: "local" });
-        return rows.some((row) => row.title === "Created before second tab");
+        const rows = await oldTab.all(allTodos, { tier: "local" });
+        return rows.some((row) => row.title === "Old schema row");
       },
       8000,
-      "Late follower should receive rows through the leader data port",
+      "Old tab should be durable-ready with the original schema",
     );
+
+    const nextApp = s.defineApp({
+      todos: s.table({
+        title: s.string(),
+        done: s.boolean(),
+        priority: s.string().optional(),
+      }),
+    });
+
+    const newTab = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    await expect(
+      withTimeout(
+        newTab.all(nextApp.todos, { tier: "local" }),
+        8000,
+        "Schema-blocked tab query should reject instead of hanging",
+      ),
+    ).rejects.toThrow("incompatible persistent browser schema");
+
+    await oldTab.shutdown();
+
+    await waitForCondition(
+      async () => getTabRole(newTab) === "leader",
+      8000,
+      "Blocked tab should be promoted after the pinning tab closes",
+    );
+    const rows = await withTimeout(
+      newTab.all(nextApp.todos, { tier: "local" }),
+      8000,
+      "Recovered tab should be able to query with its own schema",
+    );
+    expect(Array.isArray(rows)).toBe(true);
   });
+
+  it("fans out an auth failure to follower tabs", async () => {
+    const { appId, serverUrl } = await getTestingServerInfo(uniqueDbName("auth-fanout"));
+    const dbName = uniqueDbName("auth-fanout");
+    const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
+
+    // Keep the upstream unreachable during setup so the leader's rejected
+    // handshake cannot fire before the follower's data-port bridge (the
+    // fan-out target) is attached.
+    await blockTestingServerNetwork(serverUrl);
+    let leader: Db;
+    let follower: Db;
+    try {
+      const dbA = track(
+        await createDb({
+          appId,
+          serverUrl,
+          jwtToken: invalidJwt,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      const dbB = track(
+        await createDb({
+          appId,
+          serverUrl,
+          jwtToken: invalidJwt,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      ({ leader, follower } = await waitForLeaderAndFollower(dbA, dbB));
+
+      leader.insert(todos, { title: "leader-init", done: false });
+      await withTimeout(
+        leader.all(allTodos, { tier: "local" }),
+        15000,
+        "Leader bridge init did not complete",
+      );
+      follower.insert(todos, { title: "follower-init", done: false });
+      await withTimeout(
+        follower.all(allTodos, { tier: "local" }),
+        15000,
+        "Follower data-port bridge init did not complete",
+      );
+
+      expect(leader.getAuthState().error).toBeUndefined();
+      expect(follower.getAuthState().error).toBeUndefined();
+    } finally {
+      await unblockTestingServerNetwork(serverUrl);
+    }
+
+    (
+      leader as unknown as { workerBridge?: { replayServerConnection?: () => void } }
+    ).workerBridge?.replayServerConnection?.();
+
+    await waitForCondition(
+      async () => leader.getAuthState().error === "invalid",
+      20000,
+      "Leader should turn unauthenticated when the server rejects its JWT",
+    );
+    await waitForCondition(
+      async () => follower.getAuthState().error === "invalid",
+      20000,
+      "Follower should turn unauthenticated through the worker auth fan-out",
+    );
+  }, 60000);
 
   it("fails over to follower after leader shutdown", async () => {
     const dbName = uniqueDbName("leader-failover");

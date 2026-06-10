@@ -84,8 +84,11 @@ import {
 } from "./wasm-teardown-trap-suppressor.js";
 import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "./browser-broker-client.js";
 import {
+  createRandomId,
   createBrowserBrokerFingerprint,
   createRuntimeSourceIdentity,
+  isStaleLeadershipId,
+  stringifyError,
   type BrowserBrokerRole,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
@@ -171,15 +174,7 @@ function trimOptionalString(value?: string | null): string | null {
 }
 
 function createBrowserTabId(): string {
-  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
-  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
-    return cryptoObj.randomUUID();
-  }
-  return `tab-${Math.random().toString(36).slice(2, 12)}`;
-}
-
-function stringifyError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return createRandomId();
 }
 
 /** @internal Derive the default browser persistence namespace for this Db config. */
@@ -811,6 +806,8 @@ export class Db {
   private followerReady: Promise<void> | null = null;
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
+  private followerReadyResolved = false;
+  private durablePathError: Error | null = null;
   private brokerSchemaFingerprint: string | null = null;
   private brokerResetSchema: WasmSchema | null = null;
   private readonly pendingLeaderFollowerPorts = new Map<
@@ -1032,6 +1029,9 @@ export class Db {
         onAttachFollowerPort: (followerTabId, leadershipId, port) => {
           db.handleBrokerAttachFollowerPort(followerTabId, leadershipId, port);
         },
+        onDetachFollowerPort: (followerTabId, leadershipId) => {
+          db.handleBrokerDetachFollowerPort(followerTabId, leadershipId);
+        },
         onUseFollowerPort: (leaderTabId, leadershipId, port) => {
           db.handleBrokerUseFollowerPort(leaderTabId, leadershipId, port);
         },
@@ -1043,6 +1043,15 @@ export class Db {
         },
         onStorageResetBegin: (_requestId, leadershipId) =>
           db.prepareForBrokerStorageReset(leadershipId),
+        onSchemaBlocked: (reason) => {
+          db.handleBrokerSchemaBlocked(reason);
+        },
+        onReconnected: (client) => {
+          db.handleBrokerReconnected(client);
+        },
+        onClosed: (error) => {
+          db.handleBrokerClosed(error);
+        },
       });
       db.brokerClient = broker;
       db.adoptBrokerSnapshot(broker.snapshot());
@@ -1151,7 +1160,9 @@ export class Db {
     }
     if (this.brokerClient && this.tabRole === "follower") {
       this.attachFollowerPortBridgeForExistingClient();
-      await this.ensureFollowerReadyPromise();
+      await this.ensureDurablePathReadyPromise();
+    } else if (this.brokerClient && this.activeBrokerPromotion) {
+      await this.ensureDurablePathReadyPromise();
     }
   }
 
@@ -1203,6 +1214,7 @@ export class Db {
       .then(() => {
         this.flushPendingLeaderFollowerPorts();
         this.reportBrokerLeaderReady();
+        this.resolveDurablePathReady();
       })
       .then(() => undefined);
     bridgeReady.catch((error) => {
@@ -1310,6 +1322,8 @@ export class Db {
       fallbackWasmUrl,
       workerLockName:
         this.brokerClient && this.tabRole === "leader" ? this.brokerWorkerLockName() : undefined,
+      leadershipId:
+        this.brokerClient && this.tabRole === "leader" ? this.currentLeadershipId : undefined,
       logLevel: this.config.logLevel,
       telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
@@ -1393,8 +1407,9 @@ export class Db {
 
     const promotion: BrokerPromotionState = { leadershipId, cancelled: false };
     this.activeBrokerPromotion = promotion;
+    this.markDurablePathPending();
 
-    this.closeFollowerPortState(new Error("Follower port closed during leader promotion"), {
+    this.closeFollowerPortState(undefined, {
       preserveOutbox: true,
     });
     this.closePendingLeaderFollowerPorts();
@@ -1438,17 +1453,12 @@ export class Db {
       this.worker = worker;
       this.tabRole = "leader";
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
-      if (resetRequestId) {
-        this.recreateFirstClientAfterBrokerReset();
-      }
+      this.recreateFirstClientAfterBrokerReset();
       this.attachWorkerBridgeForExistingClient();
     } catch (error) {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
       this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));
-      await this.shutdownLeaderWorker();
-      this.releaseBrokerLeadershipResources();
-      this.tabRole = "follower";
-      this.currentLeaderTabId = null;
+      await this.resignBrokerLeadership();
       throw error;
     } finally {
       if (this.activeBrokerPromotion === promotion) {
@@ -1460,16 +1470,32 @@ export class Db {
   private async waitForInitialBrokerPromotion(): Promise<void> {
     if (!this.brokerClient) return;
 
-    try {
-      await this.brokerClient.waitForRole("leader", 50);
-    } catch {
-      // Follower tabs cannot become durable-ready until the first schema
-      // attaches to the leader, so they must not block createDb here.
-    }
-
     if (this.brokerPromotion) {
       await this.brokerPromotion;
     }
+  }
+
+  /**
+   * The single leadership-resignation sequence shared by every demote path.
+   * The durable path goes back to pending (waiters survive for the next
+   * leadership), the tab steps down, leader-side ports and the worker are
+   * torn down, and the leadership locks are released.
+   */
+  private async resignBrokerLeadership(
+    options: {
+      closePendingFollowerPorts?: boolean;
+      shutdown?: () => Promise<void>;
+    } = {},
+  ): Promise<void> {
+    this.markDurablePathPending();
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyLeadershipId = null;
+    if (options.closePendingFollowerPorts ?? true) {
+      this.closePendingLeaderFollowerPorts();
+    }
+    await (options.shutdown ? options.shutdown() : this.shutdownLeaderWorker());
+    this.releaseBrokerLeadershipResources();
   }
 
   private async demoteViaBroker(leadershipId: number): Promise<void> {
@@ -1481,12 +1507,7 @@ export class Db {
     } else if (this.tabRole !== "leader") {
       return;
     }
-    this.tabRole = "follower";
-    this.currentLeaderTabId = null;
-    this.brokerLeaderReadyLeadershipId = null;
-    this.closePendingLeaderFollowerPorts();
-    await this.shutdownLeaderWorker();
-    this.releaseBrokerLeadershipResources();
+    await this.resignBrokerLeadership();
   }
 
   private async handleBrokerLeaderLockLost(
@@ -1503,12 +1524,7 @@ export class Db {
 
     const message = stringifyError(reason);
     this.brokerClient?.reportLeaderFailed(leadershipId, message || `${lockName} was lost`);
-    this.tabRole = "follower";
-    this.currentLeaderTabId = null;
-    this.brokerLeaderReadyLeadershipId = null;
-    this.closePendingLeaderFollowerPorts();
-    await this.shutdownLeaderWorker();
-    this.releaseBrokerLeadershipResources();
+    await this.resignBrokerLeadership();
   }
 
   private async finishCancelledBrokerPromotion(
@@ -1526,12 +1542,7 @@ export class Db {
     if (worker && this.worker !== worker) {
       worker.terminate();
     }
-    this.tabRole = "follower";
-    this.currentLeaderTabId = null;
-    this.brokerLeaderReadyLeadershipId = null;
-    this.closePendingLeaderFollowerPorts();
-    await this.shutdownLeaderWorker();
-    this.releaseBrokerLeadershipResources();
+    await this.resignBrokerLeadership();
     return true;
   }
 
@@ -1539,11 +1550,12 @@ export class Db {
     if (this.isShuttingDown) return;
     if (leadershipId !== this.currentLeadershipId) return;
 
-    this.tabRole = "follower";
-    this.currentLeaderTabId = null;
-    this.brokerLeaderReadyLeadershipId = null;
-    await this.shutdownWorkerAndClientsForStorageReset();
-    this.releaseBrokerLeadershipResources();
+    // Pending leader follower ports are left untouched: the broker clears all
+    // attachments itself when the reset starts and re-issues them afterwards.
+    await this.resignBrokerLeadership({
+      closePendingFollowerPorts: false,
+      shutdown: () => this.shutdownWorkerAndClientsForStorageReset(),
+    });
   }
 
   private reportBrokerLeaderReady(): void {
@@ -1572,6 +1584,15 @@ export class Db {
     this.flushPendingLeaderFollowerPorts();
   }
 
+  private handleBrokerDetachFollowerPort(followerTabId: string, leadershipId: number): void {
+    const pending = this.pendingLeaderFollowerPorts.get(followerTabId);
+    if (pending?.leadershipId === leadershipId) {
+      pending.port.close();
+      this.pendingLeaderFollowerPorts.delete(followerTabId);
+    }
+    this.workerBridge?.detachFollowerPort(followerTabId, leadershipId);
+  }
+
   private flushPendingLeaderFollowerPorts(): void {
     if (!this.workerBridge || this.tabRole !== "leader") return;
 
@@ -1597,17 +1618,18 @@ export class Db {
     leadershipId: number,
     port: MessagePort,
   ): void {
-    if (this.tabRole === "leader" || leadershipId < this.currentLeadershipId) {
+    if (this.tabRole === "leader" || isStaleLeadershipId(leadershipId, this.currentLeadershipId)) {
       port.close();
       return;
     }
 
-    this.closeFollowerPortState(new Error("Follower port replaced"), { preserveOutbox: true });
+    this.markDurablePathPending();
+    this.closeFollowerPortState(undefined, { preserveOutbox: true });
     this.tabRole = "follower";
     this.currentLeaderTabId = leaderTabId;
     this.currentLeadershipId = leadershipId;
     this.followerDataPort = port;
-    this.ensureFollowerReadyPromise();
+    this.ensureDurablePathReadyPromise();
     this.attachFollowerPortBridgeForExistingClient();
   }
 
@@ -1615,19 +1637,24 @@ export class Db {
     if (this.tabRole !== "follower") return;
     if (leadershipId !== this.currentLeadershipId) return;
     this.currentLeaderTabId = leaderTabId;
-    this.resolveFollowerReady?.();
-    this.resolveFollowerReady = null;
-    this.rejectFollowerReady = null;
+    this.resolveDurablePathReady();
   }
 
   private handleBrokerCloseFollowerPort(leadershipId: number): void {
     if (leadershipId !== this.currentLeadershipId) return;
-    this.closeFollowerPortState(new Error("Follower port closed by broker"), {
+    this.markDurablePathPending();
+    this.closeFollowerPortState(undefined, {
       preserveOutbox: true,
     });
   }
 
-  private ensureFollowerReadyPromise(): Promise<void> {
+  private ensureDurablePathReadyPromise(): Promise<void> {
+    if (this.durablePathError) {
+      return Promise.reject(this.durablePathError);
+    }
+    if (this.followerReadyResolved) {
+      return Promise.resolve();
+    }
     if (this.followerReady) {
       return this.followerReady;
     }
@@ -1637,6 +1664,32 @@ export class Db {
       this.rejectFollowerReady = reject;
     });
     return this.followerReady;
+  }
+
+  private markDurablePathPending(): void {
+    this.durablePathError = null;
+    if (this.followerReadyResolved) {
+      this.followerReady = null;
+      this.followerReadyResolved = false;
+    }
+  }
+
+  private resolveDurablePathReady(): void {
+    this.durablePathError = null;
+    this.followerReadyResolved = true;
+    this.resolveFollowerReady?.();
+    this.followerReady = Promise.resolve();
+    this.resolveFollowerReady = null;
+    this.rejectFollowerReady = null;
+  }
+
+  private rejectDurablePathReady(error: Error): void {
+    this.durablePathError = error;
+    this.followerReadyResolved = false;
+    this.rejectFollowerReady?.(error);
+    this.followerReady = null;
+    this.resolveFollowerReady = null;
+    this.rejectFollowerReady = null;
   }
 
   private attachFollowerPortBridgeForExistingClient(): void {
@@ -1652,8 +1705,30 @@ export class Db {
 
     const bridge = new MessagePortRuntimeBridge(this.followerDataPort, client.getRuntime());
     bridge.init();
+    bridge.onAuthFailure((reason) => {
+      this.markUnauthenticated(reason);
+    });
     this.followerPortBridge = bridge;
     this.followerDataPort = null;
+  }
+
+  // Schema-blocked is non-terminal: queries fail fast with the reason, but the
+  // broker connection stays up so a later canonical-schema re-election can
+  // adopt this tab (any acceptance path clears the error via
+  // markDurablePathPending).
+  private handleBrokerSchemaBlocked(reason: string): void {
+    this.rejectDurablePathReady(new Error(reason));
+  }
+
+  private handleBrokerReconnected(client: BrowserBrokerClient): void {
+    this.markDurablePathPending();
+    if (this.brokerSchemaFingerprint) {
+      client.reportSchemaReady(this.brokerSchemaFingerprint);
+    }
+  }
+
+  private handleBrokerClosed(error: Error): void {
+    this.rejectDurablePathReady(error);
   }
 
   private attachWorkerBridgeForExistingClient(): void {
@@ -1699,12 +1774,9 @@ export class Db {
     this.followerDataPort?.close();
     this.followerDataPort = null;
 
-    if (error && this.rejectFollowerReady) {
-      this.rejectFollowerReady(error);
+    if (error) {
+      this.rejectDurablePathReady(error);
     }
-    this.followerReady = null;
-    this.resolveFollowerReady = null;
-    this.rejectFollowerReady = null;
   }
 
   private async shutdownLeaderWorker(): Promise<void> {
@@ -1854,7 +1926,7 @@ export class Db {
     this.bridgeReady = null;
     this.brokerLeaderReadyLeadershipId = null;
     this.closePendingLeaderFollowerPorts();
-    this.closeFollowerPortState(new Error("Browser storage reset"));
+    this.closeFollowerPortState(undefined);
 
     for (const client of this.clients.values()) {
       await client.shutdown();

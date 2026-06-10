@@ -41,7 +41,7 @@
 #![cfg(target_arch = "wasm32")]
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -65,6 +65,9 @@ thread_local! {
     static HOST: RefCell<Option<WorkerHost>> = const { RefCell::new(None) };
     static RUNTIME: RefCell<Option<Rc<WasmRuntime>>> = const { RefCell::new(None) };
     static PEER_ROUTING: RefCell<PeerRouting> = RefCell::new(PeerRouting::default());
+    /// Broker leadership this worker serves (from init). `None` outside
+    /// broker mode; when set, stale follower-port attaches are rejected.
+    static HOST_LEADERSHIP_ID: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +230,8 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
 async fn run_init(init: InitPayload) -> Result<(), String> {
     let f = &init.fields;
 
+    HOST_LEADERSHIP_ID.with(|cell| cell.set(f.leadership_id));
+
     // 1. Open runtime.
     let runtime = match WasmRuntime::open_persistent(
         &f.schema_json,
@@ -269,9 +274,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     let auth_cb = Closure::<dyn FnMut(JsValue)>::new(|reason: JsValue| {
         let raw = reason.as_string().unwrap_or_default();
         post_to_main(&WorkerToMainWire::UpstreamDisconnected);
-        post_to_main(&WorkerToMainWire::AuthFailed {
-            reason: map_auth_reason(&raw).to_string(),
-        });
+        post_auth_failed(map_auth_reason(&raw).to_string());
     })
     .into_js_value();
     runtime.on_auth_failure(auth_cb.unchecked_into());
@@ -452,6 +455,15 @@ fn close_peer(peer_id: &str) {
 }
 
 fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) {
+    if let Some(own) = HOST_LEADERSHIP_ID.with(|cell| cell.get()) {
+        if leadership_id != own {
+            tracing::warn!(
+                "rejecting stale follower-port attach for {peer_id}: leadership {leadership_id} != {own}"
+            );
+            port.close();
+            return;
+        }
+    }
     let Some(runtime) = RUNTIME.with(|cell| cell.borrow().clone()) else {
         return;
     };
@@ -852,9 +864,7 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     let json = serde_json::to_string(&auth).unwrap_or_else(|_| "{}".to_string());
     if let Err(err) = rt.update_auth(json) {
         tracing::error!("runtime.updateAuth failed: {err:?}");
-        post_to_main(&WorkerToMainWire::AuthFailed {
-            reason: "invalid".to_string(),
-        });
+        post_auth_failed("invalid".to_string());
     }
 }
 
@@ -946,6 +956,26 @@ fn post_to_main(msg: &WorkerToMainWire) {
     let _ = global.post_message_with_transfer(&value, transfer.as_ref());
 }
 
+fn post_to_follower_ports(msg: &WorkerToMainWire) {
+    PEER_ROUTING.with(|cell| {
+        for target in cell.borrow().peer_targets.values() {
+            let Some(port) = target.dyn_ref::<MessagePort>() else {
+                continue;
+            };
+            let Ok((value, transfer)) = worker_to_main_post(msg) else {
+                continue;
+            };
+            let _ = port.post_message_with_transferable(&value, transfer.as_ref());
+        }
+    });
+}
+
+fn post_auth_failed(reason: String) {
+    let msg = WorkerToMainWire::AuthFailed { reason };
+    post_to_main(&msg);
+    post_to_follower_ports(&msg);
+}
+
 fn post_follower_port_attached(peer_id: &str, leadership_id: u32) {
     let message = Object::new();
     let _ = Reflect::set(
@@ -997,7 +1027,19 @@ fn handle_follower_port_control(value: &JsValue) -> bool {
                 .ok()
                 .and_then(|v| v.as_string())
             {
-                close_peer(&peer_id);
+                let leadership_id = Reflect::get(value, &"leadershipId".into())
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                let matches_leadership = PEER_ROUTING.with(|cell| {
+                    cell.borrow()
+                        .peer_leadership_ids
+                        .get(&peer_id)
+                        .is_some_and(|current| *current == leadership_id)
+                });
+                if matches_leadership {
+                    close_peer(&peer_id);
+                }
             }
             true
         }
