@@ -117,7 +117,7 @@ fn flow_list(props: &FlowListProps) -> Html {
     let limit = use_state(|| 5_000_u32);
     let payload_filter = use_state(String::new);
     let layer_filter = use_state(String::new);
-    let expanded_rows = use_state(Vec::<String>::new);
+    let selected_row = use_state(|| None::<FlowRow>);
     let rows = use_state(Vec::<FlowRow>::new);
     let error = use_state(|| None::<String>);
 
@@ -216,24 +216,13 @@ fn flow_list(props: &FlowListProps) -> Html {
                 <tbody>
                     {for filtered_rows.iter().enumerate().map(|(index, row)| {
                         let row_key = format!("{}-{index}", row.timestamp);
-                        let toggle_key = row_key.clone();
-                        let expanded = expanded_rows.contains(&row_key);
                         html! {
                             <FlowTableRows
                                 key={row_key.clone()}
                                 row={row.clone()}
-                                expanded={expanded}
-                                on_toggle={{
-                                    let expanded_rows = expanded_rows.clone();
-                                    Callback::from(move |_| {
-                                        let mut next = (*expanded_rows).clone();
-                                        if let Some(index) = next.iter().position(|key| key == &toggle_key) {
-                                            next.remove(index);
-                                        } else {
-                                            next.push(toggle_key.clone());
-                                        }
-                                        expanded_rows.set(next);
-                                    })
+                                on_select={{
+                                    let selected_row = selected_row.clone();
+                                    Callback::from(move |row| selected_row.set(Some(row)))
                                 }}
                             />
                         }
@@ -245,6 +234,15 @@ fn flow_list(props: &FlowListProps) -> Html {
                     }
                 </tbody>
             </table>
+            if let Some(row) = (*selected_row).clone() {
+                <PayloadDialog
+                    row={row}
+                    on_close={{
+                        let selected_row = selected_row.clone();
+                        Callback::from(move |_| selected_row.set(None))
+                    }}
+                />
+            }
         </div>
     }
 }
@@ -268,14 +266,13 @@ fn field(props: &FieldProps) -> Html {
 #[derive(Properties, PartialEq)]
 struct FlowTableRowsProps {
     row: FlowRow,
-    expanded: bool,
-    on_toggle: Callback<()>,
+    on_select: Callback<FlowRow>,
 }
 
 #[function_component(FlowTableRows)]
 fn flow_table_rows(props: &FlowTableRowsProps) -> Html {
     let attrs = resolve_flow_attrs(&props.row);
-    let can_expand = !attrs.payload.is_empty() || !attrs.payload_json.is_empty();
+    let can_open = !attrs.payload.is_empty() || !attrs.payload_json.is_empty();
     let layer = layer_label(&props.row);
     let direction = if props.row.span_name == "sync.send" {
         "send"
@@ -283,42 +280,90 @@ fn flow_table_rows(props: &FlowTableRowsProps) -> Html {
         "recv"
     };
     let onclick = {
-        let on_toggle = props.on_toggle.clone();
+        let on_select = props.on_select.clone();
+        let row = props.row.clone();
         Callback::from(move |_| {
-            if can_expand {
-                on_toggle.emit(());
+            if can_open {
+                on_select.emit(row.clone());
             }
         })
     };
     let row_style = format!(
         "{TR_STYLE}; background: {}; cursor: {};",
         row_background(&layer),
-        if can_expand { "pointer" } else { "default" }
+        if can_open { "pointer" } else { "default" }
     );
 
     html! {
-        <>
-            <tr style={row_style} {onclick}>
-                <td style={TD_STYLE}>{format_time(&props.row.timestamp)}</td>
-                <td style={TD_STYLE}>{layer}</td>
-                <td style={direction_style(&props.row.span_name)}>{direction}</td>
-                <td style={PAYLOAD_CELL_STYLE}>{if attrs.payload.is_empty() { "-" } else { &attrs.payload }}</td>
-                <td style={TD_STYLE}>{short_peer(&attrs.peer_kind, &attrs.peer_id)}</td>
-                <td style={TD_STYLE}>{if attrs.tier.is_empty() { "-" } else { &attrs.tier }}</td>
-            </tr>
-            if props.expanded && can_expand {
-                <tr>
-                    <td colspan="6" style={EXPANDED_STYLE}>
-                        if !attrs.payload.is_empty() {
-                            <PayloadDetail label="payload" value={attrs.payload.clone()} is_json={false} />
-                        }
-                        if !attrs.payload_json.is_empty() {
-                            <PayloadDetail label="payload_json" value={attrs.payload_json.clone()} is_json={true} />
-                        }
-                    </td>
-                </tr>
+        <tr style={row_style} {onclick}>
+            <td style={TD_STYLE}>{format_time(&props.row.timestamp)}</td>
+            <td style={TD_STYLE}>{layer}</td>
+            <td style={direction_style(&props.row.span_name)}>{direction}</td>
+            <td style={PAYLOAD_CELL_STYLE}>{if attrs.payload.is_empty() { "-" } else { &attrs.payload }}</td>
+            <td style={TD_STYLE}>{short_peer(&attrs.peer_kind, &attrs.peer_id)}</td>
+            <td style={TD_STYLE}>{if attrs.tier.is_empty() { "-" } else { &attrs.tier }}</td>
+        </tr>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct PayloadDialogProps {
+    row: FlowRow,
+    on_close: Callback<()>,
+}
+
+#[function_component(PayloadDialog)]
+fn payload_dialog(props: &PayloadDialogProps) -> Html {
+    let attrs = resolve_flow_attrs(&props.row);
+    let on_close = props.on_close.clone();
+    let close_on_backdrop = {
+        let on_close = on_close.clone();
+        Callback::from(move |_| on_close.emit(()))
+    };
+    let stop_dialog_click = Callback::from(|event: MouseEvent| event.stop_propagation());
+    let close_on_escape = {
+        let on_close = on_close.clone();
+        Callback::from(move |event: KeyboardEvent| {
+            if event.key() == "Escape" {
+                on_close.emit(());
             }
-        </>
+        })
+    };
+
+    html! {
+        <div
+            role="presentation"
+            tabindex="0"
+            style={DIALOG_BACKDROP_STYLE}
+            onclick={close_on_backdrop}
+            onkeydown={close_on_escape}
+        >
+            <section
+                role="dialog"
+                aria-modal="true"
+                aria-label="Payload details"
+                style={DIALOG_STYLE}
+                onclick={stop_dialog_click}
+            >
+                <header style={DIALOG_HEADER_STYLE}>
+                    <div>
+                        <h2 style={DIALOG_TITLE_STYLE}>{if attrs.payload.is_empty() { "Payload" } else { &attrs.payload }}</h2>
+                        <div style={DIALOG_META_STYLE}>
+                            {format!("{} · {} · {}", format_time(&props.row.timestamp), layer_label(&props.row), props.row.span_name)}
+                        </div>
+                    </div>
+                    <button type="button" style={DIALOG_CLOSE_STYLE} onclick={move |_| on_close.emit(())}>{"×"}</button>
+                </header>
+                <div style={DIALOG_BODY_STYLE}>
+                    if !attrs.payload.is_empty() {
+                        <PayloadDetail label="payload" value={attrs.payload.clone()} is_json={false} />
+                    }
+                    if !attrs.payload_json.is_empty() {
+                        <PayloadDetail label="payload_json" value={attrs.payload_json.clone()} is_json={true} />
+                    }
+                </div>
+            </section>
+        </div>
     }
 }
 
@@ -598,7 +643,13 @@ const TD_STYLE: &str = "padding: 4px 8px; vertical-align: top; white-space: nowr
 const PAYLOAD_CELL_STYLE: &str =
     "padding: 4px 8px; vertical-align: top; white-space: nowrap; font-weight: 500;";
 const EMPTY_STYLE: &str = "padding: 24px; text-align: center; color: #6b7280;";
-const EXPANDED_STYLE: &str = "padding: 12px; background: #fafafa;";
+const DIALOG_BACKDROP_STYLE: &str = "position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(17, 24, 39, 0.36);";
+const DIALOG_STYLE: &str = "width: min(960px, 100%); max-height: min(720px, calc(100vh - 48px)); display: flex; flex-direction: column; background: white; border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.22);";
+const DIALOG_HEADER_STYLE: &str = "display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #e5e7eb;";
+const DIALOG_TITLE_STYLE: &str = "font-size: 16px; line-height: 1.4; margin: 0; color: #111827;";
+const DIALOG_META_STYLE: &str = "margin-top: 2px; font-size: 12px; color: #6b7280; font-family: ui-monospace, SFMono-Regular, monospace;";
+const DIALOG_CLOSE_STYLE: &str = "border: 0; background: transparent; color: #4b5563; cursor: pointer; font-size: 24px; line-height: 24px; padding: 0 2px;";
+const DIALOG_BODY_STYLE: &str = "overflow: auto; padding: 16px;";
 const PAYLOAD_ROW_STYLE: &str = "display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: start; margin-bottom: 8px;";
 const PAYLOAD_LABEL_STYLE: &str =
     "color: #6b7280; font-size: 11px; text-transform: uppercase; padding-top: 2px;";
