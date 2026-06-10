@@ -15,6 +15,13 @@ const TELEMETRY_ENV_KEYS = [
 ] as const;
 
 class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
+  readonly createClientMock = vi.fn((_context: DbRuntimeClientContext<DbConfig>) => {
+    return {
+      onMutationError: vi.fn(),
+      connectTransport: vi.fn(),
+      shutdown: vi.fn(),
+    } as unknown as JazzClient;
+  });
   readonly installTelemetryMock = vi.fn(
     (_context: DbRuntimeTelemetryContext<DbConfig>) => this.disposeTelemetry,
   );
@@ -27,8 +34,8 @@ class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
     return;
   }
 
-  override createClient(_context: DbRuntimeClientContext<DbConfig>): JazzClient {
-    throw new Error("createClient should not be called by telemetry tests");
+  override createClient(context: DbRuntimeClientContext<DbConfig>): JazzClient {
+    return this.createClientMock(context);
   }
 
   override installTelemetry(context: DbRuntimeTelemetryContext<DbConfig>): (() => void) | null {
@@ -79,5 +86,52 @@ describe("Db runtime telemetry", () => {
 
     await db.shutdown();
     expect(disposeTelemetryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults WASM log level to debug when a collector URL exists", async () => {
+    const runtimeModule = new TestRuntimeModule();
+    const db = await createTestDb(
+      {
+        appId: "main-debug-telemetry",
+        telemetryCollectorUrl: "http://127.0.0.1:54418",
+      },
+      runtimeModule,
+    );
+
+    (db as any).getClient({});
+
+    expect(runtimeModule.createClientMock).toHaveBeenCalledTimes(1);
+    expect(runtimeModule.createClientMock.mock.calls[0][0].config.logLevel).toBe("debug");
+    await db.shutdown();
+  });
+
+  it("keeps explicit WASM log level when a collector URL exists", async () => {
+    const runtimeModule = new TestRuntimeModule();
+    const db = await createTestDb(
+      {
+        appId: "main-explicit-telemetry",
+        telemetryCollectorUrl: "http://127.0.0.1:54418",
+        logLevel: "warn",
+      },
+      runtimeModule,
+    );
+
+    (db as any).getClient({});
+
+    expect(runtimeModule.createClientMock).toHaveBeenCalledTimes(1);
+    expect(runtimeModule.createClientMock.mock.calls[0][0].config.logLevel).toBe("warn");
+    await db.shutdown();
+  });
+
+  it("defaults worker bridge WASM log level to debug when a collector URL exists in env", async () => {
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54418";
+    const runtimeModule = new TestRuntimeModule();
+    const db = await createTestDb({ appId: "worker-debug-telemetry" }, runtimeModule);
+
+    const options = (db as any).buildWorkerBridgeOptions("{}");
+
+    expect(options.logLevel).toBe("debug");
+    expect(options.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
+    await db.shutdown();
   });
 });

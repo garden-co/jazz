@@ -1073,7 +1073,7 @@ export class Db {
       this.installMainThreadWasmTelemetry();
 
       const client = this.runtimeModule.createClient({
-        config: { ...this.config },
+        config: this.configWithTelemetryDefaults(),
         schema: runtimeSchema,
         hasWorker: this.worker !== null,
         useBinaryEncoding: this.worker !== null,
@@ -1183,6 +1183,17 @@ export class Db {
     return resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl;
   }
 
+  private resolveWasmLogLevel(): WasmLogLevel | undefined {
+    return this.config.logLevel ?? (this.resolveTelemetryCollectorUrl() ? "debug" : undefined);
+  }
+
+  private configWithTelemetryDefaults(): DbConfig {
+    return {
+      ...this.config,
+      logLevel: this.resolveWasmLogLevel(),
+    };
+  }
+
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
     const driver = resolveStorageDriver(this.config.driver);
     if (driver.type !== "persistent") {
@@ -1248,7 +1259,7 @@ export class Db {
       adminSecret: this.config.adminSecret,
       runtimeSources,
       fallbackWasmUrl,
-      logLevel: this.config.logLevel,
+      logLevel: this.resolveWasmLogLevel(),
       telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
   }
