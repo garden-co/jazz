@@ -225,14 +225,14 @@ describe("runtime/Db direct path upstream wiring", () => {
       batchId: "batch-1",
     };
     const client = {
-      create: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
+      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
       shutdown: vi.fn(async () => undefined),
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),
       getRuntime: vi.fn(() => ({}) as never),
       onMutationError: vi.fn(() => () => undefined),
     } as unknown as JazzClient & {
-      create: ReturnType<typeof vi.fn>;
+      insert: ReturnType<typeof vi.fn>;
       shutdown: ReturnType<typeof vi.fn>;
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
