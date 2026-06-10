@@ -97,6 +97,26 @@ import { tryAcquireWebLock, type LeaderLockLease } from "./leader-lock.js";
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
 
+const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
+const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
+const BROKER_STORAGE_DELETE_RETRY_MAX_MS = 500;
+
+function isBrokerStorageLockedError(error: unknown): boolean {
+  const name = (error as { name?: string } | undefined)?.name;
+  return name === "NoModificationAllowedError" || name === "InvalidStateError";
+}
+
+function brokerStorageDeleteRetryDelayMs(retry: number): number {
+  return Math.min(
+    BROKER_STORAGE_DELETE_RETRY_BASE_MS * 2 ** retry,
+    BROKER_STORAGE_DELETE_RETRY_MAX_MS,
+  );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Configuration for creating a Db instance.
  */
@@ -1887,23 +1907,30 @@ export class Db {
     rootDirectory: FileSystemDirectoryHandle,
     namespace: string,
   ): Promise<void> {
-    try {
-      await rootDirectory.removeEntry(`${namespace}.opfsbtree`, { recursive: false });
-    } catch (error) {
-      const name = (error as { name?: string } | undefined)?.name;
-      if (name === "NotFoundError") {
+    const fileName = `${namespace}.opfsbtree`;
+    for (let attempt = 0; attempt <= BROKER_STORAGE_DELETE_MAX_RETRIES; attempt++) {
+      try {
+        await rootDirectory.removeEntry(fileName, { recursive: false });
         return;
+      } catch (error) {
+        const name = (error as { name?: string } | undefined)?.name;
+        if (name === "NotFoundError") {
+          return;
+        }
+        if (!isBrokerStorageLockedError(error)) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}": ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (attempt === BROKER_STORAGE_DELETE_MAX_RETRIES) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+          );
+        }
+        await sleepMs(brokerStorageDeleteRetryDelayMs(attempt));
       }
-      if (name === "NoModificationAllowedError" || name === "InvalidStateError") {
-        throw new Error(
-          `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
-        );
-      }
-      throw new Error(
-        `Failed to delete browser storage for "${namespace}": ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
     }
   }
 
