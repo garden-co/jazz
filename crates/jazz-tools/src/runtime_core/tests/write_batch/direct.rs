@@ -109,15 +109,43 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
             payload: SyncPayload::RowBatchCreated { row, .. },
         } if *id == server_id && row.row_id == row_id && row.batch_id == batch_id
     )));
-    assert!(outbox.iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Server(id),
-            payload: SyncPayload::SealBatch { submission },
-        } if *id == server_id
-            && submission.batch_id == batch_id
-            && submission.members.iter().any(|member| member.object_id == row_id)
-    )));
+
+    let stored_row = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.batch_id == batch_id)
+        .expect("committed row history should exist");
+    let branch_name = core.schema_manager().branch_name();
+
+    let seal = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (Destination::Server(id), SyncPayload::SealBatch { submission })
+                if *id == server_id =>
+            {
+                Some(submission.clone())
+            }
+            _ => None,
+        })
+        .expect("add_server should replay a regenerated seal");
+
+    assert_eq!(seal.batch_id, batch_id);
+    assert_eq!(seal.mode, crate::batch_fate::BatchMode::Direct);
+    assert_eq!(seal.target_branch_name, branch_name);
+    assert_eq!(
+        seal.members,
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: stored_row.content_digest(),
+        }],
+        "regenerated seal must carry exactly the committed member with its stored digest"
+    );
+    assert!(
+        seal.captured_frontier.is_empty(),
+        "a seal regenerated from row history carries no captured frontier"
+    );
 }
 
 #[test]
