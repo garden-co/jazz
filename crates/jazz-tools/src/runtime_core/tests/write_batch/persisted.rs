@@ -28,7 +28,6 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
     let update_batch_id =
         s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
             .unwrap();
-    s.a.commit_batch(update_batch_id).unwrap();
 
     assert_eq!(
         s.a.storage()
@@ -81,7 +80,6 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
     s.a.immediate_tick();
 
     let delete_batch_id = s.a.delete(id, None).unwrap();
-    s.a.commit_batch(delete_batch_id).unwrap();
 
     assert_eq!(
         s.a.storage()
