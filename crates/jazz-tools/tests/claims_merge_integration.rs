@@ -85,6 +85,7 @@ async fn ephemeral_claims_merged_into_session() {
                     Value::Text("secret-123".to_string()),
                 ),
             ]),
+            None,
         )
         .expect("admin creates room");
 

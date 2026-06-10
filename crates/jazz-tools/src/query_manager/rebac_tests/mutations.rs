@@ -1,12 +1,15 @@
+#[cfg(feature = "client")]
+use crate::JazzClient;
+
 use super::*;
 
-#[test]
-fn rebac_update_denied_by_using_policy() {
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn rebac_update_denied_by_using_policy() {
     // Schema with both USING and WITH CHECK for updates
     let docs_table = TableSchema::builder("documents")
         .column("owner_id", ColumnType::Text)
         .column("content", ColumnType::Text);
-    let docs_descriptor = docs_table.clone().build().columns;
 
     // UPDATE policy: USING (owner_id = @user_id) WITH CHECK (owner_id = @user_id)
     // This means: you can only update rows you own, and the result must still be owned by you
@@ -21,98 +24,45 @@ fn rebac_update_denied_by_using_policy() {
     let schema = SchemaBuilder::new()
         .table(docs_table.policies(docs_policies))
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    // Create Alice's document first (as server/no session)
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
-    let obj_id = create_test_row(&mut storage, Some(metadata.clone()));
-
-    let alice_content = encode_row(
-        &docs_descriptor,
-        &[
-            Value::Text("alice".into()),
-            Value::Text("Alice's secret".into()),
-        ],
-    )
-    .unwrap();
-    let author = ObjectId::new();
-    let initial_commit = add_row_commit(
-        &mut storage,
-        obj_id,
-        "main",
-        vec![],
-        alice_content,
-        1000,
-        author.to_string(),
-    );
-
-    // Now Bob connects and tries to update Alice's document
-    let bob_client = ClientId::new();
-    connect_client(&mut qm, &storage, bob_client);
-    qm.sync_manager_mut()
-        .set_client_session(bob_client, Session::new("bob"));
-
-    // Register query scope for Bob
-    let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
-    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), scope, None);
-    qm.sync_manager_mut().take_outbox();
+    let (obj_id, _, _) = client
+        .insert(
+            "documents",
+            crate::row_input!("owner_id" => "alice", "content" => "Alice's secret"),
+            None,
+        )
+        .expect("seed alice document");
 
     // Bob tries to update Alice's document (keeping owner as alice to pass WITH CHECK,
-    // but USING should still deny because Bob can't see Alice's row)
-    let bob_update_content = encode_row(
-        &docs_descriptor,
-        &[
-            Value::Text("alice".into()),
-            Value::Text("Hacked by Bob".into()),
-        ],
-    )
-    .unwrap();
-
-    let update_commit = stored_row_commit(
-        smallvec![initial_commit],
-        bob_update_content,
-        2000,
-        ObjectId::new().to_string(),
-        None,
-    );
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(bob_client),
-        payload: row_batch_created_payload(
+    // but USING should still deny because Bob can't see Alice's row).
+    let err = client
+        .for_session(Session::new("bob"))
+        .update(
             obj_id,
-            "main",
-            Some(RowMetadata {
-                id: obj_id,
-                metadata,
-            }),
-            &update_commit,
-        ),
-    });
+            vec![
+                ("owner_id".into(), Value::Text("alice".into())),
+                ("content".into(), Value::Text("Hacked by Bob".into())),
+            ],
+        )
+        .expect_err("Bob's update of Alice's document should be denied by USING policy");
+    assert_client_policy_denied(err, "documents", Operation::Update);
 
-    // Process
-    qm.process(&mut storage);
-
-    // Should get permission denied (Bob cannot see Alice's row via USING)
-    let outbox = qm.sync_manager_mut().take_outbox();
-    assert!(
-        client_write_was_rejected(
-            &outbox,
-            bob_client,
-            row_batch_id_for_commit(obj_id, "main", &update_commit),
-        ),
-        "Bob's update of Alice's document should be denied by USING policy"
-    );
-
-    // Update should NOT be applied
-    let tips = test_row_tip_ids(&storage, obj_id, "main").unwrap();
-    assert!(
-        !tips.contains(&row_batch_id_for_commit(obj_id, "main", &update_commit,)),
-        "Bob's update should be denied - he cannot see Alice's document"
+    let alice_rows = client
+        .for_session(Session::new("alice"))
+        .query(
+            QueryBuilder::new("documents")
+                .filter_eq("id", Value::Uuid(obj_id))
+                .select(&["content"])
+                .build(),
+            None,
+        )
+        .await
+        .expect("query alice document");
+    assert_eq!(
+        alice_rows,
+        vec![(obj_id, vec![Value::Text("Alice's secret".into())])],
+        "Bob's denied update should not change Alice's document"
     );
 }
 

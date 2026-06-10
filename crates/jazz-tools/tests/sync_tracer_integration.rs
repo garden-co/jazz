@@ -66,6 +66,7 @@ async fn alice_write_bob_read() {
                 ("title".to_string(), Value::Text("traced-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("alice creates todo");
     alice
@@ -193,6 +194,7 @@ async fn bob_updates_alice_todo() {
                 ("title".to_string(), Value::Text("collab-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("alice creates todo");
 
@@ -214,6 +216,7 @@ async fn bob_updates_alice_todo() {
         .update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
+            None,
         )
         .expect("bob updates todo");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -310,6 +313,7 @@ async fn single_writer_flow() {
                 ("title".to_string(), Value::Text("solo-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create todo");
     alice
@@ -362,6 +366,7 @@ async fn named_object_trace() {
                 ("title".to_string(), Value::Text("buy milk".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create todo");
     alice

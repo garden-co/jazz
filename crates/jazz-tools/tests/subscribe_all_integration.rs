@@ -175,6 +175,7 @@ async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
         .insert(
             "orgs",
             HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
+            None,
         )
         .expect("create org")
         .0
@@ -200,6 +201,7 @@ async fn create_team(
                     parent_id.map(Value::Uuid).unwrap_or(Value::Null),
                 ),
             ]),
+            None,
         )
         .expect("create team")
         .0
@@ -216,6 +218,7 @@ async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>)
                     team_id.map(Value::Uuid).unwrap_or(Value::Null),
                 ),
             ]),
+            None,
         )
         .expect("create user")
         .0
@@ -233,6 +236,7 @@ async fn create_team_edge(
                 ("child_team".to_string(), Value::Uuid(child_team)),
                 ("parent_team".to_string(), Value::Uuid(parent_team)),
             ]),
+            None,
         )
         .expect("create team edge")
         .0
@@ -240,7 +244,7 @@ async fn create_team_edge(
 
 async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
     client
-        .insert("todos", seed.values())
+        .insert("todos", seed.values(), None)
         .expect("create todo")
         .0
 }
@@ -250,6 +254,7 @@ async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
         .insert(
             "file_parts",
             HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
+            None,
         )
         .expect("create file part")
         .0
@@ -266,6 +271,7 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
                     Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
                 ),
             ]),
+            None,
         )
         .expect("create file")
         .0
@@ -420,6 +426,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
                 "title".to_string(),
                 Value::Text("watch-me-updated".to_string()),
             )],
+            None,
         )
         .expect("update todo title");
 
@@ -433,7 +440,11 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     .await;
 
     pair.writer
-        .update(todo_id, vec![("done".to_string(), Value::Boolean(true))])
+        .update(
+            todo_id,
+            vec![("done".to_string(), Value::Boolean(true))],
+            None,
+        )
         .expect("mark todo done");
 
     wait_for_subscription_update(
@@ -548,6 +559,7 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
                     "title".to_string(),
                     Value::Text(format!("bulk-{revision:03}")),
                 )],
+                None,
             )
             .expect("apply rapid bulk update");
     }
@@ -869,6 +881,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
                     "title".to_string(),
                     Value::Text(format!("local-bulk-{revision:03}")),
                 )],
+                None,
             )
             .expect("apply rapid local update");
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1266,7 +1279,11 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     .await;
 
     pair.writer
-        .update(user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
+        .update(
+            user_id,
+            vec![("team_id".to_string(), Value::Uuid(team_b))],
+            None,
+        )
         .expect("move user to new team");
 
     let rows = wait_for_rows(&pair.subscriber, query, "updated team row", |rows| {
@@ -1339,6 +1356,7 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
         .update(
             file_id,
             vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
+            None,
         )
         .expect("swap file part ids");
 

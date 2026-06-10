@@ -1,3 +1,6 @@
+#[cfg(feature = "client")]
+use crate::JazzClient;
+
 use super::*;
 
 #[test]
@@ -283,8 +286,9 @@ fn rebac_update_denied_by_using_exists_policy() {
     );
 }
 
-#[test]
-fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
     let protected_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::exists(
@@ -305,37 +309,30 @@ fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let client = JazzClient::test_client(schema).await;
 
-    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+    client
+        .insert("admins", crate::row_input!("user_id" => "alice"), None)
         .expect("seed admin row");
-    let protected = qm
-        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
-        .expect("seed protected row");
+    let protected = client
+        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .expect("seed protected row")
+        .0;
 
-    let bob_err = qm
-        .update_with_session(
-            &mut storage,
-            protected.row_id,
-            &[Value::Text("bob update".into())],
-            Some(&Session::new("bob")),
+    let bob_err = client
+        .for_session(Session::new("bob"))
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("bob update".into()))],
         )
         .expect_err("non-admin update should be denied");
-    assert!(matches!(
-        bob_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Update
-        } if table == TableName::new("protected")
-    ));
+    assert_client_policy_denied(bob_err, "protected", Operation::Update);
 
-    qm.update_with_session(
-        &mut storage,
-        protected.row_id,
-        &[Value::Text("alice update".into())],
-        Some(&Session::new("alice")),
-    )
-    .expect("admin update should be allowed");
+    client
+        .for_session(Session::new("alice"))
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("alice update".into()))],
+        )
+        .expect("admin update should be allowed");
 }

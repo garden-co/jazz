@@ -32,6 +32,7 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
         .insert(
             "documents",
             crate::row_input!("title" => "draft", "deleted_at" => Value::Null),
+            None,
         )
         .expect("seed visible document");
     let (hidden_id, _, _) = client
@@ -41,6 +42,7 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
                 "title" => "soft-deleted",
                 "deleted_at" => "2026-03-30T12:00:00Z",
             ),
+            None,
         )
         .expect("seed soft-deleted document");
 
@@ -74,6 +76,7 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
         .insert(
             "documents",
             crate::row_input!("title" => "draft", "deleted_at" => Value::Null),
+            None,
         )
         .expect("seed visible document");
     let (hidden_id, _, _) = client
@@ -83,6 +86,7 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
                 "title" => "soft-deleted",
                 "deleted_at" => "2026-03-30T12:00:00Z",
             ),
+            None,
         )
         .expect("seed soft-deleted document");
 

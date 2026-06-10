@@ -1,3 +1,6 @@
+#[cfg(feature = "client")]
+use crate::JazzClient;
+
 use super::*;
 
 #[test]
@@ -826,8 +829,9 @@ fn rebac_two_clients_different_sessions() {
     );
 }
 
-#[test]
-fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
     let tasks_policies = permissions(|p| {
         p.allow_insert().where_(pe::eq("deleted_at", pe::null()));
     });
@@ -840,34 +844,22 @@ fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_ro
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let client = JazzClient::test_client(schema).await;
 
-    qm.insert_with_session(
-        &mut storage,
-        "tasks",
-        &[Value::Text("draft".into()), Value::Null],
-        Some(&Session::new("alice")),
-    )
-    .expect("null row should satisfy deleted_at = NULL policy");
-
-    let archived_err = qm
-        .insert_with_session(
-            &mut storage,
+    client
+        .for_session(Session::new("alice"))
+        .insert(
             "tasks",
-            &[
-                Value::Text("archived".into()),
-                Value::Text("2026-03-30T12:00:00Z".into()),
-            ],
-            Some(&Session::new("alice")),
+            crate::row_input!("title" => "draft", "deleted_at" => Value::Null),
+        )
+        .expect("null row should satisfy deleted_at = NULL policy");
+
+    let archived_err = client
+        .for_session(Session::new("alice"))
+        .insert(
+            "tasks",
+            crate::row_input!("title" => "archived", "deleted_at" => "2026-03-30T12:00:00Z"),
         )
         .expect_err("non-null row should fail deleted_at = NULL policy");
-    assert!(matches!(
-        archived_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Insert
-        } if table == TableName::new("tasks")
-    ));
+    assert_client_policy_denied(archived_err, "tasks", Operation::Insert);
 }
