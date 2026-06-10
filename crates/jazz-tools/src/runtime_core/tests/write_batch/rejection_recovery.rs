@@ -1,5 +1,15 @@
 use super::*;
 
+/// Attach an upstream server and drain the handshake traffic so the runtime's
+/// settlement target is `GlobalServer` for the rest of the test.
+fn attach_server_and_drain<S: Storage>(core: &mut RuntimeCore<S, NoopScheduler>) -> ServerId {
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+    server_id
+}
+
 fn users_delete_denied_authorization_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -42,10 +52,7 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         "direct-reject-replay-test",
         Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
     );
-    let server_id = ServerId::new();
-    core.add_server(server_id);
-    core.batched_tick();
-    core.sync_sender().take();
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1164,10 +1171,7 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
         users_delete_denied_authorization_schema(),
         "direct-reject-replay-record-test",
     );
-    let server_id = ServerId::new();
-    core.add_server(server_id);
-    core.batched_tick();
-    core.sync_sender().take();
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1277,10 +1281,7 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
         users_delete_denied_authorization_schema(),
         "direct-pending-worker-sync-record-test",
     );
-    let server_id = ServerId::new();
-    core.add_server(server_id);
-    core.batched_tick();
-    core.sync_sender().take();
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,

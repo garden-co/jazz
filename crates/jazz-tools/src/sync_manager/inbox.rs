@@ -837,6 +837,18 @@ impl SyncManager {
         Some(declared_rows)
     }
 
+    /// True when this authority's tier outranks an existing `DurableDirect`
+    /// fate, so re-validating the seal can promote the batch to this tier.
+    fn can_promote_direct_fate(&self, fate: &BatchFate) -> bool {
+        matches!(
+            fate,
+            BatchFate::DurableDirect { confirmed_tier, .. }
+                if self
+                    .max_local_durability_tier()
+                    .is_some_and(|authority_tier| *confirmed_tier < authority_tier)
+        )
+    }
+
     fn settle_sealed_batch<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -910,12 +922,7 @@ impl SyncManager {
             }
         };
 
-        let settled_at_target = matches!(fate, BatchFate::Rejected { .. })
-            || fate
-                .confirmed_tier()
-                .is_some_and(|tier| tier >= self.settlement_target());
-        if settled_at_target
-            && !matches!(fate, BatchFate::Missing { .. })
+        if self.batch_fate_is_settled(&fate)
             && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
         {
             tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
@@ -962,20 +969,11 @@ impl SyncManager {
         };
         match storage.load_authoritative_batch_fate(batch_id) {
             Ok(Some(fate)) => {
-                let highest_authority_tier = self.my_tiers.iter().copied().max();
-                if matches!(
-                    fate,
-                    BatchFate::DurableDirect { confirmed_tier, .. }
-                        if highest_authority_tier
-                            .is_some_and(|authority_tier| confirmed_tier < authority_tier)
-                ) {
+                if self.can_promote_direct_fate(&fate) {
                     // Continue into seal validation so this authority can promote a
                     // previously local direct fate to its own durability tier.
                 } else {
-                    let should_prune_submission = matches!(fate, BatchFate::Rejected { .. })
-                        || fate
-                            .confirmed_tier()
-                            .is_some_and(|tier| tier >= self.settlement_target());
+                    let should_prune_submission = self.batch_fate_is_settled(&fate);
                     let prune_result = if should_prune_submission {
                         storage.delete_sealed_batch_submission(batch_id)
                     } else {
@@ -1085,14 +1083,7 @@ impl SyncManager {
         let mut recovered_any = false;
         for submission in submissions {
             match storage.load_authoritative_batch_fate(submission.batch_id) {
-                Ok(Some(BatchFate::DurableDirect { confirmed_tier, .. }))
-                    if self
-                        .my_tiers
-                        .iter()
-                        .copied()
-                        .max()
-                        .is_some_and(|authority_tier| confirmed_tier < authority_tier) =>
-                {
+                Ok(Some(fate)) if self.can_promote_direct_fate(&fate) => {
                     // Continue into validation so this authority can promote a
                     // direct fate that was previously confirmed by a lower tier.
                 }

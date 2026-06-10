@@ -289,13 +289,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     );
             }
             self.durability.record_batch_ack(batch_id, acked_tier);
-        }
-
-        if fate
-            .confirmed_tier()
-            .is_some_and(|tier| tier >= self.settlement_target())
-        {
-            self.retire_settled_batch(batch_id);
+            // Only confirmed fates retire bookkeeping here: `Rejected` keeps
+            // its record for the mutation-error replay path and `Missing`
+            // pends retransmission, and neither carries a confirmed tier.
+            if acked_tier >= self.settlement_target() {
+                self.retire_settled_batch(batch_id);
+            }
         }
     }
 
