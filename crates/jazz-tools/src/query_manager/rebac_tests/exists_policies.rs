@@ -3,30 +3,22 @@ use super::*;
 #[test]
 fn rebac_exists_clause_denies_non_matching_insert() {
     // Schema with EXISTS policy: only admins can insert
-    let mut schema = Schema::new();
-
-    // Admins table
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor,
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    // Protected table: only admins can insert
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
         table: "admins".into(),
         condition: Box::new(PolicyExpr::eq_session("user_id", vec!["user_id".into()])),
     });
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor, protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -106,22 +98,8 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 #[test]
 fn rebac_update_denied_by_using_exists_policy() {
     // Schema with EXISTS policy: only admins can update
-    let mut schema = Schema::new();
-
-    // Admins table
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    // Protected table: only admins can update (via EXISTS in USING)
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
+    let protected_descriptor = protected_table.clone().build().columns;
     let protected_policies = TablePolicies::new().with_update(
         // USING: EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
         Some(PolicyExpr::Exists {
@@ -131,10 +109,14 @@ fn rebac_update_denied_by_using_exists_policy() {
         // WITH CHECK: no restriction on new row
         PolicyExpr::True,
     );
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(protected_table.policies(protected_policies))
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -302,19 +284,6 @@ fn rebac_update_denied_by_using_exists_policy() {
 
 #[test]
 fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
     let protected_policies = TablePolicies::new().with_update(
         Some(PolicyExpr::Exists {
             table: "admins".into(),
@@ -322,10 +291,18 @@ fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
         }),
         PolicyExpr::True,
     );
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);

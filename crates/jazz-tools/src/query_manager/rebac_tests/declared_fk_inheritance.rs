@@ -153,19 +153,6 @@ fn rebac_declared_fk_inheritance_array_membership_grants_access() {
 fn rebac_declared_fk_inheritance_cycle_fails_closed() {
     use crate::query_manager::query::QueryBuilder;
 
-    let mut schema = Schema::new();
-    let a_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("b_id", ColumnType::Uuid)
-            .nullable()
-            .references("table_b"),
-    ]);
-    let b_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("a_id", ColumnType::Uuid)
-            .nullable()
-            .references("table_a"),
-    ]);
     let a_policies = TablePolicies::new().with_select(PolicyExpr::or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
         PolicyExpr::InheritsReferencing {
@@ -184,14 +171,20 @@ fn rebac_declared_fk_inheritance_cycle_fails_closed() {
             max_depth: None,
         },
     ]));
-    schema.insert(
-        TableName::new("table_a"),
-        TableSchema::with_policies(a_descriptor.clone(), a_policies),
-    );
-    schema.insert(
-        TableName::new("table_b"),
-        TableSchema::with_policies(b_descriptor.clone(), b_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("table_a")
+                .column("owner_id", ColumnType::Text)
+                .nullable_fk_column("b_id", "table_b")
+                .policies(a_policies),
+        )
+        .table(
+            TableSchema::builder("table_b")
+                .column("owner_id", ColumnType::Text)
+                .nullable_fk_column("a_id", "table_a")
+                .policies(b_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
