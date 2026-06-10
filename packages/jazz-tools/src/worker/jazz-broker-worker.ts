@@ -18,6 +18,8 @@ import {
 } from "../runtime/leader-lock.js";
 
 const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS = 1_000;
+const COMPLETED_STORAGE_RESET_OUTCOME_TTL_MS = 30_000;
+const MAX_COMPLETED_STORAGE_RESET_OUTCOMES = 100;
 
 type SharedWorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
@@ -60,6 +62,13 @@ type ResetState = {
   phase: "preparing" | "promoting" | "reconnecting";
 };
 
+type StorageResetOutcome = {
+  requestId: string;
+  success: boolean;
+  errorMessage?: string;
+  finishedAt: number;
+};
+
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const brokerInstanceId = createRandomId("broker");
 const tabs = new Map<string, TabState>();
@@ -80,6 +89,7 @@ let replacementElectionInFlight = false;
 let replacementElectionGeneration = 0;
 let brokerPingTimer: ReturnType<typeof setTimeout> | null = null;
 let resetState: ResetState | null = null;
+const completedStorageResetOutcomes = new Map<string, StorageResetOutcome>();
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -158,6 +168,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   }
   if (leader?.ready) {
     post(port, { type: "broker-hello", brokerInstanceId });
+    redeliverFinishedStorageResets(port);
     post(port, {
       type: "leader-ready",
       brokerInstanceId,
@@ -168,6 +179,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   } else {
     electIfNeeded();
     post(port, { type: "broker-hello", brokerInstanceId });
+    redeliverFinishedStorageResets(port);
   }
 
   return message.tabId;
@@ -695,20 +707,67 @@ function finishStorageReset(
     resetState = null;
   }
 
+  const outcomes = rememberStorageResetOutcomes(completedReset.requestIds, success, errorMessage);
   for (const tab of tabs.values()) {
-    for (const requestId of completedReset.requestIds) {
-      post(tab.port, {
-        type: "storage-reset-finished",
-        brokerInstanceId,
-        requestId,
-        success,
-        ...(errorMessage ? { errorMessage } : {}),
-      });
+    for (const outcome of outcomes) {
+      postStorageResetOutcome(tab.port, outcome);
     }
   }
 
   if (!success) {
     electIfNeeded();
+  }
+}
+
+function rememberStorageResetOutcomes(
+  requestIds: Iterable<string>,
+  success: boolean,
+  errorMessage?: string,
+): StorageResetOutcome[] {
+  const now = Date.now();
+  const outcomes: StorageResetOutcome[] = [];
+  for (const requestId of requestIds) {
+    const outcome: StorageResetOutcome = {
+      requestId,
+      success,
+      ...(errorMessage ? { errorMessage } : {}),
+      finishedAt: now,
+    };
+    completedStorageResetOutcomes.set(requestId, outcome);
+    outcomes.push(outcome);
+  }
+  pruneCompletedStorageResetOutcomes(now);
+  return outcomes;
+}
+
+function redeliverFinishedStorageResets(port: MessagePort): void {
+  pruneCompletedStorageResetOutcomes();
+  for (const outcome of completedStorageResetOutcomes.values()) {
+    postStorageResetOutcome(port, outcome);
+  }
+}
+
+function postStorageResetOutcome(port: MessagePort, outcome: StorageResetOutcome): void {
+  post(port, {
+    type: "storage-reset-finished",
+    brokerInstanceId,
+    requestId: outcome.requestId,
+    success: outcome.success,
+    ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
+  });
+}
+
+function pruneCompletedStorageResetOutcomes(now = Date.now()): void {
+  for (const [requestId, outcome] of completedStorageResetOutcomes) {
+    if (now - outcome.finishedAt > COMPLETED_STORAGE_RESET_OUTCOME_TTL_MS) {
+      completedStorageResetOutcomes.delete(requestId);
+    }
+  }
+
+  while (completedStorageResetOutcomes.size > MAX_COMPLETED_STORAGE_RESET_OUTCOMES) {
+    const oldestRequestId = completedStorageResetOutcomes.keys().next().value;
+    if (!oldestRequestId) return;
+    completedStorageResetOutcomes.delete(oldestRequestId);
   }
 }
 
