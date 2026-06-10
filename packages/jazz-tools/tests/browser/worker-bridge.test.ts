@@ -828,6 +828,54 @@ describe("Worker Bridge with OPFS", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
+  it("retries OPFS storage deletion after a transient browser lock", async () => {
+    const dbName = uniqueDbName("delete-storage-transient-lock");
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    await db.insert(todos, { title: "Should be deleted after retry", done: false }).wait({
+      tier: "local",
+    });
+    expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
+
+    const realRoot = await navigator.storage.getDirectory();
+    const realGetDirectory = navigator.storage.getDirectory.bind(navigator.storage);
+    let lockedAttempts = 0;
+    const proxyRoot = new Proxy(realRoot, {
+      get(target, property, receiver) {
+        if (property === "removeEntry") {
+          return async (name: string, options?: FileSystemRemoveOptions): Promise<void> => {
+            if (name === `${dbName}.opfsbtree` && lockedAttempts === 0) {
+              lockedAttempts += 1;
+              throw new DOMException("OPFS handle is still closing", "NoModificationAllowedError");
+            }
+            return await target.removeEntry(name, options);
+          };
+        }
+
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const getDirectorySpy = vi
+      .spyOn(navigator.storage, "getDirectory")
+      .mockResolvedValue(proxyRoot);
+    try {
+      await db.deleteClientStorage();
+    } finally {
+      getDirectorySpy.mockRestore();
+      navigator.storage.getDirectory = realGetDirectory;
+    }
+
+    expect(lockedAttempts).toBe(1);
+    expect(await db.all(allTodos, { tier: "local" })).toEqual([]);
+  });
+
   it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
     const dbName = uniqueDbName("delete-storage-follower");
     const dbA = track(
