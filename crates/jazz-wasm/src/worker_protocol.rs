@@ -54,6 +54,9 @@ pub struct InitPayloadFields {
     pub admin_secret: Option<String>,
     pub fallback_wasm_url: Option<String>,
     pub worker_lock_name: Option<String>,
+    /// Broker leadership this worker serves. Used to fence stale
+    /// follower-port attach/detach messages at the terminal layer.
+    pub leadership_id: Option<u32>,
     pub log_level: Option<String>,
     pub telemetry_collector_url: Option<String>,
 }

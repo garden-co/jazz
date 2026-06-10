@@ -34,6 +34,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   workerLockName?: string;
+  leadershipId?: number;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
@@ -90,6 +91,7 @@ type ServerPayloadForwarder = (payload: Uint8Array) => void;
 
 interface WasmMessagePortBridgeHandle {
   updateAuth(jwtToken?: string | null): void;
+  onAuthFailure?(callback: (reason: AuthFailureReason) => void): void;
   detachForReconnect(): void;
   shutdown(): void;
 }
@@ -299,5 +301,9 @@ export class MessagePortRuntimeBridge {
 
   updateAuth(auth: { jwtToken?: string }): void {
     this.bridge?.updateAuth(auth.jwtToken ?? null);
+  }
+
+  onAuthFailure(callback: (reason: AuthFailureReason) => void): void {
+    this.bridge?.onAuthFailure?.(callback);
   }
 }

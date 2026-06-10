@@ -1,14 +1,19 @@
 import {
+  DEFAULT_BROKER_PING_INTERVAL_MS,
+  DEFAULT_BROKER_PONG_TIMEOUT_MS,
   detectBrowserBrokerMissingCapabilities,
   formatUnsupportedBrowserBrokerError,
+  isFutureLeadershipId,
+  normalizePositiveTimeout,
+  stringifyError,
   type BrowserBrokerCapabilityGlobal,
   type BrowserBrokerControlMessage,
   type BrowserBrokerRole,
+  type BrowserBrokerTabMessage,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
 
-const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
-const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
+const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
 
 export interface BrowserBrokerClientSnapshot {
   brokerInstanceId: string | null;
@@ -44,10 +49,15 @@ export interface BrowserBrokerClientOptions {
   ) => void | Promise<void>;
   onDemote?: (leadershipId: number) => void | Promise<void>;
   onAttachFollowerPort?: (followerTabId: string, leadershipId: number, port: MessagePort) => void;
+  onDetachFollowerPort?: (followerTabId: string, leadershipId: number) => void;
   onUseFollowerPort?: (leaderTabId: string, leadershipId: number, port: MessagePort) => void;
   onFollowerReady?: (leaderTabId: string, leadershipId: number) => void;
   onCloseFollowerPort?: (leadershipId: number) => void;
   onStorageResetBegin?: (requestId: string, leadershipId: number) => void | Promise<void>;
+  onSchemaBlocked?: (reason: string) => void;
+  onReconnected?: (client: BrowserBrokerClient) => void;
+  onClosed?: (error: Error) => void;
+  storageResetTimeoutMs?: number;
 }
 
 type RoleWaiter = {
@@ -60,6 +70,7 @@ type RoleWaiter = {
 type ResetWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
 };
 
 type SharedWorkerConstructor = new (
@@ -86,6 +97,7 @@ export class BrowserBrokerClient {
   private reconnecting = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
+  private readonly queuedMessages: BrowserBrokerTabMessage[] = [];
   private brokerLivenessTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(options: BrowserBrokerClientOptions) {
@@ -137,8 +149,7 @@ export class BrowserBrokerClient {
   }
 
   reportLeaderReady(input: BrowserBrokerLeaderReadyInput): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({
+    this.send({
       type: "leader-ready",
       leadershipId: input.leadershipId,
       tabLockName: input.tabLockName,
@@ -148,8 +159,7 @@ export class BrowserBrokerClient {
   }
 
   reportLeaderFailed(leadershipId: number, reason: string): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({
+    this.send({
       type: "leader-failed",
       leadershipId,
       reason,
@@ -157,13 +167,11 @@ export class BrowserBrokerClient {
   }
 
   reportVisibility(visibility: BrowserBrokerVisibility): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({ type: "visibility", visibility });
+    this.send({ type: "visibility", visibility });
   }
 
   reportFollowerPortAttached(followerTabId: string, leadershipId: number): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({
+    this.send({
       type: "follower-port-attached",
       followerTabId,
       leadershipId,
@@ -171,8 +179,7 @@ export class BrowserBrokerClient {
   }
 
   reportSchemaReady(schemaFingerprint: string): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({
+    this.send({
       type: "schema-ready",
       schemaFingerprint,
     });
@@ -182,12 +189,18 @@ export class BrowserBrokerClient {
     if (this.closed) {
       throw this.closedError ?? new Error("Browser broker client closed");
     }
+    let waiter!: ResetWaiter;
     const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.removeResetWaiter(requestId, waiter);
+        reject(new Error(`Timed out waiting for browser storage reset ${requestId}`));
+      }, this.storageResetTimeoutMs());
+      waiter = { resolve, reject, timeout };
       const waiters = this.resetWaiters.get(requestId) ?? [];
-      waiters.push({ resolve, reject });
+      waiters.push(waiter);
       this.resetWaiters.set(requestId, waiters);
     });
-    this.port?.postMessage({
+    this.send({
       type: "storage-reset-request",
       requestId,
     });
@@ -199,6 +212,7 @@ export class BrowserBrokerClient {
     this.closed = true;
     this.closedError = new Error("Browser broker client closed");
     this.stopBrokerLivenessTimer();
+    this.queuedMessages.length = 0;
     this.port?.postMessage({ type: "shutdown" });
     if (this.port) {
       this.detachBrokerPort(this.port);
@@ -263,6 +277,7 @@ export class BrowserBrokerClient {
     try {
       await hello;
       this.refreshBrokerLivenessTimer();
+      this.flushQueuedMessages();
     } catch (error) {
       if (this.port === port) {
         this.detachBrokerPort(port);
@@ -323,7 +338,7 @@ export class BrowserBrokerClient {
         });
         return;
       case "demote":
-        if (message.leadershipId > this.leadershipId) return;
+        if (isFutureLeadershipId(message.leadershipId, this.leadershipId)) return;
         if (message.leadershipId === this.leadershipId) {
           this.role = "follower";
           this.leaderTabId = null;
@@ -361,6 +376,9 @@ export class BrowserBrokerClient {
       case "close-follower-port":
         this.options.onCloseFollowerPort?.(message.leadershipId);
         return;
+      case "detach-follower-port":
+        this.options.onDetachFollowerPort?.(message.followerTabId, message.leadershipId);
+        return;
       case "storage-reset-begin":
         void Promise.resolve(
           this.options.onStorageResetBegin?.(message.requestId, message.leadershipId),
@@ -375,15 +393,11 @@ export class BrowserBrokerClient {
       case "storage-reset-finished":
         this.resolveResetWaiters(message.requestId, message.success, message.errorMessage);
         return;
+      case "schema-blocked":
+        this.options.onSchemaBlocked?.(message.reason);
+        return;
       case "unsupported":
-        this.closed = true;
-        this.closedError = new Error(message.reason);
-        this.stopBrokerLivenessTimer();
-        if (this.port) {
-          this.detachBrokerPort(this.port);
-        }
-        this.rejectRoleWaiters(this.closedError);
-        this.rejectResetWaiters(this.closedError);
+        this.closeWithError(new Error(message.reason));
         return;
     }
   }
@@ -396,7 +410,7 @@ export class BrowserBrokerClient {
     );
   }
 
-  private async reconnectAfterBrokerPortFailure(error: Error): Promise<void> {
+  private async reconnectAfterBrokerPortFailure(_error: Error): Promise<void> {
     if (this.closed || this.reconnecting) return;
     this.reconnecting = true;
 
@@ -409,10 +423,12 @@ export class BrowserBrokerClient {
     this.role = "follower";
     this.leaderTabId = null;
     this.leadershipId = 0;
-    this.rejectResetWaiters(error);
 
     if (previousPort) {
       this.detachBrokerPort(previousPort);
+      if (this.port === previousPort) {
+        this.port = null;
+      }
     }
 
     try {
@@ -424,12 +440,13 @@ export class BrowserBrokerClient {
 
       if (!this.closed) {
         await this.connectToBroker();
+        this.reconnecting = false;
+        this.flushQueuedMessages();
+        this.options.onReconnected?.(this);
+        this.flushQueuedMessages();
       }
     } catch (reconnectError) {
-      this.closed = true;
-      this.closedError = toError(reconnectError);
-      this.rejectRoleWaiters(this.closedError);
-      this.rejectResetWaiters(this.closedError);
+      this.closeWithError(toError(reconnectError));
     } finally {
       this.reconnecting = false;
     }
@@ -459,8 +476,7 @@ export class BrowserBrokerClient {
     success: boolean,
     errorMessage?: string,
   ): void {
-    if (this.closed || !this.port) return;
-    this.port.postMessage({
+    this.send({
       type: "storage-reset-ready",
       requestId,
       success,
@@ -478,6 +494,7 @@ export class BrowserBrokerClient {
     this.resetWaiters.delete(requestId);
     const error = success ? null : new Error(errorMessage ?? "Browser storage reset failed");
     for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
       if (error) {
         waiter.reject(error);
       } else {
@@ -486,9 +503,21 @@ export class BrowserBrokerClient {
     }
   }
 
+  private removeResetWaiter(requestId: string, waiter: ResetWaiter): void {
+    const waiters = this.resetWaiters.get(requestId);
+    if (!waiters) return;
+    const next = waiters.filter((candidate) => candidate !== waiter);
+    if (next.length === 0) {
+      this.resetWaiters.delete(requestId);
+    } else {
+      this.resetWaiters.set(requestId, next);
+    }
+  }
+
   private rejectResetWaiters(error: Error): void {
     for (const waiters of this.resetWaiters.values()) {
       for (const waiter of waiters) {
+        clearTimeout(waiter.timeout);
         waiter.reject(error);
       }
     }
@@ -527,24 +556,52 @@ export class BrowserBrokerClient {
     );
   }
 
+  private storageResetTimeoutMs(): number {
+    return normalizePositiveTimeout(
+      this.options.storageResetTimeoutMs,
+      DEFAULT_STORAGE_RESET_TIMEOUT_MS,
+    );
+  }
+
+  private send(message: BrowserBrokerTabMessage): void {
+    if (this.closed) return;
+    if (!this.port || this.reconnecting) {
+      this.queuedMessages.push(message);
+      return;
+    }
+    this.port.postMessage(message);
+  }
+
+  private flushQueuedMessages(): void {
+    if (this.closed || !this.port) return;
+    const messages = this.queuedMessages.splice(0);
+    for (const message of messages) {
+      this.port.postMessage(message);
+    }
+  }
+
   private detachBrokerPort(port: MessagePort): void {
     port.removeEventListener("message", this.onMessage);
     port.removeEventListener("messageerror", this.onPortMessageError);
     port.close();
   }
-}
 
-function stringifyError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  private closeWithError(error: Error): void {
+    if (this.closed && this.closedError === error) return;
+    this.closed = true;
+    this.closedError = error;
+    this.stopBrokerLivenessTimer();
+    this.queuedMessages.length = 0;
+    if (this.port) {
+      this.detachBrokerPort(this.port);
+      this.port = null;
+    }
+    this.rejectRoleWaiters(error);
+    this.rejectResetWaiters(error);
+    this.options.onClosed?.(error);
+  }
 }
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function normalizePositiveTimeout(value: unknown, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback;
-  }
-  return Math.max(1, Math.floor(value));
 }

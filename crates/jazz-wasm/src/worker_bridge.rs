@@ -580,6 +580,7 @@ impl WasmMessagePortBridge {
             runtime,
             sender,
             on_message_closure: RefCell::new(None),
+            on_auth_failure: RefCell::new(None),
             disposed: Cell::new(false),
         });
 
@@ -615,6 +616,14 @@ impl WasmMessagePortBridge {
             &self.inner.port,
             &MainToWorkerWire::UpdateAuth { jwt_token },
         );
+    }
+
+    #[wasm_bindgen(js_name = onAuthFailure)]
+    pub fn on_auth_failure(&self, callback: Function) {
+        if self.inner.disposed.get() {
+            return;
+        }
+        *self.inner.on_auth_failure.borrow_mut() = Some(callback);
     }
 }
 
@@ -678,6 +687,7 @@ struct MessagePortBridgeInner {
     runtime: WasmRuntime,
     sender: RustOutboxSender,
     on_message_closure: RefCell<Option<Closure<dyn FnMut(MessageEvent)>>>,
+    on_auth_failure: RefCell<Option<Function>>,
     disposed: Cell<bool>,
 }
 
@@ -706,7 +716,12 @@ impl MessagePortBridgeInner {
                 tracing::warn!("message port bridge error: {message}");
             }
             ParsedWorkerToMain::Wire(WorkerToMainWire::AuthFailed { reason }) => {
-                tracing::warn!("message port bridge auth failed: {reason}");
+                let cb = self.on_auth_failure.borrow().clone();
+                if let Some(cb) = cb {
+                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+                } else {
+                    tracing::warn!("message port bridge auth failed: {reason}");
+                }
             }
             ParsedWorkerToMain::Ready
             | ParsedWorkerToMain::UnknownJsObject(_)
@@ -767,6 +782,7 @@ impl MessagePortBridgeInner {
         self.port.set_onmessage(None);
         self.port.close();
         *self.on_message_closure.borrow_mut() = None;
+        *self.on_auth_failure.borrow_mut() = None;
     }
 
     fn detach_for_reconnect(&self) {
@@ -779,6 +795,7 @@ impl MessagePortBridgeInner {
         self.port.set_onmessage(None);
         self.port.close();
         *self.on_message_closure.borrow_mut() = None;
+        *self.on_auth_failure.borrow_mut() = None;
     }
 }
 
@@ -1168,6 +1185,7 @@ struct BridgeInitOptions {
     admin_secret: Option<String>,
     fallback_wasm_url: Option<String>,
     worker_lock_name: Option<String>,
+    leadership_id: Option<u32>,
     log_level: Option<String>,
     telemetry_collector_url: Option<String>,
 }
@@ -1210,6 +1228,13 @@ fn build_init_message(opts: &BridgeInitOptions, original: &JsValue) -> Result<Js
             &msg,
             &"workerLockName".into(),
             &JsValue::from_str(lock_name),
+        );
+    }
+    if let Some(leadership_id) = opts.leadership_id {
+        let _ = Reflect::set(
+            &msg,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
         );
     }
     if let Some(level) = &opts.log_level {

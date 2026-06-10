@@ -1,5 +1,10 @@
 import {
+  createRandomId,
+  DEFAULT_BROKER_PING_INTERVAL_MS,
+  DEFAULT_BROKER_PONG_TIMEOUT_MS,
+  normalizePositiveTimeout,
   selectLeaderCandidate,
+  stringifyError,
   type BrowserBrokerCandidate,
   type BrowserBrokerControlMessage,
   type BrowserBrokerTabMessage,
@@ -13,8 +18,6 @@ import {
 } from "../runtime/leader-lock.js";
 
 const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS = 1_000;
-const DEFAULT_BROKER_PING_INTERVAL_MS = 1_000;
-const DEFAULT_BROKER_PONG_TIMEOUT_MS = 3_000;
 
 type SharedWorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
@@ -48,6 +51,7 @@ type ClearedLeaderState = Pick<
 
 type ResetState = {
   requestId: string;
+  requestIds: Set<string>;
   participants: Set<string>;
   preparedTabs: Set<string>;
   errors: string[];
@@ -57,7 +61,7 @@ type ResetState = {
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
-const brokerInstanceId = createBrokerId("broker");
+const brokerInstanceId = createRandomId("broker");
 const tabs = new Map<string, TabState>();
 let namespace: {
   appId: string;
@@ -146,13 +150,14 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     lastPongAt: now,
   });
 
-  post(port, { type: "broker-hello", brokerInstanceId });
   startBrokerPingTimer();
   if (resetState) {
+    post(port, { type: "broker-hello", brokerInstanceId });
     addTabToActiveReset(message.tabId);
     return message.tabId;
   }
   if (leader?.ready) {
+    post(port, { type: "broker-hello", brokerInstanceId });
     post(port, {
       type: "leader-ready",
       brokerInstanceId,
@@ -162,6 +167,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     assignFollowerPorts(leader);
   } else {
     electIfNeeded();
+    post(port, { type: "broker-hello", brokerInstanceId });
   }
 
   return message.tabId;
@@ -209,7 +215,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
     case "leader-failed":
       if (resetState?.promotedLeadershipId === message.leadershipId) {
         resetState.errors.push(message.reason);
-        tabs.delete(tabId);
+        removeTab(tabId, { closePort: false, notifyLeader: false });
         removeTabFromActiveReset(tabId);
         leader = null;
         resetState.promotedLeadershipId = null;
@@ -239,10 +245,10 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       handleStorageResetReady(tabId, message.requestId, message.success, message.errorMessage);
       return;
     case "shutdown":
-      tabs.delete(tabId);
       if (leader?.tabId === tabId) {
         const leadershipId = leader.leadershipId;
         const activeReset = resetState;
+        removeTab(tabId, { closePort: false, notifyLeader: false });
         const cleared = clearLeader(leader.leadershipId, "leader-shutdown", {
           demoteLeader: false,
           removeLeaderTab: false,
@@ -260,13 +266,18 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
         }
         scheduleReplacementElection(cleared);
       } else {
+        removeTab(tabId, { closePort: false, notifyLeader: true });
         removeTabFromActiveReset(tabId);
       }
       resetIfIdle();
       return;
     case "broker-pong":
       if (message.brokerInstanceId !== brokerInstanceId) return;
-      tabs.get(tabId)!.lastPongAt = Date.now();
+      {
+        const tab = tabs.get(tabId);
+        if (!tab) return;
+        tab.lastPongAt = Date.now();
+      }
       evictStaleTabs();
       return;
   }
@@ -340,6 +351,50 @@ function resetIfIdle(): void {
   stopBrokerPingTimer();
 }
 
+function removeTab(
+  tabId: string,
+  options: { closePort: boolean; notifyLeader: boolean },
+): TabState | null {
+  const tab = tabs.get(tabId);
+  if (!tab) return null;
+
+  if (options.notifyLeader && leader && leader.tabId !== tabId) {
+    notifyLeaderToDetachFollower(tabId, leader.leadershipId);
+  }
+
+  tabs.delete(tabId);
+  clearFollowerAttachmentState(tabId);
+  reelectSchemaFingerprintIfUnheld(tab);
+  if (options.closePort) {
+    tab.port.close();
+  }
+  return tab;
+}
+
+function notifyLeaderToDetachFollower(followerTabId: string, leadershipId: number): void {
+  const leaderTab = leader ? tabs.get(leader.tabId) : null;
+  if (!leaderTab) return;
+  post(leaderTab.port, {
+    type: "detach-follower-port",
+    brokerInstanceId,
+    followerTabId,
+    leadershipId,
+  });
+}
+
+function clearFollowerAttachmentState(followerTabId: string): void {
+  for (const key of pendingFollowerAttachments) {
+    if (key.endsWith(`:${followerTabId}`)) {
+      pendingFollowerAttachments.delete(key);
+    }
+  }
+  for (const key of attachedFollowerPorts) {
+    if (key.endsWith(`:${followerTabId}`)) {
+      attachedFollowerPorts.delete(key);
+    }
+  }
+}
+
 function handleSchemaReady(tabId: string, schemaFingerprint: string): void {
   if (!namespace) return;
   const tab = tabs.get(tabId);
@@ -349,12 +404,13 @@ function handleSchemaReady(tabId: string, schemaFingerprint: string): void {
     namespace.schemaFingerprint = schemaFingerprint;
   }
 
+  tab.schemaFingerprint = schemaFingerprint;
+
   if (namespace.schemaFingerprint !== schemaFingerprint) {
-    rejectTabForSchemaMismatch(tabId, schemaFingerprint);
+    blockTabForSchemaMismatch(tab);
     return;
   }
 
-  tab.schemaFingerprint = schemaFingerprint;
   if (leader?.ready) {
     assignFollowerPorts(leader);
     return;
@@ -362,26 +418,50 @@ function handleSchemaReady(tabId: string, schemaFingerprint: string): void {
   electIfNeeded();
 }
 
-function rejectTabForSchemaMismatch(tabId: string, schemaFingerprint: string): void {
-  const tab = tabs.get(tabId);
-  if (!tab) return;
-
+// A mismatching tab stays connected (and keeps answering pings) so it can be
+// adopted once the canonical fingerprint is re-elected; it is excluded from
+// leadership and follower ports purely by its non-canonical fingerprint.
+function blockTabForSchemaMismatch(tab: TabState): void {
   post(tab.port, {
-    type: "unsupported",
+    type: "schema-blocked",
     brokerInstanceId,
     reason: "incompatible persistent browser schema",
   });
-  tab.port.close();
-  tabs.delete(tabId);
 
-  if (leader?.tabId === tabId) {
-    const cleared = clearLeader(leader.leadershipId, `schema mismatch: ${schemaFingerprint}`, {
-      demoteLeader: false,
+  if (leader?.tabId === tab.tabId) {
+    const cleared = clearLeader(leader.leadershipId, "schema mismatch", {
+      demoteLeader: true,
       removeLeaderTab: false,
     });
     scheduleReplacementElection(cleared);
   }
-  resetIfIdle();
+}
+
+// The canonical fingerprint is held by the tabs that reported it. When the
+// last holder departs, the namespace re-elects the earliest-connected
+// remaining fingerprint so schema-blocked tabs can recover without reloading.
+function reelectSchemaFingerprintIfUnheld(departed: TabState): void {
+  if (!namespace?.schemaFingerprint) return;
+  if (departed.schemaFingerprint !== namespace.schemaFingerprint) return;
+  for (const tab of tabs.values()) {
+    if (tab.schemaFingerprint === namespace.schemaFingerprint) return;
+  }
+
+  let next: string | null = null;
+  for (const tab of tabs.values()) {
+    if (tab.schemaFingerprint) {
+      next = tab.schemaFingerprint;
+      break;
+    }
+  }
+  namespace.schemaFingerprint = next;
+  if (!next) return;
+
+  if (leader?.ready) {
+    assignFollowerPorts(leader);
+  } else {
+    electIfNeeded();
+  }
 }
 
 function announceLeaderReady(nextLeader: LeaderState): void {
@@ -463,7 +543,7 @@ function clearLeader(
   }
 
   if (options.removeLeaderTab) {
-    tabs.delete(current.tabId);
+    removeTab(current.tabId, { closePort: false, notifyLeader: false });
   }
   leader = null;
   void reason;
@@ -487,6 +567,7 @@ function cancelLeaderMonitors(current: LeaderState): void {
 
 function startStorageReset(requestId: string): void {
   if (resetState) {
+    resetState.requestIds.add(requestId);
     return;
   }
 
@@ -500,6 +581,7 @@ function startStorageReset(requestId: string): void {
   const leadershipId = previousLeader?.leadershipId ?? currentLeadershipId;
   resetState = {
     requestId,
+    requestIds: new Set([requestId]),
     participants: new Set(tabs.keys()),
     preparedTabs: new Set(),
     errors: [],
@@ -614,13 +696,15 @@ function finishStorageReset(
   }
 
   for (const tab of tabs.values()) {
-    post(tab.port, {
-      type: "storage-reset-finished",
-      brokerInstanceId,
-      requestId: completedReset.requestId,
-      success,
-      ...(errorMessage ? { errorMessage } : {}),
-    });
+    for (const requestId of completedReset.requestIds) {
+      post(tab.port, {
+        type: "storage-reset-finished",
+        brokerInstanceId,
+        requestId,
+        success,
+        ...(errorMessage ? { errorMessage } : {}),
+      });
+    }
   }
 
   if (!success) {
@@ -720,8 +804,7 @@ function isBrokerPongTimedOut(tab: TabState, now: number): boolean {
 function evictTab(tabId: string, reason: string): void {
   const tab = tabs.get(tabId);
   if (!tab) return;
-  tabs.delete(tabId);
-  tab.port.close();
+  removeTab(tabId, { closePort: true, notifyLeader: true });
 
   if (leader?.tabId === tabId) {
     const leadershipId = leader.leadershipId;
@@ -878,30 +961,11 @@ function post(
   port.postMessage(message);
 }
 
-function createBrokerId(prefix: string): string {
-  const cryptoObj = globalThis.crypto;
-  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
-    return `${prefix}-${cryptoObj.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function stringifyError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function normalizeForceTakeoverTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS;
   }
   return Math.max(0, Math.floor(value));
-}
-
-function normalizePositiveTimeout(value: unknown, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback;
-  }
-  return Math.max(1, Math.floor(value));
 }
 
 function sleep(ms: number): Promise<void> {

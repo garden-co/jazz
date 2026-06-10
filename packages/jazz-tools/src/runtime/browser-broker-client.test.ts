@@ -272,4 +272,70 @@ describe("BrowserBrokerClient", () => {
 
     await client.shutdown();
   });
+
+  it("notifies the owner when the broker rejects an established tab", async () => {
+    const workers: FakeSharedWorker[] = [];
+    const onClosed = vi.fn();
+
+    class FakePort extends EventTarget {
+      readonly postedMessages: unknown[] = [];
+      closed = false;
+
+      postMessage(message: unknown): void {
+        this.postedMessages.push(message);
+        if ((message as { type?: unknown }).type === "hello") {
+          queueMicrotask(() => {
+            dispatchPortMessage(this, {
+              type: "broker-hello",
+              brokerInstanceId: "instance-a",
+            });
+          });
+        }
+      }
+
+      start(): void {}
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+
+    class FakeSharedWorker {
+      readonly port = new FakePort() as MessagePort & FakePort;
+
+      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
+        workers.push(this);
+      }
+    }
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+      onClosed,
+    } as Parameters<typeof BrowserBrokerClient.connect>[0]);
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "unsupported",
+      brokerInstanceId: "instance-a",
+      reason: "incompatible persistent browser schema",
+    } satisfies BrowserBrokerControlMessage);
+
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(onClosed.mock.calls[0]![0].message).toBe("incompatible persistent browser schema");
+    expect(workers[0]!.port.closed).toBe(true);
+
+    await expect(client.waitForRole("leader", 10)).rejects.toThrow(
+      "incompatible persistent browser schema",
+    );
+  });
 });

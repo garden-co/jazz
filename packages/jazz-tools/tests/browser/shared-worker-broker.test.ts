@@ -19,6 +19,18 @@ async function waitFor(
   throw new Error(`Timed out: ${message}`);
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 function createOptions(
   dbName: string,
   tabId: string,
@@ -175,20 +187,41 @@ describe("SharedWorker browser broker", () => {
     ).rejects.toThrow("incompatible persistent browser configuration");
   });
 
-  it("rejects a tab that reports a mismatched schema fingerprint", async () => {
-    const dbName = uniqueName("broker-schema-fingerprint");
-    const first = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-a"));
+  it("blocks a schema-mismatched tab and promotes it after the pinning tab departs", async () => {
+    const dbName = uniqueName("broker-schema-blocked");
+    const blockedReasons: string[] = [];
+
+    const first = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-a", "fingerprint-a", { forceTakeoverTimeoutMs: 50 }),
+    );
     clients.push(first);
     first.reportSchemaReady("schema-a");
     await first.waitForRole("leader", 2000);
 
-    const second = await BrowserBrokerClient.connect(createOptions(dbName, "tab-b"));
+    const second = await BrowserBrokerClient.connect({
+      ...createLockingOptions(dbName, "tab-b", "fingerprint-a", { forceTakeoverTimeoutMs: 50 }),
+      onSchemaBlocked: (reason: string) => {
+        blockedReasons.push(reason);
+      },
+    } as Parameters<typeof BrowserBrokerClient.connect>[0]);
     clients.push(second);
     second.reportSchemaReady("schema-b");
 
-    await expect(second.waitForRole("leader", 250)).rejects.toThrow(
-      "incompatible persistent browser schema",
+    await waitFor(
+      () => blockedReasons.length > 0,
+      2000,
+      "mismatched tab should be told it is schema-blocked",
     );
+    expect(blockedReasons[0]).toContain("incompatible persistent browser schema");
+
+    await first.shutdown();
+    clients.splice(clients.indexOf(first), 1);
+    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+
+    await second.waitForRole("leader", 4000);
+    expect(second.snapshot().role).toBe("leader");
   });
 
   it("fails fast when required browser APIs are unavailable", async () => {
@@ -642,6 +675,290 @@ describe("SharedWorker browser broker", () => {
       }),
     );
     expect(second.snapshot().leadershipId).toBeGreaterThan(1);
+  });
+
+  it("settles every caller that joins an active storage reset", async () => {
+    const dbName = uniqueName("broker-storage-reset-join");
+    const firstRequestId = `reset-a-${dbName}`;
+    const secondRequestId = `reset-b-${dbName}`;
+    const resetBegun: string[] = [];
+    const resetPromotions: string[] = [];
+    const clientByTabId = new Map<string, BrowserBrokerClient>();
+
+    function createResetJoinOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        onStorageResetBegin: async (requestId) => {
+          resetBegun.push(`${tabId}:${requestId}`);
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+        },
+        onBecomeLeader: async (client, leadershipId, resetRequestId) => {
+          if (resetRequestId) {
+            resetPromotions.push(`${tabId}:${resetRequestId}`);
+          }
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          port.close();
+          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      };
+    }
+
+    const first = await BrowserBrokerClient.connect(createResetJoinOptions("tab-a"));
+    clientByTabId.set("tab-a", first);
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createResetJoinOptions("tab-b"));
+    clientByTabId.set("tab-b", second);
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    first.reportSchemaReady("schema-a");
+    second.reportSchemaReady("schema-a");
+    await second.waitForRole("follower", 2000);
+
+    const firstReset = first.requestStorageReset(firstRequestId);
+    const secondReset = second.requestStorageReset(secondRequestId);
+    firstReset.catch(() => undefined);
+    secondReset.catch(() => undefined);
+
+    await withTimeout(firstReset, 4000, "first reset request should settle");
+    await withTimeout(secondReset, 4000, "second reset request should settle");
+
+    expect(resetBegun).toContain(`tab-a:${firstRequestId}`);
+    expect(resetBegun).toContain(`tab-b:${firstRequestId}`);
+    expect(resetPromotions.some((entry) => entry.endsWith(`:${firstRequestId}`))).toBe(true);
+  });
+
+  it("reattaches a same-tab follower after shutdown and reconnect", async () => {
+    const dbName = uniqueName("broker-follower-reattach");
+    const attachedFollowers: string[] = [];
+    const detachedFollowers: string[] = [];
+
+    const leaderClientByTabId = new Map<string, BrowserBrokerClient>();
+    function createFollowerAttachOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName, { compatibility: true });
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          attachedFollowers.push(`${followerTabId}:${leadershipId}`);
+          port.close();
+          leaderClientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onDetachFollowerPort: (followerTabId, leadershipId) => {
+          detachedFollowers.push(`${followerTabId}:${leadershipId}`);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      } as Parameters<typeof BrowserBrokerClient.connect>[0];
+    }
+
+    const leaderTab = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-a"));
+    leaderClientByTabId.set("tab-a", leaderTab);
+    clients.push(leaderTab);
+    await leaderTab.waitForRole("leader", 2000);
+    leaderTab.reportSchemaReady("schema-a");
+
+    const firstFollower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(firstFollower);
+    firstFollower.reportSchemaReady("schema-a");
+    await firstFollower.waitForRole("follower", 2000);
+    await waitFor(
+      () => attachedFollowers.includes("tab-b:1"),
+      2000,
+      "initial follower attachment should complete",
+    );
+
+    await firstFollower.shutdown();
+    clients.splice(clients.indexOf(firstFollower), 1);
+
+    await waitFor(
+      () => detachedFollowers.includes("tab-b:1"),
+      2000,
+      "leader should be asked to detach the closed follower",
+    );
+
+    const secondFollower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(secondFollower);
+    secondFollower.reportSchemaReady("schema-a");
+
+    await waitFor(
+      () => attachedFollowers.filter((entry) => entry === "tab-b:1").length === 2,
+      2000,
+      "same-tab follower should receive a fresh attachment after reconnect",
+    );
+  });
+
+  it("rejects a failed storage reset and still elects a leader afterwards", async () => {
+    const dbName = uniqueName("broker-reset-failure");
+    const requestId = `reset-${dbName}`;
+
+    const promotions: number[] = [];
+
+    function createFailingResetOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        onStorageResetBegin: async () => {
+          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          if (tabId === "tab-b") {
+            throw new Error("prepare exploded");
+          }
+        },
+        onBecomeLeader: async (client, leadershipId) => {
+          promotions.push(leadershipId);
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (_followerTabId, _leadershipId, port) => {
+          port.close();
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      };
+    }
+
+    const first = await BrowserBrokerClient.connect(createFailingResetOptions("tab-a"));
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createFailingResetOptions("tab-b"));
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    first.reportSchemaReady("schema-a");
+    second.reportSchemaReady("schema-a");
+    await second.waitForRole("follower", 2000);
+
+    await expect(
+      withTimeout(
+        first.requestStorageReset(requestId),
+        4000,
+        "failed reset request should settle with the prepare error",
+      ),
+    ).rejects.toThrow("prepare exploded");
+
+    // The pre-reset role snapshot is stale (the reset cleared the leader
+    // without demoting), so recovery means a NEW leadership is established.
+    await waitFor(
+      () => promotions.some((leadershipId) => leadershipId > 1),
+      4000,
+      "a new leader should be promoted after the failed reset",
+    );
+    await waitFor(
+      () =>
+        [first, second].some(
+          (client) => client.snapshot().role === "leader" && client.snapshot().leadershipId > 1,
+        ),
+      4000,
+      "the post-failure leadership should reach ready",
+    );
+  });
+
+  it("reconnects and reattaches a follower after it is evicted for missed pongs", async () => {
+    const dbName = uniqueName("broker-evict-reconnect");
+    let followerSilent = false;
+    const attachedFollowers: string[] = [];
+    const detachedFollowers: string[] = [];
+    const reconnects: string[] = [];
+    let leaderClient: BrowserBrokerClient | null = null;
+
+    function createEvictionOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        brokerPingIntervalMs: 50,
+        brokerPongTimeoutMs: 150,
+        respondToBrokerPings: () => tabId !== "tab-b" || !followerSilent,
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          attachedFollowers.push(`${followerTabId}:${leadershipId}`);
+          port.close();
+          leaderClient?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onDetachFollowerPort: (followerTabId, leadershipId) => {
+          detachedFollowers.push(`${followerTabId}:${leadershipId}`);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+        onReconnected: (client) => {
+          reconnects.push(tabId);
+          // Mirrors Db.handleBrokerReconnected: re-report the cached schema
+          // so the fresh TabState becomes attach-eligible again.
+          client.reportSchemaReady("schema-a");
+        },
+      } as Parameters<typeof BrowserBrokerClient.connect>[0];
+    }
+
+    leaderClient = await BrowserBrokerClient.connect(createEvictionOptions("tab-a"));
+    clients.push(leaderClient);
+    await leaderClient.waitForRole("leader", 2000);
+    leaderClient.reportSchemaReady("schema-a");
+
+    const follower = await BrowserBrokerClient.connect(createEvictionOptions("tab-b"));
+    clients.push(follower);
+    follower.reportSchemaReady("schema-a");
+    await follower.waitForRole("follower", 2000);
+    await waitFor(
+      () => attachedFollowers.includes("tab-b:1"),
+      2000,
+      "initial follower attachment should complete",
+    );
+
+    followerSilent = true;
+    await waitFor(
+      () => detachedFollowers.includes("tab-b:1"),
+      3000,
+      "broker should evict the silent follower and detach it from the leader",
+    );
+    followerSilent = false;
+
+    await waitFor(
+      () => reconnects.includes("tab-b"),
+      5000,
+      "evicted follower should notice broker silence and reconnect",
+    );
+    await waitFor(
+      () => attachedFollowers.filter((entry) => entry === "tab-b:1").length >= 2,
+      5000,
+      "reconnected follower should be re-attached to the leader",
+    );
   });
 
   it("continues storage reset when the promoted reset leader is evicted before ready", async () => {
