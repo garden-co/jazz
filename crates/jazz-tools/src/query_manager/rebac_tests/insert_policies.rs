@@ -141,7 +141,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         .iter()
         .map(|(table_name, table_schema)| {
             let mut structural = table_schema.clone();
-            structural.policies = TablePolicies::default();
+            structural.policies = Default::default();
             (*table_name, structural)
         })
         .collect();
@@ -828,8 +828,9 @@ fn rebac_two_clients_different_sessions() {
 
 #[test]
 fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
-    let tasks_policies =
-        TablePolicies::new().with_insert(PolicyExpr::eq_literal("deleted_at", Value::Null));
+    let tasks_policies = permissions(|p| {
+        p.allow_insert().where_(pe::eq("deleted_at", pe::null()));
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("tasks")

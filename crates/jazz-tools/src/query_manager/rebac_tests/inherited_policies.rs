@@ -277,8 +277,10 @@ fn rebac_inherits_filters_select_query_results() {
         .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text);
     let folders_descriptor = folders_table.clone().build().columns;
-    let folders_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+    });
 
     let docs_table = TableSchema::builder("documents")
         .column("owner_id", ColumnType::Text)
@@ -287,14 +289,12 @@ fn rebac_inherits_filters_select_query_results() {
     let docs_descriptor = docs_table.clone().build().columns;
 
     // SELECT policy: owner_id = @user_id OR INHERITS SELECT VIA folder_id
-    let docs_policies = TablePolicies::new().with_select(PolicyExpr::Or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::Inherits {
-            operation: Operation::Select,
-            via_column: "folder_id".into(),
-            max_depth: None,
-        },
-    ]));
+    let docs_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::allowed_to_read("folder_id"),
+        ]));
+    });
     let schema = SchemaBuilder::new()
         .table(folders_table.policies(folders_policies))
         .table(docs_table.policies(docs_policies))
@@ -385,10 +385,8 @@ fn rebac_inherits_filters_select_query_results() {
 fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     use crate::query_manager::query::QueryBuilder;
 
-    let documents_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "folder_id".into(),
-        max_depth: None,
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("folder_id"));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -442,10 +440,8 @@ fn inherits_select_denies_when_parent_operation_policy_is_missing() {
 
 #[test]
 fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
-    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::Inherits {
-        operation: Operation::Insert,
-        via_column: "folder_id".into(),
-        max_depth: None,
+    let documents_policies = permissions(|p| {
+        p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
     });
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("folders").column("title", ColumnType::Text))
@@ -483,15 +479,11 @@ fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_
 
 #[test]
 fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
-    let files_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::InheritsReferencing {
-            operation: Operation::Update,
-            source_table: "todos".into(),
-            via_column: "file_id".into(),
-            max_depth: None,
-        }),
-        PolicyExpr::True,
-    );
+    let files_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
+            .where_new(pe::always());
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("files")
@@ -546,14 +538,11 @@ fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permis
 
 #[test]
 fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
-    let folders_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent_id".into(),
-            max_depth: Some(10),
-        },
-    );
+    let folders_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("folders")
@@ -615,14 +604,11 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
 #[test]
 fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_history_is_removed()
 {
-    let folders_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent_id".into(),
-            max_depth: Some(10),
-        },
-    );
+    let folders_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
+    });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("folders")
@@ -686,19 +672,16 @@ fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_
 fn rebac_inherits_no_cycle_passes() {
     use crate::query_manager::types::validate_no_inherits_cycles;
 
-    let org_policy =
-        TablePolicies::new().with_select(PolicyExpr::eq_session("name", vec!["org".into()]));
-
-    let team_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "org_id".into(),
-        max_depth: None,
+    let org_policy = permissions(|p| {
+        p.allow_read().where_(pe::eq("name", pe::session("org")));
     });
 
-    let project_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "team_id".into(),
-        max_depth: None,
+    let team_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("org_id"));
+    });
+
+    let project_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("team_id"));
     });
     let schema = SchemaBuilder::new()
         .table(
