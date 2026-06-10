@@ -960,13 +960,13 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 ControlOrPhase::Phase(HandshakeResult::Connected(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
-                    #[cfg(feature = "transport-websocket")]
-                    let _ = self.connected_tx.send(true);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
                         catalogue_state_hash: resp.catalogue_state_hash,
                         next_sync_seq: resp.next_sync_seq,
                     });
                     self.tick.notify();
+                    #[cfg(feature = "transport-websocket")]
+                    let _ = self.connected_tx.send(true);
                     self.reconnect.reset();
                     match self.run_connected(&mut ws).await {
                         ConnectedExit::Shutdown => {
