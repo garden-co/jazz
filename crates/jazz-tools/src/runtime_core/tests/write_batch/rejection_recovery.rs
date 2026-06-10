@@ -42,6 +42,10 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         "direct-reject-replay-test",
         Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
     );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
 
     let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1160,6 +1164,10 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
         users_delete_denied_authorization_schema(),
         "direct-reject-replay-record-test",
     );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1269,6 +1277,10 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
         users_delete_denied_authorization_schema(),
         "direct-pending-worker-sync-record-test",
     );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1306,7 +1318,7 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
 }
 
 #[test]
-fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
+fn rc_worker_sync_records_skip_local_only_fates_at_settlement_target() {
     let mut core = create_runtime_with_schema(
         users_delete_denied_authorization_schema(),
         "direct-pending-fate-worker-sync-record-test",
@@ -1321,16 +1333,10 @@ fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
         .unwrap();
 
     let records = core.local_batch_records_for_worker_sync().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].batch_id, batch_id);
-    assert!(records[0].members.is_empty());
-    assert!(matches!(
-        records[0].latest_fate,
-        Some(crate::batch_fate::BatchFate::DurableDirect {
-            confirmed_tier: DurabilityTier::Local,
-            ..
-        })
-    ));
+    assert!(
+        records.is_empty(),
+        "a local-only fate reaches the settlement target and should not be replayed"
+    );
 }
 
 #[test]
@@ -1369,10 +1375,8 @@ fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
 
     let records = worker.local_batch_records_for_worker_sync().unwrap();
     assert!(
-        records
-            .iter()
-            .any(|record| record.batch_id == batch_id && record.members.len() == 1),
-        "worker should retain memberful batch record after local replay; records={records:?}"
+        records.is_empty(),
+        "serverless worker settles local replay at Local and should not retain worker-sync records; records={records:?}"
     );
     assert!(
         worker

@@ -290,6 +290,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             self.durability.record_batch_ack(batch_id, acked_tier);
         }
+
+        if fate
+            .confirmed_tier()
+            .is_some_and(|tier| tier >= self.settlement_target())
+        {
+            self.retire_settled_batch(batch_id);
+        }
     }
 
     pub(crate) fn mark_local_batch_rows_rejected(
