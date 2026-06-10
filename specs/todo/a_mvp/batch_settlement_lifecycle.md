@@ -120,15 +120,15 @@ is structurally unresolvable. No timeout, no error.
 
 ### After (this spec)
 
-| Topic                       | Proposed                                                                  |
-| --------------------------- | ------------------------------------------------------------------------- |
-| Terminal predicate          | one per-runtime **settlement target**, consumed by all four call sites    |
-| Local-only batch settlement | settles and retires at commit (target = own tier)                         |
-| Pending-set membership      | persisted until retirement; full-scan fallback becomes an integrity error |
-| Pending-set derivation      | maintained incrementally; `add_server` reads it, never re-derives it      |
-| Worker→main reload replay   | pending (unsettled) batches only — empty on a healthy local-only reload   |
-| `wait(tier)`                | resolvable by construction, or an immediate error when no path exists     |
-| Upstream presence           | derived from configuration intent, validated once                         |
+| Topic                       | Proposed                                                                |
+| --------------------------- | ----------------------------------------------------------------------- |
+| Terminal predicate          | one per-runtime **settlement target**, consumed by all four call sites  |
+| Local-only batch settlement | settles and retires at commit (target = own tier)                       |
+| Pending-set membership      | persisted until retirement; full-scan fallback removal deferred         |
+| Pending-set derivation      | maintained incrementally; `add_server` reads it, never re-derives it    |
+| Worker→main reload replay   | pending (unsettled) batches only — empty on a healthy local-only reload |
+| `wait(tier)`                | resolvable by construction, or an immediate error when no path exists   |
+| Upstream presence           | derived from configuration intent, validated once                       |
 
 ## Design
 
@@ -184,9 +184,14 @@ for collapsing the redundancy) makes membership recovery a point lookup.
 
 Consequences:
 
-- the fallback chain in `local_batch_rows` (`ticks.rs:27-194`) loses its
-  terminal full-scan arm; reaching "no membership record for a pending batch"
-  becomes an integrity error to assert/repair, not a normal O(N) path;
+- the fallback chain in `local_batch_rows` (`ticks.rs:27-194`) is demoted from
+  the hot path: with submissions retained until settlement, pending-batch
+  membership resolves from the submission, and the reload/reconnect paths no
+  longer reach the terminal full-scan arm for new data. **Status: the
+  full-scan arm itself is retained** for legacy storages and the late-server
+  promotion pass; deleting it (and turning "no membership record for a pending
+  batch" into an asserted integrity error) is deferred until the §6
+  watermark/migration pass lands;
 - `pending_batch_ids_needing_reconciliation` (`sync.rs:15-101`) stops
   re-deriving the pending set from whole-DB scans; it reads the maintained set.
   Its third loop (`sync.rs:59-78`, the `VisibleDirect`-rows-without-fate sweep)
@@ -208,8 +213,12 @@ accepted when the runtime has a configured path to `tier`.
   (e.g. `wait({ tier: "global" })` on a runtime with no server configured),
   instead of registering a structurally unresolvable waiter;
 - the silent no-tier `return` in `settle_sealed_batch` (`inbox.rs:879-881`)
-  becomes an explicit error response to the origin client — a peer that cannot
-  settle must say so rather than drop the seal.
+  must eventually become an explicit error response to the origin client — a
+  peer that cannot settle should say so rather than drop the seal. **Status:
+  deferred** (it requires a new wire message); the implementation ships a
+  `tracing::warn!` at the dropping peer, and the origin side is protected by
+  the `wait(tier)` fail-fast guard, which refuses waits no configured producer
+  can resolve.
 
 A timeout knob on `wait` is still worth having for network flakiness, but it is
 not the fix; the fix is that no waiter can be created that nothing can resolve.
@@ -267,9 +276,10 @@ public API:
 2. **Local-only apps settle locally.** With no server configured, N inserts +
    commits followed by a worker restart replay zero retained batch records, and
    reload time does not grow with N.
-3. **No full-scan membership recovery.** `local_batch_rows` for a pending batch
-   is a point lookup; a pending batch without a membership record is a reported
-   integrity error, not a scan.
+3. **No full-scan membership recovery (partially delivered — see §3 status).**
+   `local_batch_rows` for new retained submissions is a point lookup; turning a
+   pending batch without a membership record into a reported integrity error
+   instead of a fallback scan is deferred.
 4. **`wait` totality.** For every (runtime config, tier) pair, `wait(tier)`
    either can be resolved by a producer that exists in that config, or returns
    an error immediately. `commit().wait({ tier: "local" })` with no server
