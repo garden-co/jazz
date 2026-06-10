@@ -1670,7 +1670,7 @@ impl WasmRuntime {
 
         let mut core = self.core.borrow_mut();
         let batch_id = core
-            .upsert_with_id(table, oid, named_values, write_context.as_ref())
+            .upsert(table, oid, named_values, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Upsert failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "upserted");

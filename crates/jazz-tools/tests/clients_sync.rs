@@ -64,15 +64,14 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 
     wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
 
-    let (todo_id, _) = writer
-        .create(
+    let (todo_id, _, _) = writer
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create deep-history todo");
 
     let final_title = format!("revision-{DEEP_HISTORY_UPDATES:03}");
@@ -85,7 +84,6 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
                     Value::Text(format!("revision-{revision:03}")),
                 )],
             )
-            .await
             .expect("update deep-history todo");
     }
 
@@ -153,7 +151,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
     client_a
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -163,7 +161,6 @@ async fn jazz_tools_cli_two_clients_sync_values() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create from client a");
 
     let rows_on_b = wait_for_query(
@@ -182,7 +179,6 @@ async fn jazz_tools_cli_two_clients_sync_values() {
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
-        .await
         .expect("update from client b");
 
     let rows_on_a = wait_for_query(
@@ -235,8 +231,8 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
     let external_id =
         Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
 
-    let (todo_id, expected_values) = client
-        .create_with_id(
+    let (todo_id, expected_values, _) = client
+        .insert_with_id(
             "todos",
             external_id,
             HashMap::from([
@@ -247,7 +243,6 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create row with external id");
 
     assert_eq!(todo_id.uuid(), &external_id);
@@ -300,7 +295,6 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("insert row through upsert");
 
     let provenance_query = QueryBuilder::new("todos")
@@ -316,7 +310,6 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
                 Value::Text("updated-title".to_string()),
             )]),
         )
-        .await
         .expect("upsert row with external id");
 
     let updated_rows = wait_for_query(
@@ -375,7 +368,6 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("insert row through upsert");
 
     client
@@ -387,7 +379,6 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
                 Value::Text("updated-title".to_string()),
             )]),
         )
-        .await
         .expect("update existing row through upsert");
 
     let rows = wait_for_query(
@@ -439,7 +430,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     wait_for_edge_query_ready(&client_bob, Duration::from_secs(30)).await;
 
     client_alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -449,7 +440,6 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("alice creates todo");
 
     let rows_on_bob = wait_for_query(
@@ -468,7 +458,6 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
             shared_todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
-        .await
         .expect("bob updates alice todo");
 
     let _ = wait_for_query(
@@ -490,14 +479,13 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     .await;
 
     client_bob
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("from-bob".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("bob creates todo");
 
     let expected_titles = ["shared-across-users", "from-bob"]

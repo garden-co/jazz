@@ -8,7 +8,8 @@ use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Value};
+use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -42,8 +43,6 @@ struct UnverifiedJwtClaims {
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
-    /// Schema as declared by the client/app code.
-    declared_schema: Schema,
     /// Session inferred from client auth context for user-scoped operations.
     default_session: Option<Session>,
     /// Handle to the local runtime.
@@ -139,7 +138,6 @@ impl JazzClient {
     /// 3. Connect to the server over WebSocket (if URL provided)
     /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
-        let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
         // Loaded for its side effect of persisting the client-id file on disk;
         // the wire ClientId is assigned by `TransportManager::create` at connect
@@ -200,7 +198,6 @@ impl JazzClient {
         }
 
         Ok(Self {
-            declared_schema,
             default_session,
             runtime,
             has_server,
@@ -266,7 +263,6 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        let query_for_alignment = query.clone();
         let future = self
             .runtime
             .query(
@@ -280,67 +276,25 @@ impl JazzClient {
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
-            .map(|rows| self.align_query_rows_to_declared_schema(&query_for_alignment, rows))
             .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
     /// Create a new row in a table.
-    pub async fn create(
+    pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_with_id(table, Option::<Uuid>::None, values)
-            .await
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+        self.insert_with_id(table, Option::<Uuid>::None, values)
     }
 
     /// Create a new row in a table using a caller-supplied UUID.
-    pub async fn create_with_id(
+    pub fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                None,
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
-    }
-
-    /// Create a new row and wait until it reaches the requested durability tier.
-    pub async fn create_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
-            .await
-    }
-
-    /// Create a new row with a caller-supplied UUID and wait for durability.
-    pub async fn create_persisted_with_id(
-        &self,
-        table: &str,
-        object_id: impl Into<Option<Uuid>>,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .runtime
             .insert_with_id(
@@ -350,100 +304,41 @@ impl JazzClient {
                 None,
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "create row", tier).await?;
-        Ok((object_id, row_values))
+        Ok((object_id, row_values, batch_id))
     }
 
     /// Create or update a row using a caller-supplied UUID.
-    pub async fn upsert(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<()> {
+    ) -> Result<BatchId> {
         self.runtime
-            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
-            .map(|_| ())
+            .upsert(table, ObjectId::from_uuid(object_id), values, None)
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    /// Create or update a row and wait until it reaches the requested durability tier.
-    pub async fn upsert_persisted(
-        &self,
-        table: &str,
-        object_id: Uuid,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "upsert row", tier).await
     }
 
     /// Update a row.
-    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         self.runtime
             .update(object_id, updates, None)
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    /// Update a row and wait until it reaches the requested durability tier.
-    pub async fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .update(object_id, updates, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "update row", tier).await
     }
 
     /// Delete a row.
-    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.runtime
             .delete(object_id, None)
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    /// Delete a row and wait until it reaches the requested durability tier.
-    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
-        let batch_id = self
-            .runtime
-            .delete(object_id, None)
-            .map_err(|e| JazzError::Write(e.to_string()))?;
+    pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         let receiver = self
             .runtime
             .wait_for_batch(batch_id, tier)
             .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "delete row", tier).await
+        wait_for_batch_write(receiver, tier).await
     }
 
     /// Unsubscribe from a subscription.
@@ -456,7 +351,7 @@ impl JazzClient {
     }
 
     /// Get the current schema.
-    pub async fn schema(&self) -> Result<crate::query_manager::types::Schema> {
+    pub fn schema(&self) -> Result<crate::query_manager::types::Schema> {
         self.runtime
             .current_schema()
             .map_err(|e| JazzError::Query(e.to_string()))
@@ -509,35 +404,6 @@ impl JazzClient {
 
         Ok(())
     }
-
-    fn align_query_rows_to_declared_schema(
-        &self,
-        query: &Query,
-        rows: Vec<(ObjectId, Vec<Value>)>,
-    ) -> Vec<(ObjectId, Vec<Value>)> {
-        if !query_rows_can_be_schema_aligned(query) {
-            return rows;
-        }
-
-        let runtime_schema = match self.runtime.current_schema() {
-            Ok(schema) => schema,
-            Err(_) => return rows,
-        };
-
-        rows.into_iter()
-            .map(|(id, values)| {
-                (
-                    id,
-                    align_row_values_to_declared_schema(
-                        &self.declared_schema,
-                        &runtime_schema,
-                        &query.table,
-                        values,
-                    ),
-                )
-            })
-            .collect()
-    }
 }
 
 /// Session-scoped client for backend operations.
@@ -547,60 +413,20 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(
+    pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_with_id(table, Option::<Uuid>::None, values)
-            .await
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+        self.insert_with_id(table, Option::<Uuid>::None, values)
     }
 
-    pub async fn create_with_id(
+    pub fn insert_with_id(
         &self,
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .client
-            .runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                Some(&self.session),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.client.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.client.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
-    }
-
-    pub async fn create_persisted(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
-        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
-            .await
-    }
-
-    pub async fn create_persisted_with_id(
-        &self,
-        table: &str,
-        object_id: impl Into<Option<Uuid>>,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<(ObjectId, Vec<Value>)> {
+    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .client
             .runtime
@@ -611,114 +437,38 @@ impl<'a> SessionClient<'a> {
                 Some(&self.session),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.client.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.client.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "create row", tier).await?;
-        Ok((object_id, row_values))
+        Ok((object_id, row_values, batch_id))
     }
 
-    pub async fn upsert(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<()> {
+    ) -> Result<BatchId> {
         self.client
             .runtime
-            .upsert_with_id(
+            .upsert(
                 table,
                 ObjectId::from_uuid(object_id),
                 values,
                 Some(&self.session),
             )
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    pub async fn upsert_persisted(
-        &self,
-        table: &str,
-        object_id: Uuid,
-        values: HashMap<String, Value>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .upsert_with_id(
-                table,
-                ObjectId::from_uuid(object_id),
-                values,
-                Some(&self.session),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "upsert row", tier).await
-    }
-
-    pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         self.client
             .runtime
             .update(object_id, updates, Some(&self.session))
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    pub async fn update_persisted(
-        &self,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        tier: DurabilityTier,
-    ) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .update(object_id, updates, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "update row", tier).await
-    }
-
-    pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
-            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
-        let batch_id = self
-            .client
-            .runtime
-            .delete(object_id, Some(&self.session))
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        let receiver = self
-            .client
-            .runtime
-            .wait_for_batch(batch_id, tier)
-            .map_err(|e| JazzError::Sync(e.to_string()))?;
-        wait_for_batch_write(receiver, "delete row", tier).await
     }
 
     pub async fn query(
@@ -726,7 +476,6 @@ impl<'a> SessionClient<'a> {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        let query_for_alignment = query.clone();
         let future = self
             .client
             .runtime
@@ -741,10 +490,6 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
-            .map(|rows| {
-                self.client
-                    .align_query_rows_to_declared_schema(&query_for_alignment, rows)
-            })
             .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
@@ -755,81 +500,31 @@ impl<'a> SessionClient<'a> {
     }
 }
 
-fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
-}
-
 async fn wait_for_batch_write(
     receiver: futures::channel::oneshot::Receiver<crate::runtime_core::PersistedWriteAck>,
-    operation: &str,
     tier: DurabilityTier,
 ) -> Result<()> {
     receiver
         .await
         .map_err(|_| {
             JazzError::Sync(format!(
-                "{operation} was cancelled before reaching {tier:?} durability"
+                "batch was cancelled before reaching {tier:?} durability"
             ))
         })?
         .map_err(|rejection| {
             JazzError::Sync(format!(
-                "{operation} was rejected before reaching {tier:?} durability ({}): {}",
+                "batch was rejected before reaching {tier:?} durability ({}): {}",
                 rejection.code, rejection.reason
             ))
         })?;
     Ok(())
 }
 
-fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
-    use crate::query_manager::types::{SchemaHash, TablePolicies};
+    use crate::query_manager::types::{Schema, SchemaHash, TableName, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
@@ -844,16 +539,6 @@ mod tests {
                 TableSchema::builder("todos")
                     .column("title", ColumnType::Text)
                     .column("completed", ColumnType::Boolean),
-            )
-            .build()
-    }
-
-    fn runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("completed", ColumnType::Boolean)
-                    .column("title", ColumnType::Text),
             )
             .build()
     }
@@ -1044,21 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn query_rows_are_reordered_back_to_declared_schema() {
-        let aligned = align_row_values_to_declared_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &TableName::new("todos"),
-            vec![Value::Boolean(true), Value::Text("done".to_string())],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![Value::Text("done".to_string()), Value::Boolean(true)]
-        );
-    }
-
-    #[test]
     fn default_session_from_context_uses_jwt_claims_for_user_clients() {
         let app_id = AppId::from_name("client-jwt-session");
         let mut context = make_offline_context(
@@ -1112,44 +782,6 @@ mod tests {
             ),
             other => panic!("expected connection error for missing transport, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn simple_queries_are_schema_alignable() {
-        let query = Query::new("todos");
-        assert!(query_rows_can_be_schema_aligned(&query));
-    }
-
-    #[test]
-    fn join_queries_are_not_schema_alignable() {
-        let mut query = Query::new("todos");
-        query.joins.push(crate::query_manager::query::JoinSpec {
-            table: TableName::new("projects"),
-            alias: None,
-            on: Some(("project_id".to_string(), "id".to_string())),
-        });
-
-        assert!(!query_rows_can_be_schema_aligned(&query));
-    }
-
-    #[test]
-    fn query_alignment_preserves_row_identity() {
-        let object_id = ObjectId::new();
-        let aligned = vec![(
-            object_id,
-            align_row_values_to_declared_schema(
-                &declared_todo_schema(),
-                &runtime_todo_schema(),
-                &TableName::new("todos"),
-                vec![Value::Boolean(false), Value::Text("keep-id".to_string())],
-            ),
-        )];
-
-        assert_eq!(aligned[0].0, object_id);
-        assert_eq!(
-            aligned[0].1,
-            vec![Value::Text("keep-id".to_string()), Value::Boolean(false)]
-        );
     }
 
     #[cfg(feature = "rocksdb")]

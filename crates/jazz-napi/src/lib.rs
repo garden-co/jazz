@@ -40,10 +40,9 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, parse_batch_id_input,
-    parse_batch_mode_input, parse_durability_tier as parse_binding_tier, parse_external_object_id,
-    parse_query_input, parse_read_durability_options, parse_runtime_schema_input,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
+    parse_external_object_id, parse_query_input, parse_read_durability_options,
+    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
@@ -51,7 +50,7 @@ use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
     MutationErrorCallback, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
     SubscriptionHandle,
@@ -213,16 +212,10 @@ fn parse_testing_server_start_options(
 
 fn make_subscription_callback(
     tsfn: ThreadsafeFunction<serde_json::Value>,
-    declared_schema: Option<Schema>,
-    table: Option<TableName>,
 ) -> impl Fn(SubscriptionDelta) + Send + 'static {
     move |delta: SubscriptionDelta| {
         tsfn.call(
-            Ok(subscription_delta_to_json(
-                &delta,
-                declared_schema.as_ref(),
-                table.as_ref(),
-            )),
+            Ok(subscription_delta_to_json(&delta)),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
@@ -438,7 +431,6 @@ fn build_napi_runtime(
     Ok(NapiRuntime {
         core: core_arc,
         declared_schema,
-        subscription_queries: Mutex::new(HashMap::new()),
     })
 }
 
@@ -450,7 +442,6 @@ fn build_napi_runtime(
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
     declared_schema: Schema,
-    subscription_queries: Mutex<HashMap<u64, Query>>,
 }
 
 #[napi]
@@ -518,12 +509,6 @@ impl NapiRuntime {
         let ((object_id, row_values), batch_id) = core
             .insert_with_id(&table, values.0, object_id, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
 
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
@@ -577,7 +562,7 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let batch_id = core
-            .upsert_with_id(&table, oid, values.0, write_context.as_ref())
+            .upsert(&table, oid, values.0, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Upsert failed: {:?}", e)))?;
 
         Ok(serde_json::json!({
@@ -629,12 +614,6 @@ impl NapiRuntime {
         let ((object_id, row_values), batch_id) = core
             .restore(&table, oid, values.0, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Restore failed: {:?}", e)))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
 
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
@@ -729,40 +708,30 @@ impl NapiRuntime {
         options_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let query = parse_query(&query_json)?;
-        let query_for_alignment = query.clone();
         let session = parse_session_json(session_json)?;
 
         let (durability, propagation, transaction_batch_id) =
             parse_read_durability_options(tier.as_deref(), options_json.as_deref())
                 .map_err(napi::Error::from_reason)?;
 
-        let (future, runtime_schema) = {
+        let future = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            (
-                core.query_with_local_batch(
-                    query,
-                    session,
-                    durability,
-                    propagation,
-                    transaction_batch_id,
-                )
-                .map_err(|e| napi::Error::from_reason(format!("Query setup failed: {e}")))?,
-                core.current_schema().clone(),
+            core.query_with_local_batch(
+                query,
+                session,
+                durability,
+                propagation,
+                transaction_batch_id,
             )
+            .map_err(|e| napi::Error::from_reason(format!("Query setup failed: {e}")))?
         };
 
         let rows = future
             .await
             .map_err(|e| napi::Error::from_reason(format!("Query failed: {:?}", e)))?;
-        let rows = align_query_rows_to_declared_schema(
-            &self.declared_schema,
-            &runtime_schema,
-            &query_for_alignment,
-            rows,
-        );
 
         let json_rows: Vec<serde_json::Value> = rows
             .into_iter()
@@ -783,10 +752,6 @@ impl NapiRuntime {
 
     #[napi]
     pub fn unsubscribe(&self, handle: f64) -> napi::Result<()> {
-        self.subscription_queries
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .remove(&(handle as u64));
         let mut core = self
             .core
             .lock()
@@ -806,21 +771,12 @@ impl NapiRuntime {
     ) -> napi::Result<f64> {
         let (query, session, durability, propagation) =
             parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
-        let query_for_alignment = query.clone();
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core.create_subscription(query, session, durability, propagation);
-        drop(core);
-
-        if query_rows_can_be_schema_aligned(&query_for_alignment) {
-            self.subscription_queries
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?
-                .insert(handle.0, query_for_alignment);
-        }
 
         Ok(handle.0 as f64)
     }
@@ -835,20 +791,7 @@ impl NapiRuntime {
         >,
     ) -> napi::Result<()> {
         let sub_handle = SubscriptionHandle(handle as u64);
-        let alignment_table = self
-            .subscription_queries
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .get(&(handle as u64))
-            .map(|query| query.table);
-
-        let callback = make_subscription_callback(
-            on_update,
-            alignment_table
-                .as_ref()
-                .map(|_| self.declared_schema.clone()),
-            alignment_table,
-        );
+        let callback = make_subscription_callback(on_update);
 
         let mut core = self
             .core
@@ -1388,15 +1331,8 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use jazz_tools::binding_support::{
-        align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        query_rows_can_be_schema_aligned,
-    };
-    use jazz_tools::object::ObjectId;
-    use jazz_tools::query_manager::query::Query;
     use jazz_tools::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
-        Value,
+        ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value,
     };
 
     #[test]
@@ -1447,90 +1383,5 @@ mod tests {
             .column("done")
             .unwrap();
         assert_eq!(done.default, Some(Value::Boolean(false)));
-    }
-
-    fn declared_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("description", ColumnType::Text),
-            )
-            .build()
-    }
-
-    fn runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("description", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("title", ColumnType::Text),
-            )
-            .build()
-    }
-
-    #[test]
-    fn query_rows_are_reordered_back_to_declared_schema() {
-        let rows = vec![(
-            ObjectId::new(),
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(false),
-                Value::Text("buy milk".to_string()),
-            ],
-        )];
-        let query = Query::new("todos");
-
-        let aligned = align_query_rows_to_declared_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &query,
-            rows,
-        );
-
-        assert_eq!(
-            aligned[0].1,
-            vec![
-                Value::Text("buy milk".to_string()),
-                Value::Boolean(false),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn descriptor_values_are_reordered_back_to_declared_schema() {
-        let runtime_descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("description", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-            ColumnDescriptor::new("title", ColumnType::Text),
-        ]);
-
-        let aligned = align_values_to_declared_schema(
-            &declared_todo_schema(),
-            &TableName::new("todos"),
-            &runtime_descriptor,
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(true),
-                Value::Text("ship fix".to_string()),
-            ],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![
-                Value::Text("ship fix".to_string()),
-                Value::Boolean(true),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn simple_queries_are_schema_alignable() {
-        assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
     }
 }
