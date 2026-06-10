@@ -37,10 +37,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or_default()
             .into_iter()
             .filter(|submission| {
-                SyncManager::fate_needs_settlement_at(
-                    fates_by_batch.get(&submission.batch_id),
-                    target,
-                )
+                let fate = fates_by_batch.get(&submission.batch_id);
+                // A stored `Missing` fate still owes the server a retransmit
+                // of rows + seal. The live-delivery path retransmits
+                // immediately, but after a restart this pending-set derivation
+                // is the only thing that re-offers the batch.
+                matches!(fate, Some(BatchFate::Missing { .. }))
+                    || SyncManager::fate_needs_settlement_at(fate, target)
             })
             .map(|submission| submission.batch_id)
             .collect::<Vec<_>>();
