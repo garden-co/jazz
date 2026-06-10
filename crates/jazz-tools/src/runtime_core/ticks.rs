@@ -867,6 +867,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
+                    self.schema_manager
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .add_pending_server(server_id);
                 }
                 crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                     tracing::warn!(%server_id, %reason, "transport connect failed");
@@ -1131,7 +1135,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
-                released_server_hold = true;
+                self.schema_manager
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .add_pending_server(server_id);
             }
             crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                 debug!(%reason, "transport connect failed; releasing pending-server hold");

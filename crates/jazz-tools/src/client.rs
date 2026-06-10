@@ -127,6 +127,11 @@ async fn wait_for_initial_transport_handshake(
             "transport closed before WebSocket handshake completed".to_string(),
         ));
     }
+    // The watch signal means the transport queued `Connected`; drain the
+    // scheduled tick so `connect()` returns with the server registered.
+    runtime.flush().await.map_err(|e| {
+        JazzError::Connection(format!("failed to apply initial WebSocket handshake: {e}"))
+    })?;
     Ok(())
 }
 
