@@ -1,0 +1,18 @@
+[package]
+name = "local-telemetry-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+gloo-net = "0.6"
+gloo-timers = "0.3"
+gloo-utils = "0.2"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlInputElement", "HtmlSelectElement"] }
+yew = { version = "0.21", features = ["csr"] }

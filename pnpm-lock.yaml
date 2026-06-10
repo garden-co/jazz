@@ -174,28 +174,6 @@ importers:
 
   crates/jazz-wasm: {}
 
-  dev/local-telemetry/web:
-    dependencies:
-      '@tanstack/react-query':
-        specifier: ^5.62.0
-        version: 5.100.10(react@19.2.4)
-      react:
-        specifier: 19.2.4
-        version: 19.2.4
-      react-dom:
-        specifier: 19.2.4
-        version: 19.2.4(react@19.2.4)
-    devDependencies:
-      '@types/react':
-        specifier: ^19.0.0
-        version: 19.2.14
-      '@types/react-dom':
-        specifier: ^19.0.0
-        version: 19.2.3(@types/react@19.2.14)
-      typescript:
-        specifier: catalog:default
-        version: 6.0.2
-
   dev/stress-tests/stress-test-expo:
     dependencies:
       expo:

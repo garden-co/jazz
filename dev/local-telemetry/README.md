@@ -1,48 +1,68 @@
 # local-telemetry
 
-Single Go binary that does three things on localhost:
+Rust developer telemetry collector for localhost:
 
-- accepts OTLP/HTTP from your app on **:4318**,
-- writes per-signal JSONL to `data/` with 2-day rotation,
-- serves a **viewer** UI and a **DuckDB SQL** endpoint on **:4319**.
+- accepts browser-safe OTLP/HTTP from your app on **:4318** and forwards it to
+  **Rotel**,
+- writes per-signal Rotel JSON files under `data/`,
+- serves a **Yew** viewer UI and a **DuckDB SQL** endpoint on **:4319**.
 
 ```
-your app  ──OTLP/HTTP:4318──▶  local-telemetry  ──fileexporter──▶  data/{traces,logs,metrics}.jsonl
-                                      │                                         ▲
-                                      ▼                                         │
-                                 http :4319 ◀────── DuckDB views ───────────────┘
-                                 GET  /            → viewer (Sync Flow UI)
-                                 POST /sql         → {query} → {columns, rows}
-                                 GET  /health      → "ok"
+your app  --OTLP/HTTP:4318-->  CORS proxy  -->  Rotel file exporter
+                                                       |
+                                                       v
+                                      data/{spans,logs,metrics}/*.json
+                                                       |
+                                                       v
+                                                  http :4319
+                                                  GET  /        -> viewer (Sync Flow UI)
+                                                  POST /sql     -> {query} -> {columns, rows}
+                                                  GET  /health  -> "ok"
 ```
-
-No yaml config, no Node toolchain, no Docker — `go build` and run.
 
 ## Start it
 
+Build the Yew UI once:
+
 ```sh
-cd dev/local-telemetry
-go build -o local-telemetry .
-./local-telemetry
+cd dev/local-telemetry/web
+trunk build --release
 ```
 
-Or just `go run .` if you don't want a checked-out binary. On first start the
-binary bundles the TSX viewer in-process via esbuild (~100 ms); React and
-ReactDOM are loaded by the browser from esm.sh via an import-map, so there's
-no `node_modules` anywhere.
+Then run the collector:
+
+```sh
+cd dev/local-telemetry
+cargo run --
+```
+
+Build a release binary with:
+
+```sh
+cd dev/local-telemetry
+cargo build --release
+```
+
+Rotel's Rust build requires `protoc` on `PATH`. On macOS, install it with:
+
+```sh
+brew install protobuf
+```
 
 Flags:
 
-| Flag               | Default     | Notes                         |
-| ------------------ | ----------- | ----------------------------- |
-| `--data-dir`       | `./data`    | Where JSONL files live        |
-| `--otlp-host`      | `127.0.0.1` | OTLP/HTTP bind host           |
-| `--otlp-port`      | `4318`      | OTLP/HTTP receiver port       |
-| `--http-host`      | `127.0.0.1` | Viewer + SQL bind host        |
-| `--http-port`      | `4319`      | Viewer + SQL HTTP port        |
-| `--retention-days` | `2`         | Days of rotated files to keep |
+| Flag               | Default     | Notes                                                |
+| ------------------ | ----------- | ---------------------------------------------------- |
+| `--data-dir`       | `./data`    | Rotel JSON output directory                          |
+| `--otlp-host`      | `127.0.0.1` | OTLP/HTTP bind host                                  |
+| `--otlp-port`      | `4318`      | Browser-safe OTLP/HTTP proxy port                    |
+| `--http-host`      | `127.0.0.1` | Viewer + SQL bind host                               |
+| `--http-port`      | `4319`      | Viewer + SQL HTTP port                               |
+| `--retention-days` | `2`         | Accepted for compatibility; ignored by Rotel JSON IO |
 
-CORS is `*` on the HTTP port so browser tooling can hit it from any origin.
+CORS is open on the OTLP proxy and viewer ports so browser tooling can call
+them from any origin. Rotel still owns OTLP decoding and file export; the proxy
+only handles browser preflight and forwards request bytes to Rotel.
 
 ## Use it
 
@@ -55,10 +75,7 @@ Anything that speaks OTLP/HTTP works. For the React stress test:
 VITE_JAZZ_TELEMETRY_COLLECTOR_URL=http://127.0.0.1:4318
 ```
 
-Then `pnpm dev` from `dev/stress-tests/todo-react/` and load it in a browser.
-The `[jazz] telemetry collector: …` log line confirms the URL was picked up.
-
-For a raw OTel SDK, set the standard env vars:
+For a raw OTel SDK:
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
@@ -68,10 +85,9 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/json \
 
 ### 2. Open the viewer
 
-<http://127.0.0.1:4319/> — a table of `sync.send`/`sync.recv` spans with
-window, payload, and layer filters. Rows are clickable to expand the
-`payload_json` blob. The page polls the SQL endpoint every 3 s (react-query),
-no websocket.
+<http://127.0.0.1:4319/> shows `sync.send` and `sync.recv` spans with window,
+payload, and layer filters. Rows expand to show `payload` and `payload_json`.
+The Yew app polls `/sql` every 3 seconds.
 
 ### 3. Query directly
 
@@ -90,24 +106,26 @@ Response shape:
 }
 ```
 
-Errors: `{"error": "..."}` with HTTP 400.
-
-For interactive analysis from Claude Code, invoke the
-`analyze-local-telemetry` skill — it ships with the recipe library and view
-schemas.
+Errors use `{"error": "..."}` with HTTP 400.
 
 ## Views
 
-Created on demand whenever JSONL exists for the matching signal:
+Views are refreshed on each `/sql` request when matching Rotel JSON files exist:
 
-| View            | One row per                                 |
-| --------------- | ------------------------------------------- |
-| `raw_traces`    | OTLP `ExportTraceServiceRequest` document   |
-| `raw_logs`      | OTLP `ExportLogsServiceRequest` document    |
-| `raw_metrics`   | OTLP `ExportMetricsServiceRequest` document |
-| `spans`         | flattened span                              |
-| `logs`          | flattened log record                        |
-| `number_points` | flattened gauge/sum metric data point       |
+| View            | One row per                           |
+| --------------- | ------------------------------------- |
+| `raw_traces`    | Rotel `ResourceSpans` JSON document   |
+| `raw_logs`      | Rotel `ResourceLogs` JSON document    |
+| `raw_metrics`   | Rotel `ResourceMetrics` JSON document |
+| `spans`         | flattened span                        |
+| `logs`          | flattened log record                  |
+| `number_points` | flattened gauge/sum metric point      |
+
+Rotel writes JSON arrays under:
+
+- `data/spans/traces_*.json`
+- `data/logs/logs_*.json`
+- `data/metrics/metrics_*.json`
 
 Common columns on `spans`: `trace_id`, `span_id`, `parent_span_id`, `name`,
 `kind`, `start_time_unix_nano`, `end_time_unix_nano`, `duration_ns`,
@@ -119,42 +137,34 @@ Common columns on `logs`: `time_unix_nano`, `observed_time_unix_nano`,
 `service_name`, `scope_name`, `attributes` (JSON), `raw_record` (JSON).
 
 Common columns on `number_points`: `name`, `description`, `unit`,
-`service_name`, `scope_name`, `kind` (`'gauge'` | `'sum'`), `time_unix_nano`,
-`value` (DOUBLE), `attributes` (JSON).
+`service_name`, `scope_name`, `kind` (`'gauge'` or `'sum'`),
+`time_unix_nano`, `value` (DOUBLE), `attributes` (JSON).
 
-Histograms and exponential histograms aren't pre-flattened — query them from
-`raw_metrics` directly.
+Histograms and exponential histograms are available through `raw_metrics`.
 
 ## Layout
 
 ```
 dev/local-telemetry/
-├── main.go              flags, signals, errgroup
-├── collector.go         embedded OTel collector + in-memory confmap
-├── sql.go               DuckDB views + /sql + /health handlers
-├── ui.go                esbuild bundle + /, /main.js handlers
-├── web/                 pnpm workspace package: local-telemetry-viewer
-│   ├── package.json     react / react-dom / @tanstack/react-query (for type-checking)
-│   ├── tsconfig.json
-│   └── src/             TSX sources (//go:embed-ed by ui.go)
-│       ├── index.html   import-map + #root
-│       └── main.tsx, App.tsx, Flow.tsx, flowRows.ts, api.ts
-└── data/                JSONL output (gitignored)
+├── Cargo.toml
+├── src/
+│   ├── main.rs          flags, signals, task orchestration
+│   ├── collector.rs     Rotel Agent wiring
+│   ├── http.rs          Axum routes + static assets
+│   ├── sql.rs           /sql request execution
+│   ├── views.rs         DuckDB views for Rotel JSON files
+│   └── ui.rs            static asset lookup
+├── tests/               black-box HTTP/SQL tests
+├── web/                 Yew viewer built by Trunk
+│   ├── Cargo.toml
+│   ├── Trunk.toml
+│   ├── index.html
+│   └── src/main.rs
+└── data/                Rotel JSON output (gitignored)
 ```
-
-The `web/` package exists for type-checking and editor integration only —
-`pnpm --filter local-telemetry-viewer typecheck` runs `tsc --noEmit`. The
-deps in its `package.json` are never bundled into the runtime output:
-esbuild marks them `external` and the browser resolves them via the
-import-map in `index.html`.
-
-## Retention
-
-`fileexporter` rotation handles it natively — `max_days` matches
-`--retention-days`. No sweeper goroutine.
 
 ## Why this and not `dev/observability/`
 
 `dev/observability/` runs the upstream collector + Grafana/Tempo/Loki/Prom in
-Docker — use that when you want Grafana dashboards. `local-telemetry` is for
-fast inspection over `curl`/SQL/UI without Docker.
+Docker. `local-telemetry` is for fast inspection over `curl`, SQL, and a small
+local UI without Docker.
