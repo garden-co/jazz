@@ -19,6 +19,18 @@ fn rc_insert_returns_immediately() {
 }
 
 #[test]
+fn rc_auto_committed_direct_write_rejects_later_commit() {
+    let mut core = create_test_runtime();
+    let (_, batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let expected_error = format!("Write error: batch {batch_id} is already committed");
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+}
+
+#[test]
 fn rc_insert_data_syncs_to_server() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =
@@ -78,7 +90,6 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
     let ((row_id, _row_values), batch_id) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
-    core.commit_batch(batch_id).unwrap();
     let sealed_submission = core
         .storage()
         .load_sealed_batch_submission(batch_id)
@@ -208,7 +219,7 @@ fn rc_delete_sync() {
 #[test]
 fn rc_sealing_empty_batch_completes_waits_without_local_record() {
     let mut core = create_test_runtime();
-    let batch_id = BatchId::new();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
 
     core.commit_batch(batch_id).unwrap();
 
@@ -238,9 +249,9 @@ fn rc_sealing_empty_batch_completes_waits_without_local_record() {
             Some(&write_context),
         )
         .expect_err("sealed empty batch should not accept later writes");
-    assert!(
-        error.to_string().contains("already sealed"),
-        "unexpected error: {error}"
+    assert_eq!(
+        error.to_string(),
+        format!("Write error: batch {batch_id} has already been completed or was never opened")
     );
 }
 
@@ -259,7 +270,8 @@ fn rc_rolled_back_batch_rejects_later_operations() {
 
     core.rollback_batch(batch_id).unwrap();
 
-    let expected_error = format!("Write error: batch {batch_id} has already been rolled back");
+    let expected_error =
+        format!("Write error: batch {batch_id} has already been completed or was never opened");
 
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);

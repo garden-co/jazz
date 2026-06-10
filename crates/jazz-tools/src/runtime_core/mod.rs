@@ -79,19 +79,11 @@ pub(crate) struct QueryLocalOverlay {
     pub(crate) row_ids: Vec<ObjectId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeBatchStatus {
-    Active,
-    Committed,
-    RolledBack,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeBatchContext {
     pub(crate) batch_mode: BatchMode,
     pub(crate) batch_id: BatchId,
     pub(crate) target_branch_name: BranchName,
-    pub(crate) status: RuntimeBatchStatus,
 }
 
 // ============================================================================
@@ -380,8 +372,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
 
-    /// In-memory context for JS batch/transaction handles. Handles do not
-    /// survive process restarts, so this intentionally stays runtime-local.
+    /// Active in-memory context for JS batch/transaction handles. Handles do
+    /// not survive process restarts, so this intentionally stays runtime-local.
     batch_contexts: HashMap<BatchId, RuntimeBatchContext>,
 
     /// Label for tracing (e.g. "local", "edge", "client").

@@ -14,7 +14,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             batch_mode,
             batch_id: BatchId::new(),
             target_branch_name: self.schema_manager.branch_name(),
-            status: RuntimeBatchStatus::Active,
         };
         let batch_id = context.batch_id;
         self.batch_contexts.insert(batch_id, context);
@@ -28,50 +27,52 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    fn finalized_batch_error(
-        batch_id: BatchId,
-        batch_mode: BatchMode,
-        status: RuntimeBatchStatus,
-    ) -> RuntimeError {
+    fn committed_batch_error(batch_id: BatchId, batch_mode: BatchMode) -> RuntimeError {
         let kind = Self::batch_handle_kind(batch_mode);
-        match status {
-            RuntimeBatchStatus::Active => {
-                RuntimeError::WriteError(format!("{kind} {batch_id} is still active"))
-            }
-            RuntimeBatchStatus::Committed => {
-                RuntimeError::WriteError(format!("{kind} {batch_id} is already committed"))
-            }
-            RuntimeBatchStatus::RolledBack => {
-                RuntimeError::WriteError(format!("{kind} {batch_id} has already been rolled back"))
-            }
+        RuntimeError::WriteError(format!("{kind} {batch_id} is already committed"))
+    }
+
+    fn unavailable_batch_error(batch_id: BatchId) -> RuntimeError {
+        RuntimeError::WriteError(format!(
+            "batch {batch_id} has already been completed or was never opened"
+        ))
+    }
+
+    fn load_runtime_batch_record(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
+            return Ok(Some(record.clone()));
         }
+
+        self.storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))
     }
 
     pub(crate) fn ensure_batch_is_open(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
-        match self
-            .batch_contexts
-            .get(&batch_id)
-            .map(|context| (context.batch_mode, context.status))
-        {
-            Some((
-                batch_mode,
-                status @ (RuntimeBatchStatus::Committed | RuntimeBatchStatus::RolledBack),
-            )) => Err(Self::finalized_batch_error(batch_id, batch_mode, status)),
-            None if self.durability.accepted_batch_tier(batch_id).is_some() => {
-                Err(Self::finalized_batch_error(
-                    batch_id,
-                    BatchMode::Direct,
-                    RuntimeBatchStatus::Committed,
-                ))
-            }
-            Some((_, RuntimeBatchStatus::Active)) | None => Ok(()),
+        if self.batch_contexts.contains_key(&batch_id) {
+            return Ok(());
         }
+
+        if let Some(record) = self.load_runtime_batch_record(batch_id)? {
+            if record.sealed {
+                return Err(Self::committed_batch_error(batch_id, record.mode));
+            }
+
+            return Ok(());
+        }
+
+        if self.durability.accepted_batch_tier(batch_id).is_some() {
+            return Err(Self::committed_batch_error(batch_id, BatchMode::Direct));
+        }
+
+        Err(Self::unavailable_batch_error(batch_id))
     }
 
-    fn finish_batch(&mut self, batch_id: BatchId, status: RuntimeBatchStatus) {
-        if let Some(context) = self.batch_contexts.get_mut(&batch_id) {
-            context.status = status;
-        }
+    fn finish_batch(&mut self, batch_id: BatchId) {
+        self.batch_contexts.remove(&batch_id);
     }
 
     fn resolve_batch_write_context(
@@ -85,23 +86,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(Some(write_context.clone()));
         };
         let Some(batch_context) = self.batch_contexts.get(&batch_id) else {
-            if self.durability.accepted_batch_tier(batch_id).is_some() {
-                return Ok(Some(write_context.clone()));
-            }
             if write_context.batch_mode.is_none() && write_context.target_branch_name.is_none() {
-                return Err(RuntimeError::WriteError(format!(
-                    "batch {batch_id:?} has already been rolled back or was never opened"
-                )));
+                if let Some(record) = self.load_runtime_batch_record(batch_id)? {
+                    if record.sealed {
+                        return Err(Self::committed_batch_error(batch_id, record.mode));
+                    }
+                    return Ok(Some(write_context.clone()));
+                }
+
+                return Err(Self::unavailable_batch_error(batch_id));
             }
             return Ok(Some(write_context.clone()));
         };
-        if batch_context.status != RuntimeBatchStatus::Active {
-            return Err(Self::finalized_batch_error(
-                batch_id,
-                batch_context.batch_mode,
-                batch_context.status,
-            ));
-        }
 
         let mut resolved = write_context.clone();
         if resolved.batch_mode.is_none() {
@@ -1040,7 +1036,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.durability.forget_batch(batch_id);
-        self.finish_batch(batch_id, RuntimeBatchStatus::RolledBack);
+        self.finish_batch(batch_id);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(had_record)
@@ -1059,7 +1055,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 })?
             else {
                 self.complete_empty_batch(batch_id);
-                self.finish_batch(batch_id, RuntimeBatchStatus::Committed);
+                self.finish_batch(batch_id);
                 return Ok(());
             };
             record
@@ -1073,13 +1069,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     RuntimeError::WriteError(format!("delete empty local batch record: {err}"))
                 })?;
             self.mark_storage_write_pending_flush();
-            self.finish_batch(batch_id, RuntimeBatchStatus::Committed);
+            self.finish_batch(batch_id);
             return Ok(());
         }
 
         if record.sealed {
             self.local_batch_record_cache.insert(batch_id, record);
-            self.finish_batch(batch_id, RuntimeBatchStatus::Committed);
+            self.finish_batch(batch_id);
             return Ok(());
         }
 
@@ -1111,7 +1107,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager_mut()
             .sync_manager_mut()
             .seal_batch_to_servers(submission);
-        self.finish_batch(batch_id, RuntimeBatchStatus::Committed);
+        self.finish_batch(batch_id);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())
