@@ -1,13 +1,26 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BrowserBrokerClient } from "../../src/runtime/browser-broker-client.js";
-import {
-  acquireWebLockWithRetry,
-  tryAcquireWebLock,
-  type LeaderLockLease,
-} from "../../src/runtime/leader-lock.js";
+import { acquireWebLockWithRetry, type LeaderLockLease } from "../../src/runtime/leader-lock.js";
 
 function uniqueName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const BROKER_TEST_APP_ID = "broker-test-app";
+
+function tabLockName(dbName: string): string {
+  return `jazz-leader-tab:${BROKER_TEST_APP_ID}:${dbName}`;
+}
+
+function workerLockName(dbName: string): string {
+  return `jazz-leader-worker:${BROKER_TEST_APP_ID}:${dbName}`;
+}
+
+function leaderLockNames(dbName: string): { tabLockName: string; workerLockName: string } {
+  return {
+    tabLockName: tabLockName(dbName),
+    workerLockName: workerLockName(dbName),
+  };
 }
 
 async function waitFor(
@@ -41,7 +54,7 @@ function createOptions(
   fingerprint = "fingerprint-a",
 ): Parameters<typeof BrowserBrokerClient.connect>[0] {
   return {
-    appId: "broker-test-app",
+    appId: BROKER_TEST_APP_ID,
     dbName,
     tabId,
     fingerprint,
@@ -49,9 +62,7 @@ function createOptions(
     onBecomeLeader: async (client, leadershipId) => {
       client.reportLeaderReady({
         leadershipId,
-        tabLockName: `jazz-leader-tab:broker-test-app:${dbName}`,
-        workerLockName: `jazz-leader-worker:broker-test-app:${dbName}`,
-        compatibilityLockName: `jazz-leader-lock:broker-test-app:${dbName}`,
+        ...leaderLockNames(dbName),
       });
     },
   };
@@ -71,38 +82,28 @@ describe("SharedWorker browser broker", () => {
     lockLeases.clear();
   });
 
-  async function acquireLeaderLocks(
-    dbName: string,
-    options: { compatibility: boolean },
-  ): Promise<{
+  async function acquireLeaderLocks(dbName: string): Promise<{
     tabLockName: string;
     workerLockName: string;
-    compatibilityLockName?: string;
   }> {
-    const tabLockName = `jazz-leader-tab:broker-test-app:${dbName}`;
-    const workerLockName = `jazz-leader-worker:broker-test-app:${dbName}`;
-    const compatibilityLockName = `jazz-leader-lock:broker-test-app:${dbName}`;
+    const { tabLockName, workerLockName } = leaderLockNames(dbName);
     const tabLease = await acquireWebLockWithRetry(tabLockName);
     const workerLease = await acquireWebLockWithRetry(workerLockName);
-    const compatibilityLease = options.compatibility
-      ? await acquireWebLockWithRetry(compatibilityLockName)
-      : null;
-    if (!tabLease || !workerLease || !compatibilityLease) {
-      if (!options.compatibility && tabLease && workerLease) {
-        lockLeases.set(tabLockName, tabLease);
-        lockLeases.set(workerLockName, workerLease);
-        return { tabLockName, workerLockName };
-      }
+    if (!tabLease || !workerLease) {
       tabLease?.release();
       workerLease?.release();
-      compatibilityLease?.release();
       throw new Error("Unable to acquire broker test leader locks");
     }
 
     lockLeases.set(tabLockName, tabLease);
     lockLeases.set(workerLockName, workerLease);
-    lockLeases.set(compatibilityLockName, compatibilityLease);
-    return { tabLockName, workerLockName, compatibilityLockName };
+    return { tabLockName, workerLockName };
+  }
+
+  function releaseLeaderLocks(dbName: string): void {
+    const { tabLockName, workerLockName } = leaderLockNames(dbName);
+    releaseHeldLock(tabLockName);
+    releaseHeldLock(workerLockName);
   }
 
   function releaseHeldLock(lockName: string): void {
@@ -116,7 +117,6 @@ describe("SharedWorker browser broker", () => {
     tabId: string,
     fingerprint = "fingerprint-a",
     options: {
-      compatibility?: boolean;
       forceTakeoverTimeoutMs?: number;
       brokerPingIntervalMs?: number;
       brokerPongTimeoutMs?: number;
@@ -134,9 +134,7 @@ describe("SharedWorker browser broker", () => {
       onDemote: options.onDemote,
       onBecomeLeader: async (client, leadershipId) => {
         try {
-          const locks = await acquireLeaderLocks(dbName, {
-            compatibility: options.compatibility ?? true,
-          });
+          const locks = await acquireLeaderLocks(dbName);
           options.onReady?.(leadershipId);
           client.reportLeaderReady({
             leadershipId,
@@ -220,9 +218,7 @@ describe("SharedWorker browser broker", () => {
 
     await first.shutdown();
     clients.splice(clients.indexOf(first), 1);
-    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+    releaseLeaderLocks(dbName);
 
     await second.waitForRole("leader", 4000);
     expect(second.snapshot().role).toBe("leader");
@@ -253,9 +249,7 @@ describe("SharedWorker browser broker", () => {
     await first.waitForRole("leader", 2000);
     await second.waitForRole("follower", 2000);
 
-    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+    releaseLeaderLocks(dbName);
 
     await second.waitForRole("leader", 4000);
     expect(second.snapshot()).toMatchObject({
@@ -276,9 +270,7 @@ describe("SharedWorker browser broker", () => {
 
     await first.shutdown();
     clients.splice(clients.indexOf(first), 1);
-    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+    releaseLeaderLocks(dbName);
 
     const second = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
     clients.push(second);
@@ -291,7 +283,6 @@ describe("SharedWorker browser broker", () => {
     const dbName = uniqueName("broker-force-takeover");
     const first = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-a", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs: 50,
       }),
     );
@@ -300,7 +291,6 @@ describe("SharedWorker browser broker", () => {
     const secondReadyLeadershipIds: number[] = [];
     const second = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-b", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs: 50,
         reportFailures: true,
         onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
@@ -326,14 +316,12 @@ describe("SharedWorker browser broker", () => {
     const forceTakeoverTimeoutMs = 80;
     const first = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-a", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs,
       }),
     );
     clients.push(first);
     const second = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-b", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs,
       }),
     );
@@ -344,13 +332,11 @@ describe("SharedWorker browser broker", () => {
 
     await first.shutdown();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-    releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
+    releaseLeaderLocks(dbName);
 
     const thirdDemotedLeadershipIds: number[] = [];
     const third = await BrowserBrokerClient.connect(
       createLockingOptions(dbName, "tab-c", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs,
         onDemote: (leadershipId) => thirdDemotedLeadershipIds.push(leadershipId),
       }),
@@ -366,104 +352,6 @@ describe("SharedWorker browser broker", () => {
       leaderTabId: "tab-c",
     });
     expect(thirdDemotedLeadershipIds).toEqual([]);
-  });
-
-  it("promotes a replacement when the migration compatibility lock is released", async () => {
-    const dbName = uniqueName("broker-compat-lock-release");
-    const first = await BrowserBrokerClient.connect(
-      createLockingOptions(dbName, "tab-a", "fingerprint-a", {
-        onDemote: () => {
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-        },
-      }),
-    );
-    clients.push(first);
-    const second = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
-    clients.push(second);
-
-    await first.waitForRole("leader", 2000);
-    await second.waitForRole("follower", 2000);
-
-    releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
-
-    await second.waitForRole("leader", 4000);
-    expect(second.snapshot()).toMatchObject({
-      role: "leader",
-      tabId: "tab-b",
-      leaderTabId: "tab-b",
-      leadershipId: 2,
-    });
-  });
-
-  it("does not steal a stuck migration compatibility lock before promoting a replacement", async () => {
-    const dbName = uniqueName("broker-compat-force-takeover");
-    const first = await BrowserBrokerClient.connect(
-      createLockingOptions(dbName, "tab-a", "fingerprint-a", {
-        forceTakeoverTimeoutMs: 50,
-      }),
-    );
-    clients.push(first);
-
-    const secondReadyLeadershipIds: number[] = [];
-    const second = await BrowserBrokerClient.connect(
-      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
-        forceTakeoverTimeoutMs: 50,
-        reportFailures: true,
-        onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
-      }),
-    );
-    clients.push(second);
-
-    await first.waitForRole("leader", 2000);
-    await second.waitForRole("follower", 2000);
-
-    await first.shutdown();
-
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(secondReadyLeadershipIds.some((leadershipId) => leadershipId > 1)).toBe(false);
-  });
-
-  it("does not repeatedly promote a candidate blocked by the migration compatibility lock", async () => {
-    const dbName = uniqueName("broker-compat-blocked");
-    const compatibilityLockName = `jazz-leader-lock:broker-test-app:${dbName}`;
-    const compatibilityLease = await tryAcquireWebLock(compatibilityLockName);
-    if (!compatibilityLease) {
-      throw new Error("Unable to acquire broker compatibility lock");
-    }
-    lockLeases.set(compatibilityLockName, compatibilityLease);
-
-    let promotionAttempts = 0;
-    let failureReason: string | null = null;
-    const client = await BrowserBrokerClient.connect({
-      ...createOptions(dbName, "tab-a"),
-      onBecomeLeader: async (broker, leadershipId) => {
-        promotionAttempts++;
-        const tabLease = await tryAcquireWebLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-        if (!tabLease) {
-          failureReason = "Unable to acquire tab lock";
-          broker.reportLeaderFailed(leadershipId, failureReason);
-          return;
-        }
-
-        const migrationLease = await tryAcquireWebLock(compatibilityLockName);
-        tabLease.release();
-        if (migrationLease) {
-          migrationLease.release();
-          return;
-        }
-
-        failureReason = `Unable to acquire ${compatibilityLockName}`;
-        broker.reportLeaderFailed(leadershipId, failureReason);
-      },
-    });
-    clients.push(client);
-
-    await waitFor(() => failureReason !== null, 2000, "candidate should report lock failure");
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    expect(failureReason).toContain(compatibilityLockName);
-    expect(promotionAttempts).toBe(1);
   });
 
   it("replaces a promoted tab that has not reported schema before leader-ready", async () => {
@@ -506,6 +394,44 @@ describe("SharedWorker browser broker", () => {
     expect(demotedLeadershipIds).toContain(1);
   });
 
+  it("does not repeatedly promote a candidate that reports leader-failed", async () => {
+    const dbName = uniqueName("broker-leader-failed-no-loop");
+    const promotionAttempts: number[] = [];
+    const closedErrors: string[] = [];
+
+    const failedCandidate = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      brokerPingIntervalMs: 50,
+      brokerPongTimeoutMs: 5_000,
+      onBecomeLeader: async (client, leadershipId) => {
+        promotionAttempts.push(leadershipId);
+        client.reportLeaderFailed(leadershipId, "boom");
+      },
+      onClosed: (error) => {
+        closedErrors.push(error.message);
+      },
+    });
+    clients.push(failedCandidate);
+
+    await waitFor(
+      () => promotionAttempts.length === 1,
+      2000,
+      "candidate should receive its first leader promotion",
+    );
+    await waitFor(
+      () => closedErrors.includes("boom"),
+      2000,
+      "failed leader candidate should be closed with the reported reason",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const replacement = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
+    clients.push(replacement);
+    await replacement.waitForRole("leader", 1_000);
+
+    expect(promotionAttempts).toEqual([1]);
+  });
+
   it("demotes a stale candidate that reports leader-ready after being replaced", async () => {
     const dbName = uniqueName("broker-stale-leader-ready");
     const demotedLeadershipIds: number[] = [];
@@ -517,9 +443,7 @@ describe("SharedWorker browser broker", () => {
         reportStaleLeaderReady = () => {
           client.reportLeaderReady({
             leadershipId,
-            tabLockName: `jazz-leader-tab:broker-test-app:${dbName}`,
-            workerLockName: `jazz-leader-worker:broker-test-app:${dbName}`,
-            compatibilityLockName: `jazz-leader-lock:broker-test-app:${dbName}`,
+            ...leaderLockNames(dbName),
           });
         };
       },
@@ -563,7 +487,6 @@ describe("SharedWorker browser broker", () => {
     let silentLeaderReady = false;
     const silentLeader = await BrowserBrokerClient.connect({
       ...createLockingOptions(dbName, "tab-silent", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs: 50,
         brokerPingIntervalMs: 50,
         brokerPongTimeoutMs: 1_000,
@@ -584,7 +507,6 @@ describe("SharedWorker browser broker", () => {
     const secondClosedLeadershipIds: number[] = [];
     const second = await BrowserBrokerClient.connect({
       ...createLockingOptions(dbName, "tab-b", "fingerprint-a", {
-        compatibility: false,
         forceTakeoverTimeoutMs: 50,
         onReady: (leadershipId) => secondReadyLeadershipIds.push(leadershipId),
         onFailure: (leadershipId, reason) => secondFailures.push(`${leadershipId}:${reason}`),
@@ -620,15 +542,13 @@ describe("SharedWorker browser broker", () => {
         forceTakeoverTimeoutMs: 50,
         onStorageResetBegin: async (receivedRequestId) => {
           resetBegunByTab.push(`${tabId}:${receivedRequestId}`);
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          releaseLeaderLocks(dbName);
         },
         onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
             resetPromotions.push({ tabId, requestId: resetRequestId, leadershipId });
           }
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -697,15 +617,13 @@ describe("SharedWorker browser broker", () => {
         forceTakeoverTimeoutMs: 50,
         onStorageResetBegin: async (requestId) => {
           resetBegun.push(`${tabId}:${requestId}`);
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          releaseLeaderLocks(dbName);
         },
         onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
             resetPromotions.push(`${tabId}:${resetRequestId}`);
           }
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -768,15 +686,13 @@ describe("SharedWorker browser broker", () => {
         storageResetTimeoutMs: 2_500,
         onStorageResetBegin: async (requestId) => {
           resetBegun.push(`${tabId}:${requestId}`);
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          releaseLeaderLocks(dbName);
           if (tabId === "tab-a") {
             await leaderPreparation;
           }
         },
         onBecomeLeader: async (client, leadershipId) => {
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -836,7 +752,7 @@ describe("SharedWorker browser broker", () => {
       return {
         ...createOptions(dbName, tabId),
         onBecomeLeader: async (client, leadershipId) => {
-          const locks = await acquireLeaderLocks(dbName, { compatibility: true });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -905,16 +821,14 @@ describe("SharedWorker browser broker", () => {
         ...createOptions(dbName, tabId),
         forceTakeoverTimeoutMs: 50,
         onStorageResetBegin: async () => {
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          releaseLeaderLocks(dbName);
           if (tabId === "tab-b") {
             throw new Error("prepare exploded");
           }
         },
         onBecomeLeader: async (client, leadershipId) => {
           promotions.push(leadershipId);
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -982,7 +896,7 @@ describe("SharedWorker browser broker", () => {
         brokerPongTimeoutMs: 150,
         respondToBrokerPings: () => tabId !== "tab-b" || !followerSilent,
         onBecomeLeader: async (client, leadershipId) => {
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,
@@ -1059,9 +973,7 @@ describe("SharedWorker browser broker", () => {
         brokerPongTimeoutMs: 60,
         respondToBrokerPings: () => tabId !== "tab-b" || !silentResetLeader,
         onStorageResetBegin: async () => {
-          releaseHeldLock(`jazz-leader-tab:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-worker:broker-test-app:${dbName}`);
-          releaseHeldLock(`jazz-leader-lock:broker-test-app:${dbName}`);
+          releaseLeaderLocks(dbName);
         },
         onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
@@ -1071,7 +983,7 @@ describe("SharedWorker browser broker", () => {
               return;
             }
           }
-          const locks = await acquireLeaderLocks(dbName, { compatibility: false });
+          const locks = await acquireLeaderLocks(dbName);
           client.reportLeaderReady({
             leadershipId,
             ...locks,

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   acquireWebLockWithRetry,
-  createNavigatorLocksLeaderLockStrategy,
   monitorWebLockRelease,
   stealAndReleaseWebLock,
   tryAcquireWebLock,
@@ -25,26 +24,6 @@ async function waitForLease(
 }
 
 describe("leader-lock browser integration", () => {
-  it("acquires an exclusive lease and blocks concurrent acquisition until release", async () => {
-    const strategyA = createNavigatorLocksLeaderLockStrategy();
-    const strategyB = createNavigatorLocksLeaderLockStrategy();
-    expect(strategyA).not.toBeNull();
-    expect(strategyB).not.toBeNull();
-
-    const lockName = uniqueLockName("leader-lock");
-    const leaseA = await strategyA!.tryAcquire(lockName);
-    expect(leaseA).not.toBeNull();
-
-    const leaseWhileHeld = await strategyB!.tryAcquire(lockName);
-    expect(leaseWhileHeld).toBeNull();
-
-    leaseA!.release();
-
-    const leaseAfterRelease = await waitForLease(() => strategyB!.tryAcquire(lockName), 1000);
-    expect(leaseAfterRelease).not.toBeNull();
-    leaseAfterRelease!.release();
-  });
-
   it("supports fail-fast acquisition through the shared Web Locks helper", async () => {
     const lockName = uniqueLockName("leader-lock-helper");
     const leaseA = await tryAcquireWebLock(lockName);

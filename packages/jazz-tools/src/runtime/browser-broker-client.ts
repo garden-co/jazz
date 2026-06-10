@@ -27,7 +27,6 @@ export interface BrowserBrokerLeaderReadyInput {
   leadershipId: number;
   tabLockName: string;
   workerLockName: string;
-  compatibilityLockName?: string;
 }
 
 export interface BrowserBrokerClientOptions {
@@ -154,7 +153,6 @@ export class BrowserBrokerClient {
       leadershipId: input.leadershipId,
       tabLockName: input.tabLockName,
       workerLockName: input.workerLockName,
-      compatibilityLockName: input.compatibilityLockName,
     });
   }
 

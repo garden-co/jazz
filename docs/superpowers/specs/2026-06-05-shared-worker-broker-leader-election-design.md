@@ -10,7 +10,7 @@ Memory-mode browser clients, Node/NAPI clients, and the public `createDb` API sh
 
 The browser persistent runtime gains one SharedWorker broker per `{appId, dbName}` namespace. The broker owns connected tab state, broker instance, visibility ranking, leadership IDs, lock monitoring, demotion, follower-port assignment, and storage reset coordination. Tabs interact with it through a small control protocol implemented by a new `BrowserBrokerClient`.
 
-The leader tab acquires `jazz-leader-tab:<appId>:<dbName>` and the migration compatibility lock `jazz-leader-lock:<appId>:<dbName>`, then starts the existing dedicated worker. The worker init preflight acquires `jazz-leader-worker:<appId>:<dbName>` before Rust opens OPFS. Followers do not spawn dedicated workers and do not use fallback namespaces.
+The leader tab acquires `jazz-leader-tab:<appId>:<dbName>`, then starts the existing dedicated worker. The worker init preflight acquires `jazz-leader-worker:<appId>:<dbName>` before Rust opens OPFS. Followers do not spawn dedicated workers and do not use fallback namespaces.
 
 Follower sync uses transferred `MessagePort`s. The broker creates a channel per follower attachment, sends one endpoint to the follower, and sends the other endpoint to the leader tab for transfer into the leader worker. The Rust wasm worker host maps the transferred endpoint to a peer client. The existing postcard worker sync envelopes remain the payload format on the data ports, but the broker never parses or relays those payloads.
 
@@ -32,7 +32,7 @@ Leader startup:
 
 1. `Db.createWithWorker` creates a broker client and sends `hello`.
 2. Broker elects a candidate by visibility ranking and sends `become-leader`.
-3. Candidate acquires tab and compatibility locks, starts the dedicated worker, and waits for bridge initialization.
+3. Candidate acquires the tab lock, starts the dedicated worker, and waits for bridge initialization.
 4. Worker init acquires the worker Web Lock before OPFS opens.
 5. Leader reports `leader-ready`.
 6. Broker starts queued lock monitors and announces durable-ready leadership.
@@ -64,4 +64,4 @@ If demotion does not release a lock within `forceTakeoverTimeoutMs`, the broker 
 
 Tests follow the repo instruction to prefer black-box browser integration and public API setup. Existing behavior tests are updated only where their old assertions encode replaced BroadcastChannel/fallback implementation details.
 
-Focused unit tests cover protocol validation, unsupported-environment error text, deterministic fingerprints, and visibility ranking. Browser tests cover unsupported API failure, old compatibility lock contention, single leader worker across tabs, follower no-worker startup, follower-port acknowledgement gating, follower read/write persistence through the leader worker, lock-loss failover, planned demotion/reset monitor cancellation, forced lock stealing, broker instance changes after broker restart, hidden-only ranking, and follower-initiated storage reset.
+Focused unit tests cover protocol validation, unsupported-environment error text, deterministic fingerprints, and visibility ranking. Browser tests cover unsupported API failure, single leader worker across tabs, follower no-worker startup, follower-port acknowledgement gating, follower read/write persistence through the leader worker, lock-loss failover, planned demotion/reset monitor cancellation, forced lock stealing, broker instance changes after broker restart, hidden-only ranking, and follower-initiated storage reset.

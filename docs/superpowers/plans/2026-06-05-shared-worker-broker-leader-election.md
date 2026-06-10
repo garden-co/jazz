@@ -81,7 +81,7 @@ Expected: FAIL because the new monitor/steal helpers are missing.
 
 - [ ] **Step 7: Implement lock helpers**
 
-Extend `leader-lock.ts` with `tryAcquireWebLock`, `monitorWebLockRelease`, and `stealAndReleaseWebLock`. Keep the existing `createNavigatorLocksLeaderLockStrategy` API working.
+Extend `leader-lock.ts` with `tryAcquireWebLock`, `monitorWebLockRelease`, and `stealAndReleaseWebLock`. Remove the old navigator-lock strategy API once the broker no longer uses that abstraction.
 
 - [ ] **Step 8: Run lock tests to verify GREEN**
 
@@ -216,7 +216,7 @@ In `Db.createWithWorker`, create `BrowserBrokerClient` for persistent browser mo
 
 - [ ] **Step 4: Promote leaders through broker callbacks**
 
-On `become-leader`, acquire tab and compatibility locks, spawn worker, attach bridge on first schema, include `workerLockName`, and report `leader-ready` only after bridge init resolves.
+On `become-leader`, acquire the tab lock, spawn worker, attach bridge on first schema, include `workerLockName`, and report `leader-ready` only after bridge init resolves.
 
 - [ ] **Step 5: Start followers without workers**
 
@@ -224,7 +224,7 @@ When role is follower, keep `worker` null, create main-thread non-durable client
 
 - [ ] **Step 6: Demote and shutdown cleanly**
 
-On demotion or shutdown, poison stale leadership ID state, close follower data ports, shut down bridge/client resources, terminate workers, release tab and compatibility lock leases, and notify broker.
+On demotion or shutdown, poison stale leadership ID state, close follower data ports, shut down bridge/client resources, terminate workers, release the tab lock lease, and notify broker.
 
 - [ ] **Step 7: Run integration tests to verify GREEN**
 
@@ -257,7 +257,7 @@ After `leader-ready`, start abortable queued lock monitors for tab and worker lo
 
 - [ ] **Step 4: Implement forced takeover**
 
-Track demotion deadlines. If a lock remains held past `forceTakeoverTimeoutMs`, call `stealAndReleaseWebLock` for that lock and continue election. Never steal the old compatibility lock.
+Track demotion deadlines. If a lock remains held past `forceTakeoverTimeoutMs`, call `stealAndReleaseWebLock` for that lock and continue election.
 
 - [ ] **Step 5: Implement broker liveness and broker instance handling**
 

@@ -80,7 +80,7 @@ vi.mock("./leader-lock.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./leader-lock.js")>();
   return {
     ...actual,
-    tryAcquireWebLock: tryAcquireWebLockMock,
+    acquireWebLockWithRetry: tryAcquireWebLockMock,
   };
 });
 
@@ -488,21 +488,19 @@ describe("Db worker runtime bootstrap", () => {
     let db: Db | null = null;
     try {
       await waitFor(
-        () => tryAcquireWebLockMock.mock.calls.length >= 2 && workerReady !== null,
+        () => tryAcquireWebLockMock.mock.calls.length >= 1 && workerReady !== null,
         200,
-        "promotion should acquire locks and start worker bootstrap",
+        "promotion should acquire the tab lock and start worker bootstrap",
       );
 
       await FakeBrowserBrokerClient.instances[0]!.demote(1);
       workerReady!();
       db = await dbPromise;
 
-      expect(releasedLocks).toEqual(
-        expect.arrayContaining([
-          `jazz-leader-tab:${appId}:${dbName}`,
-          `jazz-leader-lock:${appId}:${dbName}`,
-        ]),
-      );
+      expect(tryAcquireWebLockMock.mock.calls.map(([lockName]) => lockName)).toEqual([
+        `jazz-leader-tab:${appId}:${dbName}`,
+      ]);
+      expect(releasedLocks).toEqual([`jazz-leader-tab:${appId}:${dbName}`]);
       expect(terminatedWorkers).toBe(1);
       expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
     } finally {
@@ -568,9 +566,7 @@ describe("Db worker runtime bootstrap", () => {
       lostCallbacks.get(tabLockName)!(new Error("tab lock stolen"));
 
       await waitFor(() => terminatedWorkers === 1, 200, "leader worker should terminate");
-      expect(releasedLocks).toEqual(
-        new Set([`jazz-leader-tab:${appId}:${dbName}`, `jazz-leader-lock:${appId}:${dbName}`]),
-      );
+      expect(releasedLocks).toEqual(new Set([`jazz-leader-tab:${appId}:${dbName}`]));
       expect(FakeBrowserBrokerClient.leaderFailures).toEqual([
         { leadershipId: 1, reason: "tab lock stolen" },
       ]);
