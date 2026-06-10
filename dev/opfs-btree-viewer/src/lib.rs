@@ -2,6 +2,7 @@
 
 mod bundle;
 mod format;
+mod raw_store;
 
 #[cfg(target_arch = "wasm32")]
 mod app;

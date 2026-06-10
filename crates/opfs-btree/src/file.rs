@@ -32,12 +32,6 @@ impl MemoryFile {
     pub fn new() -> Self {
         Self::default()
     }
-
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            inner: Rc::new(RefCell::new(bytes)),
-        }
-    }
 }
 
 impl SyncFile for MemoryFile {

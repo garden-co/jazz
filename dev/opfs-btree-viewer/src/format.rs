@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use opfs_btree::RawPageKind;
+
+use crate::raw_store::RawPageKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewMode {

@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, HashMap};
 
 use gloo_timers::future::TimeoutFuture;
 use js_sys::Uint8Array;
-use opfs_btree::{BTreeOptions, MemoryFile, OpfsBTree, RawPageKind, RawPageSummary};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -14,6 +13,7 @@ use yew::prelude::*;
 
 use crate::bundle::{StorageBundle, StorageBundleFile, decode_storage_bundle};
 use crate::format::{PreviewMode, bytes_to_hex, format_bytes, format_value, page_kind_label};
+use crate::raw_store::{RawPageKind, RawPageSummary, RawStore};
 
 const ENTRY_SCAN_BATCH_SIZE: usize = 250;
 const PAGE_SCAN_BATCH_SIZE: usize = 250;
@@ -945,13 +945,12 @@ fn read_browser_file(file: File, link: Scope<App>) {
 fn start_entry_scan(link: Scope<App>, path: String, bytes: Vec<u8>) {
     spawn_local(async move {
         let result = async {
-            let file = MemoryFile::from_bytes(bytes);
-            let mut tree = OpfsBTree::open(file, BTreeOptions::default())
-                .map_err(|err| format!("open opfs-btree bytes: {err}"))?;
+            let store =
+                RawStore::open(bytes).map_err(|err| format!("open opfs-btree bytes: {err}"))?;
             let mut cursor = None;
 
             loop {
-                let batch = tree
+                let batch = store
                     .raw_entries_batch(cursor, ENTRY_SCAN_BATCH_SIZE)
                     .map_err(|err| format!("scan opfs-btree entries: {err}"))?;
                 let done = batch.done;
@@ -988,17 +987,14 @@ fn start_entry_scan(link: Scope<App>, path: String, bytes: Vec<u8>) {
 fn start_page_scan(link: Scope<App>, path: String, bytes: Vec<u8>) {
     spawn_local(async move {
         let result = async {
-            let file = MemoryFile::from_bytes(bytes);
-            let mut tree = OpfsBTree::open(file, BTreeOptions::default())
-                .map_err(|err| format!("open opfs-btree bytes: {err}"))?;
-            let total_pages = tree.total_pages();
-            let page_size = tree.page_size();
+            let store =
+                RawStore::open(bytes).map_err(|err| format!("open opfs-btree bytes: {err}"))?;
+            let total_pages = store.total_pages();
+            let page_size = store.page_size();
             let mut next_page_id = Some(0);
 
             while let Some(start_page_id) = next_page_id {
-                let batch = tree
-                    .raw_page_summaries_batch(start_page_id, PAGE_SCAN_BATCH_SIZE)
-                    .map_err(|err| format!("scan opfs-btree pages: {err}"))?;
+                let batch = store.raw_page_summaries_batch(start_page_id, PAGE_SCAN_BATCH_SIZE);
                 next_page_id = batch.next_page_id;
                 let done = batch.done;
                 link.send_message(Msg::PageBatch {
