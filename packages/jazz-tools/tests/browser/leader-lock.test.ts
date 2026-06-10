@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acquireWebLockWithRetry,
   createNavigatorLocksLeaderLockStrategy,
   monitorWebLockRelease,
   stealAndReleaseWebLock,
@@ -55,6 +56,23 @@ describe("leader-lock browser integration", () => {
     leaseA!.release();
 
     const leaseAfterRelease = await waitForLease(() => tryAcquireWebLock(lockName), 1000);
+    expect(leaseAfterRelease).not.toBeNull();
+    leaseAfterRelease!.release();
+  });
+
+  it("retries acquisition until a released lock is observable", async () => {
+    const lockName = uniqueLockName("leader-lock-retry");
+    const leaseA = await tryAcquireWebLock(lockName);
+    expect(leaseA).not.toBeNull();
+
+    const retry = acquireWebLockWithRetry(lockName, {
+      timeoutMs: 1_000,
+      retryDelayMs: 20,
+    });
+
+    setTimeout(() => leaseA!.release(), 50);
+
+    const leaseAfterRelease = await retry;
     expect(leaseAfterRelease).not.toBeNull();
     leaseAfterRelease!.release();
   });

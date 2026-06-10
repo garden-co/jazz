@@ -92,7 +92,7 @@ import {
   type BrowserBrokerRole,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
-import { tryAcquireWebLock, type LeaderLockLease } from "./leader-lock.js";
+import { acquireWebLockWithRetry, type LeaderLockLease } from "./leader-lock.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
@@ -1442,7 +1442,7 @@ export class Db {
 
     try {
       const tabLockName = this.brokerTabLockName();
-      const tabLockLease = await tryAcquireWebLock(tabLockName, {
+      const tabLockLease = await acquireWebLockWithRetry(tabLockName, {
         onLost: (reason) => {
           void this.handleBrokerLeaderLockLost(leadershipId, tabLockName, reason);
         },
@@ -1454,7 +1454,7 @@ export class Db {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
 
       const compatibilityLockName = this.brokerCompatibilityLockName();
-      const compatibilityLockLease = await tryAcquireWebLock(compatibilityLockName, {
+      const compatibilityLockLease = await acquireWebLockWithRetry(compatibilityLockName, {
         onLost: (reason) => {
           void this.handleBrokerLeaderLockLost(leadershipId, compatibilityLockName, reason);
         },
