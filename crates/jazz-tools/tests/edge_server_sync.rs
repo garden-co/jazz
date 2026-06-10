@@ -267,6 +267,7 @@ async fn write_through_one_edge_replica_becomes_visible_through_another_edge() {
                 "title".to_string(),
                 Value::Text("global via edge".to_string()),
             )]),
+            None,
         )
         .expect("alice create should succeed");
     tokio::time::timeout(
@@ -326,6 +327,7 @@ async fn edge_tier_write_propagates_from_writer_edge_to_core_and_peer_edge() {
                 "title".to_string(),
                 Value::Text("edge-local then replicated".to_string()),
             )]),
+            None,
         )
         .expect("alice edge-tier create should settle on edge_us");
     alice
@@ -425,6 +427,7 @@ async fn global_tier_write_through_edge_is_visible_at_global_tier_everywhere() {
                 "title".to_string(),
                 Value::Text("edge write with global durability".to_string()),
             )]),
+            None,
         )
         .expect("global-tier create through edge_us should wait for core");
     alice
@@ -518,6 +521,7 @@ async fn core_write_reaches_subscribed_clients_on_both_edges() {
                 "title".to_string(),
                 Value::Text("core write to both edges".to_string()),
             )]),
+            None,
         )
         .expect("core global-tier create");
     carol
@@ -620,6 +624,7 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
                 "title".to_string(),
                 Value::Text("released after catalogue push".to_string()),
             )]),
+            None,
         )
         .expect("alice create should settle globally after catalogue reaches edge_us");
     alice
@@ -697,6 +702,7 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
                 "title".to_string(),
                 Value::Text("fresh edge catalogue pull".to_string()),
             )]),
+            None,
         )
         .expect("fresh edge should write after pulling core catalogue");
     alice
@@ -798,6 +804,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
                 "title".to_string(),
                 Value::Text("catalogue forwarded through core".to_string()),
             )]),
+            None,
         )
         .expect("peer edge should write after receiving forwarded catalogue");
     alice
@@ -917,6 +924,7 @@ async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() 
                 "title".to_string(),
                 Value::Text("catalogue over app-scoped ws upstream".to_string()),
             )]),
+            None,
         )
         .expect("alice writes after catalogue is published through ws-style upstream");
     alice
@@ -1054,6 +1062,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
                     Value::Text("v2 column available before work proceeds".to_string()),
                 ),
             ]),
+            None,
         )
         .expect("v2 write should settle after stale edge receives catalogue replay");
     alice
@@ -1140,6 +1149,7 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge()
                 "title".to_string(),
                 Value::Text("visible before permissions tighten".to_string()),
             )]),
+            None,
         )
         .expect("core write should settle under allow permissions");
     carol
@@ -1260,6 +1270,7 @@ async fn edge_global_query_receives_global_query_settled() {
                 "title".to_string(),
                 Value::Text("global query settlement through edge".to_string()),
             )]),
+            None,
         )
         .expect("bob global-tier create through edge_eu");
     bob.wait_for_batch(batch_id, DurabilityTier::GlobalServer)

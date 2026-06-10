@@ -55,7 +55,7 @@ pub use object::ObjectId;
 #[cfg(feature = "client")]
 pub use query_manager::query::{Query, QueryBuilder};
 #[cfg(feature = "client")]
-pub use query_manager::session::Session;
+pub use query_manager::session::{Session, WriteContext};
 #[cfg(feature = "client")]
 pub use query_manager::types::{
     ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,

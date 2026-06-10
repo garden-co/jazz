@@ -12,6 +12,7 @@ fn insert_folder(
         .insert(
             "folders",
             crate::row_input!("owner_id" => owner_id, "name" => name, "parent_id" => parent_id),
+            None,
         )
         .expect("insert folder")
         .0

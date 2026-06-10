@@ -10,12 +10,14 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
         .insert(
             "folders",
             crate::row_input!("owner_id" => "bob", "name" => "A", "parent_id" => Value::Null),
+            None,
         )
         .expect("insert folder A");
     let (b, _, _) = client
         .insert(
             "folders",
             crate::row_input!("owner_id" => "carol", "name" => "B", "parent_id" => a),
+            None,
         )
         .expect("insert folder B");
 

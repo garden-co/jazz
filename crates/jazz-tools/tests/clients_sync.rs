@@ -71,6 +71,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
                 ("title".to_string(), Value::Text("revision-000".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create deep-history todo");
 
@@ -83,6 +84,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
                     "title".to_string(),
                     Value::Text(format!("revision-{revision:03}")),
                 )],
+                None,
             )
             .expect("update deep-history todo");
     }
@@ -160,6 +162,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create from client a");
 
@@ -178,6 +181,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
         .update(
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
+            None,
         )
         .expect("update from client b");
 
@@ -242,6 +246,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("create row with external id");
 
@@ -294,6 +299,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
                 ("title".to_string(), Value::Text("first-title".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("insert row through upsert");
 
@@ -309,6 +315,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
                 "title".to_string(),
                 Value::Text("updated-title".to_string()),
             )]),
+            None,
         )
         .expect("upsert row with external id");
 
@@ -367,6 +374,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
                 ("title".to_string(), Value::Text("first-title".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("insert row through upsert");
 
@@ -378,6 +386,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
                 "title".to_string(),
                 Value::Text("updated-title".to_string()),
             )]),
+            None,
         )
         .expect("update existing row through upsert");
 
@@ -439,6 +448,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("alice creates todo");
 
@@ -457,6 +467,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
         .update(
             shared_todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
+            None,
         )
         .expect("bob updates alice todo");
 
@@ -485,6 +496,7 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
                 ("title".to_string(), Value::Text("from-bob".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            None,
         )
         .expect("bob creates todo");
 

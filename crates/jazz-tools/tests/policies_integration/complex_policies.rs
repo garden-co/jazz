@@ -345,7 +345,7 @@ fn exists_update_policy_schema() -> Schema {
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .insert("documents", row_input!("title" => title.to_string()))
+        .insert("documents", row_input!("title" => title.to_string()), None)
         .expect("create title document")
         .0
 }
@@ -364,6 +364,7 @@ async fn create_chat(
                 "created_by" => created_by.to_string(),
                 "is_public" => is_public,
             ),
+            None,
         )
         .expect("create chat")
         .0
@@ -374,6 +375,7 @@ async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group
         .insert(
             "document_grants",
             row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
+            None,
         )
         .expect("create document grant");
 }
@@ -383,6 +385,7 @@ async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug:
         .insert(
             "group_memberships",
             row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
+            None,
         )
         .expect("create group membership");
 }
@@ -448,6 +451,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
         .insert(
             "document_shares",
             row_input!("document_id" => doc_id, "user_id" => "bob"),
+            None,
         )
         .expect("create document share")
         .0;
@@ -469,7 +473,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     assert_eq!(bob_rows.len(), 1);
 
     admin
-        .update(share_id, row_changes([("user_id", "dave".into())]))
+        .update(share_id, row_changes([("user_id", "dave".into())]), None)
         .expect("update document share user");
     wait_for_subscription_update(
         &mut bob_stream,
@@ -488,7 +492,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     )
     .await;
 
-    admin.delete(share_id).expect("delete share row");
+    admin.delete(share_id, None).expect("delete share row");
     wait_for_subscription_update(
         &mut dave_stream,
         &mut dave_log,
@@ -654,6 +658,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
             .insert(
                 "folders",
                 row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
+                None,
             )
             .expect("create folder")
             .0
@@ -675,6 +680,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
                     "title" => title.to_string(),
                     "folder_id" => folder_id,
                 ),
+                None,
             )
             .expect("create complex document")
             .0
@@ -685,6 +691,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
             .insert(
                 "document_flags",
                 row_input!("document_id" => document_id, "flag" => flag.to_string()),
+                None,
             )
             .expect("create document flag");
     }
@@ -839,7 +846,11 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     .await;
 
     let batch_id = alice
-        .update(chat_id, row_changes([("name", "Project Room".into())]))
+        .update(
+            chat_id,
+            row_changes([("name", "Project Room".into())]),
+            None,
+        )
         .expect("chat name update should satisfy same-table EXISTS with_check");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -860,7 +871,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
-    let batch_id = alice.update(chat_id, row_changes([("is_public", true.into())]));
+    let batch_id = alice.update(chat_id, row_changes([("is_public", true.into())]), None);
     let protected_update = match batch_id {
         Ok(batch_id) => {
             alice
@@ -936,6 +947,7 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
         .insert(
             "document_editors",
             row_input!("document_id" => doc_id, "user_id" => "alice"),
+            None,
         )
         .expect("create document editor");
     wait_for_subscription_update(
@@ -959,7 +971,7 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     )
     .await;
 
-    bob.update(doc_id, row_changes([("title", "Hacked".into())]))
+    bob.update(doc_id, row_changes([("title", "Hacked".into())]), None)
         .expect("optimistic local exists update");
 
     let rows_after_update = observer

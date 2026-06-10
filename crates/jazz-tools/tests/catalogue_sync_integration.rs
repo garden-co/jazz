@@ -414,6 +414,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
         .insert(
             "users",
             user_values_v1(user_id_value, "visible after permissions"),
+            None,
         )
         .expect("admin creates user after permissions publish");
     admin
@@ -470,6 +471,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
             "users",
             *queued_row_id.uuid(),
             user_values_v1(queued_user_id, "queued before permissions"),
+            None,
         )
         .expect("pre-permissions create should stage locally");
     let queued_write_error = writer
@@ -522,6 +524,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         .insert(
             "users",
             user_values_v1(accepted_user_id, "accepted after permissions"),
+            None,
         )
         .expect("post-publish create should succeed");
     writer
@@ -560,6 +563,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
                 "name".to_string(),
                 Value::Text("updated after permissions".to_string()),
             )],
+            None,
         )
         .expect("update should succeed once permissions exist");
     writer
@@ -588,7 +592,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
     assert_eq!(rows_after_update.len(), 1);
 
     let batch_id = writer
-        .delete(accepted_row_id)
+        .delete(accepted_row_id, None)
         .expect("delete should succeed once permissions exist");
     writer
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -636,6 +640,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .insert(
             "users",
             user_values_v1(denied_user_id, "timed out before permissions"),
+            None,
         )
         .expect("optimistic local create before timeout");
 
@@ -664,6 +669,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .insert(
             "users",
             user_values_v1(allowed_user_id, "accepted after timeout window"),
+            None,
         )
         .expect("create should succeed after permissions publish");
     writer
@@ -751,6 +757,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         .insert(
             "users",
             user_values_v1(user_id_value, "subscription target"),
+            None,
         )
         .expect("admin creates user after permissions publish");
     admin
@@ -851,7 +858,7 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
 
     let user_id_value = jazz_tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = alice
-        .insert("users", user_values_v1(user_id_value, "Alice Smith"))
+        .insert("users", user_values_v1(user_id_value, "Alice Smith"), None)
         .expect("alice creates user after permissions publish");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -951,6 +958,7 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
         .insert(
             "users",
             user_values_v2(user_id_value, "Bob Backward", user_email),
+            None,
         )
         .expect("bob creates user");
 
@@ -1039,7 +1047,11 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
 
     let user_id_value = jazz_tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = alice
-        .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
+        .insert(
+            "users",
+            user_values_v1(user_id_value, "Alice Through Lens"),
+            None,
+        )
         .expect("alice creates user after v1 permissions publish");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
