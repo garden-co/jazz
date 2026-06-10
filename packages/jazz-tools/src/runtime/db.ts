@@ -827,6 +827,8 @@ export class Db {
   private resolveFollowerReady: (() => void) | null = null;
   private rejectFollowerReady: ((error: Error) => void) | null = null;
   private followerReadyResolved = false;
+  private followerPortReadyLeadershipId: number | null = null;
+  private followerLeaderReadyLeadershipId: number | null = null;
   private durablePathError: Error | null = null;
   private brokerSchemaFingerprint: string | null = null;
   private brokerResetSchema: WasmSchema | null = null;
@@ -1644,20 +1646,27 @@ export class Db {
     }
 
     this.markDurablePathPending();
-    this.closeFollowerPortState(undefined, { preserveOutbox: true });
+    const preserveLeaderReadySignal = this.followerLeaderReadyLeadershipId === leadershipId;
+    this.closeFollowerPortState(undefined, {
+      preserveOutbox: true,
+      preserveLeaderReadySignal,
+    });
     this.tabRole = "follower";
     this.currentLeaderTabId = leaderTabId;
     this.currentLeadershipId = leadershipId;
     this.followerDataPort = port;
     this.ensureDurablePathReadyPromise();
     this.attachFollowerPortBridgeForExistingClient();
+    this.resolveFollowerDurablePathIfReady();
   }
 
   private handleBrokerFollowerReady(leaderTabId: string, leadershipId: number): void {
     if (this.tabRole !== "follower") return;
-    if (leadershipId !== this.currentLeadershipId) return;
+    if (isStaleLeadershipId(leadershipId, this.currentLeadershipId)) return;
     this.currentLeaderTabId = leaderTabId;
-    this.resolveDurablePathReady();
+    this.currentLeadershipId = leadershipId;
+    this.followerLeaderReadyLeadershipId = leadershipId;
+    this.resolveFollowerDurablePathIfReady();
   }
 
   private handleBrokerCloseFollowerPort(leadershipId: number): void {
@@ -1730,6 +1739,16 @@ export class Db {
     });
     this.followerPortBridge = bridge;
     this.followerDataPort = null;
+    this.followerPortReadyLeadershipId = this.currentLeadershipId;
+    this.resolveFollowerDurablePathIfReady();
+  }
+
+  private resolveFollowerDurablePathIfReady(): void {
+    if (this.tabRole !== "follower") return;
+    if (this.currentLeadershipId <= 0) return;
+    if (this.followerPortReadyLeadershipId !== this.currentLeadershipId) return;
+    if (this.followerLeaderReadyLeadershipId !== this.currentLeadershipId) return;
+    this.resolveDurablePathReady();
   }
 
   // Schema-blocked is non-terminal: queries fail fast with the reason, but the
@@ -1784,13 +1803,20 @@ export class Db {
     this.clientSchemas.set(schemaJson, schema);
   }
 
-  private closeFollowerPortState(error?: Error, options: { preserveOutbox?: boolean } = {}): void {
+  private closeFollowerPortState(
+    error?: Error,
+    options: { preserveOutbox?: boolean; preserveLeaderReadySignal?: boolean } = {},
+  ): void {
     if (options.preserveOutbox) {
       this.followerPortBridge?.detachForReconnect();
     } else {
       this.followerPortBridge?.shutdown();
     }
     this.followerPortBridge = null;
+    this.followerPortReadyLeadershipId = null;
+    if (!options.preserveLeaderReadySignal) {
+      this.followerLeaderReadyLeadershipId = null;
+    }
     this.followerDataPort?.close();
     this.followerDataPort = null;
 
@@ -2529,23 +2555,44 @@ export class Db {
 
     const queryOptions = ordinaryDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
-    const subId = client.subscribe(
-      wasmQuery,
-      handleDelta,
-      queryOptions,
-      context?.session ?? session,
-      runtimeSchema.peek(),
-    );
-    const traceId = this.registerActiveQuerySubscriptionTrace(
-      wasmQuery,
-      builtQuery.table,
-      queryOptions,
-    );
+    let unsubscribed = false;
+    let subId: number | null = null;
+    let traceId: string | null = null;
+
+    const startSubscription = () => {
+      if (unsubscribed) return;
+      subId = client.subscribe(
+        wasmQuery,
+        handleDelta,
+        queryOptions,
+        context?.session ?? session,
+        runtimeSchema.peek(),
+      );
+      traceId = this.registerActiveQuerySubscriptionTrace(
+        wasmQuery,
+        builtQuery.table,
+        queryOptions,
+      );
+    };
+
+    if (this.brokerClient && this.tabRole === "follower") {
+      void this.ensureQueryReady(queryOptions)
+        .then(startSubscription)
+        .catch((error) => {
+          if (unsubscribed) return;
+          console.error("Failed to start Jazz subscription", error);
+        });
+    } else {
+      startSubscription();
+    }
 
     // Return unsubscribe function
     return () => {
+      unsubscribed = true;
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      client.unsubscribe(subId);
+      if (subId !== null) {
+        client.unsubscribe(subId);
+      }
       manager.clear();
     };
   }
