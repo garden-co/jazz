@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "client")]
+use crate::Schema;
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
@@ -408,6 +410,45 @@ impl JazzClient {
         storage_result?;
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "client")]
+impl JazzClient {
+    pub async fn test_client(schema: Schema) -> crate::JazzClient {
+        let context = crate::AppContext {
+            app_id: crate::AppId::random(),
+            client_id: None,
+            schema,
+            server_url: String::new(),
+            data_dir: std::env::temp_dir(),
+            storage: crate::ClientStorage::Memory,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+            sync_tracer: None,
+        };
+        crate::JazzClient::connect(context)
+            .await
+            .expect("connect local JazzClient")
+    }
+}
+
+#[cfg(test)]
+impl Drop for JazzClient {
+    /// This is a simplified and synchronous implementation of `JazzClient.shutdown`
+    /// that is good-enough for tests (so that we don't require an explicit
+    /// `JazzClient.shutdown` at the end of each test case)
+    fn drop(&mut self) {
+        if self.has_server {
+            self.runtime.disconnect();
+        }
+
+        let _ = self.runtime.with_storage(|storage| {
+            let _ = storage.flush();
+            let _ = storage.flush_wal();
+            let _ = storage.close();
+        });
     }
 }
 

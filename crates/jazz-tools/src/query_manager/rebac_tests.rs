@@ -754,4 +754,5 @@ mod insert_policies;
 mod magic_provenance;
 mod mutations;
 mod recursive_inheritance;
+#[cfg(feature = "client")]
 mod select_policies;
