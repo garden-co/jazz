@@ -61,20 +61,6 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
     let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
 }
 
-fn local_batch_record_needs_fate_reconciliation(
-    record: &LocalBatchRecord,
-    terminal_tier: DurabilityTier,
-) -> bool {
-    match record.latest_fate.as_ref() {
-        None => true,
-        Some(BatchFate::DurableDirect { confirmed_tier, .. })
-        | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
-            *confirmed_tier < terminal_tier
-        }
-        Some(BatchFate::Missing { .. } | BatchFate::Rejected { .. }) => false,
-    }
-}
-
 // =============================================================================
 // Public bridge
 // =============================================================================
@@ -622,7 +608,7 @@ impl BridgeInner {
         } else {
             DurabilityTier::Local
         };
-        let should_reconcile = local_batch_record_needs_fate_reconciliation(&record, terminal_tier);
+        let should_reconcile = record.needs_fate_reconciliation_at(terminal_tier);
         let batch_id = record.batch_id;
         let mut core = self.runtime.core.borrow_mut();
         if let Some(BatchFate::Rejected { code, reason, .. }) = record.latest_fate.clone() {
