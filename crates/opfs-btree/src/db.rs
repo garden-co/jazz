@@ -124,6 +124,38 @@ pub struct RawEntryBatch {
     pub done: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawPageKind {
+    SuperblockA,
+    SuperblockB,
+    Internal,
+    Leaf,
+    Overflow,
+    Freelist,
+    Corrupt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPageSummary {
+    pub page_id: u64,
+    pub kind: RawPageKind,
+    pub byte_offset: u64,
+    pub byte_len: usize,
+    pub item_count: usize,
+    pub next_page_id: Option<u64>,
+    pub is_root: bool,
+    pub is_free: bool,
+    pub is_active: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawPageBatch {
+    pub pages: Vec<RawPageSummary>,
+    pub next_page_id: Option<u64>,
+    pub done: bool,
+}
+
 enum StagedValue {
     Inline(Vec<u8>),
     Overflow {
@@ -464,6 +496,100 @@ impl<F: SyncFile> OpfsBTree<F> {
             next_cursor: None,
             done: true,
         })
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.options.page_size
+    }
+
+    pub fn total_pages(&self) -> u64 {
+        self.total_pages
+    }
+
+    pub fn raw_page_summaries_batch(
+        &mut self,
+        start_page_id: u64,
+        limit: usize,
+    ) -> Result<RawPageBatch, BTreeError> {
+        let _span =
+            tracing::trace_span!("OpfsBTree::raw_page_summaries_batch", start_page_id, limit)
+                .entered();
+
+        if limit == 0 {
+            return Ok(RawPageBatch {
+                pages: Vec::new(),
+                next_page_id: (start_page_id < self.total_pages).then_some(start_page_id),
+                done: start_page_id >= self.total_pages,
+            });
+        }
+
+        let mut pages = Vec::new();
+        let mut page_id = start_page_id;
+        while page_id < self.total_pages && pages.len() < limit {
+            pages.push(self.raw_page_summary(page_id));
+            page_id += 1;
+        }
+
+        Ok(RawPageBatch {
+            pages,
+            next_page_id: (page_id < self.total_pages).then_some(page_id),
+            done: page_id >= self.total_pages,
+        })
+    }
+
+    fn raw_page_summary(&mut self, page_id: u64) -> RawPageSummary {
+        let byte_offset = page_id.saturating_mul(self.options.page_size as u64);
+        let superblock_kind = match page_id {
+            0 => Some(RawPageKind::SuperblockA),
+            1 => Some(RawPageKind::SuperblockB),
+            _ => None,
+        };
+
+        if let Some(kind) = superblock_kind {
+            return RawPageSummary {
+                page_id,
+                kind,
+                byte_offset,
+                byte_len: self.options.page_size,
+                item_count: 0,
+                next_page_id: None,
+                is_root: false,
+                is_free: false,
+                is_active: matches!(
+                    (kind, self.active_slot),
+                    (RawPageKind::SuperblockA, SuperblockSlot::A)
+                        | (RawPageKind::SuperblockB, SuperblockSlot::B)
+                ),
+                error: None,
+            };
+        }
+
+        let decoded = (|| {
+            self.ensure_page_loaded(page_id)?;
+            let raw = self.raw_page_bytes(page_id)?;
+            decode_page(raw, self.options.page_size)
+        })();
+
+        let (kind, item_count, next_page_id, error) = match decoded {
+            Ok(Page::Internal { keys, .. }) => (RawPageKind::Internal, keys.len(), None, None),
+            Ok(Page::Leaf { entries, next }) => (RawPageKind::Leaf, entries.len(), next, None),
+            Ok(Page::Overflow { data, next }) => (RawPageKind::Overflow, data.len(), next, None),
+            Ok(Page::Freelist { ids, next }) => (RawPageKind::Freelist, ids.len(), next, None),
+            Err(err) => (RawPageKind::Corrupt, 0, None, Some(err.to_string())),
+        };
+
+        RawPageSummary {
+            page_id,
+            kind,
+            byte_offset,
+            byte_len: self.options.page_size,
+            item_count,
+            next_page_id,
+            is_root: self.root_page_id == Some(page_id),
+            is_free: self.free_set.contains(&page_id),
+            is_active: false,
+            error,
+        }
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
@@ -2161,6 +2287,33 @@ mod tests {
             .chain(third.entries)
             .collect();
         assert_eq!(combined, tree.raw_entries(usize::MAX).expect("raw entries"));
+    }
+
+    #[test]
+    fn raw_page_summaries_include_superblocks_and_tree_pages() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        tree.put(b"a", b"alpha").expect("put alpha");
+        tree.checkpoint().expect("checkpoint");
+
+        let batch = tree
+            .raw_page_summaries_batch(0, 16)
+            .expect("page summaries");
+        assert!(batch.done);
+        assert_eq!(batch.pages[0].kind, RawPageKind::SuperblockA);
+        assert_eq!(batch.pages[1].kind, RawPageKind::SuperblockB);
+        assert_eq!(batch.pages.iter().filter(|page| page.is_active).count(), 1);
+
+        let root_page_id = tree.checkpoint_state().root_page_id;
+        let root = batch
+            .pages
+            .iter()
+            .find(|page| page.page_id == root_page_id)
+            .expect("root page summary");
+        assert_eq!(root.kind, RawPageKind::Leaf);
+        assert_eq!(root.item_count, 1);
+        assert!(root.is_root);
     }
 
     #[test]

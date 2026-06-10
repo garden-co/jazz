@@ -31,20 +31,6 @@ declare module "jazz-wasm" {
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): WasmTraceEntry[];
   export function subscribeTraceEntries(callback: () => void): () => void;
-  export interface OpfsBTreeRawEntry {
-    key: string;
-    keyBytes: Uint8Array;
-    value: Uint8Array;
-  }
-  export interface OpfsBTreeRawEntryBatch {
-    entries: OpfsBTreeRawEntry[];
-    done: boolean;
-  }
-  export function scanOpfsBTreeEntriesFromFileBytes(fileBytes: Uint8Array): OpfsBTreeRawEntry[];
-  export class OpfsBTreeEntryScanner {
-    constructor(fileBytes: Uint8Array);
-    nextBatch(limit: number): OpfsBTreeRawEntryBatch;
-  }
   /**
    * Worker-side entry point. Called by the JS shim after WASM init.
    * Synchronously installs a Rust closure as `self.onmessage`, then opens

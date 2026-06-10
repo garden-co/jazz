@@ -1,6 +1,6 @@
 # OPFS B-tree Viewer
 
-Open a `.jazz-opfs-bundle` file to inspect raw `opfs-btree` key/value entries.
+Open a `.jazz-opfs-bundle` file to inspect raw `opfs-btree` key/value entries and physical pages.
 
 ## Export From A Browser App
 

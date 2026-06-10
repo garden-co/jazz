@@ -227,6 +227,11 @@ button {
   overflow: hidden;
 }
 
+.segmented.tabs {
+  grid-template-columns: repeat(2, 1fr);
+  min-width: 160px;
+}
+
 .segmented button {
   min-height: 34px;
   border: 0;
@@ -265,12 +270,14 @@ button {
   color: #7b2f22;
 }
 
-.entry-table {
+.entry-table,
+.page-table {
   display: grid;
   overflow-x: auto;
 }
 
-.entry-row {
+.entry-row,
+.page-row {
   display: grid;
   grid-template-columns: minmax(220px, 1.4fr) 100px 110px minmax(260px, 2fr) 112px;
   gap: 12px;
@@ -279,6 +286,10 @@ button {
   min-height: 48px;
   padding: 10px 16px;
   border-bottom: 1px solid #edf0ea;
+}
+
+.page-row {
+  grid-template-columns: 72px 130px 90px 90px 130px minmax(320px, 1fr);
 }
 
 .entry-heading {
@@ -291,7 +302,8 @@ button {
   text-transform: uppercase;
 }
 
-.entry-row code {
+.entry-row code,
+.page-row code {
   min-width: 0;
   overflow-wrap: anywhere;
   color: #142c27;
