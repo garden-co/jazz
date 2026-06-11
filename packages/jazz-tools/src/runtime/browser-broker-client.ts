@@ -274,6 +274,7 @@ export class BrowserBrokerClient {
 
     try {
       await hello;
+      await this.waitForInitialLeadershipMessage(port);
       this.refreshBrokerLivenessTimer();
       this.flushQueuedMessages();
     } catch (error) {
@@ -286,6 +287,26 @@ export class BrowserBrokerClient {
       }
       throw error;
     }
+  }
+
+  private async waitForInitialLeadershipMessage(port: MessagePort): Promise<void> {
+    if (this.leadershipId > 0 || this.closed || this.port !== port) return;
+
+    await new Promise<void>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout>;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        port.removeEventListener("message", onMessage);
+        resolve();
+      };
+      const onMessage = () => {
+        if (this.leadershipId > 0 || this.closed || this.port !== port) {
+          cleanup();
+        }
+      };
+      timeout = setTimeout(cleanup, 100);
+      port.addEventListener("message", onMessage);
+    });
   }
 
   private createSharedWorker(): SharedWorker {
@@ -315,7 +336,6 @@ export class BrowserBrokerClient {
     switch (message.type) {
       case "broker-hello":
         this.brokerInstanceId = message.brokerInstanceId;
-        this.refreshBrokerLivenessTimer();
         return;
       case "broker-ping":
         this.refreshBrokerLivenessTimer();
