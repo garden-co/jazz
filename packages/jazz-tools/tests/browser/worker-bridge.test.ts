@@ -2510,52 +2510,44 @@ describe("Worker Bridge with OPFS", () => {
   it("fans out an auth failure to follower tabs", async () => {
     const { appId, serverUrl } = await getTestingServerInfo(uniqueDbName("auth-fanout"));
     const dbName = uniqueDbName("auth-fanout");
+    const validJwt = await getTestingServerJwtForUser("auth-fanout-user", undefined, appId);
     const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
 
-    // Keep the upstream unreachable during setup so the leader's rejected
-    // handshake cannot fire before the follower's data-port bridge (the
-    // fan-out target) is attached.
-    await blockTestingServerNetwork(serverUrl);
-    let leader: Db;
-    let follower: Db;
-    try {
-      const dbA = track(
-        await createDb({
-          appId,
-          serverUrl,
-          jwtToken: invalidJwt,
-          driver: { type: "persistent", dbName },
-        }),
-      );
-      const dbB = track(
-        await createDb({
-          appId,
-          serverUrl,
-          jwtToken: invalidJwt,
-          driver: { type: "persistent", dbName },
-        }),
-      );
-      ({ leader, follower } = await waitForLeaderAndFollower(dbA, dbB));
+    const dbA = track(
+      await createDb({
+        appId,
+        serverUrl,
+        jwtToken: validJwt,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    const dbB = track(
+      await createDb({
+        appId,
+        serverUrl,
+        jwtToken: validJwt,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
-      leader.insert(todos, { title: "leader-init", done: false });
-      await withTimeout(
-        leader.all(allTodos, { tier: "local" }),
-        15000,
-        "Leader bridge init did not complete",
-      );
-      follower.insert(todos, { title: "follower-init", done: false });
-      await withTimeout(
-        follower.all(allTodos, { tier: "local" }),
-        15000,
-        "Follower data-port bridge init did not complete",
-      );
+    leader.insert(todos, { title: "leader-init", done: false });
+    await withTimeout(
+      leader.all(allTodos, { tier: "local" }),
+      15000,
+      "Leader bridge init did not complete",
+    );
+    follower.insert(todos, { title: "follower-init", done: false });
+    await withTimeout(
+      follower.all(allTodos, { tier: "local" }),
+      15000,
+      "Follower data-port bridge init did not complete",
+    );
 
-      expect(leader.getAuthState().error).toBeUndefined();
-      expect(follower.getAuthState().error).toBeUndefined();
-    } finally {
-      await unblockTestingServerNetwork(serverUrl);
-    }
+    expect(leader.getAuthState().error).toBeUndefined();
+    expect(follower.getAuthState().error).toBeUndefined();
 
+    leader.updateAuthToken(invalidJwt);
     (
       leader as unknown as {
         workerBridge?: { replayServerConnection?: () => void };
