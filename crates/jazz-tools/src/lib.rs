@@ -105,6 +105,24 @@ pub struct AppContext {
     pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
 }
 
+#[cfg(test)]
+impl AppContext {
+    pub fn test(schema: Schema) -> AppContext {
+        AppContext {
+            app_id: crate::AppId::random(),
+            client_id: None,
+            schema,
+            server_url: String::new(),
+            data_dir: std::env::temp_dir(),
+            storage: crate::ClientStorage::Memory,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+            sync_tracer: None,
+        }
+    }
+}
+
 /// Local storage backend for a client application.
 #[cfg(feature = "client")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

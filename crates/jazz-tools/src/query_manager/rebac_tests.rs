@@ -20,8 +20,7 @@ use crate::sync_manager::{
     SyncPayload,
 };
 use crate::test_support::{
-    apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    seeded_memory_storage,
+    apply_test_row_batch, create_test_row, load_test_row_tip_ids, seeded_memory_storage,
 };
 
 use crate::query_manager::encoding::encode_row;
@@ -217,10 +216,6 @@ fn add_row_commit(
     let batch_id = row.batch_id();
     apply_test_row_batch(storage, object_id, branch, row).unwrap();
     batch_id
-}
-
-fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> Option<HashMap<String, String>> {
-    load_test_row_metadata(storage, row_id)
 }
 
 fn test_row_tip_ids(

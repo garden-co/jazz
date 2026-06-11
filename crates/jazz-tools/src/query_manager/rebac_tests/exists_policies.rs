@@ -1,12 +1,82 @@
 #[cfg(feature = "client")]
+use std::time::Duration;
+
+#[cfg(feature = "client")]
 use crate::JazzClient;
+#[cfg(feature = "test-utils")]
+use crate::server::TestingServer;
+#[cfg(feature = "client")]
+use crate::sync_manager::DurabilityTier;
+#[cfg(feature = "client")]
+use crate::test_support::wait_for_query;
 
 use super::*;
 
-#[test]
-fn rebac_exists_clause_denies_non_matching_insert() {
-    // Schema with EXISTS policy: only admins can insert
+#[cfg(feature = "client")]
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "client")]
+async fn wait_for_protected_row(
+    client: &JazzClient,
+    protected_id: ObjectId,
+    expected_data: &str,
+    description: &str,
+) {
+    wait_for_query(
+        client,
+        QueryBuilder::new("protected")
+            .filter_eq("id", Value::Uuid(protected_id))
+            .select(&["data"])
+            .build(),
+        Some(DurabilityTier::EdgeServer),
+        WAIT_TIMEOUT,
+        description,
+        |rows| (rows == [(protected_id, vec![Value::Text(expected_data.into())])]).then_some(()),
+    )
+    .await;
+}
+
+#[cfg(feature = "client")]
+async fn wait_for_protected_row_absent(
+    client: &JazzClient,
+    protected_id: ObjectId,
+    description: &str,
+) {
+    wait_for_query(
+        client,
+        QueryBuilder::new("protected")
+            .filter_eq("id", Value::Uuid(protected_id))
+            .select(&["data"])
+            .build(),
+        Some(DurabilityTier::EdgeServer),
+        WAIT_TIMEOUT,
+        description,
+        |rows| rows.is_empty().then_some(()),
+    )
+    .await;
+}
+
+#[cfg(feature = "client")]
+async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &str) {
+    wait_for_query(
+        client,
+        QueryBuilder::new("admins")
+            .filter_eq("id", Value::Uuid(admin_id))
+            .select(&["user_id"])
+            .build(),
+        Some(DurabilityTier::EdgeServer),
+        WAIT_TIMEOUT,
+        format!("{user_id} admin row becomes visible"),
+        |rows| (rows == [(admin_id, vec![Value::Text(user_id.into())])]).then_some(()),
+    )
+    .await;
+}
+
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn rebac_exists_clause_denies_non_matching_insert() {
     let protected_policies = permissions(|p| {
+        p.allow_read().always();
         p.allow_insert().where_(pe::exists(
             pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
         ));
@@ -24,266 +94,147 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let bob = JazzClient::connect_with_row_policy_mode(
+        server.make_client_context_for_user(schema.clone(), "bob"),
+        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+    )
+    .await
+    .expect("connect bob");
+    let alice = JazzClient::connect(server.make_client_context_for_user(schema, "alice"))
+        .await
+        .expect("connect alice");
 
-    // Add a client with session for non-admin user
-    let client_id = ClientId::new();
-    connect_client(&mut qm, &storage, client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("regular_user"));
-
-    // Note: We do NOT add "regular_user" to admins table
-
-    // Create object for protected row
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "protected".to_string());
-    let obj_id = create_test_row(&mut storage, Some(metadata.clone()));
-
-    // Register query scope
-    let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
-    set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    // Encode row content
-    let protected_desc = RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
-    let content = encode_row(&protected_desc, &[Value::Text("secret data".into())]).unwrap();
-
-    // Non-admin tries to insert
-    let commit = stored_row_commit(
-        smallvec![],
-        content,
-        1000,
-        ObjectId::new().to_string(),
-        None,
-    );
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: row_batch_created_payload(
-            obj_id,
-            "main",
-            Some(RowMetadata {
-                id: obj_id,
-                metadata,
-            }),
-            &commit,
-        ),
-    });
-
-    // Process
-    qm.process(&mut storage);
-
-    // Should get permission denied (non-admin cannot insert)
-    let outbox = qm.sync_manager_mut().take_outbox();
+    let (protected_id, _, batch_id) = bob
+        .insert(
+            "protected",
+            crate::row_input!("data" => "secret data"),
+            None,
+        )
+        .expect("permissive non-admin insert should succeed locally");
+    let rejected = bob
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await;
     assert!(
-        client_write_was_rejected(
-            &outbox,
-            client_id,
-            row_batch_id_for_commit(obj_id, "main", &commit),
-        ),
-        "Non-admin insert should be denied by EXISTS policy"
+        rejected.is_err(),
+        "non-admin insert should be rejected by EXISTS policy on sync"
     );
+    wait_for_protected_row_absent(
+        &alice,
+        protected_id,
+        "alice never sees bob's rejected protected insert",
+    )
+    .await;
 
-    // Commit should NOT be applied to the branch.
-    assert!(
-        test_row_metadata(&storage, obj_id).is_some(),
-        "Object should still exist after denied insert"
-    );
-    let tips = test_row_tip_ids(&storage, obj_id, "main");
-    assert!(
-        tips.is_err(),
-        "Denied insert should not create tips on branch main"
-    );
+    server.shutdown().await;
 }
 
-#[test]
-fn rebac_update_denied_by_using_exists_policy() {
-    // Schema with EXISTS policy: only admins can update
-    let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
-    let protected_descriptor = protected_table.clone().build().columns;
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn rebac_update_denied_by_using_exists_policy() {
     let protected_policies = permissions(|p| {
-        // USING: EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
+        p.allow_read().always();
+        p.allow_insert().always();
         p.allow_update()
             .where_old(pe::exists(
                 pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
             ))
-            // WITH CHECK: no restriction on new row
             .where_new(pe::always());
     });
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(permissions(|p| p.allow_read().always())),
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                    p.allow_insert()
+                        .where_(pe::eq("user_id", pe::session("user_id")));
+                })),
         )
-        .table(protected_table.policies(protected_policies))
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let alice = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
+        .await
+        .expect("connect alice");
+    let bob = JazzClient::connect_with_row_policy_mode(
+        server.make_client_context_for_user(schema.clone(), "bob"),
+        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+    )
+    .await
+    .expect("connect permissive bob");
 
-    // Add Alice as admin (using insert to properly index the row)
-    let _alice_admin = qm
-        .insert(&mut storage, "admins", &[Value::Text("alice".into())])
-        .unwrap();
-
-    // Create a protected row (as server, no session) - also using insert for proper indexing
-    let protected_handle = qm
+    let (admin_id, _, _) = alice
+        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .expect("seed alice admin row");
+    let (protected_id, _, _) = alice
         .insert(
-            &mut storage,
             "protected",
-            &[Value::Text("original data".into())],
+            crate::row_input!("data" => "original data"),
+            None,
         )
-        .unwrap();
-    let protected_obj = protected_handle.row_id;
-    let initial_commit = protected_handle.batch_id;
+        .expect("seed protected row");
 
-    // Get object metadata for later use in update payloads
-    let protected_metadata = test_row_metadata(&storage, protected_obj).unwrap_or_default();
-
-    // ---- Bob (non-admin) tries to update ----
-    let branch = get_branch(&qm);
-    let bob_client = ClientId::new();
-    connect_client(&mut qm, &storage, bob_client);
-    qm.sync_manager_mut()
-        .set_client_session(bob_client, Session::new("bob"));
-
-    // Register query scope for Bob
-    let mut bob_scope = HashSet::new();
-    bob_scope.insert((protected_obj, branch.clone().into()));
-    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), bob_scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    // Bob tries to update the protected row
-    let bob_update_content = encode_row(
-        &protected_descriptor,
-        &[Value::Text("hacked by bob".into())],
+    wait_for_admin_row(&bob, admin_id, "alice").await;
+    wait_for_protected_row(
+        &bob,
+        protected_id,
+        "original data",
+        "bob sees the protected row before attempting the permissive update",
     )
-    .unwrap();
-    let bob_commit = stored_row_commit(
-        smallvec![initial_commit],
-        bob_update_content,
-        2000,
-        ObjectId::new().to_string(),
-        None,
-    );
+    .await;
 
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(bob_client),
-        payload: row_batch_created_payload(
-            protected_obj,
-            &branch,
-            Some(RowMetadata {
-                id: protected_obj,
-                metadata: protected_metadata.clone(),
-            }),
-            &bob_commit,
-        ),
-    });
-
-    // Process - may need multiple iterations for EXISTS to settle
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    // Bob should get permission denied
-    let outbox = qm.sync_manager_mut().take_outbox();
+    let bob_batch_id = bob
+        .update(
+            protected_id,
+            vec![("data".into(), Value::Text("hacked by bob".into()))],
+            None,
+        )
+        .expect("permissive non-admin update should succeed locally");
+    let rejected = bob
+        .wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
+        .await;
     assert!(
-        client_write_was_rejected(
-            &outbox,
-            bob_client,
-            row_batch_id_for_commit(protected_obj, &branch, &bob_commit),
-        ),
-        "Bob's update should be denied by EXISTS in USING policy"
+        rejected.is_err(),
+        "bob's update should be rejected by EXISTS in USING policy on sync"
     );
 
-    // Bob's update should NOT be applied
-    let tips = test_row_tip_ids(&storage, protected_obj, &branch).unwrap();
-    assert!(
-        !tips.contains(&row_batch_id_for_commit(
-            protected_obj,
-            &branch,
-            &bob_commit,
-        )),
-        "Bob's update should not be applied - he is not an admin"
-    );
-
-    // ---- Alice (admin) tries to update ----
-    let alice_client = ClientId::new();
-    connect_client(&mut qm, &storage, alice_client);
-    qm.sync_manager_mut()
-        .set_client_session(alice_client, Session::new("alice"));
-
-    // Register query scope for Alice
-    let mut alice_scope = HashSet::new();
-    alice_scope.insert((protected_obj, branch.clone().into()));
-    set_client_query_scope(
-        &mut qm,
-        &storage,
-        alice_client,
-        QueryId(2),
-        alice_scope,
-        None,
-    );
-    qm.sync_manager_mut().take_outbox();
-
-    // Alice tries to update the protected row
-    let alice_update_content = encode_row(
-        &protected_descriptor,
-        &[Value::Text("updated by admin alice".into())],
+    wait_for_protected_row(
+        &alice,
+        protected_id,
+        "original data",
+        "alice still sees original data after bob's rejected update",
     )
-    .unwrap();
-    let alice_commit = stored_row_commit(
-        smallvec![initial_commit],
-        alice_update_content,
-        3000,
-        ObjectId::new().to_string(),
-        None,
-    );
+    .await;
+    wait_for_protected_row(
+        &bob,
+        protected_id,
+        "original data",
+        "bob sees original data again after his rejected update",
+    )
+    .await;
 
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(alice_client),
-        payload: row_batch_created_payload(
-            protected_obj,
-            &branch,
-            Some(RowMetadata {
-                id: protected_obj,
-                metadata: protected_metadata.clone(),
-            }),
-            &alice_commit,
-        ),
-    });
+    alice
+        .update(
+            protected_id,
+            vec![("data".into(), Value::Text("updated by admin alice".into()))],
+            None,
+        )
+        .expect("admin update should be allowed locally");
+    wait_for_protected_row(
+        &bob,
+        protected_id,
+        "updated by admin alice",
+        "bob sees alice's accepted admin update",
+    )
+    .await;
 
-    // Process - may need multiple iterations for EXISTS to settle
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    // Alice should NOT get permission denied
-    let outbox = qm.sync_manager_mut().take_outbox();
-    assert!(
-        !client_write_was_rejected(
-            &outbox,
-            alice_client,
-            row_batch_id_for_commit(protected_obj, &branch, &alice_commit),
-        ),
-        "Alice's update should be allowed by EXISTS in USING policy (she is an admin)"
-    );
-
-    // Alice's update SHOULD be applied
-    let tips = test_row_tip_ids(&storage, protected_obj, &branch).unwrap();
-    assert!(
-        tips.contains(&row_batch_id_for_commit(
-            protected_obj,
-            &branch,
-            &alice_commit,
-        )),
-        "Alice's update should be applied - she is an admin"
-    );
+    server.shutdown().await;
 }
 
 #[cfg(feature = "client")]
