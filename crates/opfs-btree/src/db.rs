@@ -2440,6 +2440,69 @@ mod tests {
     }
 
     #[test]
+    fn range_handles_gap_and_boundary_starts() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
+        for i in 0..600u32 {
+            tree.put(
+                format!("k{:04}", i).as_bytes(),
+                format!("v-{}", i).as_bytes(),
+            )
+            .expect("put");
+        }
+        // "k0042~" sorts after "k0042" and before "k0043", so this sweeps a
+        // start through every inter-key gap, including gaps between leaves.
+        for i in 0..599u32 {
+            let start = format!("k{:04}~", i);
+            let end = format!("k{:04}", i + 4);
+            let got = tree
+                .range(start.as_bytes(), end.as_bytes(), 10)
+                .expect("range");
+            let expected: Vec<(Vec<u8>, Vec<u8>)> = (i + 1..(i + 4).min(600))
+                .map(|j| {
+                    (
+                        format!("k{:04}", j).into_bytes(),
+                        format!("v-{}", j).into_bytes(),
+                    )
+                })
+                .collect();
+            assert_eq!(got, expected, "start {}", start);
+        }
+    }
+
+    #[test]
+    fn paginated_ranges_stitch_into_full_scan() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
+        for i in 0..600u32 {
+            tree.put(
+                format!("k{:04}", i).as_bytes(),
+                format!("v-{}", i).as_bytes(),
+            )
+            .expect("put");
+        }
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let mut cursor = b"k".to_vec();
+        loop {
+            let batch = tree.range(&cursor, b"l", 37).expect("range");
+            let Some((last_key, _)) = batch.last() else {
+                break;
+            };
+            // Next page starts just past the last returned key.
+            cursor = last_key.clone();
+            cursor.push(0);
+            seen.extend(batch.into_iter().map(|(k, _)| k));
+        }
+        assert_eq!(seen.len(), 600);
+        assert_eq!(
+            seen.first().map(|k| k.as_slice()),
+            Some(b"k0000".as_slice())
+        );
+        assert_eq!(seen.last().map(|k| k.as_slice()), Some(b"k0599".as_slice()));
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
     fn overflow_values_round_trip() {
         let file = MemoryFile::new();
         let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
