@@ -26,7 +26,7 @@ export function getSupportedWhereOperatorsForColumn(column: WhereOperatorColumn)
 
   switch (column.columnType.type) {
     case "Text":
-      return ["eq", "ne", "contains"];
+      return ["eq", "ne", "contains", "in"];
     case "Boolean":
       return ["eq"];
     case "Integer":
@@ -37,7 +37,7 @@ export function getSupportedWhereOperatorsForColumn(column: WhereOperatorColumn)
       return ["eq", "gt", "gte", "lt", "lte"];
     case "Uuid":
       if (column.references) {
-        return column.nullable ? ["eq", "ne", "isNull"] : ["eq", "ne"];
+        return column.nullable ? ["eq", "ne", "in", "isNull"] : ["eq", "ne", "in"];
       }
       return ["eq", "ne", "in"];
     case "Bytea":

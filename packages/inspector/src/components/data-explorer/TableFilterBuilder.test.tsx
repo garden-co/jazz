@@ -38,7 +38,7 @@ describe("TableFilterBuilder", () => {
     const refOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(refOperators).toEqual(["eq", "ne", "isNull"]);
+    expect(refOperators).toEqual(["eq", "ne", "in", "isNull"]);
   });
 
   it("does not show unsupported columns", () => {
