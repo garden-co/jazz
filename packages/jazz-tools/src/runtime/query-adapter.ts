@@ -370,14 +370,6 @@ function conditionToRelPredicate(
     if (!Array.isArray(cond.value)) {
       throw new Error('"in" operator requires an array value');
     }
-    if (cond.value.length === 0) {
-      // The engine's plan compiler rejects a literal "False" predicate
-      // ("unsupported relation_ir shape"), so lower the never-matching
-      // filter as a contradiction on the column instead.
-      return {
-        And: [{ IsNull: { column: columnRef } }, { IsNotNull: { column: columnRef } }],
-      };
-    }
     return {
       In: {
         left: columnRef,
