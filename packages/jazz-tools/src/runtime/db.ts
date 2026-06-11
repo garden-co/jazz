@@ -1278,6 +1278,12 @@ export class Db {
         }
       });
     });
+    bridge.onFollowerPortClosed((event) => {
+      if (this.tabRole !== "leader") return;
+      if (event.leadershipId !== this.currentLeadershipId) return;
+      if (this.workerBridge !== bridge) return;
+      this.brokerClient?.reportFollowerPortClosed(event.peerId, event.leadershipId);
+    });
     this.workerBridge = bridge;
     const leadershipId = this.currentLeadershipId;
     const bridgeReady = bridge

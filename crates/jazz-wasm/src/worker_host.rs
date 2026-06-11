@@ -441,17 +441,28 @@ fn ensure_peer_client(runtime: &Rc<WasmRuntime>, peer_id: &str) -> Result<String
 }
 
 fn close_peer(peer_id: &str) {
-    PEER_ROUTING.with(|cell| {
+    let closed_leadership_id = PEER_ROUTING.with(|cell| {
         let mut guard = cell.borrow_mut();
         if let Some(client) = guard.peer_client_by_peer_id.remove(peer_id) {
             guard.peer_id_by_client.remove(&client);
         }
-        guard.peer_leadership_ids.remove(peer_id);
-        if let Some(target) = guard.peer_targets.remove(peer_id) {
+        let leadership_id = guard.peer_leadership_ids.remove(peer_id);
+        let had_target = if let Some(target) = guard.peer_targets.remove(peer_id) {
             close_message_target(&target);
-        }
+            true
+        } else {
+            false
+        };
         guard.peer_port_message_closures.remove(peer_id);
+        if had_target {
+            leadership_id
+        } else {
+            None
+        }
     });
+    if let Some(leadership_id) = closed_leadership_id {
+        post_follower_port_closed(peer_id, leadership_id);
+    }
 }
 
 fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) {
@@ -461,13 +472,18 @@ fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) 
                 "rejecting stale follower-port attach for {peer_id}: leadership {leadership_id} != {own}"
             );
             port.close();
+            post_follower_port_closed(&peer_id, leadership_id);
             return;
         }
     }
     let Some(runtime) = RUNTIME.with(|cell| cell.borrow().clone()) else {
+        port.close();
+        post_follower_port_closed(&peer_id, leadership_id);
         return;
     };
     if ensure_peer_client(&runtime, &peer_id).is_err() {
+        port.close();
+        post_follower_port_closed(&peer_id, leadership_id);
         return;
     }
 
@@ -488,7 +504,9 @@ fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) 
         guard
             .peer_leadership_ids
             .insert(peer_id.clone(), leadership_id);
-        guard.peer_targets.insert(peer_id.clone(), port_target);
+        if let Some(previous_target) = guard.peer_targets.insert(peer_id.clone(), port_target) {
+            close_message_target(&previous_target);
+        }
         guard
             .peer_port_message_closures
             .insert(peer_id.clone(), on_message);
@@ -982,6 +1000,23 @@ fn post_follower_port_attached(peer_id: &str, leadership_id: u32) {
         &message,
         &"type".into(),
         &JsValue::from_str("follower-port-attached"),
+    );
+    let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+    let _ = Reflect::set(
+        &message,
+        &"leadershipId".into(),
+        &JsValue::from_f64(leadership_id as f64),
+    );
+    let global = global_worker_scope();
+    let _ = global.post_message(&message);
+}
+
+fn post_follower_port_closed(peer_id: &str, leadership_id: u32) {
+    let message = Object::new();
+    let _ = Reflect::set(
+        &message,
+        &"type".into(),
+        &JsValue::from_str("follower-port-closed"),
     );
     let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
     let _ = Reflect::set(
