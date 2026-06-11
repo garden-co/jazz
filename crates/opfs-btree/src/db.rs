@@ -293,6 +293,40 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(());
         }
 
+        // Fast path: when a hinted leaf covers the key and the value is
+        // inline-sized, upsert in place without descending. Splits still need
+        // the parent path, so NeedSplit falls through to the recursive insert.
+        if value.len() <= self.options.overflow_threshold
+            && let Some(page_id) = self.hinted_leaf_for_key(key)?
+        {
+            let new_value = ValueCell::Inline(value.to_vec());
+            let upsert = {
+                let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
+                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                })?;
+                raw_leaf_upsert_in_place(raw, self.options.page_size, key, &new_value)?
+            };
+            match upsert {
+                RawLeafUpsertResult::Inserted => {
+                    self.mark_dirty_loaded_page(page_id);
+                    self.remember_leaf_hint(page_id)?;
+                    return Ok(());
+                }
+                RawLeafUpsertResult::Updated { old_overflow } => {
+                    self.mark_dirty_loaded_page(page_id);
+                    self.remember_leaf_hint(page_id)?;
+                    if let Some(old_overflow) = old_overflow {
+                        self.free_overflow_extent(
+                            old_overflow.head_page_id,
+                            old_overflow.total_len as usize,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                RawLeafUpsertResult::NeedSplit => {}
+            }
+        }
+
         let root_page_id = self.root_page_id.expect("root must exist");
         if let Some(split) = self.insert_recursive(root_page_id, key, value)? {
             let new_root_page_id = self.alloc_page();
