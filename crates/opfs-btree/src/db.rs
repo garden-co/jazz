@@ -221,9 +221,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => return Ok(None),
         };
 
-        self.ensure_page_loaded(leaf_page_id)?;
-        let raw = self.raw_page_bytes(leaf_page_id)?;
-        let value_cell = raw_leaf_find_value(raw, self.options.page_size, key)?;
+        let page_size = self.options.page_size;
+        let raw = self.ensure_page_loaded(leaf_page_id)?;
+        let value_cell = raw_leaf_find_value(raw, page_size, key)?;
         match value_cell {
             None => Ok(None),
             Some(ValueCellRef::Inline(value)) => Ok(Some(value.to_vec())),
@@ -317,6 +317,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(Vec::new());
         }
 
+        let page_size = self.options.page_size;
         let mut out = Vec::with_capacity(limit.min(1024));
         let mut current = self.leaf_for_key(start)?;
         let mut visited = OpfsSet::default();
@@ -329,31 +330,23 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
-            self.ensure_page_loaded(page_id)?;
             let remaining = limit.saturating_sub(out.len());
-            let raw = self.raw_page_bytes(page_id)?;
+            let raw = self.ensure_page_loaded(page_id)?;
             staged.clear();
-            let next = raw_leaf_scan(
-                raw,
-                self.options.page_size,
-                start,
-                end,
-                remaining,
-                |key, value| {
-                    let staged_value = match value {
-                        ValueCellRef::Inline(value) => StagedValue::Inline(value.to_vec()),
-                        ValueCellRef::Overflow {
-                            head_page_id,
-                            total_len,
-                        } => StagedValue::Overflow {
-                            head_page_id,
-                            total_len: total_len as usize,
-                        },
-                    };
-                    staged.push((key.to_vec(), staged_value));
-                    Ok(())
-                },
-            )?;
+            let next = raw_leaf_scan(raw, page_size, start, end, remaining, |key, value| {
+                let staged_value = match value {
+                    ValueCellRef::Inline(value) => StagedValue::Inline(value.to_vec()),
+                    ValueCellRef::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => StagedValue::Overflow {
+                        head_page_id,
+                        total_len: total_len as usize,
+                    },
+                };
+                staged.push((key.to_vec(), staged_value));
+                Ok(())
+            })?;
 
             for (key, value) in staged.drain(..) {
                 let value = match value {
@@ -489,10 +482,10 @@ impl<F: SyncFile> OpfsBTree<F> {
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
+        let page_size = self.options.page_size;
         let kind = {
-            let raw = self.raw_page_bytes(page_id)?;
-            raw_page_kind(raw, self.options.page_size)?
+            let raw = self.ensure_page_loaded(page_id)?;
+            raw_page_kind(raw, page_size)?
         };
 
         match kind {
@@ -667,10 +660,10 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
+        let page_size = self.options.page_size;
         let kind = {
-            let raw = self.raw_page_bytes(page_id)?;
-            raw_page_kind(raw, self.options.page_size)?
+            let raw = self.ensure_page_loaded(page_id)?;
+            raw_page_kind(raw, page_size)?
         };
 
         match kind {
@@ -1036,22 +1029,16 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => return Ok(None),
         };
 
+        let page_size = self.options.page_size;
         loop {
-            self.ensure_page_loaded(current)?;
-            let raw = self.raw_page_bytes(current)?;
-            match raw_descend_step(raw, self.options.page_size, key)? {
+            let raw = self.ensure_page_loaded(current)?;
+            match raw_descend_step(raw, page_size, key)? {
                 RawDescendStep::Leaf => return Ok(Some(current)),
                 RawDescendStep::Child(child) => current = child,
-                RawDescendStep::Other(PageKind::Overflow) => {
+                RawDescendStep::Other(kind) => {
                     return Err(BTreeError::Corrupt(format!(
-                        "unexpected overflow page {} in tree path",
-                        current
-                    )));
-                }
-                RawDescendStep::Other(_) => {
-                    return Err(BTreeError::Corrupt(format!(
-                        "unexpected freelist page {} in tree path",
-                        current
+                        "unexpected {:?} page {} in tree path",
+                        kind, current
                     )));
                 }
             }
@@ -1077,19 +1064,19 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(leaf)
     }
 
-    fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+    fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
         if self.pages.contains_key(&page_id) {
             self.touch_page(page_id);
-            return Ok(());
+        } else {
+            self.read_page_run_from_disk(page_id)?;
         }
-        self.read_page_run_from_disk(page_id)?;
-        if !self.pages.contains_key(&page_id) {
-            return Err(BTreeError::Corrupt(format!(
+        match self.pages.get(&page_id) {
+            Some(raw) => Ok(raw),
+            None => Err(BTreeError::Corrupt(format!(
                 "page {} missing after disk load",
                 page_id
-            )));
+            ))),
         }
-        Ok(())
     }
 
     fn page_kind(&self, page_id: PageId) -> Result<PageKind, BTreeError> {
@@ -1476,6 +1463,9 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
+        if self.last_leaf_hint == Some(page_id) {
+            self.last_leaf_hint = None;
+        }
         self.dirty_pages.remove(&page_id);
         self.wal_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::file::SyncFile;
 use crate::page::PageId;
 use crate::{BTreeError, checksum};
@@ -113,9 +115,31 @@ pub(crate) fn read_commit<F: SyncFile>(
     start_page_id: PageId,
     persisted_pages: u64,
 ) -> Result<Option<(WalHeader, Vec<WalFrame>, PageId)>, BTreeError> {
-    let mut reader = PageRunReader::new(file, page_size, persisted_pages)?;
-    reader.set_end_page_id(start_page_id + 1);
-    let Some(header) = read_header(&mut reader, start_page_id)? else {
+    read_commit_with_mode(
+        file,
+        page_size,
+        start_page_id,
+        persisted_pages,
+        batch_wal_replay_reads(),
+    )
+}
+
+// `batched` is cfg-selected in production (see `batch_wal_replay_reads`) but
+// kept as a parameter so native tests can exercise the batched reader too.
+fn read_commit_with_mode<F: SyncFile>(
+    file: &F,
+    page_size: usize,
+    start_page_id: PageId,
+    persisted_pages: u64,
+    batched: bool,
+) -> Result<Option<(WalHeader, Vec<WalFrame>, PageId)>, BTreeError> {
+    let mut reader = if batched {
+        WalPageReader::Batched(PageRunReader::new(file, page_size, persisted_pages)?)
+    } else {
+        WalPageReader::PerPage { file, page_size }
+    };
+    reader.limit_to(start_page_id + 1);
+    let Some(header) = decode_wal_header_page(&reader.page(start_page_id)?, page_size)? else {
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     };
@@ -133,28 +157,18 @@ pub(crate) fn read_commit<F: SyncFile>(
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     }
-    let use_batched_reader = batch_wal_replay_reads();
-    if use_batched_reader {
-        reader.set_end_page_id(next_cursor);
-    }
+    reader.limit_to(next_cursor);
 
     let mut frames = Vec::with_capacity(frame_count);
     let mut cursor = start_page_id + 1;
     for _ in 0..frame_count {
-        let frame_meta = if use_batched_reader {
-            read_frame_meta(&mut reader, cursor)?
-        } else {
-            read_frame_meta_at(file, page_size, cursor)?
-        };
-        let Some((page_id, is_blob, is_freelist, expected_checksum)) = frame_meta else {
+        let Some((page_id, is_blob, is_freelist, expected_checksum)) =
+            decode_wal_frame_meta_page(&reader.page(cursor)?, page_size)?
+        else {
             truncate_tail(file, page_size, start_page_id)?;
             return Ok(None);
         };
-        let raw = if use_batched_reader {
-            reader.page(cursor + 1)?.to_vec()
-        } else {
-            read_raw_page_at(file, page_size, cursor + 1)?
-        };
+        let raw = reader.page(cursor + 1)?.into_owned();
         if checksum::hash(&raw) != expected_checksum {
             truncate_tail(file, page_size, start_page_id)?;
             return Ok(None);
@@ -168,18 +182,7 @@ pub(crate) fn read_commit<F: SyncFile>(
         cursor += 2;
     }
 
-    let has_commit_marker = if use_batched_reader {
-        read_commit_marker(&mut reader, cursor, header.generation, header.frame_count)?
-    } else {
-        read_commit_marker_at(
-            file,
-            page_size,
-            cursor,
-            header.generation,
-            header.frame_count,
-        )?
-    };
-    if !has_commit_marker {
+    if !decode_wal_commit_page(&reader.page(cursor)?, header.generation, header.frame_count)? {
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     }
@@ -197,52 +200,32 @@ fn commit_page_count(
         .ok_or_else(|| err(overflow_message.to_string()))
 }
 
-fn read_header<F: SyncFile>(
-    reader: &mut PageRunReader<'_, F>,
-    page_id: PageId,
-) -> Result<Option<WalHeader>, BTreeError> {
-    let page_size = reader.page_size;
-    let raw = reader.page(page_id)?;
-    decode_wal_header_page(raw, page_size)
+/// Page source for `read_commit_with_mode`: either the run-buffered reader or
+/// direct per-page reads, behind one `Cow`-returning interface so the replay
+/// loop has a single control flow.
+enum WalPageReader<'a, F: SyncFile> {
+    Batched(PageRunReader<'a, F>),
+    PerPage { file: &'a F, page_size: usize },
 }
 
-fn read_frame_meta<F: SyncFile>(
-    reader: &mut PageRunReader<'_, F>,
-    page_id: PageId,
-) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
-    let page_size = reader.page_size;
-    let raw = reader.page(page_id)?;
-    decode_wal_frame_meta_page(raw, page_size)
-}
+impl<'a, F: SyncFile> WalPageReader<'a, F> {
+    /// Caps batched reads at `end_page_id` so the run prefetch never reads
+    /// past what the caller has validated. Per-page reads need no cap; they
+    /// only ever touch the requested page.
+    fn limit_to(&mut self, end_page_id: PageId) {
+        if let WalPageReader::Batched(reader) = self {
+            reader.set_end_page_id(end_page_id);
+        }
+    }
 
-fn read_commit_marker<F: SyncFile>(
-    reader: &mut PageRunReader<'_, F>,
-    page_id: PageId,
-    generation: u64,
-    frame_count: u64,
-) -> Result<bool, BTreeError> {
-    let raw = reader.page(page_id)?;
-    decode_wal_commit_page(raw, generation, frame_count)
-}
-
-fn read_frame_meta_at<F: SyncFile>(
-    file: &F,
-    page_size: usize,
-    page_id: PageId,
-) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
-    let raw = read_raw_page_at(file, page_size, page_id)?;
-    decode_wal_frame_meta_page(&raw, page_size)
-}
-
-fn read_commit_marker_at<F: SyncFile>(
-    file: &F,
-    page_size: usize,
-    page_id: PageId,
-    generation: u64,
-    frame_count: u64,
-) -> Result<bool, BTreeError> {
-    let raw = read_raw_page_at(file, page_size, page_id)?;
-    decode_wal_commit_page(&raw, generation, frame_count)
+    fn page(&mut self, page_id: PageId) -> Result<Cow<'_, [u8]>, BTreeError> {
+        match self {
+            WalPageReader::Batched(reader) => reader.page(page_id).map(Cow::Borrowed),
+            WalPageReader::PerPage { file, page_size } => {
+                read_raw_page_at(*file, *page_size, page_id).map(Cow::Owned)
+            }
+        }
+    }
 }
 
 fn read_raw_page_at<F: SyncFile>(
@@ -627,18 +610,20 @@ mod tests {
         assert_eq!(pages_written, 82);
 
         let persisted_pages = START_PAGE_ID + pages_written;
-        let (_, read_frames, next_cursor) =
-            read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
-                .expect("read WAL")
-                .expect("commit present");
+        for batched in [false, true] {
+            let (_, read_frames, next_cursor) =
+                read_commit_with_mode(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages, batched)
+                    .expect("read WAL")
+                    .expect("commit present");
 
-        assert_eq!(next_cursor, persisted_pages);
-        assert_eq!(read_frames.len(), 40);
-        for (i, frame) in read_frames.iter().enumerate() {
-            assert_eq!(frame.page_id, 100 + i as PageId);
-            assert_eq!(frame.is_blob, i % 3 == 0);
-            assert_eq!(frame.is_freelist, i % 5 == 0);
-            assert_eq!(frame.raw, frame_pages[i]);
+            assert_eq!(next_cursor, persisted_pages);
+            assert_eq!(read_frames.len(), 40);
+            for (i, frame) in read_frames.iter().enumerate() {
+                assert_eq!(frame.page_id, 100 + i as PageId);
+                assert_eq!(frame.is_blob, i % 3 == 0);
+                assert_eq!(frame.is_freelist, i % 5 == 0);
+                assert_eq!(frame.raw, frame_pages[i]);
+            }
         }
     }
 
