@@ -1,33 +1,6 @@
 const dialogPrototype =
   globalThis.HTMLDialogElement?.prototype ?? globalThis.HTMLElement?.prototype;
 
-if (typeof globalThis.localStorage?.clear !== "function") {
-  const entries = new Map<string, string>();
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: {
-      get length() {
-        return entries.size;
-      },
-      clear() {
-        entries.clear();
-      },
-      getItem(key: string) {
-        return entries.get(key) ?? null;
-      },
-      key(index: number) {
-        return Array.from(entries.keys())[index] ?? null;
-      },
-      removeItem(key: string) {
-        entries.delete(key);
-      },
-      setItem(key: string, value: string) {
-        entries.set(key, String(value));
-      },
-    },
-  });
-}
-
 if (typeof globalThis.confirm !== "function") {
   globalThis.confirm = () => false;
 }
