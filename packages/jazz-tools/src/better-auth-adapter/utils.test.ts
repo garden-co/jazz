@@ -66,6 +66,26 @@ describe("isQuerySupported", () => {
     expect(isQuerySupported(tableSchema, where)).toBe(true);
   });
 
+  it("supports in on id, reference, and text columns", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "id", operator: "in", value: ["row-1", "row-2"], connector: "AND" },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "owner_id", operator: "in", value: ["row-1"], connector: "AND" },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "email_address", operator: "in", value: ["a@b.c"], connector: "AND" },
+      ]),
+    ).toBe(true);
+  });
+
   it("allows null only on nullable columns", () => {
     expect(
       isQuerySupported(tableSchema, [

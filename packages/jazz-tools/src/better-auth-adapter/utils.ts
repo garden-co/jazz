@@ -18,7 +18,7 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
 
   const getSupportedOperators = (fieldName: string): ReadonlySet<string> | undefined => {
     if (fieldName === "id") {
-      return new Set(["eq", "ne"]);
+      return new Set(["eq", "ne", "in"]);
     }
 
     const column = columnByName.get(fieldName);
@@ -27,12 +27,12 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
     }
 
     if (column.references) {
-      return column.nullable ? new Set(["eq", "ne", "isNull"]) : new Set(["eq", "ne"]);
+      return column.nullable ? new Set(["eq", "ne", "in", "isNull"]) : new Set(["eq", "ne", "in"]);
     }
 
     switch (column.column_type.type) {
       case "Text":
-        return new Set(["eq", "ne", "contains"]);
+        return new Set(["eq", "ne", "contains", "in"]);
       case "Boolean":
         return new Set(["eq"]);
       case "Integer":
