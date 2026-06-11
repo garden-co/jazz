@@ -2420,6 +2420,38 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_puts_and_reads_stay_consistent() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
+        for i in 0..2_000u32 {
+            let a = format!("a{:05}", i);
+            let b = format!("b{:05}", i);
+            tree.put(a.as_bytes(), format!("va-{}", i).as_bytes())
+                .expect("put a");
+            tree.put(b.as_bytes(), format!("vb-{}", i).as_bytes())
+                .expect("put b");
+            assert_eq!(
+                tree.get(a.as_bytes()).expect("get a"),
+                Some(format!("va-{}", i).into_bytes())
+            );
+            assert_eq!(
+                tree.get(b.as_bytes()).expect("get b"),
+                Some(format!("vb-{}", i).into_bytes())
+            );
+            if i % 3 == 0 {
+                tree.delete(a.as_bytes()).expect("delete a");
+                assert_eq!(tree.get(a.as_bytes()).expect("get deleted"), None);
+            }
+            if i % 500 == 499 {
+                tree.flush_wal().expect("flush");
+            }
+        }
+        let got = tree.range(b"a", b"b", usize::MAX).expect("range a-region");
+        let expected_live = (0..2_000u32).filter(|i| i % 3 != 0).count();
+        assert_eq!(got.len(), expected_live);
+    }
+
+    #[test]
     fn in_place_mutations_survive_flush_and_reopen() {
         for checkpoint in [true, false] {
             let file = MemoryFile::new();
