@@ -41,6 +41,26 @@ describe("TS Query API", () => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("queries by id with in", async () => {
+      const projectA = insertProject(db, "Project A");
+      const projectB = insertProject(db, "Project B");
+      const _projectC = insertProject(db, "Project C");
+
+      const results = await db.all(app.projects.where({ id: { in: [projectA.id, projectB.id] } }));
+
+      expect(results.map((project) => project.id).sort()).toEqual(
+        [projectA.id, projectB.id].sort(),
+      );
+    });
+
+    it("returns no rows for an empty in list", async () => {
+      insertProject(db, "Project A");
+
+      const results = await db.all(app.projects.where({ id: { in: [] } }));
+
+      expect(results).toEqual([]);
+    });
+
     it("can read deleted rows with includeDeleted", async () => {
       const project = insertProject(db, "Deleted Project");
       db.delete(app.projects, project.id);
@@ -116,6 +136,16 @@ describe("TS Query API", () => {
 
       const results = await db.all(app.todos.where({ ownerId: undefined }));
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+    });
+
+    it("filters enum columns with in", async () => {
+      const { value: rowA } = db.insert(app.table_with_defaults, { enum: "a" });
+      const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
+      db.insert(app.table_with_defaults, { enum: "c" });
+
+      const results = await db.all(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
+
+      expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
     });
 
     it("filters int columns with multiple range operators on the same column", async () => {
