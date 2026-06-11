@@ -215,6 +215,7 @@ pub(crate) fn raw_page_kind(raw: &[u8], expected_page_size: usize) -> Result<Pag
     Ok(header.kind)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn raw_internal_child_for_key(
     raw: &[u8],
     expected_page_size: usize,
@@ -268,6 +269,31 @@ fn internal_child_for_key_parsed(
         return read_u64_at(payload, 0, "internal left child");
     }
     Ok(read_le_u64(slots, (lo - 1) * INTERNAL_SLOT_BYTES + 8))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawDescendStep {
+    Leaf,
+    Child(PageId),
+    Other(PageKind),
+}
+
+/// One tree-descent step on a raw page: parses the header once and, for
+/// internal pages, finds the child for `key` in the same pass.
+pub(crate) fn raw_descend_step(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<RawDescendStep, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    match header.kind {
+        PageKind::Leaf => Ok(RawDescendStep::Leaf),
+        PageKind::Internal => {
+            internal_child_for_key_parsed(header.payload, header.item_count as usize, key)
+                .map(RawDescendStep::Child)
+        }
+        kind => Ok(RawDescendStep::Other(kind)),
+    }
 }
 
 pub(crate) fn raw_leaf_find_value<'a>(
