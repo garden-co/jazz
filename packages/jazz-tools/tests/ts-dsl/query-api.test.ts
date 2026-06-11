@@ -173,6 +173,16 @@ describe("TS Query API", () => {
       expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
     });
 
+    it("filters string columns with in", async () => {
+      const todoA = insertTodo(db, { title: "Buy milk" });
+      const todoB = insertTodo(db, { title: "Walk dog" });
+      const _todoC = insertTodo(db, { title: "Write code" });
+
+      const results = await db.all(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
+
+      expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
+    });
+
     it("filters int columns with multiple range operators on the same column", async () => {
       db.insert(app.table_with_defaults, { integer: 5 });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });

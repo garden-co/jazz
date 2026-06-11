@@ -245,7 +245,7 @@ type UuidWhere<TOptional extends boolean> = WhereEqNe<
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string; in?: string[] }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
       ? boolean
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
