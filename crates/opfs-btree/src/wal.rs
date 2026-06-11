@@ -488,6 +488,44 @@ mod tests {
     }
 
     #[test]
+    fn read_commit_round_trips_commits_larger_than_one_read_run() {
+        let file = MemoryFile::new();
+        // 40 frames -> 2 + 40 * 2 = 82 WAL pages, more than one 64-page run.
+        let frame_pages: Vec<Vec<u8>> = (0..40u8)
+            .map(|i| vec![i.wrapping_add(1); PAGE_SIZE])
+            .collect();
+        let frames: Vec<WalFrameRef<'_>> = frame_pages
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| WalFrameRef {
+                page_id: 100 + i as PageId,
+                is_blob: i % 3 == 0,
+                is_freelist: i % 5 == 0,
+                raw,
+            })
+            .collect();
+
+        let pages_written =
+            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        assert_eq!(pages_written, 82);
+
+        let persisted_pages = START_PAGE_ID + pages_written;
+        let (_, read_frames, next_cursor) =
+            read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
+                .expect("read WAL")
+                .expect("commit present");
+
+        assert_eq!(next_cursor, persisted_pages);
+        assert_eq!(read_frames.len(), 40);
+        for (i, frame) in read_frames.iter().enumerate() {
+            assert_eq!(frame.page_id, 100 + i as PageId);
+            assert_eq!(frame.is_blob, i % 3 == 0);
+            assert_eq!(frame.is_freelist, i % 5 == 0);
+            assert_eq!(frame.raw, frame_pages[i]);
+        }
+    }
+
+    #[test]
     fn read_commit_returns_none_and_truncates_truncated_tail() {
         let file = MemoryFile::new();
         let page = vec![1u8; PAGE_SIZE];
