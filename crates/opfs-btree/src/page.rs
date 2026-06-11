@@ -1236,7 +1236,23 @@ fn finish_leaf_mutation(
     }
 
     raw[16..20].copy_from_slice(&item_count.to_le_bytes());
+    // Checksum is deferred: in-place mutations zero it, and the flush and
+    // checkpoint paths recompute it once per dirty page before any write.
     raw[20..24].copy_from_slice(&0u32.to_le_bytes());
+    Ok(())
+}
+
+pub(crate) fn refresh_page_checksum(
+    raw: &mut [u8],
+    expected_page_size: usize,
+) -> Result<(), BTreeError> {
+    if raw.len() != expected_page_size {
+        return Err(BTreeError::Corrupt(format!(
+            "page length mismatch: found {}, expected {}",
+            raw.len(),
+            expected_page_size
+        )));
+    }
     let checksum = page_checksum(raw);
     raw[20..24].copy_from_slice(&checksum.to_le_bytes());
     Ok(())

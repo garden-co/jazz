@@ -8,7 +8,8 @@ use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
     ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
     raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
+    refresh_page_checksum, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 use crate::wal::{self, WalFrame, WalFrameRef, WalHeader};
@@ -412,6 +413,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
         dirty_page_ids.sort_unstable();
+        self.refresh_dirty_page_checksums(&dirty_page_ids)?;
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
         let generation = self.active.generation.saturating_add(1);
         let persisted_pages = {
@@ -1167,6 +1169,8 @@ impl<F: SyncFile> OpfsBTree<F> {
         dirty_page_ids: &[PageId],
         freelist_pages: &[(PageId, Page)],
     ) -> Result<(), BTreeError> {
+        self.refresh_dirty_page_checksums(dirty_page_ids)?;
+
         let mut max_page_id = 1u64;
         if let Some(max_live) = self.pages.keys().max().copied() {
             max_page_id = max_page_id.max(max_live);
@@ -1224,6 +1228,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             idx = end;
         }
 
+        Ok(())
+    }
+
+    fn refresh_dirty_page_checksums(&mut self, page_ids: &[PageId]) -> Result<(), BTreeError> {
+        for page_id in page_ids {
+            if self.blob_pages.contains(page_id) {
+                continue;
+            }
+            if let Some(raw) = self.pages.get_mut(page_id) {
+                refresh_page_checksum(raw, self.options.page_size)?;
+            }
+        }
         Ok(())
     }
 
