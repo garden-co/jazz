@@ -97,8 +97,7 @@ pub(crate) fn freelist_ids_per_page(page_size: usize) -> Result<usize, BTreeErro
 }
 
 pub(crate) fn page_fits(page: &Page, page_size: usize) -> Result<bool, BTreeError> {
-    let encoded = encode_fields(page)?;
-    Ok(encoded.payload.len() <= page_payload_capacity(page_size)?)
+    Ok(encoded_payload_len(page)? <= page_payload_capacity(page_size)?)
 }
 
 pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTreeError> {
@@ -941,6 +940,60 @@ fn encode_fields(page: &Page) -> Result<EncodedFields, BTreeError> {
     }
 }
 
+/// Encoded payload size of `page`, kept in lockstep with `encode_fields`
+/// so fit checks don't have to build the payload.
+fn encoded_payload_len(page: &Page) -> Result<usize, BTreeError> {
+    let len = match page {
+        Page::Internal { keys, children } => {
+            if children.len() != keys.len() + 1 {
+                return Err(BTreeError::Corrupt(format!(
+                    "internal children/key mismatch: children={}, keys={}",
+                    children.len(),
+                    keys.len()
+                )));
+            }
+            let mut len = INTERNAL_LEFT_CHILD_BYTES
+                .checked_add(keys.len().checked_mul(INTERNAL_SLOT_BYTES).ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal slot bytes overflow".to_string())
+                })?)
+                .ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal data base overflow".to_string())
+                })?;
+            for key in keys {
+                len = len.checked_add(key.len()).ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal payload size overflow".to_string())
+                })?;
+            }
+            len
+        }
+        Page::Leaf { entries, .. } => {
+            let mut len = entries.len().checked_mul(LEAF_SLOT_BYTES).ok_or_else(|| {
+                BTreeError::InvalidOptions("leaf slot bytes overflow".to_string())
+            })?;
+            for (key, value) in entries {
+                let cell_len = match value {
+                    ValueCell::Inline(bytes) => bytes.len().checked_add(5).ok_or_else(|| {
+                        BTreeError::InvalidOptions("inline value too large".to_string())
+                    })?,
+                    ValueCell::Overflow { .. } => 13,
+                };
+                len = len
+                    .checked_add(key.len())
+                    .and_then(|sum| sum.checked_add(cell_len))
+                    .ok_or_else(|| {
+                        BTreeError::InvalidOptions("leaf payload size overflow".to_string())
+                    })?;
+            }
+            len
+        }
+        Page::Overflow { data, .. } => data.len(),
+        Page::Freelist { ids, .. } => ids.len().checked_mul(8).ok_or_else(|| {
+            BTreeError::InvalidOptions("freelist payload size overflow".to_string())
+        })?,
+    };
+    Ok(len)
+}
+
 struct RawPageHeader<'a> {
     kind: PageKind,
     next_page_id: Option<PageId>,
@@ -1618,6 +1671,48 @@ mod tests {
                     i, got, expected
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn encoded_payload_len_matches_encode_fields() {
+        let pages = vec![
+            Page::Internal {
+                keys: (0..40)
+                    .map(|i| format!("key{:03}", i).into_bytes())
+                    .collect(),
+                children: (0..41).map(|i| 100 + i as PageId).collect(),
+            },
+            Page::Leaf {
+                entries: (0..30)
+                    .map(|i| {
+                        let value = if i % 4 == 0 {
+                            ValueCell::Overflow {
+                                head_page_id: 500 + i as PageId,
+                                total_len: 9000,
+                            }
+                        } else {
+                            ValueCell::Inline(vec![7u8; 10 + i])
+                        };
+                        (format!("k{:04}", i).into_bytes(), value)
+                    })
+                    .collect(),
+                next: Some(9),
+            },
+            Page::Overflow {
+                data: vec![1u8; 777],
+                next: None,
+            },
+            Page::Freelist {
+                ids: vec![3, 5, 8, 13],
+                next: Some(2),
+            },
+        ];
+        for page in &pages {
+            assert_eq!(
+                encoded_payload_len(page).expect("payload len"),
+                encode_fields(page).expect("encode").payload.len(),
+            );
         }
     }
 
