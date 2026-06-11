@@ -53,9 +53,11 @@ pub fn bind(config: CollectorConfig) -> Result<BoundCollector> {
 }
 
 pub async fn run(bound: BoundCollector, shutdown: CancellationToken) -> Result<()> {
-    let mut args = AgentRun::default();
-    args.receiver = Some(Receiver::Otlp);
-    args.exporter = Some(Exporter::File);
+    let mut args = AgentRun {
+        receiver: Some(Receiver::Otlp),
+        exporter: Some(Exporter::File),
+        ..Default::default()
+    };
     args.otlp_receiver.otlp_http_endpoint = bound.config.otlp_http_endpoint;
     args.otlp_receiver.otlp_grpc_endpoint = bound.config.otlp_grpc_endpoint;
     args.batch.batch_timeout = Duration::from_millis(200);

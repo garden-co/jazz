@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+collector = ["dep:rotel"]
+
+[[bin]]
+name = "local-telemetry"
+path = "src/main.rs"
+required-features = ["collector"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.7"
@@ -12,12 +21,12 @@ duckdb = { version = "1.4", features = ["bundled"] }
 http = "1"
 mime_guess = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rotel = { git = "https://github.com/rotel-dev/rotel", tag = "v0.2.2", default-features = false, features = [
+rotel = { git = "https://github.com/rotel-dev/rotel", tag = "v0.2.2", default-features = false, optional = true, features = [
   "file_exporter",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }

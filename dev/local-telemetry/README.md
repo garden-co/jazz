@@ -33,14 +33,14 @@ Then run the collector:
 
 ```sh
 cd dev/local-telemetry
-cargo run --
+cargo run --features collector --
 ```
 
 Build a release binary with:
 
 ```sh
 cd dev/local-telemetry
-cargo build --release
+cargo build --release --features collector
 ```
 
 Rotel's Rust build requires `protoc` on `PATH`. On macOS, install it with:
