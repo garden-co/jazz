@@ -313,9 +313,10 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(Vec::new());
         }
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(limit.min(1024));
         let mut current = self.find_leaf_page_id(start)?;
         let mut visited = OpfsSet::default();
+        let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
 
         while let Some(page_id) = current {
             if !visited.insert(page_id) {
@@ -327,7 +328,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.ensure_page_loaded(page_id)?;
             let remaining = limit.saturating_sub(out.len());
             let raw = self.raw_page_bytes(page_id)?;
-            let mut staged = Vec::new();
+            staged.clear();
             let next = raw_leaf_scan(
                 raw,
                 self.options.page_size,
@@ -349,9 +350,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                     Ok(())
                 },
             )?;
-            let staged_entries = staged;
 
-            for (key, value) in staged_entries {
+            for (key, value) in staged.drain(..) {
                 let value = match value {
                     StagedValue::Inline(value) => value,
                     StagedValue::Overflow {
