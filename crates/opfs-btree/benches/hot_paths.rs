@@ -155,10 +155,10 @@ fn bench_put_append(c: &mut Criterion) {
             // key(i) allocates per iteration, but identically before/after,
             // so relative comparisons hold.
             tree.put(&key(i), &value).expect("put");
-            if i % 1000 == 0 {
+            if i.is_multiple_of(1000) {
                 tree.flush_wal().expect("flush_wal");
             }
-            if i % 10_000 == 0 {
+            if i.is_multiple_of(10_000) {
                 tree.checkpoint().expect("checkpoint");
             }
         })
