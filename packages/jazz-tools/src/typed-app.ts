@@ -225,7 +225,7 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
 type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
-  { gt?: T; gte?: T; lt?: T; lte?: T }
+  { gt?: T; gte?: T; lt?: T; lte?: T; in?: T[] }
 >;
 type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   Date | number,
@@ -235,29 +235,32 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     gte?: Date | number;
     lt?: Date | number;
     lte?: Date | number;
+    in?: (Date | number)[];
   }
 >;
-type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
-  ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
-  : WhereEqNe<
-      string,
-      TOptional,
-      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
-    >;
+type UuidWhere<TOptional extends boolean> = WhereEqNe<
+  string,
+  TOptional,
+  TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+>;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string; in?: string[] }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? boolean
+      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, { in?: boolean[] }>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
           ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
           : ColumnBuilderSqlType<TBuilder> extends "UUID"
-            ? UuidWhere<ColumnBuilderOptional<TBuilder>, ColumnBuilderReferences<TBuilder>>
+            ? UuidWhere<ColumnBuilderOptional<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
+              ? WhereEqNe<
+                  Uint8Array,
+                  ColumnBuilderOptional<TBuilder>,
+                  { in?: (Uint8Array | number[])[] }
+                >
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
                 ? WhereEqNe<
                     StoredColumnValue<TBuilder>,
@@ -276,7 +279,10 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                     ? WhereEqNe<
                         StoredColumnValue<TBuilder>,
                         ColumnBuilderOptional<TBuilder>,
-                        { contains?: TSTypeFromSqlType<TElementSql> }
+                        {
+                          contains?: TSTypeFromSqlType<TElementSql>;
+                          in?: StoredColumnValue<TBuilder>[];
+                        }
                       >
                     : never;
 
@@ -774,6 +780,10 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
   return { ...condition };
 }
 
+function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
+  return value instanceof Uint8Array ? [...value] : value;
+}
+
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
   return {
     ...(relation.table ? { table: relation.table } : {}),
@@ -1006,20 +1016,23 @@ export class TypedTableQueryBuilder<
   }
 
   _build(): string {
-    return JSON.stringify({
-      table: this._table,
-      conditions: this._conditions,
-      includes: this._includes,
-      __jazz_requireIncludes: this._requireIncludes || undefined,
-      select: this._selectColumns,
-      orderBy: this._orderBys,
-      limit: this._limitVal,
-      offset: this._offsetVal,
-      includeDeleted: this._includeDeleted || undefined,
-      hops: this._hops,
-      gather: this._gatherVal,
-      ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
-    });
+    return JSON.stringify(
+      {
+        table: this._table,
+        conditions: this._conditions,
+        includes: this._includes,
+        __jazz_requireIncludes: this._requireIncludes || undefined,
+        select: this._selectColumns,
+        orderBy: this._orderBys,
+        limit: this._limitVal,
+        offset: this._offsetVal,
+        includeDeleted: this._includeDeleted || undefined,
+        hops: this._hops,
+        gather: this._gatherVal,
+        ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
+      },
+      queryBuilderJsonReplacer,
+    );
   }
 
   toJSON(): unknown {

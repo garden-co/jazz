@@ -136,6 +136,9 @@ const files: TableProxy<File, Omit<File, "id">> = {
   _initType: {} as Omit<File, "id">,
 };
 
+const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000201";
+const CONDITION_TODO_ID = "00000000-0000-0000-0000-000000000202";
+
 function uniqueDbName(label: string): string {
   return `db-subscribe-all-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -204,6 +207,7 @@ describe("db.subscribeAll browser integration", () => {
     name: string;
     query: QueryBuilder<Todo>;
     insert: Omit<Todo, "id">;
+    insertId?: string;
   }> = [
     {
       name: "eq",
@@ -296,6 +300,52 @@ describe("db.subscribeAll browser integration", () => {
         done: false,
         priority: 1,
         owner_id: undefined,
+        tags: ["x"],
+      },
+    },
+    {
+      name: "in-id",
+      query: makeQuery<Todo>("todos", {
+        conditions: [
+          {
+            column: "id",
+            op: "in",
+            value: [CONDITION_TODO_ID, "00000000-0000-0000-0000-000000000299"],
+          },
+        ],
+      }),
+      insert: {
+        title: "in-id-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      insertId: CONDITION_TODO_ID,
+    },
+    {
+      name: "in-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "in", value: ["in-text-hit", "other"] }],
+      }),
+      insert: {
+        title: "in-text-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+    },
+    {
+      name: "in-reference",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+      }),
+      insert: {
+        title: "in-reference-hit",
+        done: false,
+        priority: 1,
+        owner_id: CONDITION_OWNER_ID,
         tags: ["x"],
       },
     },
@@ -419,7 +469,7 @@ describe("db.subscribeAll browser integration", () => {
 
       const {
         value: { id: insertedId },
-      } = await conditionsDb.insert(todos, testCase.insert);
+      } = await conditionsDb.insert(todos, testCase.insert, { id: testCase.insertId });
 
       await waitForCondition(
         () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),
@@ -546,6 +596,40 @@ describe("db.subscribeAll browser integration", () => {
       value: { id: insertedId },
     } = db.insert(todos, {
       title: "completely unrelated",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(deltas.some((delta) => hasChangeForId(delta, 0, insertedId))).toBe(false);
+
+    unsubscribe();
+  });
+
+  it("does not emit add for an empty in list", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("in-empty") },
+      }),
+    );
+
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<Todo>("todos", {
+          conditions: [{ column: "title", op: "in", value: [] }],
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const {
+      value: { id: insertedId },
+    } = db.insert(todos, {
+      title: "in-empty-miss",
       done: false,
       priority: 1,
       owner_id: undefined,
