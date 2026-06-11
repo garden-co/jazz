@@ -465,6 +465,9 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn checkpoint_state(&self) -> CheckpointState {
+        // Reports the latest durable logical state: checkpoint metadata plus
+        // any replayed or newly flushed WAL commits. `active_slot` still names
+        // the checkpoint superblock slot; WAL commits do not rotate slots.
         CheckpointState {
             active_slot: slot_char(self.active_slot),
             generation: self.active.generation,
@@ -1166,6 +1169,8 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    // Checkpoint path: copy the latest dirty/WAL-pinned page bytes back to
+    // their home locations, so the checkpointed region becomes current.
     fn write_pages_to_disk(
         &mut self,
         dirty_page_ids: &[PageId],
