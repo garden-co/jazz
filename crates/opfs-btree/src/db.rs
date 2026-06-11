@@ -333,11 +333,6 @@ impl<F: SyncFile> OpfsBTree<F> {
 
             let remaining = limit.saturating_sub(out.len());
             let raw = self.ensure_page_loaded(page_id)?;
-            // `raw` borrows the page bytes out of the cache, and resolving an
-            // overflow value needs `&mut self` to load its extent pages, so
-            // matches are staged as owned copies first and overflow refs are
-            // resolved after the borrow ends. `staged` lives outside the loop
-            // to reuse one buffer across the leaf chain.
             staged.clear();
             let next = raw_leaf_scan(raw, page_size, start, end, remaining, |key, value| {
                 let staged_value = match value {
