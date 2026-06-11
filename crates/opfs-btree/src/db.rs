@@ -2389,6 +2389,49 @@ mod tests {
     }
 
     #[test]
+    fn in_place_mutations_survive_flush_and_reopen() {
+        for checkpoint in [true, false] {
+            let file = MemoryFile::new();
+            {
+                let mut tree = OpfsBTree::open(file.clone(), tiny_cache_options()).expect("open");
+                for i in 0..500u32 {
+                    tree.put(
+                        format!("k{:05}", i).as_bytes(),
+                        format!("v-{}", i).as_bytes(),
+                    )
+                    .expect("put");
+                }
+                tree.flush_wal().expect("first flush");
+
+                for i in 0..500u32 {
+                    tree.put(
+                        format!("k{:05}", i).as_bytes(),
+                        format!("w-{}", i).as_bytes(),
+                    )
+                    .expect("overwrite");
+                }
+                tree.delete(b"k00000").expect("delete");
+                tree.flush_wal().expect("second flush");
+                if checkpoint {
+                    tree.checkpoint().expect("checkpoint");
+                }
+            }
+
+            let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("reopen");
+            assert_eq!(tree.get(b"k00000").expect("get deleted"), None);
+            for i in 1..500u32 {
+                assert_eq!(
+                    tree.get(format!("k{:05}", i).as_bytes()).expect("get"),
+                    Some(format!("w-{}", i).into_bytes()),
+                    "key {} (checkpoint={})",
+                    i,
+                    checkpoint
+                );
+            }
+        }
+    }
+
+    #[test]
     fn checkpoint_writes_only_dirty_data_pages() {
         let options = small_options();
         let file = CountingFile::new();
