@@ -113,6 +113,37 @@ fn bench_put_churn(c: &mut Criterion) {
     });
 }
 
+fn bench_put_get_interleaved(c: &mut Criterion) {
+    let file = build_tree(true);
+    let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
+    let value = vec![0xcdu8; 100];
+    let mut i = 0usize;
+    c.bench_function("put_get_interleaved", |b| {
+        b.iter(|| {
+            i = (i + 1) % N;
+            tree.put(&keys[i], &value).expect("put");
+            black_box(tree.get(&keys[i]).expect("get").expect("present"));
+        })
+    });
+}
+
+fn bench_get_alternating_regions(c: &mut Criterion) {
+    let file = build_tree(true);
+    let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
+    let mut i = 0usize;
+    c.bench_function("get_alternating_regions", |b| {
+        b.iter(|| {
+            i = (i + 1) % (N / 2);
+            // Alternate between two distant key regions, like two tables
+            // sharing one tree: a single-slot leaf hint misses every time.
+            black_box(tree.get(&keys[i]).expect("get").expect("present"));
+            black_box(tree.get(&keys[i + N / 2]).expect("get").expect("present"));
+        })
+    });
+}
+
 fn bench_open_replay(c: &mut Criterion) {
     let file = build_tree(false);
     c.bench_function("open_with_wal_tail", |b| {
@@ -126,6 +157,8 @@ criterion_group!(
     bench_range,
     bench_put,
     bench_put_churn,
+    bench_put_get_interleaved,
+    bench_get_alternating_regions,
     bench_open_replay
 );
 criterion_main!(benches);
