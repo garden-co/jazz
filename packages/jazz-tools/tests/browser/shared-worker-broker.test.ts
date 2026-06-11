@@ -224,6 +224,52 @@ describe("SharedWorker browser broker", () => {
     expect(second.snapshot().role).toBe("leader");
   });
 
+  it("keeps a replacement leader elected while a non-ready schema leader shuts down", async () => {
+    const dbName = uniqueName("broker-shutdown-replacement");
+    const replacementFailures: string[] = [];
+    const replacementReadyLeadershipIds: number[] = [];
+
+    const staleLeader = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async () => {
+        // Simulate a promoted tab that reported its schema but never finished
+        // opening the persistent worker.
+      },
+    });
+    clients.push(staleLeader);
+
+    await waitFor(
+      () => staleLeader.snapshot().leadershipId === 1,
+      2000,
+      "first tab should receive a leader promotion",
+    );
+    staleLeader.reportSchemaReady("schema-a");
+
+    const replacement = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
+        forceTakeoverTimeoutMs: 50,
+        onReady: (leadershipId) => replacementReadyLeadershipIds.push(leadershipId),
+        onFailure: (_leadershipId, reason) => replacementFailures.push(reason),
+      }),
+    );
+    clients.push(replacement);
+    replacement.reportSchemaReady("schema-b");
+
+    await staleLeader.shutdown();
+    clients.splice(clients.indexOf(staleLeader), 1);
+
+    await replacement.waitForRole("leader", 4000);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(replacement.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-b",
+      leaderTabId: "tab-b",
+    });
+    expect(replacementReadyLeadershipIds).toHaveLength(1);
+    expect(replacementFailures).toEqual([]);
+  });
+
   it("fails fast when required browser APIs are unavailable", async () => {
     await expect(
       BrowserBrokerClient.connect({
@@ -394,9 +440,10 @@ describe("SharedWorker browser broker", () => {
     expect(demotedLeadershipIds).toContain(1);
   });
 
-  it("does not repeatedly promote a candidate that reports leader-failed", async () => {
-    const dbName = uniqueName("broker-leader-failed-no-loop");
+  it("demotes a failed leader candidate without closing the tab", async () => {
+    const dbName = uniqueName("broker-leader-failed-demote");
     const promotionAttempts: number[] = [];
+    const demotedLeadershipIds: number[] = [];
     const closedErrors: string[] = [];
 
     const failedCandidate = await BrowserBrokerClient.connect({
@@ -406,6 +453,9 @@ describe("SharedWorker browser broker", () => {
       onBecomeLeader: async (client, leadershipId) => {
         promotionAttempts.push(leadershipId);
         client.reportLeaderFailed(leadershipId, "boom");
+      },
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
       },
       onClosed: (error) => {
         closedErrors.push(error.message);
@@ -419,17 +469,53 @@ describe("SharedWorker browser broker", () => {
       "candidate should receive its first leader promotion",
     );
     await waitFor(
-      () => closedErrors.includes("boom"),
+      () => demotedLeadershipIds.includes(1),
       2000,
-      "failed leader candidate should be closed with the reported reason",
+      "failed leader candidate should be demoted with the reported leadership id",
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(closedErrors).toEqual([]);
 
     const replacement = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-b"));
     clients.push(replacement);
-    await replacement.waitForRole("leader", 1_000);
+    await replacement.waitForRole("leader", 2_000);
 
     expect(promotionAttempts).toEqual([1]);
+    expect(failedCandidate.snapshot().role).toBe("follower");
+  });
+
+  it("steals locks from a failed candidate that never reported leader-ready", async () => {
+    const dbName = uniqueName("broker-pre-ready-lock-takeover");
+    const failedLeadershipIds: number[] = [];
+    const replacementReadyLeadershipIds: number[] = [];
+
+    const failedCandidate = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      forceTakeoverTimeoutMs: 50,
+      onBecomeLeader: async (client, leadershipId) => {
+        await acquireLeaderLocks(dbName);
+        failedLeadershipIds.push(leadershipId);
+        client.reportLeaderFailed(leadershipId, "worker bootstrap hung");
+      },
+    });
+    clients.push(failedCandidate);
+
+    const replacement = await BrowserBrokerClient.connect(
+      createLockingOptions(dbName, "tab-b", "fingerprint-a", {
+        forceTakeoverTimeoutMs: 50,
+        reportFailures: true,
+        onReady: (leadershipId) => replacementReadyLeadershipIds.push(leadershipId),
+      }),
+    );
+    clients.push(replacement);
+
+    await waitFor(
+      () => failedLeadershipIds.includes(1),
+      2000,
+      "first candidate should fail after taking the leader locks",
+    );
+    await replacement.waitForRole("leader", 4000);
+
+    expect(replacementReadyLeadershipIds.some((leadershipId) => leadershipId > 1)).toBe(true);
   });
 
   it("demotes a stale candidate that reports leader-ready after being replaced", async () => {
@@ -601,6 +687,84 @@ describe("SharedWorker browser broker", () => {
     expect(second.snapshot().leadershipId).toBeGreaterThan(1);
   });
 
+  it("ignores storage-reset-ready from a tab that already left the reset", async () => {
+    const dbName = uniqueName("broker-storage-reset-late-ready");
+    const requestId = `reset-${dbName}`;
+    const resetBegun: string[] = [];
+    const resetPromotions: string[] = [];
+    const clientByTabId = new Map<string, BrowserBrokerClient>();
+    let releaseDepartedTab!: () => void;
+    let releaseRemainingTab!: () => void;
+    const departedTabReady = new Promise<void>((resolve) => {
+      releaseDepartedTab = resolve;
+    });
+    const remainingTabReady = new Promise<void>((resolve) => {
+      releaseRemainingTab = resolve;
+    });
+
+    function createLateReadyOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        forceTakeoverTimeoutMs: 50,
+        onStorageResetBegin: async () => {
+          resetBegun.push(tabId);
+          releaseLeaderLocks(dbName);
+          await (tabId === "tab-a" ? departedTabReady : remainingTabReady);
+        },
+        onBecomeLeader: async (client, leadershipId, resetRequestId) => {
+          if (resetRequestId) {
+            resetPromotions.push(`${tabId}:${resetRequestId}`);
+          }
+          const locks = await acquireLeaderLocks(dbName);
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          port.close();
+          clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      };
+    }
+
+    const first = await BrowserBrokerClient.connect(createLateReadyOptions("tab-a"));
+    clientByTabId.set("tab-a", first);
+    clients.push(first);
+    const second = await BrowserBrokerClient.connect(createLateReadyOptions("tab-b"));
+    clientByTabId.set("tab-b", second);
+    clients.push(second);
+
+    await first.waitForRole("leader", 2000);
+    first.reportSchemaReady("schema-a");
+    second.reportSchemaReady("schema-a");
+    await second.waitForRole("follower", 2000);
+
+    const reset = second.requestStorageReset(requestId);
+    reset.catch(() => undefined);
+
+    await waitFor(
+      () => resetBegun.includes("tab-a") && resetBegun.includes("tab-b"),
+      2000,
+      "broker should ask both tabs to prepare storage reset",
+    );
+
+    (first as unknown as { port?: MessagePort | null }).port?.postMessage({ type: "shutdown" });
+    releaseDepartedTab();
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(resetPromotions).toEqual([]);
+
+    releaseRemainingTab();
+    await reset;
+    expect(resetPromotions).toContain(`tab-b:${requestId}`);
+  });
+
   it("settles every caller that joins an active storage reset", async () => {
     const dbName = uniqueName("broker-storage-reset-join");
     const firstRequestId = `reset-a-${dbName}`;
@@ -608,6 +772,10 @@ describe("SharedWorker browser broker", () => {
     const resetBegun: string[] = [];
     const resetPromotions: string[] = [];
     const clientByTabId = new Map<string, BrowserBrokerClient>();
+    let releaseResetPreparation!: () => void;
+    const resetPreparation = new Promise<void>((resolve) => {
+      releaseResetPreparation = resolve;
+    });
 
     function createResetJoinOptions(
       tabId: string,
@@ -615,9 +783,11 @@ describe("SharedWorker browser broker", () => {
       return {
         ...createOptions(dbName, tabId),
         forceTakeoverTimeoutMs: 50,
+        storageResetTimeoutMs: 50,
         onStorageResetBegin: async (requestId) => {
           resetBegun.push(`${tabId}:${requestId}`);
           releaseLeaderLocks(dbName);
+          await resetPreparation;
         },
         onBecomeLeader: async (client, leadershipId, resetRequestId) => {
           if (resetRequestId) {
@@ -652,10 +822,31 @@ describe("SharedWorker browser broker", () => {
     await second.waitForRole("follower", 2000);
 
     const firstReset = first.requestStorageReset(firstRequestId);
-    const secondReset = second.requestStorageReset(secondRequestId);
     firstReset.catch(() => undefined);
+
+    await waitFor(
+      () =>
+        resetBegun.includes(`tab-a:${firstRequestId}`) &&
+        resetBegun.includes(`tab-b:${firstRequestId}`),
+      2000,
+      "first reset should enter prepare before another caller joins it",
+    );
+
+    let secondResetOutcome: "pending" | "resolved" | string = "pending";
+    const secondReset = second.requestStorageReset(secondRequestId).then(
+      () => {
+        secondResetOutcome = "resolved";
+      },
+      (error) => {
+        secondResetOutcome = error instanceof Error ? error.message : String(error);
+      },
+    );
     secondReset.catch(() => undefined);
 
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(secondResetOutcome).toBe("pending");
+
+    releaseResetPreparation();
     await withTimeout(firstReset, 4000, "first reset request should settle");
     await withTimeout(secondReset, 4000, "second reset request should settle");
 
@@ -664,7 +855,7 @@ describe("SharedWorker browser broker", () => {
     expect(resetPromotions.some((entry) => entry.endsWith(`:${firstRequestId}`))).toBe(true);
   });
 
-  it("redelivers storage reset completion after the requester reconnects", async () => {
+  it("rejects a storage reset request after the requester reconnects mid-reset", async () => {
     const dbName = uniqueName("broker-storage-reset-redeliver");
     const requestId = `reset-${dbName}`;
     const resetBegun: string[] = [];
@@ -734,9 +925,16 @@ describe("SharedWorker browser broker", () => {
     );
 
     (second as unknown as { port?: MessagePort | null }).port?.close();
+    await waitFor(
+      () => reconnects.includes("tab-b"),
+      5000,
+      "reset requester should reconnect before the broker finishes the reset",
+    );
     releaseLeaderPreparation();
 
-    await withTimeout(reset, 3000, "reset requester should receive redelivered completion");
+    await expect(
+      withTimeout(reset, 3000, "reset requester should reject after reconnecting mid-reset"),
+    ).rejects.toThrow("Browser broker restarted during storage reset");
     expect(reconnects).toContain("tab-b");
   });
 

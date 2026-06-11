@@ -198,6 +198,11 @@ export interface BrowserBrokerStorageResetBeginMessage extends BrokerInstanceMes
   leadershipId: number;
 }
 
+export interface BrowserBrokerStorageResetStartedMessage extends BrokerInstanceMessage {
+  type: "storage-reset-started";
+  requestId: string;
+}
+
 export interface BrowserBrokerStorageResetFinishedMessage extends BrokerInstanceMessage {
   type: "storage-reset-finished";
   requestId: string;
@@ -227,6 +232,7 @@ export type BrowserBrokerControlMessage =
   | BrowserBrokerCloseFollowerPortMessage
   | BrowserBrokerDetachFollowerPortMessage
   | BrowserBrokerStorageResetBeginMessage
+  | BrowserBrokerStorageResetStartedMessage
   | BrowserBrokerStorageResetFinishedMessage
   | BrowserBrokerUnsupportedMessage
   | BrowserBrokerSchemaBlockedMessage;
@@ -297,10 +303,6 @@ export function selectLeaderCandidate(
 // matches are compared with plain equality at the call sites.
 export function isStaleLeadershipId(incoming: number, current: number): boolean {
   return incoming < current;
-}
-
-export function isFutureLeadershipId(incoming: number, current: number): boolean {
-  return incoming > current;
 }
 
 export function createBrowserBrokerFingerprint(input: BrowserBrokerFingerprintInput): string {

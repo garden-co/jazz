@@ -18,6 +18,7 @@ import {
 } from "../runtime/leader-lock.js";
 
 const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS = 1_000;
+const LEADER_FAILURE_RETRY_BACKOFF_MS = 1_000;
 const COMPLETED_STORAGE_RESET_OUTCOME_TTL_MS = 30_000;
 const MAX_COMPLETED_STORAGE_RESET_OUTCOMES = 100;
 
@@ -86,8 +87,10 @@ const attachedFollowerPorts = new Set<string>();
 let replacementElectionInFlight = false;
 let replacementElectionGeneration = 0;
 let brokerPingTimer: ReturnType<typeof setTimeout> | null = null;
+let leaderFailureRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let resetState: ResetState | null = null;
 const completedStorageResetOutcomes = new Map<string, StorageResetOutcome>();
+const failedLeaderRetryAfterByTabId = new Map<string, number>();
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -231,23 +234,16 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
         return;
       }
       if (leader?.tabId === tabId && leader.leadershipId === message.leadershipId) {
-        const failedTab = tabs.get(tabId);
+        markLeaderCandidateFailed(tabId);
         const cleared = clearLeader(message.leadershipId, "leader-failed", {
-          demoteLeader: false,
-          removeLeaderTab: true,
+          demoteLeader: true,
+          removeLeaderTab: false,
         });
-        if (failedTab) {
-          post(failedTab.port, {
-            type: "unsupported",
-            brokerInstanceId,
-            reason: message.reason,
-          });
-        }
         scheduleReplacementElection(cleared);
       }
       return;
     case "storage-reset-request":
-      startStorageReset(message.requestId);
+      startStorageReset(tabId, message.requestId);
       return;
     case "storage-reset-ready":
       handleStorageResetReady(tabId, message.requestId, message.success, message.errorMessage);
@@ -257,7 +253,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
         const leadershipId = leader.leadershipId;
         const activeReset = resetState;
         removeTab(tabId, { closePort: false, notifyLeader: false });
-        const cleared = clearLeader(leader.leadershipId, "leader-shutdown", {
+        const cleared = clearLeader(leadershipId, "leader-shutdown", {
           demoteLeader: false,
           removeLeaderTab: false,
         });
@@ -308,7 +304,10 @@ function electIfNeeded(): void {
   if (leader && !namespace?.schemaFingerprint) return;
 
   const candidate = selectLeaderCandidate(eligibleLeaderCandidates());
-  if (!candidate) return;
+  if (!candidate) {
+    scheduleLeaderFailureRetryElection();
+    return;
+  }
 
   if (leader) {
     const currentLeaderTab = tabs.get(leader.tabId);
@@ -326,14 +325,16 @@ function electIfNeeded(): void {
 
   const tab = tabs.get(candidate.tabId);
   if (!tab) return;
+  const lockNames = currentLeaderLockNames();
+  if (!lockNames) return;
 
   currentLeadershipId += 1;
   leader = {
     tabId: tab.tabId,
     leadershipId: currentLeadershipId,
     ready: false,
-    tabLockName: null,
-    workerLockName: null,
+    tabLockName: lockNames.tabLockName,
+    workerLockName: lockNames.workerLockName,
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
@@ -354,6 +355,8 @@ function resetIfIdle(): void {
   resetState = null;
   replacementElectionGeneration += 1;
   replacementElectionInFlight = false;
+  failedLeaderRetryAfterByTabId.clear();
+  stopLeaderFailureRetryTimer();
   stopBrokerPingTimer();
 }
 
@@ -369,6 +372,7 @@ function removeTab(
   }
 
   tabs.delete(tabId);
+  failedLeaderRetryAfterByTabId.delete(tabId);
   clearFollowerAttachmentState(tabId);
   reelectSchemaFingerprintIfUnheld(tab);
   if (options.closePort) {
@@ -558,9 +562,17 @@ function cancelLeaderMonitors(current: LeaderState): void {
   current.workerLockMonitor = null;
 }
 
-function startStorageReset(requestId: string): void {
+function startStorageReset(requestingTabId: string, requestId: string): void {
   if (resetState) {
     resetState.requestIds.add(requestId);
+    const tab = tabs.get(requestingTabId);
+    if (tab) {
+      post(tab.port, {
+        type: "storage-reset-started",
+        brokerInstanceId,
+        requestId,
+      });
+    }
     return;
   }
 
@@ -582,6 +594,15 @@ function startStorageReset(requestId: string): void {
     promotedLeadershipId: null,
     phase: "preparing",
   };
+
+  const requestingTab = tabs.get(requestingTabId);
+  if (requestingTab) {
+    post(requestingTab.port, {
+      type: "storage-reset-started",
+      brokerInstanceId,
+      requestId,
+    });
+  }
 
   for (const tab of tabs.values()) {
     post(tab.port, {
@@ -621,6 +642,9 @@ function handleStorageResetReady(
     return;
   }
 
+  if (!activeReset.participants.has(tabId)) {
+    return;
+  }
   if (!success) {
     activeReset.errors.push(errorMessage ?? `Tab ${tabId} failed to prepare storage reset`);
   }
@@ -630,7 +654,9 @@ function handleStorageResetReady(
 
 function continueStorageResetIfReady(activeReset: ResetState): void {
   if (resetState !== activeReset || activeReset.phase !== "preparing") return;
-  if (activeReset.preparedTabs.size < activeReset.participants.size) return;
+  for (const participant of activeReset.participants) {
+    if (!activeReset.preparedTabs.has(participant)) return;
+  }
 
   activeReset.phase = "promoting";
   void (async () => {
@@ -656,6 +682,11 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     finishStorageReset(activeReset, false, "No connected tab is available to reset storage");
     return;
   }
+  const lockNames = currentLeaderLockNames();
+  if (!lockNames) {
+    finishStorageReset(activeReset, false, "No connected tab is available to reset storage");
+    return;
+  }
 
   currentLeadershipId += 1;
   activeReset.promotedLeadershipId = currentLeadershipId;
@@ -663,8 +694,8 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     tabId: tab.tabId,
     leadershipId: currentLeadershipId,
     ready: false,
-    tabLockName: null,
-    workerLockName: null,
+    tabLockName: lockNames.tabLockName,
+    workerLockName: lockNames.workerLockName,
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
@@ -850,7 +881,7 @@ function evictTab(tabId: string, reason: string): void {
   if (leader?.tabId === tabId) {
     const leadershipId = leader.leadershipId;
     const activeReset = resetState;
-    const cleared = clearLeader(leader.leadershipId, reason, {
+    const cleared = clearLeader(leadershipId, reason, {
       demoteLeader: false,
       removeLeaderTab: false,
     });
@@ -945,10 +976,62 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
 
 function eligibleLeaderCandidates(): BrowserBrokerCandidate[] {
   const schemaFingerprint = namespace?.schemaFingerprint;
-  if (!schemaFingerprint) {
-    return [...tabs.values()];
+  return [...tabs.values()].filter((tab) => {
+    if (isLeaderCandidateInFailureBackoff(tab.tabId)) {
+      return false;
+    }
+    return !schemaFingerprint || tab.schemaFingerprint === schemaFingerprint;
+  });
+}
+
+function markLeaderCandidateFailed(tabId: string): void {
+  failedLeaderRetryAfterByTabId.set(tabId, Date.now() + LEADER_FAILURE_RETRY_BACKOFF_MS);
+}
+
+function isLeaderCandidateInFailureBackoff(tabId: string, now = Date.now()): boolean {
+  const retryAfter = failedLeaderRetryAfterByTabId.get(tabId);
+  if (retryAfter === undefined) return false;
+  if (retryAfter <= now) {
+    failedLeaderRetryAfterByTabId.delete(tabId);
+    return false;
   }
-  return [...tabs.values()].filter((tab) => tab.schemaFingerprint === schemaFingerprint);
+  return true;
+}
+
+function scheduleLeaderFailureRetryElection(now = Date.now()): void {
+  if (leaderFailureRetryTimer || resetState || replacementElectionInFlight || leader?.ready) return;
+
+  let retryAt: number | null = null;
+  for (const [tabId, candidateRetryAt] of failedLeaderRetryAfterByTabId) {
+    if (!tabs.has(tabId)) {
+      failedLeaderRetryAfterByTabId.delete(tabId);
+      continue;
+    }
+    retryAt = retryAt === null ? candidateRetryAt : Math.min(retryAt, candidateRetryAt);
+  }
+  if (retryAt === null) return;
+
+  leaderFailureRetryTimer = setTimeout(
+    () => {
+      leaderFailureRetryTimer = null;
+      electIfNeeded();
+    },
+    Math.max(0, retryAt - now),
+  );
+}
+
+function stopLeaderFailureRetryTimer(): void {
+  if (!leaderFailureRetryTimer) return;
+  clearTimeout(leaderFailureRetryTimer);
+  leaderFailureRetryTimer = null;
+}
+
+function currentLeaderLockNames(): { tabLockName: string; workerLockName: string } | null {
+  if (!namespace) return null;
+  return {
+    tabLockName: `jazz-leader-tab:${namespace.appId}:${namespace.dbName}`,
+    workerLockName: `jazz-leader-worker:${namespace.appId}:${namespace.dbName}`,
+  };
 }
 
 function shouldAssignFollowerPort(tab: TabState, nextLeader: LeaderState): boolean {
