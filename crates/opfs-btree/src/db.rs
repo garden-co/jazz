@@ -483,13 +483,13 @@ impl<F: SyncFile> OpfsBTree<F> {
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
         let page_size = self.options.page_size;
-        let kind = {
+        let step = {
             let raw = self.ensure_page_loaded(page_id)?;
-            raw_page_kind(raw, page_size)?
+            raw_descend_step(raw, page_size, key)?
         };
 
-        match kind {
-            PageKind::Leaf => {
+        match step {
+            RawDescendStep::Leaf => {
                 let (new_value, reused_overflow_head) =
                     if value.len() <= self.options.overflow_threshold {
                         (ValueCell::Inline(value.to_vec()), None)
@@ -590,10 +590,15 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            PageKind::Internal => {
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-                })?;
+            RawDescendStep::Child(child_page_id) => {
+                let split = self.insert_recursive(child_page_id, key, value)?;
+                let Some(split) = split else {
+                    return Ok(None);
+                };
+
+                // Split path: recursion may have evicted this clean parent, so
+                // reload before decoding for the structural update.
+                let page_raw = self.ensure_page_loaded(page_id)?.to_vec();
                 let page = decode_page(&page_raw, self.options.page_size)?;
                 let Page::Internal {
                     mut keys,
@@ -606,17 +611,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                     )));
                 };
                 let child_idx = child_index(&keys, key);
-                let child_page_id = *children.get(child_idx).ok_or_else(|| {
-                    BTreeError::Corrupt(format!(
-                        "internal page {} missing child {}",
-                        page_id, child_idx
-                    ))
-                })?;
-
-                let split = self.insert_recursive(child_page_id, key, value)?;
-                let Some(split) = split else {
-                    return Ok(None);
-                };
 
                 keys.insert(child_idx, split.separator);
                 children.insert(child_idx + 1, split.right_page_id);
@@ -648,26 +642,22 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
-                "insert reached overflow page {}",
-                page_id
-            ))),
-            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
-                "insert reached freelist page {}",
-                page_id
+            RawDescendStep::Other(kind) => Err(BTreeError::Corrupt(format!(
+                "insert reached {:?} page {}",
+                kind, page_id
             ))),
         }
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
         let page_size = self.options.page_size;
-        let kind = {
+        let step = {
             let raw = self.ensure_page_loaded(page_id)?;
-            raw_page_kind(raw, page_size)?
+            raw_descend_step(raw, page_size, key)?
         };
 
-        match kind {
-            PageKind::Leaf => {
+        match step {
+            RawDescendStep::Leaf => {
                 let deleted = {
                     let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
                         BTreeError::Corrupt(format!("page {} missing during delete", page_id))
@@ -688,33 +678,10 @@ impl<F: SyncFile> OpfsBTree<F> {
                     }
                 }
             }
-            PageKind::Internal => {
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during delete", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
-                let Page::Internal { keys, children } = page else {
-                    return Err(BTreeError::Corrupt(format!(
-                        "expected internal page {}, found non-internal during delete",
-                        page_id
-                    )));
-                };
-                let child_idx = child_index(&keys, key);
-                let child_page_id = *children.get(child_idx).ok_or_else(|| {
-                    BTreeError::Corrupt(format!(
-                        "internal page {} missing child {}",
-                        page_id, child_idx
-                    ))
-                })?;
-                self.delete_recursive(child_page_id, key)
-            }
-            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
-                "delete reached overflow page {}",
-                page_id
-            ))),
-            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
-                "delete reached freelist page {}",
-                page_id
+            RawDescendStep::Child(child_page_id) => self.delete_recursive(child_page_id, key),
+            RawDescendStep::Other(kind) => Err(BTreeError::Corrupt(format!(
+                "delete reached {:?} page {}",
+                kind, page_id
             ))),
         }
     }
