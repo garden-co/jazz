@@ -469,9 +469,7 @@ describe("db.subscribeAll browser integration", () => {
 
       const {
         value: { id: insertedId },
-      } = testCase.insertId
-        ? await conditionsDb.insert(todos, testCase.insert, { id: testCase.insertId })
-        : await conditionsDb.insert(todos, testCase.insert);
+      } = await conditionsDb.insert(todos, testCase.insert, { id: testCase.insertId });
 
       await waitForCondition(
         () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),

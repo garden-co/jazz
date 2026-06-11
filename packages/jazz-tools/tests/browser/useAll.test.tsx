@@ -382,11 +382,7 @@ describe("useAll browser integration", () => {
         </JazzProvider>,
       );
 
-      if (testCase.insertId) {
-        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
-      } else {
-        await conditionsClient.db.insert(todos, testCase.insert);
-      }
+      await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
 
       await waitForCondition(
         () => getText("rows").split("|").includes(testCase.pick),

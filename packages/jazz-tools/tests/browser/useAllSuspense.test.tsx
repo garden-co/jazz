@@ -392,11 +392,7 @@ describe("useAllSuspense browser integration", () => {
       const preloadBeforeRender =
         testCase.name === "contains-text" || testCase.name === "contains-text-empty";
       if (preloadBeforeRender) {
-        if (testCase.insertId) {
-          await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
-        } else {
-          await conditionsClient.db.insert(todos, testCase.insert);
-        }
+        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
       }
 
       renderSuspense(
@@ -412,11 +408,7 @@ describe("useAllSuspense browser integration", () => {
       );
 
       if (!preloadBeforeRender) {
-        if (testCase.insertId) {
-          await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
-        } else {
-          await conditionsClient.db.insert(todos, testCase.insert);
-        }
+        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
       }
 
       await waitForCondition(
