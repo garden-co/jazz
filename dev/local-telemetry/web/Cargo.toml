@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[workspace]
-
 [dependencies]
 gloo-net = "0.6"
 gloo-timers = "0.3"

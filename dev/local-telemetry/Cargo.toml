@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[workspace]
-
 [dependencies]
 anyhow = "1"
 axum = "0.7"
