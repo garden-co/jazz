@@ -5,10 +5,10 @@ use std::collections::BinaryHeap;
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
-    ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
-    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
-    raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
+    ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
+    raw_descend_step, raw_freelist_page, raw_leaf_delete_in_place, raw_leaf_find_value,
+    raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 use crate::wal::{self, WalFrame, WalFrameRef, WalHeader};
@@ -1034,23 +1034,17 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         loop {
             self.ensure_page_loaded(current)?;
-            let raw_kind = {
-                let raw = self.raw_page_bytes(current)?;
-                raw_page_kind(raw, self.options.page_size)?
-            };
-            match raw_kind {
-                PageKind::Leaf => return Ok(Some(current)),
-                PageKind::Internal => {
-                    let raw = self.raw_page_bytes(current)?;
-                    current = raw_internal_child_for_key(raw, self.options.page_size, key)?;
-                }
-                PageKind::Overflow => {
+            let raw = self.raw_page_bytes(current)?;
+            match raw_descend_step(raw, self.options.page_size, key)? {
+                RawDescendStep::Leaf => return Ok(Some(current)),
+                RawDescendStep::Child(child) => current = child,
+                RawDescendStep::Other(PageKind::Overflow) => {
                     return Err(BTreeError::Corrupt(format!(
                         "unexpected overflow page {} in tree path",
                         current
                     )));
                 }
-                PageKind::Freelist => {
+                RawDescendStep::Other(_) => {
                     return Err(BTreeError::Corrupt(format!(
                         "unexpected freelist page {} in tree path",
                         current
