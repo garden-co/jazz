@@ -3,7 +3,6 @@ import {
   DEFAULT_BROKER_PONG_TIMEOUT_MS,
   detectBrowserBrokerMissingCapabilities,
   formatUnsupportedBrowserBrokerError,
-  isFutureLeadershipId,
   normalizePositiveTimeout,
   stringifyError,
   type BrowserBrokerCapabilityGlobal,
@@ -69,6 +68,11 @@ type RoleWaiter = {
 type ResetWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
+};
+
+type ResetStartWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 };
 
@@ -96,6 +100,7 @@ export class BrowserBrokerClient {
   private reconnecting = false;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
+  private readonly resetStartWaiters = new Map<string, ResetStartWaiter[]>();
   private readonly queuedMessages: BrowserBrokerTabMessage[] = [];
   private brokerLivenessTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -187,13 +192,20 @@ export class BrowserBrokerClient {
     if (this.closed) {
       throw this.closedError ?? new Error("Browser broker client closed");
     }
+    let startWaiter!: ResetStartWaiter;
     let waiter!: ResetWaiter;
-    const completion = new Promise<void>((resolve, reject) => {
+    const started = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.removeResetWaiter(requestId, waiter);
-        reject(new Error(`Timed out waiting for browser storage reset ${requestId}`));
+        this.removeResetStartWaiter(requestId, startWaiter);
+        reject(new Error(`Timed out waiting for browser storage reset ${requestId} to start`));
       }, this.storageResetTimeoutMs());
-      waiter = { resolve, reject, timeout };
+      startWaiter = { resolve, reject, timeout };
+      const waiters = this.resetStartWaiters.get(requestId) ?? [];
+      waiters.push(startWaiter);
+      this.resetStartWaiters.set(requestId, waiters);
+    });
+    const completion = new Promise<void>((resolve, reject) => {
+      waiter = { resolve, reject };
       const waiters = this.resetWaiters.get(requestId) ?? [];
       waiters.push(waiter);
       this.resetWaiters.set(requestId, waiters);
@@ -202,7 +214,13 @@ export class BrowserBrokerClient {
       type: "storage-reset-request",
       requestId,
     });
-    await completion;
+    try {
+      await started;
+      await completion;
+    } catch (error) {
+      this.removeResetWaiter(requestId, waiter);
+      throw error;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -220,6 +238,7 @@ export class BrowserBrokerClient {
       waiter.reject(new Error("Browser broker client closed"));
     }
     this.roleWaiters.clear();
+    this.rejectResetStartWaiters(new Error("Browser broker client closed"));
     this.rejectResetWaiters(new Error("Browser broker client closed"));
   }
 
@@ -356,7 +375,6 @@ export class BrowserBrokerClient {
         });
         return;
       case "demote":
-        if (isFutureLeadershipId(message.leadershipId, this.leadershipId)) return;
         if (message.leadershipId === this.leadershipId) {
           this.role = "follower";
           this.leaderTabId = null;
@@ -398,6 +416,7 @@ export class BrowserBrokerClient {
         this.options.onDetachFollowerPort?.(message.followerTabId, message.leadershipId);
         return;
       case "storage-reset-begin":
+        this.resolveResetStartWaiters(message.requestId);
         void Promise.resolve(
           this.options.onStorageResetBegin?.(message.requestId, message.leadershipId),
         )
@@ -408,7 +427,11 @@ export class BrowserBrokerClient {
             this.reportStorageResetReady(message.requestId, false, stringifyError(error));
           });
         return;
+      case "storage-reset-started":
+        this.resolveResetStartWaiters(message.requestId);
+        return;
       case "storage-reset-finished":
+        this.resolveResetStartWaiters(message.requestId);
         this.resolveResetWaiters(message.requestId, message.success, message.errorMessage);
         return;
       case "schema-blocked":
@@ -441,6 +464,10 @@ export class BrowserBrokerClient {
     this.role = "follower";
     this.leaderTabId = null;
     this.leadershipId = 0;
+    this.queuedMessages.length = 0;
+    const resetError = new Error("Browser broker restarted during storage reset");
+    this.rejectResetStartWaiters(resetError);
+    this.rejectResetWaiters(resetError);
 
     if (previousPort) {
       this.detachBrokerPort(previousPort);
@@ -450,9 +477,10 @@ export class BrowserBrokerClient {
     }
 
     try {
-      if (previousRole === "leader" && previousLeadershipId > 0) {
+      if (previousLeadershipId > 0) {
         await this.options.onDemote?.(previousLeadershipId);
-      } else if (previousRole === "follower" && previousLeadershipId > 0) {
+      }
+      if (previousRole === "follower" && previousLeadershipId > 0) {
         this.options.onCloseFollowerPort?.(previousLeadershipId);
       }
 
@@ -512,12 +540,32 @@ export class BrowserBrokerClient {
     this.resetWaiters.delete(requestId);
     const error = success ? null : new Error(errorMessage ?? "Browser storage reset failed");
     for (const waiter of waiters) {
-      clearTimeout(waiter.timeout);
       if (error) {
         waiter.reject(error);
       } else {
         waiter.resolve();
       }
+    }
+  }
+
+  private resolveResetStartWaiters(requestId: string): void {
+    const waiters = this.resetStartWaiters.get(requestId);
+    if (!waiters) return;
+    this.resetStartWaiters.delete(requestId);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve();
+    }
+  }
+
+  private removeResetStartWaiter(requestId: string, waiter: ResetStartWaiter): void {
+    const waiters = this.resetStartWaiters.get(requestId);
+    if (!waiters) return;
+    const next = waiters.filter((candidate) => candidate !== waiter);
+    if (next.length === 0) {
+      this.resetStartWaiters.delete(requestId);
+    } else {
+      this.resetStartWaiters.set(requestId, next);
     }
   }
 
@@ -532,10 +580,19 @@ export class BrowserBrokerClient {
     }
   }
 
+  private rejectResetStartWaiters(error: Error): void {
+    for (const waiters of this.resetStartWaiters.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timeout);
+        waiter.reject(error);
+      }
+    }
+    this.resetStartWaiters.clear();
+  }
+
   private rejectResetWaiters(error: Error): void {
     for (const waiters of this.resetWaiters.values()) {
       for (const waiter of waiters) {
-        clearTimeout(waiter.timeout);
         waiter.reject(error);
       }
     }
@@ -615,6 +672,7 @@ export class BrowserBrokerClient {
       this.port = null;
     }
     this.rejectRoleWaiters(error);
+    this.rejectResetStartWaiters(error);
     this.rejectResetWaiters(error);
     this.options.onClosed?.(error);
   }

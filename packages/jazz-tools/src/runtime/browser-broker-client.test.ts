@@ -338,4 +338,253 @@ describe("BrowserBrokerClient", () => {
       "incompatible persistent browser schema",
     );
   });
+
+  it("forwards future demote messages so in-flight promotions can be cancelled", async () => {
+    const workers: FakeSharedWorker[] = [];
+    const demotedLeadershipIds: number[] = [];
+
+    class FakePort extends EventTarget {
+      readonly postedMessages: unknown[] = [];
+      closed = false;
+
+      postMessage(message: unknown): void {
+        this.postedMessages.push(message);
+        if ((message as { type?: unknown }).type === "hello") {
+          queueMicrotask(() => {
+            dispatchPortMessage(this, {
+              type: "broker-hello",
+              brokerInstanceId: "instance-a",
+            });
+          });
+        }
+      }
+
+      start(): void {}
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+
+    class FakeSharedWorker {
+      readonly port = new FakePort() as MessagePort & FakePort;
+
+      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
+        workers.push(this);
+      }
+    }
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+      onDemote: (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
+      },
+    });
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "leader-ready",
+      brokerInstanceId: "instance-a",
+      leaderTabId: "tab-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+    await client.waitForRole("leader", 100);
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "demote",
+      brokerInstanceId: "instance-a",
+      leadershipId: 2,
+    } satisfies BrowserBrokerControlMessage);
+
+    expect(demotedLeadershipIds).toEqual([2]);
+
+    await client.shutdown();
+  });
+
+  it("times out only the storage reset start acknowledgment", async () => {
+    const workers: FakeSharedWorker[] = [];
+    let resetOutcome: "pending" | "resolved" | string = "pending";
+
+    class FakePort extends EventTarget {
+      readonly postedMessages: unknown[] = [];
+      closed = false;
+
+      postMessage(message: unknown): void {
+        this.postedMessages.push(message);
+        if ((message as { type?: unknown }).type === "hello") {
+          queueMicrotask(() => {
+            dispatchPortMessage(this, {
+              type: "broker-hello",
+              brokerInstanceId: "instance-a",
+            });
+          });
+        }
+      }
+
+      start(): void {}
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+
+    class FakeSharedWorker {
+      readonly port = new FakePort() as MessagePort & FakePort;
+
+      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
+        workers.push(this);
+      }
+    }
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      storageResetTimeoutMs: 25,
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    const reset = client.requestStorageReset("reset-a").then(
+      () => {
+        resetOutcome = "resolved";
+      },
+      (error) => {
+        resetOutcome = error instanceof Error ? error.message : String(error);
+      },
+    );
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "storage-reset-begin",
+      brokerInstanceId: "instance-a",
+      requestId: "reset-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(resetOutcome).toBe("pending");
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "storage-reset-finished",
+      brokerInstanceId: "instance-a",
+      requestId: "reset-a",
+      success: true,
+    } satisfies BrowserBrokerControlMessage);
+
+    await reset;
+    expect(resetOutcome).toBe("resolved");
+
+    await client.shutdown();
+  });
+
+  it("rejects storage reset completion waiters when the broker reconnects mid-reset", async () => {
+    const brokerInstanceIds = ["instance-a", "instance-b"];
+    const workers: FakeSharedWorker[] = [];
+    let resetOutcome = "pending";
+
+    class FakePort extends EventTarget {
+      readonly postedMessages: unknown[] = [];
+      closed = false;
+
+      constructor(private readonly brokerInstanceId: string) {
+        super();
+      }
+
+      postMessage(message: unknown): void {
+        this.postedMessages.push(message);
+        if ((message as { type?: unknown }).type === "hello") {
+          queueMicrotask(() => {
+            dispatchPortMessage(this, {
+              type: "broker-hello",
+              brokerInstanceId: this.brokerInstanceId,
+            });
+          });
+        }
+      }
+
+      start(): void {}
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+
+    class FakeSharedWorker {
+      readonly port: MessagePort & FakePort;
+
+      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
+        this.port = new FakePort(
+          brokerInstanceIds[workers.length] ?? "instance-next",
+        ) as MessagePort & FakePort;
+        workers.push(this);
+      }
+    }
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    const reset = client.requestStorageReset("reset-a").then(
+      () => {
+        resetOutcome = "resolved";
+      },
+      (error) => {
+        resetOutcome = error instanceof Error ? error.message : String(error);
+      },
+    );
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "storage-reset-started",
+      brokerInstanceId: "instance-a",
+      requestId: "reset-a",
+    } satisfies BrowserBrokerControlMessage);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(resetOutcome).toBe("pending");
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "broker-ping",
+      brokerInstanceId: "instance-b",
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(() => workers.length === 2, 200, "client should reconnect to the new broker");
+    await waitFor(
+      () => resetOutcome !== "pending",
+      200,
+      "storage reset waiter should reject when the broker reconnects",
+    );
+
+    expect(resetOutcome).toBe("Browser broker restarted during storage reset");
+
+    await reset;
+    await client.shutdown();
+  });
 });

@@ -48,6 +48,10 @@ const { loadWasmModuleMock, tryAcquireWebLockMock, FakeBrowserBrokerClient } = v
 
     async shutdown(): Promise<void> {}
 
+    async beginStorageReset(leadershipId: number): Promise<void> {
+      await this.options.onStorageResetBegin?.("reset-test", leadershipId);
+    }
+
     async demote(leadershipId: number): Promise<void> {
       if (leadershipId === this.leadershipId) {
         this.role = "follower";
@@ -505,6 +509,155 @@ describe("Db worker runtime bootstrap", () => {
       expect((db as unknown as { tabRole?: unknown }).tabRole).toBe("follower");
     } finally {
       await db?.shutdown();
+    }
+  });
+
+  it("waits for an in-flight promotion to settle before acking broker storage reset", async () => {
+    const appId = "worker-bootstrap-reset-cancels-promotion";
+    const dbName = "worker-bootstrap-reset-cancels-promotion";
+    const releasedLocks: string[] = [];
+    let workerReady: (() => void) | null = null;
+    let resetPrepared = false;
+    let terminatedWorkers = 0;
+
+    tryAcquireWebLockMock.mockImplementation(async (lockName?: string) => ({
+      release: vi.fn(() => {
+        if (lockName) {
+          releasedLocks.push(lockName);
+        }
+      }),
+    }));
+
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        workerReady = () => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        };
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {
+        terminatedWorkers++;
+      }
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const dbPromise = createWorkerDb({
+      appId,
+      driver: { type: "persistent", dbName },
+    });
+
+    let db: Db | null = null;
+    const shutdownForReset = vi.spyOn(
+      Db.prototype as unknown as {
+        shutdownWorkerAndClientsForStorageReset: () => Promise<void>;
+      },
+      "shutdownWorkerAndClientsForStorageReset",
+    );
+    try {
+      await waitFor(
+        () => tryAcquireWebLockMock.mock.calls.length >= 1 && workerReady !== null,
+        200,
+        "promotion should acquire the tab lock and start worker bootstrap",
+      );
+
+      const resetPreparation = FakeBrowserBrokerClient.instances[0]!.beginStorageReset(1).then(
+        () => {
+          resetPrepared = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(resetPrepared).toBe(false);
+
+      workerReady!();
+      db = await dbPromise;
+      await resetPreparation;
+
+      expect(resetPrepared).toBe(true);
+      expect(releasedLocks).toEqual([`jazz-leader-tab:${appId}:${dbName}`]);
+      expect(terminatedWorkers).toBe(1);
+      expect(shutdownForReset).toHaveBeenCalledTimes(1);
+    } finally {
+      shutdownForReset.mockRestore();
+      await db?.shutdown();
+    }
+  });
+
+  it("adopts the broker snapshot when the broker reconnects", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await createWorkerDb({
+      appId: "worker-bootstrap-reconnect-snapshot",
+      driver: { type: "persistent", dbName: "worker-bootstrap-reconnect-snapshot" },
+    });
+
+    try {
+      const anyDb = db as unknown as {
+        brokerSchemaFingerprint: string | null;
+        currentLeaderTabId: string | null;
+        currentLeadershipId: number;
+        handleBrokerReconnected(client: unknown): void;
+        tabId: string;
+        tabRole: string;
+      };
+      const reportSchemaReady = vi.fn();
+
+      anyDb.tabRole = "follower";
+      anyDb.currentLeaderTabId = "old-leader";
+      anyDb.currentLeadershipId = 42;
+      anyDb.brokerSchemaFingerprint = "schema-a";
+
+      anyDb.handleBrokerReconnected({
+        snapshot: () => ({
+          brokerInstanceId: "new-broker",
+          role: "follower",
+          tabId: anyDb.tabId,
+          leaderTabId: null,
+          leadershipId: 0,
+        }),
+        reportSchemaReady,
+      });
+
+      expect(anyDb.currentLeadershipId).toBe(0);
+      expect(anyDb.currentLeaderTabId).toBeNull();
+      expect(reportSchemaReady).toHaveBeenCalledWith("schema-a");
+    } finally {
+      await db.shutdown();
     }
   });
 

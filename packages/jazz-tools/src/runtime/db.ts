@@ -1255,10 +1255,12 @@ export class Db {
     bridge.onFollowerPortAttached((event) => {
       if (this.tabRole !== "leader") return;
       if (event.leadershipId !== this.currentLeadershipId) return;
+      const leadershipId = event.leadershipId;
       const reportAttached = () => {
         if (this.tabRole !== "leader") return;
-        if (event.leadershipId !== this.currentLeadershipId) return;
-        this.brokerClient?.reportFollowerPortAttached(event.peerId, event.leadershipId);
+        if (leadershipId !== this.currentLeadershipId) return;
+        if (this.workerBridge !== bridge) return;
+        this.brokerClient?.reportFollowerPortAttached(event.peerId, leadershipId);
       };
       if (!this.config.serverUrl) {
         reportAttached();
@@ -1266,29 +1268,42 @@ export class Db {
       }
       reportAttached();
       void bridge.waitForUpstreamServerConnection().catch((error) => {
-        if (this.brokerClient && this.tabRole === "leader") {
-          this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
+        if (
+          this.brokerClient &&
+          this.tabRole === "leader" &&
+          this.currentLeadershipId === leadershipId &&
+          this.workerBridge === bridge
+        ) {
+          this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
         }
       });
     });
     this.workerBridge = bridge;
+    const leadershipId = this.currentLeadershipId;
     const bridgeReady = bridge
       .init(this.buildWorkerBridgeOptions(schemaJson))
       .then(() => {
+        if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
         this.flushPendingLeaderFollowerPorts();
         this.reportBrokerLeaderReady();
         this.resolveDurablePathReady();
       })
       .then(() => undefined);
     bridgeReady.catch((error) => {
-      void this.handleBrokerLeaderBridgeFailure(error);
+      if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
+      void this.handleBrokerLeaderBridgeFailure(error, bridge, leadershipId);
     });
     this.bridgeReady = bridgeReady;
   }
 
-  private async handleBrokerLeaderBridgeFailure(error: unknown): Promise<void> {
+  private async handleBrokerLeaderBridgeFailure(
+    error: unknown,
+    failedBridge: WorkerBridge,
+    leadershipId: number,
+  ): Promise<void> {
+    if (this.workerBridge !== failedBridge || this.currentLeadershipId !== leadershipId) return;
     if (this.brokerClient && this.tabRole === "leader") {
-      this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
+      this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
     }
     if (this.tabRole !== "leader") return;
 
@@ -1597,6 +1612,12 @@ export class Db {
     if (this.isShuttingDown) return;
     if (leadershipId !== this.currentLeadershipId) return;
 
+    const activePromotion = this.activeBrokerPromotion;
+    if (activePromotion?.leadershipId === leadershipId) {
+      activePromotion.cancelled = true;
+      await this.brokerPromotion?.catch(() => undefined);
+    }
+
     // Pending leader follower ports are left untouched: the broker clears all
     // attachments itself when the reset starts and re-issues them afterwards.
     await this.resignBrokerLeadership({
@@ -1784,6 +1805,7 @@ export class Db {
   }
 
   private handleBrokerReconnected(client: BrowserBrokerClient): void {
+    this.adoptBrokerSnapshot(client.snapshot());
     this.markDurablePathPending();
     if (this.brokerSchemaFingerprint) {
       client.reportSchemaReady(this.brokerSchemaFingerprint);
