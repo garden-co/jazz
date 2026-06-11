@@ -7,8 +7,8 @@ use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
     ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
-    raw_descend_step, raw_freelist_page, raw_leaf_delete_in_place, raw_leaf_find_value,
-    raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 use crate::wal::{self, WalFrame, WalFrameRef, WalHeader};
@@ -116,6 +116,7 @@ pub struct OpfsBTree<F: SyncFile> {
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
+    last_leaf_hint: Option<PageId>,
 }
 
 #[derive(Debug)]
@@ -166,6 +167,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
+            last_leaf_hint: None,
         };
 
         if tree.active.generation == 0 {
@@ -214,7 +216,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::get", key_len = key.len()).entered();
-        let leaf_page_id = match self.find_leaf_page_id(key)? {
+        let leaf_page_id = match self.leaf_for_key(key)? {
             Some(id) => id,
             None => return Ok(None),
         };
@@ -241,6 +243,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             value_len = value.len()
         )
         .entered();
+        self.last_leaf_hint = None;
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -271,6 +274,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
+        self.last_leaf_hint = None;
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -314,7 +318,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         let mut out = Vec::with_capacity(limit.min(1024));
-        let mut current = self.find_leaf_page_id(start)?;
+        let mut current = self.leaf_for_key(start)?;
         let mut visited = OpfsSet::default();
         let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
 
@@ -1054,6 +1058,25 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
+    /// Resolves the leaf for `key`, trying the last-used leaf before paying
+    /// for a full root-to-leaf descent. Safe because `raw_leaf_covers_key`
+    /// re-checks the page's current bytes on every use.
+    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        if let Some(page_id) = self.last_leaf_hint {
+            let covers = match self.pages.get(&page_id) {
+                Some(raw) => raw_leaf_covers_key(raw, self.options.page_size, key)?,
+                None => false,
+            };
+            if covers {
+                self.touch_page(page_id);
+                return Ok(Some(page_id));
+            }
+        }
+        let leaf = self.find_leaf_page_id(key)?;
+        self.last_leaf_hint = leaf;
+        Ok(leaf)
+    }
+
     fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
         if self.pages.contains_key(&page_id) {
             self.touch_page(page_id);
@@ -1340,6 +1363,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         header: WalHeader,
         frames: Vec<WalFrame>,
     ) -> Result<(), BTreeError> {
+        self.last_leaf_hint = None;
         if header.total_pages < 2 {
             return Err(BTreeError::Corrupt(
                 "WAL total_pages must be >= 2".to_string(),

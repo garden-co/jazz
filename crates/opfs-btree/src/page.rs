@@ -345,6 +345,49 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
+/// True when `raw` is a non-empty leaf whose closed key span
+/// [first_key, last_key] contains `key`. In a B+tree that makes it the
+/// unique leaf responsible for `key`, so callers may skip the descent.
+pub(crate) fn raw_leaf_covers_key(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<bool, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Ok(false);
+    }
+    let entry_count = header.item_count as usize;
+    if entry_count == 0 {
+        return Ok(false);
+    }
+    let payload = header.payload;
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if payload.len() < slots_bytes {
+        return Ok(false);
+    }
+    let slots = &payload[..slots_bytes];
+
+    let first_off = read_le_u32(slots, 0) as usize;
+    let first_len = read_le_u32(slots, 4) as usize;
+    let last_base = (entry_count - 1) * LEAF_SLOT_BYTES;
+    let last_off = read_le_u32(slots, last_base) as usize;
+    let last_len = read_le_u32(slots, last_base + 4) as usize;
+    let first_end = first_off
+        .checked_add(first_len)
+        .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+    let last_end = last_off
+        .checked_add(last_len)
+        .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+    if first_end > payload.len() || last_end > payload.len() {
+        return Err(BTreeError::Corrupt(
+            "leaf key exceeds payload bounds".to_string(),
+        ));
+    }
+
+    Ok(&payload[first_off..first_end] <= key && key <= &payload[last_off..last_end])
+}
+
 /// Scan a leaf page for key-value pairs in the range [start, end).
 /// Calls the `visit` function for each key-value pair in the range.
 /// If the end of the range (or the limit of results) is reached, the function returns None.
