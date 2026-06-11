@@ -280,26 +280,37 @@ pub(crate) fn raw_leaf_find_value<'a>(
         return Err(BTreeError::Corrupt("expected leaf page".to_string()));
     }
 
+    let payload = header.payload;
     let entry_count = header.item_count as usize;
     let slots_bytes = leaf_slots_bytes(entry_count)?;
-    if header.payload.len() < slots_bytes {
+    if payload.len() < slots_bytes {
         return Err(BTreeError::Corrupt(
             "leaf page payload shorter than slot directory".to_string(),
         ));
     }
+    let slots = &payload[..slots_bytes];
 
     let mut lo = 0usize;
     let mut hi = entry_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (key_off, key_len, _) = leaf_slot(header.payload, entry_count, mid)?;
-        let current_key = slice_payload(header.payload, key_off, key_len, "leaf key")?;
-        match current_key.cmp(key) {
+        let base = mid * LEAF_SLOT_BYTES;
+        let key_off = read_le_u32(slots, base) as usize;
+        let key_len = read_le_u32(slots, base + 4) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        match payload[key_off..key_end].cmp(key) {
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
             std::cmp::Ordering::Equal => {
-                let (_, _, value_off) = leaf_slot(header.payload, entry_count, mid)?;
-                let value = parse_leaf_value_cell_at(header.payload, value_off)?;
+                let value_off = read_le_u32(slots, base + 8) as usize;
+                let value = parse_leaf_value_cell_at(payload, value_off)?;
                 return Ok(Some(value));
             }
         }
