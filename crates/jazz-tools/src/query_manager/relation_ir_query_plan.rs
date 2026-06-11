@@ -205,7 +205,18 @@ fn relation_predicate_to_disjuncts(predicate: &PredicateExpr) -> Option<Vec<Conj
         }
         PredicateExpr::In { left, values } => {
             if values.is_empty() {
-                return None;
+                let column = to_scoped_runtime_column(left);
+                // Empty IN lists must match no rows. Represent that as a
+                // contradiction so the existing query planner can still lower
+                // the predicate into normal scan/filter conditions.
+                return Some(vec![Conjunction {
+                    conditions: vec![
+                        Condition::IsNull {
+                            column: column.clone(),
+                        },
+                        Condition::IsNotNull { column },
+                    ],
+                }]);
             }
             let mut out = Vec::with_capacity(values.len());
             for value in values {
@@ -1028,6 +1039,36 @@ mod tests {
                 column: "u.name".to_string(),
                 value: Value::Text("Bob".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_lowers_empty_in_to_no_match_conditions() {
+        let relation = RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            predicate: PredicateExpr::In {
+                left: ColumnRef::unscoped("name"),
+                values: vec![],
+            },
+        };
+        let branches = vec!["main".to_string()];
+
+        let plan = lower_relation_to_execution_plan(&relation, &branches, false, Vec::new(), None)
+            .expect("empty in should lower to a valid no-match plan");
+
+        assert_eq!(plan.disjuncts.len(), 1);
+        assert_eq!(
+            plan.disjuncts[0].conditions,
+            vec![
+                Condition::IsNull {
+                    column: "name".to_string(),
+                },
+                Condition::IsNotNull {
+                    column: "name".to_string(),
+                },
+            ]
         );
     }
 
