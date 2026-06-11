@@ -29,21 +29,28 @@ fn build_tree(checkpoint: bool) -> MemoryFile {
     file
 }
 
+// Pre-built outside the timed loops so per-iteration `format!` allocations
+// don't dilute the measured tree work.
+fn all_keys() -> Vec<Vec<u8>> {
+    (0..N).map(key).collect()
+}
+
 fn bench_get(c: &mut Criterion) {
     let file = build_tree(true);
     let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
     let mut i = 0usize;
     c.bench_function("get_random", |b| {
         b.iter(|| {
             i = (i + 7919) % N;
-            black_box(tree.get(&key(i)).expect("get").expect("present"))
+            black_box(tree.get(&keys[i]).expect("get").expect("present"))
         })
     });
     let mut j = 0usize;
     c.bench_function("get_sequential", |b| {
         b.iter(|| {
             j = (j + 1) % N;
-            black_box(tree.get(&key(j)).expect("get").expect("present"))
+            black_box(tree.get(&keys[j]).expect("get").expect("present"))
         })
     });
 }
@@ -51,11 +58,12 @@ fn bench_get(c: &mut Criterion) {
 fn bench_range(c: &mut Criterion) {
     let file = build_tree(true);
     let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
     let mut i = 0usize;
     c.bench_function("range_100", |b| {
         b.iter(|| {
             i = (i + 7919) % (N - 200);
-            black_box(tree.range(&key(i), &key(i + 200), 100).expect("range"))
+            black_box(tree.range(&keys[i], &keys[i + 200], 100).expect("range"))
         })
     });
 }

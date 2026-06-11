@@ -215,19 +215,6 @@ pub(crate) fn raw_page_kind(raw: &[u8], expected_page_size: usize) -> Result<Pag
     Ok(header.kind)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn raw_internal_child_for_key(
-    raw: &[u8],
-    expected_page_size: usize,
-    key: &[u8],
-) -> Result<PageId, BTreeError> {
-    let header = parse_header(raw, expected_page_size, false)?;
-    if header.kind != PageKind::Internal {
-        return Err(BTreeError::Corrupt("expected internal page".to_string()));
-    }
-    internal_child_for_key_parsed(header.payload, header.item_count as usize, key)
-}
-
 // Hot path: bounds for the whole slot directory are validated once up front
 // so each binary-search probe is two direct loads plus one key bounds check.
 fn internal_child_for_key_parsed(
@@ -1529,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_internal_child_for_key_matches_partition_point_reference() {
+    fn raw_descend_step_child_matches_partition_point_reference() {
         let keys: Vec<Vec<u8>> = (0..101)
             .map(|i| format!("key{:04}", i * 2).into_bytes())
             .collect();
@@ -1555,7 +1542,10 @@ mod tests {
             probes.push(format!("key{:04}", i).into_bytes());
         }
         for probe in probes {
-            let got = raw_internal_child_for_key(&raw, 4096, &probe).expect("child for key");
+            let got = match raw_descend_step(&raw, 4096, &probe).expect("descend step") {
+                RawDescendStep::Child(child) => child,
+                other => panic!("expected child for internal page, got {:?}", other),
+            };
             assert_eq!(
                 got,
                 reference_child(&probe),
