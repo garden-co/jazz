@@ -634,14 +634,14 @@ impl<F: SyncFile> OpfsBTree<F> {
                     Err(idx) => entries.insert(idx, (key.to_vec(), new_value)),
                 }
 
-                let candidate = Page::Leaf {
-                    entries: entries.clone(),
-                    next,
-                };
+                let candidate = Page::Leaf { entries, next };
                 if page_fits(&candidate, self.options.page_size)? {
                     self.set_dirty_page(page_id, candidate)?;
                     return Ok(None);
                 }
+                let Page::Leaf { entries, next } = candidate else {
+                    unreachable!("candidate is constructed as a leaf above")
+                };
 
                 if entries.len() < 2 {
                     return Err(BTreeError::InvalidOptions(
@@ -690,14 +690,14 @@ impl<F: SyncFile> OpfsBTree<F> {
                 keys.insert(child_idx, split.separator);
                 children.insert(child_idx + 1, split.right_page_id);
 
-                let candidate = Page::Internal {
-                    keys: keys.clone(),
-                    children: children.clone(),
-                };
+                let candidate = Page::Internal { keys, children };
                 if page_fits(&candidate, self.options.page_size)? {
                     self.set_dirty_page(page_id, candidate)?;
                     return Ok(None);
                 }
+                let Page::Internal { keys, children } = candidate else {
+                    unreachable!("candidate is constructed as an internal page above")
+                };
 
                 if keys.len() < 2 {
                     return Err(BTreeError::InvalidOptions(
