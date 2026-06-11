@@ -23,10 +23,11 @@ const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 // Recently used leaf pages, most recent first; page id 0 marks an empty slot
-// (ids below 2 are superblocks and never tree pages). Two slots let workloads
-// that alternate between key regions keep a hint per region without making the
-// random miss path scan a larger hint set.
-const LEAF_HINT_SLOTS: usize = 2;
+// (ids below 2 are superblocks and never tree pages). Multiple slots let
+// workloads that interleave several key regions (separate tables in one tree)
+// keep a hint per region; the could_cover prefilter keeps non-front slots to
+// a couple of byte comparisons on the miss path.
+const LEAF_HINT_SLOTS: usize = 4;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
