@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "client")]
-use crate::Schema;
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
+#[cfg(test)]
+use crate::query_manager::types::RowPolicyMode;
 use crate::query_manager::types::{OrderedRowDelta, Value};
 use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
@@ -82,6 +82,29 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     Ok(schema_manager)
 }
 
+#[cfg(test)]
+fn build_client_schema_manager_with_policy_mode<S: Storage + ?Sized>(
+    storage: &S,
+    context: &AppContext,
+    row_policy_mode: RowPolicyMode,
+) -> Result<SchemaManager> {
+    let sync_manager = SyncManager::new();
+    let mut schema_manager = SchemaManager::new_with_policy_mode(
+        sync_manager,
+        context.schema.clone(),
+        context.app_id,
+        "client",
+        "main",
+        row_policy_mode,
+    )
+    .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
+
+    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
+        .map_err(JazzError::Storage)?;
+
+    Ok(schema_manager)
+}
+
 fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     let payload = token.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -145,6 +168,13 @@ impl JazzClient {
     /// 3. Connect to the server over WebSocket (if URL provided)
     /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
+        Self::connect_with_schema_manager(context, build_client_schema_manager).await
+    }
+
+    async fn connect_with_schema_manager(
+        context: AppContext,
+        build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
+    ) -> Result<Self> {
         let default_session = default_session_from_context(&context);
         // Loaded for its side effect of persisting the client-id file on disk;
         // the wire ClientId is assigned by `TransportManager::create` at connect
@@ -159,7 +189,7 @@ impl JazzClient {
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
 
-        let schema_manager = build_client_schema_manager(&storage, &context)?;
+        let schema_manager = build_schema_manager(&storage, &context)?;
 
         // Create runtime. The sync callback is a no-op — the WS TransportManager
         // drives the outbox directly via its own channel.
@@ -211,6 +241,17 @@ impl JazzClient {
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn connect_with_row_policy_mode(
+        context: AppContext,
+        row_policy_mode: RowPolicyMode,
+    ) -> Result<Self> {
+        Self::connect_with_schema_manager(context, |storage, context| {
+            build_client_schema_manager_with_policy_mode(storage, context, row_policy_mode)
+        })
+        .await
     }
 
     /// Subscribe to a query.
@@ -441,21 +482,10 @@ impl JazzClient {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(test)]
 impl JazzClient {
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
-        let context = crate::AppContext {
-            app_id: crate::AppId::random(),
-            client_id: None,
-            schema,
-            server_url: String::new(),
-            data_dir: std::env::temp_dir(),
-            storage: crate::ClientStorage::Memory,
-            jwt_token: None,
-            backend_secret: None,
-            admin_secret: None,
-            sync_tracer: None,
-        };
+        let context = crate::AppContext::test(schema);
         crate::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")

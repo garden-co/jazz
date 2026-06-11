@@ -21,7 +21,6 @@ use serde_json::Value as JsonValue;
 mod permissions;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 #[allow(dead_code)]
 const DEFAULT_ROWS_TIMEOUT: Duration = Duration::from_secs(25);
 #[allow(dead_code)]
@@ -29,8 +28,7 @@ const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
-/// Convenience shape for query results returned by test helpers.
-pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
+pub use jazz_tools::test_support::{QueryRows, wait_for_query};
 
 #[allow(unused_imports)]
 pub use permissions::{
@@ -485,60 +483,6 @@ where
 
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for {description}");
-        }
-
-        tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
-    }
-}
-
-/// Re-runs a query until its rows satisfy the provided matcher or the timeout
-/// expires.
-///
-/// Per-attempt query timeouts and transient query errors are retried until the
-/// outer deadline is reached.
-pub async fn wait_for_query<T, F>(
-    client: &JazzClient,
-    query: Query,
-    durability_tier: Option<DurabilityTier>,
-    timeout: Duration,
-    description: impl Into<String>,
-    mut check_rows: F,
-) -> T
-where
-    F: FnMut(QueryRows) -> Option<T>,
-{
-    let description = description.into();
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    let mut last_error: Option<String> = None;
-    let mut last_rows: Option<QueryRows> = None;
-
-    loop {
-        match tokio::time::timeout(
-            DEFAULT_QUERY_TIMEOUT,
-            client.query(query.clone(), durability_tier),
-        )
-        .await
-        {
-            Ok(Ok(rows)) => {
-                if let Some(value) = check_rows(rows.clone()) {
-                    return value;
-                }
-                last_rows = Some(rows);
-                last_error = None;
-            }
-            Ok(Err(e)) => last_error = Some(e.to_string()),
-            Err(_) => {} // per-attempt timeout, will retry
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            match last_error {
-                Some(e) => panic!("timed out waiting for {description}: last query error: {e}"),
-                None => panic!(
-                    "timed out waiting for {description}: last rows: {:?}",
-                    last_rows
-                ),
-            }
         }
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
