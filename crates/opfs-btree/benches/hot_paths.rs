@@ -144,6 +144,65 @@ fn bench_get_alternating_regions(c: &mut Criterion) {
     });
 }
 
+fn bench_put_append(c: &mut Criterion) {
+    let file = build_tree(true);
+    let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let value = vec![0xcdu8; 100];
+    let mut i = N;
+    c.bench_function("put_append", |b| {
+        b.iter(|| {
+            i += 1;
+            // key(i) allocates per iteration, but identically before/after,
+            // so relative comparisons hold.
+            tree.put(&key(i), &value).expect("put");
+            if i % 1000 == 0 {
+                tree.flush_wal().expect("flush_wal");
+            }
+            if i % 10_000 == 0 {
+                tree.checkpoint().expect("checkpoint");
+            }
+        })
+    });
+}
+
+fn bench_range_paginate(c: &mut Criterion) {
+    let file = build_tree(true);
+    let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
+    let mut i = 0usize;
+    c.bench_function("range_paginate", |b| {
+        b.iter(|| {
+            // Sequential pages: each scan starts where the previous ended,
+            // which is the leaf the previous scan finished in, not the leaf
+            // it started in.
+            i = (i + 100) % (N - 200);
+            black_box(tree.range(&keys[i], &keys[i + 200], 100).expect("range"))
+        })
+    });
+}
+
+fn bench_get_three_regions(c: &mut Criterion) {
+    let file = build_tree(true);
+    let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open");
+    let keys = all_keys();
+    let third = N / 3;
+    let mut i = 0usize;
+    c.bench_function("get_three_regions", |b| {
+        b.iter(|| {
+            // Three interleaved regions overflow a 2-slot hint array on
+            // every rotation.
+            i = (i + 1) % third;
+            black_box(tree.get(&keys[i]).expect("get").expect("present"));
+            black_box(tree.get(&keys[i + third]).expect("get").expect("present"));
+            black_box(
+                tree.get(&keys[i + 2 * third])
+                    .expect("get")
+                    .expect("present"),
+            );
+        })
+    });
+}
+
 fn bench_open_replay(c: &mut Criterion) {
     let file = build_tree(false);
     c.bench_function("open_with_wal_tail", |b| {
@@ -159,6 +218,9 @@ criterion_group!(
     bench_put_churn,
     bench_put_get_interleaved,
     bench_get_alternating_regions,
+    bench_put_append,
+    bench_range_paginate,
+    bench_get_three_regions,
     bench_open_replay
 );
 criterion_main!(benches);
