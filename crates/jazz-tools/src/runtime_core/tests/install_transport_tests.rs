@@ -278,6 +278,45 @@ mod install_transport_tests {
         }
     }
 
+    #[test]
+    fn disconnected_transport_keeps_edge_waits_attainable_while_reconnecting() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        let server_id = core.transport.as_ref().unwrap().server_id;
+        let current_hash = core.schema_manager().catalogue_state_hash();
+
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::Connected {
+                catalogue_state_hash: Some(current_hash),
+                next_sync_seq: None,
+            },
+        );
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::Disconnected,
+        );
+
+        let ((_row_id, _row_values), batch_id) = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+        let mut receiver = core
+            .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .expect("edge wait should stay attainable while installed transport reconnects");
+
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(None),
+            "edge wait should remain pending until the reconnected server settles the batch"
+        );
+    }
+
     /// Shared body for terminal-transport-event release tests. Asserts that
     /// dispatching `event` unblocks a held initial subscription so it delivers
     /// the local row. `event_label` is used only for the panic message.

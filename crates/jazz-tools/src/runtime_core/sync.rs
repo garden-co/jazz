@@ -1,19 +1,35 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
-    fn retained_batch_terminal_tier(&self) -> DurabilityTier {
-        let sync_manager = self.schema_manager.query_manager().sync_manager();
+use crate::batch_fate::BatchFate;
+use crate::sync_manager::SyncManager;
 
-        if sync_manager.has_connected_servers() {
-            DurabilityTier::GlobalServer
-        } else {
-            sync_manager
-                .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Local)
-        }
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    pub(crate) fn settlement_target(&self) -> DurabilityTier {
+        self.schema_manager
+            .query_manager()
+            .sync_manager()
+            .settlement_target()
     }
+
+    /// One terminal predicate for batch settlement
+    /// (spec: batch_settlement_lifecycle §1), evaluated against this
+    /// runtime's settlement target.
+    pub(crate) fn batch_needs_settlement(&self, fate: Option<&BatchFate>) -> bool {
+        self.schema_manager
+            .query_manager()
+            .sync_manager()
+            .batch_needs_settlement(fate)
+    }
+
     fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
-        let terminal_tier = self.retained_batch_terminal_tier();
+        let target = self.settlement_target();
+        let fates_by_batch: HashMap<crate::row_histories::BatchId, BatchFate> = self
+            .storage
+            .scan_authoritative_batch_fates()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|fate| (fate.batch_id(), fate))
+            .collect();
 
         let mut batch_ids = self
             .storage
@@ -21,83 +37,82 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or_default()
             .into_iter()
             .filter(|submission| {
-                match self
-                    .storage
-                    .load_authoritative_batch_fate(submission.batch_id)
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                {
-                    None => true,
-                    Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
-                    Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
-                    Some(crate::batch_fate::BatchFate::DurableDirect {
-                        confirmed_tier, ..
-                    })
-                    | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
-                        confirmed_tier,
-                        ..
-                    }) => confirmed_tier < &terminal_tier,
-                }
+                let fate = fates_by_batch.get(&submission.batch_id);
+                // A stored `Missing` fate still owes the server a retransmit
+                // of rows + seal. The live-delivery path retransmits
+                // immediately, but after a restart this pending-set derivation
+                // is the only thing that re-offers the batch.
+                matches!(fate, Some(BatchFate::Missing { .. }))
+                    || SyncManager::fate_needs_settlement_at(fate, target)
             })
             .map(|submission| submission.batch_id)
             .collect::<Vec<_>>();
 
         batch_ids.extend(
-            self.storage
-                .scan_authoritative_batch_fates()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|fate| {
-                    Self::sealed_batch_still_needs_edge_reconciliation(Some(fate))
-                        && fate
-                            .confirmed_tier()
-                            .is_some_and(|tier| tier < terminal_tier)
-                })
+            fates_by_batch
+                .values()
+                .filter(|fate| SyncManager::fate_needs_settlement_at(Some(fate), target))
                 .map(|fate| fate.batch_id()),
         );
-        if let Ok(row_locators) = self.storage.scan_row_locators() {
-            for (object_id, row_locator) in row_locators {
-                let Ok(history_rows) = self
-                    .storage
-                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
-                else {
-                    continue;
-                };
-                batch_ids.extend(history_rows.into_iter().filter_map(|row| {
-                    if !matches!(row.state, crate::row_histories::RowState::VisibleDirect) {
-                        return None;
-                    }
-                    let fate = self
-                        .storage
-                        .load_authoritative_batch_fate(row.batch_id)
-                        .ok()
-                        .flatten();
-                    Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref())
-                        .then_some(row.batch_id)
-                }));
-            }
-        }
+        // No row-history sweep here: every committed direct batch durably
+        // carries a fate (self-confirming runtimes write one at commit) or a
+        // sealed submission (retained until the settlement target is reached),
+        // so the submission/fate scans above already cover the pending set. A
+        // `VisibleDirect` row with neither is a storage inconsistency to
+        // repair explicitly, not a reason to scan all row history on every
+        // server (re)connect (spec: batch_settlement_lifecycle §4/§6).
         batch_ids.extend(self.local_batch_record_cache.values().filter_map(|record| {
-            let authoritative_fate = self
-                .storage
-                .load_authoritative_batch_fate(record.batch_id)
-                .ok()
-                .flatten();
-            let latest_fate = authoritative_fate.as_ref().or(record.latest_fate.as_ref());
-            if !Self::sealed_batch_still_needs_edge_reconciliation(latest_fate) {
-                return None;
-            }
-
-            match latest_fate.and_then(|fate| fate.confirmed_tier()) {
-                Some(tier) if tier >= terminal_tier => None,
-                _ => Some(record.batch_id),
-            }
+            let latest_fate = fates_by_batch
+                .get(&record.batch_id)
+                .or(record.latest_fate.as_ref());
+            SyncManager::fate_needs_settlement_at(latest_fate, target).then_some(record.batch_id)
         }));
         batch_ids.sort();
         batch_ids.dedup();
         batch_ids.retain(|batch_id| !self.local_batch_rows(*batch_id).is_empty());
         batch_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_batch_ids_needing_reconciliation_for_test(
+        &self,
+    ) -> Vec<crate::row_histories::BatchId> {
+        self.pending_batch_ids_needing_reconciliation()
+    }
+
+    /// Retire a batch's pending bookkeeping once its fate reaches the
+    /// settlement target. The terminal fate row stays behind as the tombstone;
+    /// row history is untouched.
+    pub(crate) fn retire_settled_batch(&mut self, batch_id: crate::row_histories::BatchId) {
+        // Servers broadcast fates to every interested client and may
+        // re-deliver them, so most settled fates arriving here describe
+        // batches this node never tracked. Probe before deleting to avoid
+        // dirtying storage (and forcing a flush) when there is nothing to
+        // retire.
+        let had_cached_record = self.local_batch_record_cache.remove(&batch_id).is_some();
+        let has_stored_bookkeeping = had_cached_record
+            || self
+                .storage
+                .load_sealed_batch_submission(batch_id)
+                .ok()
+                .flatten()
+                .is_some()
+            || self
+                .storage
+                .load_local_batch_record(batch_id)
+                .ok()
+                .flatten()
+                .is_some();
+        if !has_stored_bookkeeping {
+            return;
+        }
+        if let Err(error) = self.storage.delete_sealed_batch_submission(batch_id) {
+            tracing::warn!(?batch_id, %error, "failed to retire sealed batch submission");
+        }
+        if let Err(error) = self.storage.delete_local_batch_record(batch_id) {
+            tracing::warn!(?batch_id, %error, "failed to retire local batch record");
+        }
+        self.mark_storage_write_pending_flush();
     }
 
     // =========================================================================
