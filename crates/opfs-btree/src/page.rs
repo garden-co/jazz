@@ -1,7 +1,6 @@
 use crate::{BTreeError, checksum};
 
 pub(crate) type PageId = u64;
-type RawLeafKeySpan<'a> = (&'a [u8], &'a [u8]);
 
 const PAGE_MAGIC: [u8; 4] = *b"OPPG";
 const PAGE_HEADER_BYTES: usize = 24;
@@ -52,6 +51,12 @@ pub(crate) enum RawLeafUpsertResult {
     Inserted,
     Updated { old_overflow: Option<OverflowRef> },
     NeedSplit,
+}
+
+pub(crate) struct RawLeafSpan<'a> {
+    pub(crate) first_key: &'a [u8],
+    pub(crate) last_key: &'a [u8],
+    pub(crate) next_page_id: Option<PageId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,24 +337,24 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
-/// True when `raw` is a non-empty leaf whose closed key span
-/// [first_key, last_key] contains `key`. In a B+tree that makes it the
-/// unique leaf responsible for `key`, so callers may skip the descent.
+/// True when `raw` is a non-empty leaf whose key span contains `key`. The
+/// rightmost leaf has no successor and owns [first_key, +inf), so keys past
+/// its last entry still belong to it.
 pub(crate) fn raw_leaf_covers_key(
     raw: &[u8],
     expected_page_size: usize,
     key: &[u8],
 ) -> Result<bool, BTreeError> {
-    let Some((first_key, last_key)) = raw_leaf_key_span(raw, expected_page_size)? else {
+    let Some(span) = raw_leaf_span(raw, expected_page_size)? else {
         return Ok(false);
     };
-    Ok(first_key <= key && key <= last_key)
+    Ok(span.first_key <= key && (key <= span.last_key || span.next_page_id.is_none()))
 }
 
-pub(crate) fn raw_leaf_key_span(
+pub(crate) fn raw_leaf_span(
     raw: &[u8],
     expected_page_size: usize,
-) -> Result<Option<RawLeafKeySpan<'_>>, BTreeError> {
+) -> Result<Option<RawLeafSpan<'_>>, BTreeError> {
     let header = parse_header(raw, expected_page_size, false)?;
     if header.kind != PageKind::Leaf {
         return Ok(None);
@@ -382,10 +387,11 @@ pub(crate) fn raw_leaf_key_span(
         ));
     }
 
-    Ok(Some((
-        &payload[first_off..first_end],
-        &payload[last_off..last_end],
-    )))
+    Ok(Some(RawLeafSpan {
+        first_key: &payload[first_off..first_end],
+        last_key: &payload[last_off..last_end],
+        next_page_id: header.next_page_id,
+    }))
 }
 
 /// Scan a leaf page for key-value pairs in the range [start, end).
@@ -1829,6 +1835,40 @@ mod tests {
             raw_leaf_upsert_in_place(&mut raw, 128, b"b", &ValueCell::Inline(vec![2u8; 80]))
                 .expect("upsert");
         assert_eq!(result, RawLeafUpsertResult::NeedSplit);
+    }
+
+    #[test]
+    fn tail_leaf_covers_keys_past_its_last_entry() {
+        let entries = vec![
+            (b"k1".to_vec(), ValueCell::Inline(b"1".to_vec())),
+            (b"k5".to_vec(), ValueCell::Inline(b"5".to_vec())),
+        ];
+        let tail = encode_page(
+            &Page::Leaf {
+                entries: entries.clone(),
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode tail leaf");
+        let chained = encode_page(
+            &Page::Leaf {
+                entries,
+                next: Some(7),
+            },
+            4096,
+        )
+        .expect("encode chained leaf");
+
+        // Inside the span: both cover.
+        assert!(raw_leaf_covers_key(&tail, 4096, b"k3").expect("covers"));
+        assert!(raw_leaf_covers_key(&chained, 4096, b"k3").expect("covers"));
+        // Past the last entry: only the tail owns [first, +inf).
+        assert!(raw_leaf_covers_key(&tail, 4096, b"k9").expect("covers"));
+        assert!(!raw_leaf_covers_key(&chained, 4096, b"k9").expect("covers"));
+        // Before the first entry: neither covers (an earlier leaf may own it).
+        assert!(!raw_leaf_covers_key(&tail, 4096, b"a").expect("covers"));
+        assert!(!raw_leaf_covers_key(&chained, 4096, b"a").expect("covers"));
     }
 
     #[test]
