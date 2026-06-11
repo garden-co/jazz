@@ -1,7 +1,34 @@
 #[cfg(feature = "client")]
 use crate::JazzClient;
+#[cfg(feature = "test-utils")]
+use crate::server::TestingServer;
+#[cfg(feature = "test-utils")]
+use crate::test_support::wait_for_query;
 
 use super::*;
+
+#[cfg(feature = "test-utils")]
+async fn wait_for_protected_rows(
+    client: &JazzClient,
+    protected_id: ObjectId,
+    description: &str,
+    mut predicate: impl FnMut(&[(ObjectId, Vec<Value>)]) -> bool,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let query = QueryBuilder::new("protected")
+        .filter_eq("id", Value::Uuid(protected_id))
+        .select(&["data"])
+        .build();
+
+    wait_for_query(
+        client,
+        query,
+        Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        Duration::from_secs(5),
+        description,
+        |rows| predicate(&rows).then_some(rows),
+    )
+    .await
+}
 
 #[cfg(feature = "client")]
 #[tokio::test]
@@ -66,11 +93,12 @@ async fn rebac_update_denied_by_using_policy() {
     );
 }
 
-#[test]
-fn synced_soft_delete_should_use_delete_policy() {
-    let protected_table = TableSchema::builder("protected").column("data", ColumnType::Text);
-    let protected_descriptor = protected_table.clone().build().columns;
-    let protected_policies = permissions(|p| {
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn synced_soft_delete_should_use_delete_policy() {
+    let only_admins_can_delete = permissions(|p| {
+        p.allow_read().always();
+        p.allow_insert().always();
         p.allow_delete().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
         ));
@@ -79,84 +107,97 @@ fn synced_soft_delete_should_use_delete_policy() {
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .policies(permissions(|p| p.allow_read().always())),
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                    p.allow_insert()
+                        .where_(pe::eq("user_id", pe::session("user_id")));
+                })),
         )
-        .table(protected_table.policies(protected_policies))
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(only_admins_can_delete),
+        )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let alice = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
+        .await
+        .expect("connect alice");
+    let bob = JazzClient::connect_with_row_policy_mode(
+        server.make_client_context_for_user(schema.clone(), "bob"),
+        crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+    )
+    .await
+    .expect("connect bob");
 
-    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
-        .expect("seed admin row");
-    let protected = qm
-        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+    let (admin_id, _, _) = alice
+        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .expect("seed alice admin row");
+    let (protected_id, _, _) = alice
+        .insert("protected", crate::row_input!("data" => "initial"), None)
         .expect("seed protected row");
-    let branch = get_branch(&qm);
 
-    let protected_metadata =
-        test_row_metadata(&storage, protected.row_id).expect("protected row metadata");
+    wait_for_query(
+        &bob,
+        QueryBuilder::new("admins")
+            .filter_eq("id", Value::Uuid(admin_id))
+            .select(&["user_id"])
+            .build(),
+        Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        Duration::from_secs(5),
+        "bob sees alice's admin row",
+        |rows| (rows == [(admin_id, vec![Value::Text("alice".into())])]).then_some(rows),
+    )
+    .await;
+    wait_for_protected_rows(
+        &bob,
+        protected_id,
+        "bob syncs the protected row before attempting the delete",
+        |rows| rows == [(protected_id, vec![Value::Text("initial".into())])],
+    )
+    .await;
 
-    let bob_client = ClientId::new();
-    connect_client(&mut qm, &storage, bob_client);
-    qm.sync_manager_mut()
-        .set_client_session(bob_client, Session::new("bob"));
-
-    let mut bob_scope = HashSet::new();
-    bob_scope.insert((protected.row_id, branch.clone().into()));
-    set_client_query_scope(&mut qm, &storage, bob_client, QueryId(1), bob_scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    let delete_content =
-        encode_row(&protected_descriptor, &[Value::Text("initial".into())]).unwrap();
-    let delete_commit = stored_row_commit(
-        smallvec![protected.batch_id],
-        delete_content,
-        2000,
-        ObjectId::new().to_string(),
-        Some(DeleteKind::Soft),
-    );
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(bob_client),
-        payload: row_batch_created_payload(
-            protected.row_id,
-            &branch,
-            Some(RowMetadata {
-                id: protected.row_id,
-                metadata: protected_metadata,
-            }),
-            &delete_commit,
-        ),
-    });
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = client_write_was_rejected(
-        &outbox,
-        bob_client,
-        row_batch_id_for_commit(protected.row_id, &branch, &delete_commit),
-    );
+    let bob_delete_batch = bob
+        .delete(protected_id, None)
+        .expect("bob should accept the delete locally");
+    let bob_delete = bob
+        .wait_for_batch(
+            bob_delete_batch,
+            crate::sync_manager::DurabilityTier::EdgeServer,
+        )
+        .await;
     assert!(
-        denied,
-        "soft deletes replicated over sync should be checked against DELETE policy"
+        bob_delete.is_err(),
+        "non-admin soft delete should be rejected by the server delete policy"
     );
 
-    let tips = test_row_tip_ids(&storage, protected.row_id, &branch).unwrap();
-    assert!(
-        !tips.contains(&row_batch_id_for_commit(
-            protected.row_id,
-            &branch,
-            &delete_commit
-        )),
-        "denied synced soft delete should not be applied"
-    );
-    assert!(
-        !qm.row_is_deleted(&storage, "protected", protected.row_id),
-        "denied synced soft delete should leave the row visible"
-    );
+    wait_for_protected_rows(
+        &alice,
+        protected_id,
+        "alice still sees the protected row after bob's rejected delete",
+        |rows| rows == [(protected_id, vec![Value::Text("initial".into())])],
+    )
+    .await;
+    wait_for_protected_rows(
+        &bob,
+        protected_id,
+        "bob sees the protected row again after his rejected delete",
+        |rows| rows == [(protected_id, vec![Value::Text("initial".into())])],
+    )
+    .await;
+
+    alice
+        .delete(protected_id, None)
+        .expect("admin soft delete should be accepted locally");
+
+    wait_for_protected_rows(
+        &bob,
+        protected_id,
+        "bob no longer sees the protected row after alice's accepted delete",
+        |rows| rows.is_empty(),
+    )
+    .await;
+
+    server.shutdown().await;
 }
