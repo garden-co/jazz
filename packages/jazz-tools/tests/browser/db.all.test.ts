@@ -232,6 +232,11 @@ describe("db.all browser integration", () => {
       expectedTitles: ["alpha", "gamma"],
     },
     {
+      name: "in-array-element",
+      conditions: [{ column: "tags", op: "in", value: ["work"] }],
+      expectedTitles: [],
+    },
+    {
       name: "contains-text",
       conditions: [{ column: "title", op: "contains", value: "alp" }],
       expectedTitles: ["alpha"],
