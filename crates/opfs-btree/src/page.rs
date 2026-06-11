@@ -224,22 +224,40 @@ pub(crate) fn raw_internal_child_for_key(
     if header.kind != PageKind::Internal {
         return Err(BTreeError::Corrupt("expected internal page".to_string()));
     }
+    internal_child_for_key_parsed(header.payload, header.item_count as usize, key)
+}
 
-    let key_count = header.item_count as usize;
+// Hot path: bounds for the whole slot directory are validated once up front
+// so each binary-search probe is two direct loads plus one key bounds check.
+fn internal_child_for_key_parsed(
+    payload: &[u8],
+    key_count: usize,
+    key: &[u8],
+) -> Result<PageId, BTreeError> {
     let slots_bytes = internal_slots_bytes(key_count)?;
-    if header.payload.len() < slots_bytes {
+    if payload.len() < slots_bytes {
         return Err(BTreeError::Corrupt(
             "internal page payload shorter than slot directory".to_string(),
         ));
     }
+    let slots = &payload[INTERNAL_LEFT_CHILD_BYTES..slots_bytes];
 
     let mut lo = 0usize;
     let mut hi = key_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (key_off, key_len, _) = internal_slot(header.payload, key_count, mid)?;
-        let current_key = slice_payload(header.payload, key_off, key_len, "internal key")?;
-        if current_key <= key {
+        let base = mid * INTERNAL_SLOT_BYTES;
+        let key_off = read_le_u32(slots, base) as usize;
+        let key_len = read_le_u32(slots, base + 4) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("internal key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "internal key exceeds payload bounds".to_string(),
+            ));
+        }
+        if &payload[key_off..key_end] <= key {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -247,11 +265,9 @@ pub(crate) fn raw_internal_child_for_key(
     }
 
     if lo == 0 {
-        return read_u64_at(header.payload, 0, "internal left child");
+        return read_u64_at(payload, 0, "internal left child");
     }
-
-    let (_, _, right_child) = internal_slot(header.payload, key_count, lo - 1)?;
-    Ok(right_child)
+    Ok(read_le_u64(slots, (lo - 1) * INTERNAL_SLOT_BYTES + 8))
 }
 
 pub(crate) fn raw_leaf_find_value<'a>(
