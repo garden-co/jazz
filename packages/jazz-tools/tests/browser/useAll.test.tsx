@@ -85,6 +85,9 @@ const todos: TableProxy<Todo, Omit<Todo, "id">> = {
   _initType: {} as Omit<Todo, "id">,
 };
 
+const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000301";
+const CONDITION_TODO_ID = "00000000-0000-0000-0000-000000000302";
+
 function uniqueId(label: string): string {
   return `use-all-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -193,6 +196,7 @@ describe("useAll browser integration", () => {
     name: string;
     query: QueryBuilder<Todo>;
     insert: Omit<Todo, "id">;
+    insertId?: string;
     pick: string;
   }> = [
     {
@@ -297,6 +301,55 @@ describe("useAll browser integration", () => {
       },
       pick: "any-title",
     },
+    {
+      name: "in-id",
+      query: makeQuery<Todo>("todos", {
+        conditions: [
+          {
+            column: "id",
+            op: "in",
+            value: [CONDITION_TODO_ID, "00000000-0000-0000-0000-000000000399"],
+          },
+        ],
+      }),
+      insert: {
+        title: "in-id-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      insertId: CONDITION_TODO_ID,
+      pick: "in-id-hit",
+    },
+    {
+      name: "in-text",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "title", op: "in", value: ["in-text-hit", "other"] }],
+      }),
+      insert: {
+        title: "in-text-hit",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      },
+      pick: "in-text-hit",
+    },
+    {
+      name: "in-reference",
+      query: makeQuery<Todo>("todos", {
+        conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+      }),
+      insert: {
+        title: "in-reference-hit",
+        done: false,
+        priority: 1,
+        owner_id: CONDITION_OWNER_ID,
+        tags: ["x"],
+      },
+      pick: "in-reference-hit",
+    },
   ];
 
   function track(client: JazzClient): JazzClient {
@@ -329,7 +382,11 @@ describe("useAll browser integration", () => {
         </JazzProvider>,
       );
 
-      await conditionsClient.db.insert(todos, testCase.insert);
+      if (testCase.insertId) {
+        await conditionsClient.db.insert(todos, testCase.insert, { id: testCase.insertId });
+      } else {
+        await conditionsClient.db.insert(todos, testCase.insert);
+      }
 
       await waitForCondition(
         () => getText("rows").split("|").includes(testCase.pick),
@@ -338,6 +395,37 @@ describe("useAll browser integration", () => {
       );
     });
   }
+
+  it("does not include rows for an empty in list", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("in-empty"),
+        driver: { type: "persistent", dbName: uniqueId("in-empty") },
+      }),
+    );
+    const query = makeQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "in", value: [] }],
+    });
+
+    render(
+      <JazzProvider client={client}>
+        <UseAllProbe query={query} pick={(row) => row.title} />
+      </JazzProvider>,
+    );
+
+    await waitForCondition(() => getText("rows") !== "pending", 5000, "expected empty rows");
+
+    await client.db.insert(todos, {
+      title: "in-empty-miss",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(getText("rows").split("|")).not.toContain("in-empty-miss");
+  });
 
   it("supports orderBy + limit + offset", async () => {
     const client = track(
