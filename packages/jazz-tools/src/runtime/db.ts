@@ -1225,6 +1225,23 @@ export class Db {
     await this.workerBridge.waitForUpstreamServerConnection();
   }
 
+  private async ensureWriteWaitReady(options: { tier: DurabilityTier }): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl || options.tier === "local") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
+  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
+    const wait = handle.wait.bind(handle);
+    handle.wait = (async (options: { tier: DurabilityTier }) => {
+      await this.ensureWriteWaitReady(options);
+      return wait(options);
+    }) as THandle["wait"];
+    return handle;
+  }
+
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
     if (!this.worker) {
       throw new Error("Cannot attach worker bridge without an active worker");
@@ -1247,14 +1264,12 @@ export class Db {
         reportAttached();
         return;
       }
-      void bridge
-        .waitForUpstreamServerConnection()
-        .then(reportAttached)
-        .catch((error) => {
-          if (this.brokerClient && this.tabRole === "leader") {
-            this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
-          }
-        });
+      reportAttached();
+      void bridge.waitForUpstreamServerConnection().catch((error) => {
+        if (this.brokerClient && this.tabRole === "leader") {
+          this.brokerClient.reportLeaderFailed(this.currentLeadershipId, stringifyError(error));
+        }
+      });
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -1816,6 +1831,9 @@ export class Db {
     error?: Error,
     options: { preserveOutbox?: boolean; preserveLeaderReadySignal?: boolean } = {},
   ): void {
+    if (options.preserveOutbox && !error) {
+      this.markDurablePathPending();
+    }
     if (options.preserveOutbox) {
       this.followerPortBridge?.detachForReconnect();
     } else {
@@ -2157,8 +2175,10 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return inserted.mapValue((row) =>
-      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    return this.wrapWriteWait(
+      inserted.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
     );
   }
 
@@ -2185,8 +2205,10 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return restored.mapValue((row) =>
-      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    return this.wrapWriteWait(
+      restored.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
     );
   }
 
@@ -2204,7 +2226,9 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return client.upsert(table._table, values, options, context?.session, context?.attribution);
+    return this.wrapWriteWait(
+      client.upsert(table._table, values, options, context?.session, context?.attribution),
+    );
   }
 
   /**
@@ -2222,7 +2246,9 @@ export class Db {
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return client.update(id, updates, options, context?.session, context?.attribution);
+    return this.wrapWriteWait(
+      client.update(id, updates, options, context?.session, context?.attribution),
+    );
   }
 
   /**
@@ -2233,7 +2259,7 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return client.delete(id, options, context?.session, context?.attribution);
+    return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
   }
 
   /**
