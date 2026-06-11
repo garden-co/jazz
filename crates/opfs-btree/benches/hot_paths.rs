@@ -103,10 +103,10 @@ fn bench_put_churn(c: &mut Criterion) {
             i = (i + 7919) % N;
             tree.put(&keys[i], &value).expect("put");
             ops += 1;
-            if ops % 1000 == 0 {
+            if ops.is_multiple_of(1000) {
                 tree.flush_wal().expect("flush_wal");
             }
-            if ops % 10_000 == 0 {
+            if ops.is_multiple_of(10_000) {
                 tree.checkpoint().expect("checkpoint");
             }
         })
