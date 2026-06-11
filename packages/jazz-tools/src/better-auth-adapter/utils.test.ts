@@ -39,6 +39,16 @@ describe("isQuerySupported", () => {
         nullable: true,
       },
       {
+        name: "bytes",
+        column_type: { type: "Bytea" },
+        nullable: false,
+      },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      {
         name: "session_expires_at",
         column_type: { type: "Timestamp" },
         nullable: false,
@@ -66,7 +76,7 @@ describe("isQuerySupported", () => {
     expect(isQuerySupported(tableSchema, where)).toBe(true);
   });
 
-  it("supports in on id, reference, and text columns", () => {
+  it("supports in on columns with equality support", () => {
     expect(
       isQuerySupported(tableSchema, [
         { field: "id", operator: "in", value: ["row-1", "row-2"], connector: "AND" },
@@ -83,6 +93,41 @@ describe("isQuerySupported", () => {
       isQuerySupported(tableSchema, [
         { field: "email_address", operator: "in", value: ["a@b.c"], connector: "AND" },
       ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "age", operator: "in", value: [18, 21], connector: "AND" },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "active", operator: "in", value: [true], connector: "AND" },
+      ] as unknown as CleanedWhere[]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        {
+          field: "session_expires_at",
+          operator: "in",
+          value: [new Date("2026-01-01T00:00:00.000Z")],
+          connector: "AND",
+        },
+      ] as unknown as CleanedWhere[]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "bytes", operator: "in", value: [[1, 2, 3]], connector: "AND" },
+      ] as unknown as CleanedWhere[]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "tags", operator: "in", value: [["a"]], connector: "AND" },
+      ] as unknown as CleanedWhere[]),
     ).toBe(true);
   });
 

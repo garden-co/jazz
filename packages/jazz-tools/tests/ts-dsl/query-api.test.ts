@@ -183,6 +183,65 @@ describe("TS Query API", () => {
       expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
     });
 
+    it("filters boolean columns with in", async () => {
+      const { value: rowA } = db.insert(app.table_with_defaults, { boolean: true });
+      db.insert(app.table_with_defaults, { boolean: false });
+
+      const results = await db.all(app.table_with_defaults.where({ boolean: { in: [true] } }));
+
+      expect(results.map((row) => row.id)).toEqual([rowA.id]);
+    });
+
+    it("filters numeric columns with in", async () => {
+      const { value: rowA } = db.insert(app.table_with_defaults, { integer: 5, float: 1.5 });
+      const { value: rowB } = db.insert(app.table_with_defaults, { integer: 10, float: 2.5 });
+      db.insert(app.table_with_defaults, { integer: 15, float: 3.5 });
+
+      const results = await db.all(
+        app.table_with_defaults.where({ integer: { in: [5, 10] }, float: { in: [1.5, 2.5] } }),
+      );
+
+      expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+    });
+
+    it("filters timestamp columns with in", async () => {
+      const first = new Date("2026-01-01T00:00:00.000Z");
+      const second = new Date("2026-01-02T00:00:00.000Z");
+      const third = new Date("2026-01-03T00:00:00.000Z");
+      const { value: rowA } = db.insert(app.table_with_defaults, { timestampDate: first });
+      const { value: rowB } = db.insert(app.table_with_defaults, { timestampDate: second });
+      db.insert(app.table_with_defaults, { timestampDate: third });
+
+      const results = await db.all(
+        app.table_with_defaults.where({ timestampDate: { in: [first, second] } }),
+      );
+
+      expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+    });
+
+    it("filters byte-array columns with in", async () => {
+      const { value: rowA } = db.insert(app.table_with_defaults, {
+        bytes: new Uint8Array([1, 2, 3]),
+      });
+      db.insert(app.table_with_defaults, { bytes: new Uint8Array([4, 5, 6]) });
+
+      const results = await db.all(
+        app.table_with_defaults.where({ bytes: { in: [new Uint8Array([1, 2, 3])] } }),
+      );
+
+      expect(results.map((row) => row.id)).toEqual([rowA.id]);
+    });
+
+    it("filters array columns with in as whole-array equality", async () => {
+      const { value: rowA } = db.insert(app.table_with_defaults, { array: ["a", "b"] });
+      db.insert(app.table_with_defaults, { array: ["a"] });
+      db.insert(app.table_with_defaults, { array: ["b", "a"] });
+
+      const results = await db.all(app.table_with_defaults.where({ array: { in: [["a", "b"]] } }));
+
+      expect(results.map((row) => row.id)).toEqual([rowA.id]);
+    });
+
     it("filters int columns with multiple range operators on the same column", async () => {
       db.insert(app.table_with_defaults, { integer: 5 });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });

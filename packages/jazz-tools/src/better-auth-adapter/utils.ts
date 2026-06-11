@@ -34,19 +34,19 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
       case "Text":
         return new Set(["eq", "ne", "contains", "in"]);
       case "Boolean":
-        return new Set(["eq"]);
+        return new Set(["eq", "ne", "in"]);
       case "Integer":
       case "BigInt":
       case "Double":
-        return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
+        return new Set(["eq", "ne", "gt", "gte", "lt", "lte", "in"]);
       case "Timestamp":
-        return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
+        return new Set(["eq", "ne", "gt", "gte", "lt", "lte", "in"]);
       case "Bytea":
-        return new Set(["eq", "ne"]);
+        return new Set(["eq", "ne", "in"]);
       case "Enum":
         return new Set(["eq", "ne", "in"]);
       case "Array":
-        return new Set(["eq", "contains"]);
+        return new Set(["eq", "contains", "in"]);
       case "Json":
         return new Set(["eq", "ne", "in"]);
       case "Uuid":

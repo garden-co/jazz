@@ -263,9 +263,29 @@ describe("db.all browser integration", () => {
       expectedTitles: ["alpha", "gamma"],
     },
     {
+      name: "in-boolean",
+      conditions: [{ column: "done", op: "in", value: [false] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-number",
+      conditions: [{ column: "priority", op: "in", value: [1, 999] }],
+      expectedTitles: ["alpha"],
+    },
+    {
       name: "in-reference",
       conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
       expectedTitles: ["alpha", "beta", "gamma"],
+    },
+    {
+      name: "in-array-whole-value",
+      conditions: [{ column: "tags", op: "in", value: [["work", "backend"]] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-bytea",
+      conditions: [{ column: "payload", op: "in", value: [[1, 2, 3]] }],
+      expectedTitles: ["alpha"],
     },
     {
       name: "in-empty",

@@ -25,6 +25,7 @@ const schema = {
       title: s.string(),
       done: s.boolean(),
       tags: s.array(s.string()),
+      attachment: s.bytes(),
       project: s.ref("projects"),
       owner: s.ref("users").optional(),
     })
@@ -271,12 +272,14 @@ describe("typed app prototype", () => {
     expectTypeOf(todoRow.title).toEqualTypeOf<string>();
     expectTypeOf(todoRow.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoRow.tags).toEqualTypeOf<string[]>();
+    expectTypeOf(todoRow.attachment).toEqualTypeOf<Uint8Array>();
     expectTypeOf(todoRow.project).toEqualTypeOf<string>();
     expectTypeOf(todoRow.owner).toEqualTypeOf<string | null>();
 
     expectTypeOf(todoInsert.title).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoInsert.tags).toEqualTypeOf<string[]>();
+    expectTypeOf(todoInsert.attachment).toEqualTypeOf<Uint8Array>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
@@ -290,7 +293,10 @@ describe("typed app prototype", () => {
       | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string } | undefined
+      string[] | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][] } | undefined
+    >();
+    expectTypeOf<TodoWhere["attachment"]>().branded.toEqualTypeOf<
+      Uint8Array | { eq?: Uint8Array; ne?: Uint8Array; in?: (Uint8Array | number[])[] } | undefined
     >();
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
@@ -382,6 +388,37 @@ describe("typed app prototype", () => {
     }
   });
 
+  it("infers in filters for boolean, bytes, and array columns", () => {
+    expectTypeOf<s.WhereOf<typeof app.todos>["done"]>().branded.toEqualTypeOf<
+      | boolean
+      | {
+          eq?: boolean;
+          ne?: boolean;
+          in?: boolean[];
+        }
+      | undefined
+    >();
+    expectTypeOf<s.WhereOf<typeof app.todos>["tags"]>().branded.toEqualTypeOf<
+      | string[]
+      | {
+          eq?: string[];
+          ne?: string[];
+          contains?: string;
+          in?: string[][];
+        }
+      | undefined
+    >();
+    expectTypeOf<s.WhereOf<typeof app.todos>["attachment"]>().branded.toEqualTypeOf<
+      | Uint8Array
+      | {
+          eq?: Uint8Array;
+          ne?: Uint8Array;
+          in?: (Uint8Array | number[])[];
+        }
+      | undefined
+    >();
+  });
+
   it("infers transformed column row and write types while keeping where raw", () => {
     expectTypeOf<s.RowOf<typeof transformedColumnApp.tasks>>().toEqualTypeOf<{
       id: string;
@@ -401,6 +438,7 @@ describe("typed app prototype", () => {
           gte?: number;
           lt?: number;
           lte?: number;
+          in?: number[];
         }
       | undefined
     >();
