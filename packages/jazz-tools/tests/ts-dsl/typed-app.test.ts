@@ -280,11 +280,14 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
-    expectTypeOf<TodoWhere["project"]>().toEqualTypeOf<
-      string | { eq?: string; ne?: string } | undefined
+    expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
+      string | { eq?: string; ne?: string; in?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
-      string | null | { eq?: string | null; ne?: string | null; isNull?: boolean } | undefined
+      | string
+      | null
+      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
       string[] | { eq?: string[]; ne?: string[]; contains?: string } | undefined

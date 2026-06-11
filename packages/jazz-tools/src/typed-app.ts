@@ -237,13 +237,11 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     lte?: Date | number;
   }
 >;
-type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
-  ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
-  : WhereEqNe<
-      string,
-      TOptional,
-      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
-    >;
+type UuidWhere<TOptional extends boolean> = WhereEqNe<
+  string,
+  TOptional,
+  TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+>;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
@@ -255,7 +253,7 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
           ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
           : ColumnBuilderSqlType<TBuilder> extends "UUID"
-            ? UuidWhere<ColumnBuilderOptional<TBuilder>, ColumnBuilderReferences<TBuilder>>
+            ? UuidWhere<ColumnBuilderOptional<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
               ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
