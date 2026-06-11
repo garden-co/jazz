@@ -1,5 +1,14 @@
 # jazz-wasm
 
+## 2.0.0-alpha.51
+
+### Patch Changes
+
+- 6f7a83f: Fix an owner `db.update` of a backend-created row hard-deleting the row instead of updating it on persistent-storage clients. A client write can no longer downgrade a batch the server has already accepted, so the row survives and the update applies.
+- 5c76bfc: Add soft-deleted row restoration with `db.restore(...)`.
+- 791e5e2: Stop the inert "memory access out of bounds" WASM trap from surfacing as an uncaught error when a page is reloaded or closed while two or more Jazz clients share the tab. Each client's WebSocket transport is abandoned mid-navigation and the dying page's WASM heap traps; the runtime now swallows that one specific trap inside the `pagehide` teardown window (on both the main thread and the worker), so it no longer reaches the console or the app's error handlers. A genuine out-of-bounds error during normal operation still surfaces.
+- 5c76bfc: `db.update(...)` now fails when trying to update deleted rows, similarly to insert and delete.
+
 ## 2.0.0-alpha.50
 
 ### Patch Changes
