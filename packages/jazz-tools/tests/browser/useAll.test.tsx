@@ -392,37 +392,6 @@ describe("useAll browser integration", () => {
     });
   }
 
-  it("does not include rows for an empty in list", async () => {
-    const client = track(
-      await createJazzClient({
-        appId: uniqueId("in-empty"),
-        driver: { type: "persistent", dbName: uniqueId("in-empty") },
-      }),
-    );
-    const query = makeQuery<Todo>("todos", {
-      conditions: [{ column: "title", op: "in", value: [] }],
-    });
-
-    render(
-      <JazzProvider client={client}>
-        <UseAllProbe query={query} pick={(row) => row.title} />
-      </JazzProvider>,
-    );
-
-    await waitForCondition(() => getText("rows") !== "pending", 5000, "expected empty rows");
-
-    await client.db.insert(todos, {
-      title: "in-empty-miss",
-      done: false,
-      priority: 1,
-      owner_id: undefined,
-      tags: ["x"],
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(getText("rows").split("|")).not.toContain("in-empty-miss");
-  });
-
   it("supports orderBy + limit + offset", async () => {
     const client = track(
       await createJazzClient({

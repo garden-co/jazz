@@ -91,6 +91,12 @@ describe("isQuerySupported", () => {
 
     expect(
       isQuerySupported(tableSchema, [
+        { field: "uuid_col", operator: "in", value: ["row-1"], connector: "AND" },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
         { field: "email_address", operator: "in", value: ["a@b.c"], connector: "AND" },
       ]),
     ).toBe(true);
