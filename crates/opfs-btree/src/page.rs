@@ -1486,6 +1486,42 @@ mod tests {
     }
 
     #[test]
+    fn raw_leaf_find_value_matches_entry_list_reference() {
+        let entries: Vec<(Vec<u8>, ValueCell)> = (0..50)
+            .map(|i| {
+                (
+                    format!("key{:04}", i * 2).into_bytes(),
+                    ValueCell::Inline(format!("value{}", i).into_bytes()),
+                )
+            })
+            .collect();
+        let raw = encode_page(
+            &Page::Leaf {
+                entries: entries.clone(),
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode leaf page");
+
+        for i in 0..101 {
+            let probe = format!("key{:04}", i).into_bytes();
+            let got = raw_leaf_find_value(&raw, 4096, &probe).expect("find value");
+            let expected = entries.iter().find(|(k, _)| *k == probe).map(|(_, v)| v);
+            match (got, expected) {
+                (Some(ValueCellRef::Inline(value)), Some(ValueCell::Inline(want))) => {
+                    assert_eq!(value, want.as_slice(), "probe key{:04}", i)
+                }
+                (None, None) => {}
+                (got, expected) => panic!(
+                    "mismatch for key{:04}: got {:?}, expected {:?}",
+                    i, got, expected
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn leaf_page_round_trip() {
         let page = Page::Leaf {
             entries: vec![
