@@ -148,6 +148,31 @@ describe("TS Query API", () => {
       expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
     });
 
+    it("filters reference columns with in", async () => {
+      const projectA = insertProject(db, "Project A");
+      const projectB = insertProject(db, "Project B");
+      const projectC = insertProject(db, "Project C");
+      const todoA = insertTodo(db, { title: "A", projectId: projectA.id });
+      const todoB = insertTodo(db, { title: "B", projectId: projectB.id });
+      const _todoC = insertTodo(db, { title: "C", projectId: projectC.id });
+
+      const results = await db.all(
+        app.todos.where({ projectId: { in: [projectA.id, projectB.id] } }),
+      );
+
+      expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
+    });
+
+    it("filters nullable reference columns with in", async () => {
+      const owner = insertUser(db, "Owner");
+      const todoWithOwner = insertTodo(db, { title: "Owned", ownerId: owner.id });
+      const _todoWithoutOwner = insertTodo(db, { title: "Unowned", ownerId: null });
+
+      const results = await db.all(app.todos.where({ ownerId: { in: [owner.id] } }));
+
+      expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
+    });
+
     it("filters int columns with multiple range operators on the same column", async () => {
       db.insert(app.table_with_defaults, { integer: 5 });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });
