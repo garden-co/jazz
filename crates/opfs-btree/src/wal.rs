@@ -113,7 +113,9 @@ pub(crate) fn read_commit<F: SyncFile>(
     start_page_id: PageId,
     persisted_pages: u64,
 ) -> Result<Option<(WalHeader, Vec<WalFrame>, PageId)>, BTreeError> {
-    let Some(header) = read_header(file, page_size, start_page_id)? else {
+    let mut reader = PageRunReader::new(file, page_size, persisted_pages)?;
+    reader.set_end_page_id(start_page_id + 1);
+    let Some(header) = read_header(&mut reader, start_page_id)? else {
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     };
@@ -131,17 +133,28 @@ pub(crate) fn read_commit<F: SyncFile>(
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     }
+    let use_batched_reader = batch_wal_replay_reads();
+    if use_batched_reader {
+        reader.set_end_page_id(next_cursor);
+    }
 
     let mut frames = Vec::with_capacity(frame_count);
     let mut cursor = start_page_id + 1;
     for _ in 0..frame_count {
-        let Some((page_id, is_blob, is_freelist, expected_checksum)) =
-            read_frame_meta(file, page_size, cursor)?
-        else {
+        let frame_meta = if use_batched_reader {
+            read_frame_meta(&mut reader, cursor)?
+        } else {
+            read_frame_meta_at(file, page_size, cursor)?
+        };
+        let Some((page_id, is_blob, is_freelist, expected_checksum)) = frame_meta else {
             truncate_tail(file, page_size, start_page_id)?;
             return Ok(None);
         };
-        let raw = read_raw_page_at(file, page_size, cursor + 1)?;
+        let raw = if use_batched_reader {
+            reader.page(cursor + 1)?.to_vec()
+        } else {
+            read_raw_page_at(file, page_size, cursor + 1)?
+        };
         if checksum::hash(&raw) != expected_checksum {
             truncate_tail(file, page_size, start_page_id)?;
             return Ok(None);
@@ -155,13 +168,18 @@ pub(crate) fn read_commit<F: SyncFile>(
         cursor += 2;
     }
 
-    if !read_commit_marker(
-        file,
-        page_size,
-        cursor,
-        header.generation,
-        header.frame_count,
-    )? {
+    let has_commit_marker = if use_batched_reader {
+        read_commit_marker(&mut reader, cursor, header.generation, header.frame_count)?
+    } else {
+        read_commit_marker_at(
+            file,
+            page_size,
+            cursor,
+            header.generation,
+            header.frame_count,
+        )?
+    };
+    if !has_commit_marker {
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     }
@@ -180,15 +198,34 @@ fn commit_page_count(
 }
 
 fn read_header<F: SyncFile>(
-    file: &F,
-    page_size: usize,
+    reader: &mut PageRunReader<'_, F>,
     page_id: PageId,
 ) -> Result<Option<WalHeader>, BTreeError> {
-    let raw = read_raw_page_at(file, page_size, page_id)?;
-    decode_wal_header_page(&raw, page_size)
+    let page_size = reader.page_size;
+    let raw = reader.page(page_id)?;
+    decode_wal_header_page(raw, page_size)
 }
 
 fn read_frame_meta<F: SyncFile>(
+    reader: &mut PageRunReader<'_, F>,
+    page_id: PageId,
+) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
+    let page_size = reader.page_size;
+    let raw = reader.page(page_id)?;
+    decode_wal_frame_meta_page(raw, page_size)
+}
+
+fn read_commit_marker<F: SyncFile>(
+    reader: &mut PageRunReader<'_, F>,
+    page_id: PageId,
+    generation: u64,
+    frame_count: u64,
+) -> Result<bool, BTreeError> {
+    let raw = reader.page(page_id)?;
+    decode_wal_commit_page(raw, generation, frame_count)
+}
+
+fn read_frame_meta_at<F: SyncFile>(
     file: &F,
     page_size: usize,
     page_id: PageId,
@@ -197,7 +234,7 @@ fn read_frame_meta<F: SyncFile>(
     decode_wal_frame_meta_page(&raw, page_size)
 }
 
-fn read_commit_marker<F: SyncFile>(
+fn read_commit_marker_at<F: SyncFile>(
     file: &F,
     page_size: usize,
     page_id: PageId,
@@ -217,6 +254,86 @@ fn read_raw_page_at<F: SyncFile>(
     let mut raw = vec![0u8; page_size];
     file.read_exact_at(offset, &mut raw)?;
     Ok(raw)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn batch_wal_replay_reads() -> bool {
+    true
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn batch_wal_replay_reads() -> bool {
+    // Native files and MemoryFile can fill owned page buffers cheaply; run
+    // buffering would copy frame data twice. OPFS pays enough per read call for
+    // batched replay to win there.
+    false
+}
+
+const READ_RUN_PAGES: u64 = 64;
+
+/// Serves WAL page reads from a buffered run of up to READ_RUN_PAGES pages,
+/// so sequential replay does one backing-file read per run instead of one
+/// (freshly allocated) read per page.
+struct PageRunReader<'a, F: SyncFile> {
+    file: &'a F,
+    page_size: usize,
+    file_end_page_id: PageId,
+    /// First page id past the readable region: min(persisted pages, file length).
+    end_page_id: PageId,
+    buf: Vec<u8>,
+    buf_first_page: PageId,
+    buf_page_count: u64,
+}
+
+impl<'a, F: SyncFile> PageRunReader<'a, F> {
+    fn new(file: &'a F, page_size: usize, persisted_pages: u64) -> Result<Self, BTreeError> {
+        let file_pages = file.len()? / page_size as u64;
+        let file_end_page_id = persisted_pages.min(file_pages);
+        Ok(Self {
+            file,
+            page_size,
+            file_end_page_id,
+            end_page_id: file_end_page_id,
+            buf: Vec::new(),
+            buf_first_page: 0,
+            buf_page_count: 0,
+        })
+    }
+
+    fn set_end_page_id(&mut self, end_page_id: PageId) {
+        self.end_page_id = end_page_id.min(self.file_end_page_id);
+    }
+
+    fn page(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
+        if page_id >= self.end_page_id {
+            return Err(BTreeError::Io(format!(
+                "unexpected eof: WAL page {} beyond readable end {}",
+                page_id, self.end_page_id
+            )));
+        }
+        if page_id < self.buf_first_page || page_id >= self.buf_first_page + self.buf_page_count {
+            self.fill(page_id)?;
+        }
+        let start = (page_id - self.buf_first_page) as usize * self.page_size;
+        Ok(&self.buf[start..start + self.page_size])
+    }
+
+    fn fill(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        if page_id >= self.end_page_id {
+            return Err(BTreeError::Io(format!(
+                "unexpected eof: WAL page {} beyond readable end {}",
+                page_id, self.end_page_id
+            )));
+        }
+        let run = READ_RUN_PAGES.min(self.end_page_id - page_id);
+        let len = run as usize * self.page_size;
+        self.buf.resize(len, 0);
+        let offset = page_offset(page_id, self.page_size, "raw page read offset overflow")?;
+        self.file.read_exact_at(offset, &mut self.buf[..len])?;
+        self.buf_first_page = page_id;
+        self.buf_page_count = run;
+        Ok(())
+    }
 }
 
 fn write_page<F: SyncFile>(
