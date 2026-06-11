@@ -399,9 +399,10 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let page_size = self.options.page_size;
         let mut out = Vec::with_capacity(limit.min(1024));
-        let mut current = self.leaf_for_key(start)?;
+        let mut current = self.leaf_for_range_start(start)?;
         let mut visited = OpfsSet::default();
         let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
+        let mut last_scanned = None;
 
         while let Some(page_id) = current {
             if !visited.insert(page_id) {
@@ -438,13 +439,18 @@ impl<F: SyncFile> OpfsBTree<F> {
                 };
                 out.push((key, value));
                 if out.len() == limit {
+                    self.remember_leaf_hint_if_not_mru(page_id)?;
                     return Ok(out);
                 }
             }
 
+            last_scanned = Some(page_id);
             current = next;
         }
 
+        if let Some(page_id) = last_scanned {
+            self.remember_leaf_hint_if_not_mru(page_id)?;
+        }
         Ok(out)
     }
 
@@ -1151,6 +1157,64 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.remember_leaf_hint(page_id)?;
         }
         Ok(leaf)
+    }
+
+    /// Resolves the leaf where a range scan for `start` should begin. Unlike
+    /// point lookups, a range only needs the leaf where keys >= `start` begin,
+    /// so when `start` falls in the empty gap between a hinted leaf and its
+    /// cached successor, the successor is provably the right starting leaf and
+    /// the descent can be skipped.
+    fn leaf_for_range_start(&mut self, start: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        if let Some(page_id) = self.hinted_leaf_for_key_prefiltered(start)? {
+            return Ok(Some(page_id));
+        }
+        for idx in 0..LEAF_HINT_SLOTS {
+            if self.leaf_hints[idx].is_empty() || self.leaf_hints[idx].first_key.as_slice() > start
+            {
+                continue;
+            }
+            let page_id = self.leaf_hints[idx].page_id;
+            let Some(raw) = self.pages.get(&page_id) else {
+                continue;
+            };
+            let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
+                continue;
+            };
+            if span.first_key > start || start <= span.last_key {
+                // Not a floor for `start` (covers would have caught the
+                // in-span case above).
+                continue;
+            }
+            // `start` is past this leaf; if the successor is cached and its
+            // first key is past `start` too, the gap in between is empty and
+            // the successor is where keys >= start begin. A tail leaf is
+            // already handled by the covers check above.
+            let Some(next_id) = span.next_page_id else {
+                continue;
+            };
+            let Some(next_raw) = self.pages.get(&next_id) else {
+                continue;
+            };
+            let Some(next_span) = raw_leaf_span(next_raw, self.options.page_size)? else {
+                continue;
+            };
+            if next_span.first_key > start {
+                self.touch_page(next_id);
+                return Ok(Some(next_id));
+            }
+        }
+        let leaf = self.find_leaf_page_id(start)?;
+        if let Some(page_id) = leaf {
+            self.remember_leaf_hint(page_id)?;
+        }
+        Ok(leaf)
+    }
+
+    fn remember_leaf_hint_if_not_mru(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        if self.leaf_hints[0].page_id == page_id {
+            return Ok(());
+        }
+        self.remember_leaf_hint(page_id)
     }
 
     fn remember_leaf_hint(&mut self, page_id: PageId) -> Result<(), BTreeError> {
