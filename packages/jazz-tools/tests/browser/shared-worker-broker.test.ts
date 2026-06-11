@@ -1006,6 +1006,155 @@ describe("SharedWorker browser broker", () => {
     );
   });
 
+  it("reattaches a same-tab follower that reconnects without broker eviction", async () => {
+    const dbName = uniqueName("broker-follower-rehello");
+    const attachedFollowers: string[] = [];
+    let leaderClient: BrowserBrokerClient | null = null;
+
+    function createFollowerAttachOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName);
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          attachedFollowers.push(`${followerTabId}:${leadershipId}`);
+          port.close();
+          leaderClient?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      } as Parameters<typeof BrowserBrokerClient.connect>[0];
+    }
+
+    leaderClient = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-a"));
+    clients.push(leaderClient);
+    await leaderClient.waitForRole("leader", 2000);
+    leaderClient.reportSchemaReady("schema-a");
+
+    const firstFollower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(firstFollower);
+    firstFollower.reportSchemaReady("schema-a");
+    await waitFor(
+      () => attachedFollowers.includes("tab-b:1"),
+      2000,
+      "initial follower attachment should complete",
+    );
+
+    const secondFollower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(secondFollower);
+    secondFollower.reportSchemaReady("schema-a");
+
+    await waitFor(
+      () => attachedFollowers.filter((entry) => entry === "tab-b:1").length >= 2,
+      2000,
+      "same-tab re-hello should receive a fresh follower port",
+    );
+  });
+
+  it("reattaches a follower when the leader reports the data port closed", async () => {
+    const dbName = uniqueName("broker-follower-port-closed");
+    const attachedFollowers: string[] = [];
+    let leaderClient: BrowserBrokerClient | null = null;
+
+    function createFollowerAttachOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName);
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          attachedFollowers.push(`${followerTabId}:${leadershipId}`);
+          port.close();
+          leaderClient?.reportFollowerPortAttached(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      } as Parameters<typeof BrowserBrokerClient.connect>[0];
+    }
+
+    leaderClient = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-a"));
+    clients.push(leaderClient);
+    await leaderClient.waitForRole("leader", 2000);
+    leaderClient.reportSchemaReady("schema-a");
+
+    const follower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(follower);
+    follower.reportSchemaReady("schema-a");
+    await waitFor(
+      () => attachedFollowers.includes("tab-b:1"),
+      2000,
+      "initial follower attachment should complete",
+    );
+
+    leaderClient.reportFollowerPortClosed("tab-b", 1);
+
+    await waitFor(
+      () => attachedFollowers.filter((entry) => entry === "tab-b:1").length >= 2,
+      2000,
+      "closed follower data port should be re-attached",
+    );
+  });
+
+  it("backs off when retrying a follower attachment that is never acknowledged", async () => {
+    const dbName = uniqueName("broker-follower-attach-timeout");
+    const attachedFollowers: string[] = [];
+
+    function createFollowerAttachOptions(
+      tabId: string,
+    ): Parameters<typeof BrowserBrokerClient.connect>[0] {
+      return {
+        ...createOptions(dbName, tabId),
+        onBecomeLeader: async (client, leadershipId) => {
+          const locks = await acquireLeaderLocks(dbName);
+          client.reportLeaderReady({
+            leadershipId,
+            ...locks,
+          });
+        },
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          attachedFollowers.push(`${followerTabId}:${leadershipId}`);
+          port.close();
+        },
+        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+          port.close();
+        },
+      } as Parameters<typeof BrowserBrokerClient.connect>[0];
+    }
+
+    const leaderClient = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-a"));
+    clients.push(leaderClient);
+    await leaderClient.waitForRole("leader", 2000);
+    leaderClient.reportSchemaReady("schema-a");
+
+    const follower = await BrowserBrokerClient.connect(createFollowerAttachOptions("tab-b"));
+    clients.push(follower);
+    follower.reportSchemaReady("schema-a");
+
+    await waitFor(
+      () => attachedFollowers.filter((entry) => entry === "tab-b:1").length >= 2,
+      4000,
+      "unacknowledged follower attachment should be retried",
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(attachedFollowers.filter((entry) => entry === "tab-b:1")).toHaveLength(2);
+  });
+
   it("rejects a failed storage reset and still elects a leader afterwards", async () => {
     const dbName = uniqueName("broker-reset-failure");
     const requestId = `reset-${dbName}`;

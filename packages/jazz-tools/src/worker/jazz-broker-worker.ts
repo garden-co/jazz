@@ -19,6 +19,8 @@ import {
 
 const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS = 1_000;
 const LEADER_FAILURE_RETRY_BACKOFF_MS = 1_000;
+const INITIAL_FOLLOWER_ATTACHMENT_TIMEOUT_MS = 1_000;
+const MAX_FOLLOWER_ATTACHMENT_TIMEOUT_MS = 30_000;
 const COMPLETED_STORAGE_RESET_OUTCOME_TTL_MS = 30_000;
 const MAX_COMPLETED_STORAGE_RESET_OUTCOMES = 100;
 
@@ -83,6 +85,8 @@ let namespace: {
 let leader: LeaderState | null = null;
 let currentLeadershipId = 0;
 const pendingFollowerAttachments = new Set<string>();
+const pendingFollowerAttachmentTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const followerAttachmentRetryCounts = new Map<string, number>();
 const attachedFollowerPorts = new Set<string>();
 let replacementElectionInFlight = false;
 let replacementElectionGeneration = 0;
@@ -149,6 +153,12 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   }
 
   const now = Date.now();
+  const previousTab = tabs.get(message.tabId);
+  if (previousTab && previousTab.port !== port) {
+    previousTab.port.close();
+  }
+  clearFollowerAttachmentState(message.tabId);
+
   tabs.set(message.tabId, {
     tabId: message.tabId,
     appId: message.appId,
@@ -219,6 +229,11 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
     case "follower-port-attached":
       if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
       markFollowerPortAttached(message.followerTabId, message.leadershipId);
+      return;
+    case "follower-port-closed":
+      if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
+      clearFollowerAttachmentKey(message.followerTabId, message.leadershipId);
+      assignFollowerPorts(leader);
       return;
     case "schema-ready":
       handleSchemaReady(tabId, message.schemaFingerprint);
@@ -350,8 +365,7 @@ function resetIfIdle(): void {
   if (tabs.size > 0) return;
   namespace = null;
   leader = null;
-  pendingFollowerAttachments.clear();
-  attachedFollowerPorts.clear();
+  clearAllFollowerAttachmentState();
   resetState = null;
   replacementElectionGeneration += 1;
   replacementElectionInFlight = false;
@@ -395,13 +409,39 @@ function notifyLeaderToDetachFollower(followerTabId: string, leadershipId: numbe
 function clearFollowerAttachmentState(followerTabId: string): void {
   for (const key of pendingFollowerAttachments) {
     if (key.endsWith(`:${followerTabId}`)) {
-      pendingFollowerAttachments.delete(key);
+      clearPendingFollowerAttachment(key);
     }
   }
   for (const key of attachedFollowerPorts) {
     if (key.endsWith(`:${followerTabId}`)) {
       attachedFollowerPorts.delete(key);
     }
+  }
+}
+
+function clearFollowerAttachmentKey(followerTabId: string, leadershipId: number): void {
+  const key = followerAttachmentKey(followerTabId, leadershipId);
+  clearPendingFollowerAttachment(key);
+  attachedFollowerPorts.delete(key);
+}
+
+function clearAllFollowerAttachmentState(): void {
+  for (const timer of pendingFollowerAttachmentTimers.values()) {
+    clearTimeout(timer);
+  }
+  pendingFollowerAttachmentTimers.clear();
+  pendingFollowerAttachments.clear();
+  followerAttachmentRetryCounts.clear();
+  attachedFollowerPorts.clear();
+}
+
+function clearPendingFollowerAttachment(key: string): void {
+  pendingFollowerAttachments.delete(key);
+  followerAttachmentRetryCounts.delete(key);
+  const timer = pendingFollowerAttachmentTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    pendingFollowerAttachmentTimers.delete(key);
   }
 }
 
@@ -521,8 +561,7 @@ function clearLeader(
   const current = leader;
   if (!current || current.leadershipId !== leadershipId) return null;
   cancelLeaderMonitors(current);
-  pendingFollowerAttachments.clear();
-  attachedFollowerPorts.clear();
+  clearAllFollowerAttachmentState();
 
   const leaderTab = tabs.get(current.tabId);
   if (options.demoteLeader && leaderTab) {
@@ -948,7 +987,7 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
     if (attachedFollowerPorts.has(key)) continue;
 
     const channel = new MessageChannel();
-    pendingFollowerAttachments.add(key);
+    markFollowerPortPending(follower.tabId, nextLeader.leadershipId);
     post(
       leaderTab.port,
       {
@@ -972,6 +1011,25 @@ function assignFollowerPorts(nextLeader: LeaderState): void {
       [channel.port2],
     );
   }
+}
+
+function markFollowerPortPending(followerTabId: string, leadershipId: number): void {
+  const key = followerAttachmentKey(followerTabId, leadershipId);
+  pendingFollowerAttachments.add(key);
+  const retryCount = followerAttachmentRetryCounts.get(key) ?? 0;
+  const timeoutMs = Math.min(
+    INITIAL_FOLLOWER_ATTACHMENT_TIMEOUT_MS * 2 ** retryCount,
+    MAX_FOLLOWER_ATTACHMENT_TIMEOUT_MS,
+  );
+  const timer = setTimeout(() => {
+    pendingFollowerAttachmentTimers.delete(key);
+    if (!pendingFollowerAttachments.delete(key)) return;
+    if (!leader || !leader.ready || leader.leadershipId !== leadershipId) return;
+    if (!tabs.has(followerTabId)) return;
+    followerAttachmentRetryCounts.set(key, retryCount + 1);
+    assignFollowerPorts(leader);
+  }, timeoutMs);
+  pendingFollowerAttachmentTimers.set(key, timer);
 }
 
 function eligibleLeaderCandidates(): BrowserBrokerCandidate[] {
@@ -1051,7 +1109,7 @@ function removeTabFromActiveReset(tabId: string): void {
 function markFollowerPortAttached(followerTabId: string, leadershipId: number): void {
   const key = followerAttachmentKey(followerTabId, leadershipId);
   if (!pendingFollowerAttachments.has(key)) return;
-  pendingFollowerAttachments.delete(key);
+  clearPendingFollowerAttachment(key);
 
   if (!leader || leader.leadershipId !== leadershipId) return;
   const follower = tabs.get(followerTabId);

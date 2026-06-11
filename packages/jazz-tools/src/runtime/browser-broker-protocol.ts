@@ -94,6 +94,12 @@ export interface BrowserBrokerFollowerPortAttachedMessage {
   followerTabId: string;
 }
 
+export interface BrowserBrokerFollowerPortClosedMessage {
+  type: "follower-port-closed";
+  leadershipId: number;
+  followerTabId: string;
+}
+
 export interface BrowserBrokerSchemaReadyMessage {
   type: "schema-ready";
   schemaFingerprint: string;
@@ -126,6 +132,7 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerLeaderReadyMessage
   | BrowserBrokerLeaderFailedMessage
   | BrowserBrokerFollowerPortAttachedMessage
+  | BrowserBrokerFollowerPortClosedMessage
   | BrowserBrokerSchemaReadyMessage
   | BrowserBrokerStorageResetRequestMessage
   | BrowserBrokerStorageResetReadyMessage

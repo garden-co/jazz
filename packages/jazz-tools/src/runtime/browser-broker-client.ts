@@ -181,6 +181,14 @@ export class BrowserBrokerClient {
     });
   }
 
+  reportFollowerPortClosed(followerTabId: string, leadershipId: number): void {
+    this.send({
+      type: "follower-port-closed",
+      followerTabId,
+      leadershipId,
+    });
+  }
+
   reportSchemaReady(schemaFingerprint: string): void {
     this.send({
       type: "schema-ready",
