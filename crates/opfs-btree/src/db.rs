@@ -1447,6 +1447,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let raw = encode_page(&page, self.options.page_size)?;
         self.pages.insert(page_id, raw);
         self.mark_dirty_loaded_page(page_id);
+        self.evict_pages_if_needed(Some(page_id));
         Ok(())
     }
 
@@ -1454,12 +1455,14 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.pages.insert(page_id, raw);
         self.blob_pages.insert(page_id);
         self.mark_dirty_loaded_page(page_id);
+        self.evict_pages_if_needed(Some(page_id));
     }
 
+    // Marking an already-cached page dirty cannot grow the cache, so it must
+    // not trigger an eviction scan; only the insertion paths do that.
     fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
         self.dirty_pages.insert(page_id);
         self.touch_page(page_id);
-        self.evict_pages_if_needed(Some(page_id));
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
@@ -1698,14 +1701,23 @@ impl<F: SyncFile> OpfsBTree<F> {
         over_budget_allowance: usize,
     ) {
         let max_cached_pages = self.max_cached_pages();
-        let trigger = max_cached_pages.saturating_add(over_budget_allowance);
+        // Dirty and WAL-pinned pages cannot be evicted; they raise both the
+        // floor the scan can reach and the level at which it re-arms. Without
+        // this, a cache pinned above the trigger rescans on every call. The
+        // sum overcounts pages in both sets, which only makes the resting
+        // level conservative; those pages are unevictable either way.
+        let pinned = self.dirty_pages.len() + self.wal_pages.len();
+        let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
+        let resting_pages = steady_cached_pages.max(pinned.saturating_add(max_cached_pages / 8));
+        let trigger = max_cached_pages
+            .max(resting_pages.saturating_add(max_cached_pages / 4))
+            .saturating_add(over_budget_allowance);
         if self.pages.len() <= trigger {
             return;
         }
 
         let root_page_id = self.root_page_id;
-        let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
-        let target = self.pages.len().saturating_sub(steady_cached_pages);
+        let target = self.pages.len().saturating_sub(resting_pages);
         if target == 0 {
             return;
         }
@@ -2694,6 +2706,59 @@ mod tests {
                 page_id
             );
         }
+    }
+
+    #[test]
+    fn eviction_with_pinned_cache_keeps_warm_evictable_pages() {
+        let file = MemoryFile::new();
+        let options = BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 64,
+            overflow_threshold: 128,
+            pin_internal_pages: false,
+            read_coalesce_pages: 1,
+        };
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+        let max_cached = tree.max_cached_pages();
+        let page_size = tree.options.page_size;
+
+        let pinned = max_cached * 2;
+        for idx in 0..pinned {
+            let page_id = 10_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.dirty_pages.insert(page_id);
+            tree.touch_page(page_id);
+        }
+
+        let warm = max_cached / 8;
+        for idx in 0..warm {
+            let page_id = 20_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.touch_page(page_id);
+        }
+        tree.evict_pages_if_needed(None);
+        assert_eq!(
+            tree.pages.len(),
+            pinned + warm,
+            "eviction must not wipe warm pages while the cache is pinned over budget"
+        );
+
+        let burst = max_cached / 4 + max_cached / 8;
+        for idx in 0..burst {
+            let page_id = 30_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.touch_page(page_id);
+        }
+        tree.evict_pages_if_needed(None);
+        assert_eq!(
+            tree.pages.len(),
+            pinned + max_cached / 8,
+            "eviction should trim to the pinned-aware resting level"
+        );
+        let surviving_dirty = (0..pinned)
+            .filter(|idx| tree.pages.contains_key(&(10_000 + *idx as u64)))
+            .count();
+        assert_eq!(surviving_dirty, pinned, "dirty pages must never be evicted");
     }
 
     #[test]
