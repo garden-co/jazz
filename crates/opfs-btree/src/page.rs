@@ -1,6 +1,7 @@
 use crate::{BTreeError, checksum};
 
 pub(crate) type PageId = u64;
+type RawLeafKeySpan<'a> = (&'a [u8], &'a [u8]);
 
 const PAGE_MAGIC: [u8; 4] = *b"OPPG";
 const PAGE_HEADER_BYTES: usize = 24;
@@ -340,18 +341,28 @@ pub(crate) fn raw_leaf_covers_key(
     expected_page_size: usize,
     key: &[u8],
 ) -> Result<bool, BTreeError> {
+    let Some((first_key, last_key)) = raw_leaf_key_span(raw, expected_page_size)? else {
+        return Ok(false);
+    };
+    Ok(first_key <= key && key <= last_key)
+}
+
+pub(crate) fn raw_leaf_key_span(
+    raw: &[u8],
+    expected_page_size: usize,
+) -> Result<Option<RawLeafKeySpan<'_>>, BTreeError> {
     let header = parse_header(raw, expected_page_size, false)?;
     if header.kind != PageKind::Leaf {
-        return Ok(false);
+        return Ok(None);
     }
     let entry_count = header.item_count as usize;
     if entry_count == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let payload = header.payload;
     let slots_bytes = leaf_slots_bytes(entry_count)?;
     if payload.len() < slots_bytes {
-        return Ok(false);
+        return Ok(None);
     }
     let slots = &payload[..slots_bytes];
 
@@ -372,7 +383,10 @@ pub(crate) fn raw_leaf_covers_key(
         ));
     }
 
-    Ok(&payload[first_off..first_end] <= key && key <= &payload[last_off..last_end])
+    Ok(Some((
+        &payload[first_off..first_end],
+        &payload[last_off..last_end],
+    )))
 }
 
 /// Scan a leaf page for key-value pairs in the range [start, end).

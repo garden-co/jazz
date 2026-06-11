@@ -8,7 +8,7 @@ use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
     ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
     raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
+    raw_leaf_find_value, raw_leaf_key_span, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
     refresh_page_checksum, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
@@ -22,6 +22,11 @@ const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
+// Recently used leaf pages, most recent first; page id 0 marks an empty slot
+// (ids below 2 are superblocks and never tree pages). Two slots let workloads
+// that alternate between key regions keep a hint per region without making the
+// random miss path scan a larger hint set.
+const LEAF_HINT_SLOTS: usize = 2;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -31,6 +36,37 @@ struct PageWrite<'a> {
     is_blob: bool,
     is_freelist: bool,
     raw: Cow<'a, [u8]>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LeafHint {
+    page_id: PageId,
+    first_key: Vec<u8>,
+    last_key: Vec<u8>,
+}
+
+impl LeafHint {
+    fn new(page_id: PageId, first_key: &[u8], last_key: &[u8]) -> Self {
+        Self {
+            page_id,
+            first_key: first_key.to_vec(),
+            last_key: last_key.to_vec(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.page_id == 0
+    }
+
+    fn could_cover(&self, key: &[u8]) -> bool {
+        !self.is_empty() && self.first_key.as_slice() <= key && key <= self.last_key.as_slice()
+    }
+
+    fn clear(&mut self) {
+        self.page_id = 0;
+        self.first_key.clear();
+        self.last_key.clear();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,7 +153,7 @@ pub struct OpfsBTree<F: SyncFile> {
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
-    last_leaf_hint: Option<PageId>,
+    leaf_hints: [LeafHint; LEAF_HINT_SLOTS],
 }
 
 #[derive(Debug)]
@@ -168,7 +204,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
-            last_leaf_hint: None,
+            leaf_hints: std::array::from_fn(|_| LeafHint::default()),
         };
 
         if tree.active.generation == 0 {
@@ -244,7 +280,6 @@ impl<F: SyncFile> OpfsBTree<F> {
             value_len = value.len()
         )
         .entered();
-        self.last_leaf_hint = None;
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -275,7 +310,6 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
-        self.last_leaf_hint = None;
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -1019,23 +1053,78 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    /// Resolves the leaf for `key`, trying the last-used leaf before paying
-    /// for a full root-to-leaf descent. Safe because `raw_leaf_covers_key`
-    /// re-checks the page's current bytes on every use.
-    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        if let Some(page_id) = self.last_leaf_hint {
+    /// Checks the hint slots for a cached leaf whose current key span covers
+    /// `key`. Safe across mutations because `raw_leaf_covers_key` re-validates
+    /// the page's current bytes on every use; `remove_page` drops freed pages
+    /// from the slots and WAL replay clears them all.
+    fn hinted_leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        for idx in 0..LEAF_HINT_SLOTS {
+            if self.leaf_hints[idx].is_empty()
+                || (idx > 0 && !self.leaf_hints[idx].could_cover(key))
+            {
+                continue;
+            }
+            let page_id = self.leaf_hints[idx].page_id;
             let covers = match self.pages.get(&page_id) {
                 Some(raw) => raw_leaf_covers_key(raw, self.options.page_size, key)?,
                 None => false,
             };
             if covers {
+                self.leaf_hints[..=idx].rotate_right(1);
                 self.touch_page(page_id);
                 return Ok(Some(page_id));
             }
         }
+        Ok(None)
+    }
+
+    /// Resolves the leaf for `key`, trying the hint slots before paying for a
+    /// full root-to-leaf descent.
+    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        if let Some(page_id) = self.hinted_leaf_for_key(key)? {
+            return Ok(Some(page_id));
+        }
         let leaf = self.find_leaf_page_id(key)?;
-        self.last_leaf_hint = leaf;
+        if let Some(page_id) = leaf {
+            self.remember_leaf_hint(page_id)?;
+        }
         Ok(leaf)
+    }
+
+    fn remember_leaf_hint(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        let Some(raw) = self.pages.get(&page_id) else {
+            return Ok(());
+        };
+        let Some((first_key, last_key)) = raw_leaf_key_span(raw, self.options.page_size)? else {
+            return Ok(());
+        };
+        let hint = LeafHint::new(page_id, first_key, last_key);
+        if let Some(pos) = self
+            .leaf_hints
+            .iter()
+            .position(|entry| entry.page_id == page_id)
+        {
+            self.leaf_hints[pos] = hint;
+            self.leaf_hints[..=pos].rotate_right(1);
+        } else {
+            self.leaf_hints.rotate_right(1);
+            self.leaf_hints[0] = hint;
+        }
+        Ok(())
+    }
+
+    fn forget_leaf_hint(&mut self, page_id: PageId) {
+        for slot in &mut self.leaf_hints {
+            if slot.page_id == page_id {
+                slot.clear();
+            }
+        }
+    }
+
+    fn clear_leaf_hints(&mut self) {
+        for slot in &mut self.leaf_hints {
+            slot.clear();
+        }
     }
 
     fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
@@ -1343,7 +1432,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         header: WalHeader,
         frames: Vec<WalFrame>,
     ) -> Result<(), BTreeError> {
-        self.last_leaf_hint = None;
+        self.clear_leaf_hints();
         if header.total_pages < 2 {
             return Err(BTreeError::Corrupt(
                 "WAL total_pages must be >= 2".to_string(),
@@ -1464,9 +1553,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
-        if self.last_leaf_hint == Some(page_id) {
-            self.last_leaf_hint = None;
-        }
+        self.forget_leaf_hint(page_id);
         self.dirty_pages.remove(&page_id);
         self.wal_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
