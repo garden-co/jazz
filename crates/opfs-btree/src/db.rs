@@ -333,6 +333,11 @@ impl<F: SyncFile> OpfsBTree<F> {
 
             let remaining = limit.saturating_sub(out.len());
             let raw = self.ensure_page_loaded(page_id)?;
+            // `raw` borrows the page bytes out of the cache, and resolving an
+            // overflow value needs `&mut self` to load its extent pages, so
+            // matches are staged as owned copies first and overflow refs are
+            // resolved after the borrow ends. `staged` lives outside the loop
+            // to reuse one buffer across the leaf chain.
             staged.clear();
             let next = raw_leaf_scan(raw, page_size, start, end, remaining, |key, value| {
                 let staged_value = match value {
@@ -600,8 +605,10 @@ impl<F: SyncFile> OpfsBTree<F> {
 
                 // Split path: recursion may have evicted this clean parent, so
                 // reload before decoding for the structural update.
-                let page_raw = self.ensure_page_loaded(page_id)?.to_vec();
-                let page = decode_page(&page_raw, self.options.page_size)?;
+                let page = {
+                    let raw = self.ensure_page_loaded(page_id)?;
+                    decode_page(raw, page_size)?
+                };
                 let Page::Internal {
                     mut keys,
                     mut children,
@@ -1233,7 +1240,10 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn refresh_dirty_page_checksums(&mut self, page_ids: &[PageId]) -> Result<(), BTreeError> {
         for page_id in page_ids {
-            if self.blob_pages.contains(page_id) {
+            // Only pages mutated since the last flush can carry a deferred
+            // checksum; WAL-pinned pages in a checkpoint batch were already
+            // refreshed by the flush that wrote them.
+            if !self.dirty_pages.contains(page_id) || self.blob_pages.contains(page_id) {
                 continue;
             }
             if let Some(raw) = self.pages.get_mut(page_id) {
@@ -1382,6 +1392,11 @@ impl<F: SyncFile> OpfsBTree<F> {
             header.total_pages,
         );
         self.freelist_dirty = false;
+        // Replay inserts frames into the cache like any other load path, so it
+        // owes the same eviction check as the other insertion sites. This runs
+        // after the freelist load because freelist frames are clean and
+        // evictable the moment they are applied.
+        self.evict_pages_if_needed(None);
         Ok(())
     }
 
