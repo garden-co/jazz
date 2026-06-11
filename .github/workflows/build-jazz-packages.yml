@@ -65,7 +65,7 @@ jobs:
           tool: cargo-zigbuild
 
       - name: Build CLI binary
-        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli,otel --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -103,7 +103,7 @@ jobs:
           setup-node: "false"
 
       - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli,otel --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
