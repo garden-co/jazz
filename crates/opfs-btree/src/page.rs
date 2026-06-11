@@ -1433,6 +1433,43 @@ mod tests {
     }
 
     #[test]
+    fn raw_internal_child_for_key_matches_partition_point_reference() {
+        let keys: Vec<Vec<u8>> = (0..101)
+            .map(|i| format!("key{:04}", i * 2).into_bytes())
+            .collect();
+        let children: Vec<PageId> = (0..102).map(|i| 1000 + i as PageId).collect();
+        let raw = encode_page(
+            &Page::Internal {
+                keys: keys.clone(),
+                children: children.clone(),
+            },
+            4096,
+        )
+        .expect("encode internal page");
+
+        // children[i] receives probes that sort before keys[i] and at-or-after
+        // keys[i-1]; equal keys route right, matching `current_key <= key`.
+        let reference_child = |probe: &[u8]| {
+            let idx = keys.partition_point(|k| k.as_slice() <= probe);
+            children[idx]
+        };
+
+        let mut probes: Vec<Vec<u8>> = vec![b"".to_vec(), b"zzzz".to_vec()];
+        for i in 0..203 {
+            probes.push(format!("key{:04}", i).into_bytes());
+        }
+        for probe in probes {
+            let got = raw_internal_child_for_key(&raw, 4096, &probe).expect("child for key");
+            assert_eq!(
+                got,
+                reference_child(&probe),
+                "probe {}",
+                String::from_utf8_lossy(&probe)
+            );
+        }
+    }
+
+    #[test]
     fn leaf_page_round_trip() {
         let page = Page::Leaf {
             entries: vec![
