@@ -206,6 +206,9 @@ fn relation_predicate_to_disjuncts(predicate: &PredicateExpr) -> Option<Vec<Conj
         PredicateExpr::In { left, values } => {
             if values.is_empty() {
                 let column = to_scoped_runtime_column(left);
+                // Empty IN lists must match no rows. Represent that as a
+                // contradiction so the existing query planner can still lower
+                // the predicate into normal scan/filter conditions.
                 return Some(vec![Conjunction {
                     conditions: vec![
                         Condition::IsNull {
