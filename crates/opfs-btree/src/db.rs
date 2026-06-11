@@ -2093,6 +2093,60 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_ops_match_btreemap_model() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open");
+        let mut model = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+
+        // Deterministic LCG so failures reproduce.
+        let mut rng_state = 0x12345678u64;
+        let mut rng = move || {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng_state >> 33) as usize
+        };
+
+        for op in 0..5_000 {
+            let k = format!("key/{:06}", rng() % 800).into_bytes();
+            match rng() % 10 {
+                0..=4 => {
+                    let v = format!("value-{}", op).into_bytes();
+                    tree.put(&k, &v).expect("put");
+                    model.insert(k, v);
+                }
+                5 => {
+                    tree.delete(&k).expect("delete");
+                    model.remove(&k);
+                }
+                6..=8 => {
+                    assert_eq!(
+                        tree.get(&k).expect("get"),
+                        model.get(&k).cloned(),
+                        "op {}",
+                        op
+                    );
+                }
+                _ => {
+                    let hi = format!("key/{:06}", rng() % 800).into_bytes();
+                    let (start, end) = if k <= hi {
+                        (k.clone(), hi)
+                    } else {
+                        (hi, k.clone())
+                    };
+                    let got = tree.range(&start, &end, 50).expect("range");
+                    let want: Vec<(Vec<u8>, Vec<u8>)> = model
+                        .range(start..end)
+                        .take(50)
+                        .map(|(a, b)| (a.clone(), b.clone()))
+                        .collect();
+                    assert_eq!(got, want, "op {}", op);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bootstrap_creates_checkpoint_state() {
         let file = MemoryFile::new();
         let tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open tree");
