@@ -5,10 +5,10 @@ use std::collections::BinaryHeap;
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
-    ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
-    raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_key_span, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
+    OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafSpan,
+    RawLeafUpsertResult, ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page,
+    page_fits, raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_span, raw_leaf_upsert_in_place, raw_page_kind,
     refresh_page_checksum, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
@@ -43,29 +43,40 @@ struct LeafHint {
     page_id: PageId,
     first_key: Vec<u8>,
     last_key: Vec<u8>,
+    is_tail: bool,
 }
 
 impl LeafHint {
-    fn new(page_id: PageId, first_key: &[u8], last_key: &[u8]) -> Self {
-        Self {
-            page_id,
-            first_key: first_key.to_vec(),
-            last_key: last_key.to_vec(),
-        }
+    /// Overwrites this slot in place, reusing its key buffers so descents
+    /// don't allocate two fresh Vecs each time a hint is remembered.
+    fn set(&mut self, page_id: PageId, span: &RawLeafSpan<'_>) {
+        self.page_id = page_id;
+        self.first_key.clear();
+        self.first_key.extend_from_slice(span.first_key);
+        self.last_key.clear();
+        self.last_key.extend_from_slice(span.last_key);
+        self.is_tail = span.next_page_id.is_none();
     }
 
     fn is_empty(&self) -> bool {
         self.page_id == 0
     }
 
+    /// Prefilter only: false positives are re-checked by
+    /// `raw_leaf_covers_key` on the live page bytes; `is_tail` can only go
+    /// stale in the safe direction (a tail becomes non-tail on split, never
+    /// the reverse, because leaves are never merged).
     fn could_cover(&self, key: &[u8]) -> bool {
-        !self.is_empty() && self.first_key.as_slice() <= key && key <= self.last_key.as_slice()
+        !self.is_empty()
+            && self.first_key.as_slice() <= key
+            && (key <= self.last_key.as_slice() || self.is_tail)
     }
 
     fn clear(&mut self) {
         self.page_id = 0;
         self.first_key.clear();
         self.last_key.clear();
+        self.is_tail = false;
     }
 }
 
@@ -297,7 +308,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         // inline-sized, upsert in place without descending. Splits still need
         // the parent path, so NeedSplit falls through to the recursive insert.
         if value.len() <= self.options.overflow_threshold
-            && let Some(page_id) = self.hinted_leaf_for_key(key)?
+            && let Some(page_id) = self.hinted_leaf_for_key_prefiltered(key)?
         {
             let new_value = ValueCell::Inline(value.to_vec());
             let upsert = {
@@ -594,10 +605,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                 match upsert {
                     RawLeafUpsertResult::Inserted => {
                         self.mark_dirty_loaded_page(page_id);
+                        self.remember_tail_leaf_hint(page_id)?;
                         return Ok(None);
                     }
                     RawLeafUpsertResult::Updated { old_overflow } => {
                         self.mark_dirty_loaded_page(page_id);
+                        self.remember_tail_leaf_hint(page_id)?;
                         if let Some(old_overflow) = old_overflow
                             && Some(old_overflow.head_page_id) != reused_overflow_head
                         {
@@ -1087,14 +1100,29 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
+    fn hinted_leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        self.hinted_leaf_for_key_inner(key, false)
+    }
+
+    fn hinted_leaf_for_key_prefiltered(
+        &mut self,
+        key: &[u8],
+    ) -> Result<Option<PageId>, BTreeError> {
+        self.hinted_leaf_for_key_inner(key, true)
+    }
+
     /// Checks the hint slots for a cached leaf whose current key span covers
     /// `key`. Safe across mutations because `raw_leaf_covers_key` re-validates
     /// the page's current bytes on every use; `remove_page` drops freed pages
     /// from the slots and WAL replay clears them all.
-    fn hinted_leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+    fn hinted_leaf_for_key_inner(
+        &mut self,
+        key: &[u8],
+        prefilter_mru: bool,
+    ) -> Result<Option<PageId>, BTreeError> {
         for idx in 0..LEAF_HINT_SLOTS {
             if self.leaf_hints[idx].is_empty()
-                || (idx > 0 && !self.leaf_hints[idx].could_cover(key))
+                || ((prefilter_mru || idx > 0) && !self.leaf_hints[idx].could_cover(key))
             {
                 continue;
             }
@@ -1129,22 +1157,39 @@ impl<F: SyncFile> OpfsBTree<F> {
         let Some(raw) = self.pages.get(&page_id) else {
             return Ok(());
         };
-        let Some((first_key, last_key)) = raw_leaf_key_span(raw, self.options.page_size)? else {
+        let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
             return Ok(());
         };
-        let hint = LeafHint::new(page_id, first_key, last_key);
-        if let Some(pos) = self
-            .leaf_hints
-            .iter()
-            .position(|entry| entry.page_id == page_id)
-        {
-            self.leaf_hints[pos] = hint;
-            self.leaf_hints[..=pos].rotate_right(1);
-        } else {
-            self.leaf_hints.rotate_right(1);
-            self.leaf_hints[0] = hint;
-        }
+        Self::remember_leaf_span(&mut self.leaf_hints, page_id, &span);
         Ok(())
+    }
+
+    fn remember_tail_leaf_hint(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        let Some(raw) = self.pages.get(&page_id) else {
+            return Ok(());
+        };
+        let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
+            return Ok(());
+        };
+        if span.next_page_id.is_some() {
+            return Ok(());
+        }
+        Self::remember_leaf_span(&mut self.leaf_hints, page_id, &span);
+        Ok(())
+    }
+
+    fn remember_leaf_span(
+        leaf_hints: &mut [LeafHint; LEAF_HINT_SLOTS],
+        page_id: PageId,
+        span: &RawLeafSpan<'_>,
+    ) {
+        if let Some(pos) = leaf_hints.iter().position(|entry| entry.page_id == page_id) {
+            leaf_hints[pos].set(page_id, span);
+            leaf_hints[..=pos].rotate_right(1);
+        } else {
+            leaf_hints.rotate_right(1);
+            leaf_hints[0].set(page_id, span);
+        }
     }
 
     fn forget_leaf_hint(&mut self, page_id: PageId) {
