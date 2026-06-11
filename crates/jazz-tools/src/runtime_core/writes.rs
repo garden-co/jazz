@@ -171,6 +171,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )
     }
 
+    /// The strongest durability tier some configured producer can still
+    /// confirm for this runtime's batches: with any producer available that
+    /// is exactly the settlement target; a non-durable client with no
+    /// upstream has no producer at all.
+    fn max_attainable_wait_tier(&self) -> Option<DurabilityTier> {
+        let sync_manager = self.schema_manager.query_manager().sync_manager();
+        let has_producer = sync_manager.has_servers_or_pending_servers()
+            || self.synthesize_direct_write_fate
+            || sync_manager.max_local_durability_tier().is_some();
+        has_producer.then(|| sync_manager.settlement_target())
+    }
+
     fn completed_batch_wait_receiver(
         outcome: PersistedWriteAck,
     ) -> oneshot::Receiver<PersistedWriteAck> {
@@ -795,17 +807,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(crate) fn sealed_batch_still_needs_edge_reconciliation(fate: Option<&BatchFate>) -> bool {
-        match fate {
-            Some(BatchFate::Rejected { .. } | BatchFate::Missing { .. }) => false,
-            Some(BatchFate::DurableDirect { confirmed_tier, .. })
-            | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
-                *confirmed_tier < DurabilityTier::EdgeServer
-            }
-            None => true,
-        }
-    }
-
     /// Load retained local batch records plus sealed submissions that still
     /// need edge reconciliation. Browser workers send this set to the main
     /// runtime during startup so local queries know when they must wait for the
@@ -831,7 +832,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .storage
                 .load_authoritative_batch_fate(submission.batch_id)
                 .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))?;
-            if !Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref()) {
+            if !self.batch_needs_settlement(fate.as_ref()) {
                 continue;
             }
             if let Some(record) =
@@ -853,7 +854,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if retained_batch_ids.contains(&fate.batch_id()) {
                 continue;
             }
-            if !Self::sealed_batch_still_needs_edge_reconciliation(Some(&fate)) {
+            if !self.batch_needs_settlement(Some(&fate)) {
                 continue;
             }
             let local_rows = self.local_batch_rows(fate.batch_id());
@@ -915,6 +916,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 self.durability.take_mutation_error_event(batch_id);
             }
             return Ok(Self::completed_batch_wait_receiver(outcome));
+        }
+
+        let attainable = self.max_attainable_wait_tier();
+        if attainable.is_none_or(|max_tier| tier > max_tier) {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot wait for durability tier {tier:?}: no configured server or local \
+                 durability tier can produce it (max attainable: {attainable:?})"
+            )));
         }
 
         Ok(self.register_batch_waiter(batch_id, tier))
@@ -1082,6 +1091,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let submission = self.sealed_batch_submission(&record)?;
 
         record.mark_sealed(submission.clone());
+        let mut settled_at_commit = false;
         if record.mode == BatchMode::Direct {
             if let Some(confirmed_tier) = self.local_write_confirmed_tier() {
                 let settlement = BatchFate::DurableDirect {
@@ -1094,14 +1104,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .map_err(|err| {
                         RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
+                settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
+                self.durability.record_batch_ack(batch_id, confirmed_tier);
             }
             self.publish_direct_batch_rows(&record)?;
         }
-        self.storage
-            .upsert_sealed_batch_submission(&submission)
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
-            })?;
+        if !settled_at_commit {
+            self.storage
+                .upsert_sealed_batch_submission(&submission)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
+                })?;
+        }
         self.local_batch_record_cache.insert(batch_id, record);
         self.schema_manager
             .query_manager_mut()

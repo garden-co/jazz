@@ -141,7 +141,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         .iter()
         .map(|(table_name, table_schema)| {
             let mut structural = table_schema.clone();
-            structural.policies = TablePolicies::default();
+            structural.policies = Default::default();
             (*table_name, structural)
         })
         .collect();
@@ -526,16 +526,14 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 
     // Permissive local schema (no insert policy) that should NOT be used for server writes
     // on unrelated branches.
-    let mut permissive = Schema::new();
-    permissive.insert(
-        TableName::new("documents"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("owner_id", ColumnType::Text),
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("folder_id", ColumnType::Uuid).nullable(),
-        ])
-        .into(),
-    );
+    let permissive = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_column("folder_id", ColumnType::Uuid),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, permissive);
@@ -601,11 +599,9 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 #[test]
 fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy() {
     // Schema with no policies
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("notes"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]).into(),
-    );
+    let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
+    let notes_desc = notes_table.clone().build().columns;
+    let schema = SchemaBuilder::new().table(notes_table).build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -629,7 +625,6 @@ fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_wi
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
-    let notes_desc = RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
     let content = encode_row(&notes_desc, &[Value::Text("A note".into())]).unwrap();
 
     // Client sends insert
@@ -667,11 +662,9 @@ fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_wi
 
 #[test]
 fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("notes"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]).into(),
-    );
+    let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
+    let notes_desc = notes_table.clone().build().columns;
+    let schema = SchemaBuilder::new().table(notes_table).build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema.clone());
@@ -693,7 +686,6 @@ fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_po
     set_client_query_scope(&mut qm, &storage, client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
-    let notes_desc = RowDescriptor::new(vec![ColumnDescriptor::new("content", ColumnType::Text)]);
     let content = encode_row(&notes_desc, &[Value::Text("A note".into())]).unwrap();
     let commit = stored_row_commit(
         smallvec![],
@@ -836,17 +828,17 @@ fn rebac_two_clients_different_sessions() {
 
 #[test]
 fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
-    let mut schema = Schema::new();
-    let tasks_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
-    ]);
-    let tasks_policies =
-        TablePolicies::new().with_insert(PolicyExpr::eq_literal("deleted_at", Value::Null));
-    schema.insert(
-        TableName::new("tasks"),
-        TableSchema::with_policies(tasks_descriptor, tasks_policies),
-    );
+    let tasks_policies = permissions(|p| {
+        p.allow_insert().where_(pe::eq("deleted_at", pe::null()));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("deleted_at", ColumnType::Text)
+                .policies(tasks_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);

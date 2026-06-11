@@ -4,17 +4,17 @@ use super::*;
 fn rebac_select_policy_with_null_literal_filters_query_results() {
     use crate::query_manager::query::QueryBuilder;
 
-    let mut schema = Schema::new();
-    let documents_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
-    ]);
-    let documents_policies =
-        TablePolicies::new().with_select(PolicyExpr::eq_literal("deleted_at", Value::Null));
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(documents_descriptor, documents_policies),
-    );
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::eq("deleted_at", pe::null()));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("title", ColumnType::Text)
+                .nullable_column("deleted_at", ColumnType::Text)
+                .policies(documents_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -71,18 +71,17 @@ fn rebac_select_policy_with_null_literal_filters_query_results() {
 fn rebac_select_policy_with_is_null_filters_query_results() {
     use crate::query_manager::query::QueryBuilder;
 
-    let mut schema = Schema::new();
-    let documents_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
-    ]);
-    let documents_policies = TablePolicies::new().with_select(PolicyExpr::IsNull {
-        column: "deleted_at".into(),
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::is_null("deleted_at"));
     });
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(documents_descriptor, documents_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("title", ColumnType::Text)
+                .nullable_column("deleted_at", ColumnType::Text)
+                .policies(documents_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
