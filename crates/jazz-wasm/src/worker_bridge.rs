@@ -725,27 +725,24 @@ impl MessagePortBridgeInner {
         for entry in payloads {
             match entry {
                 SyncEntry::BareBytes(bytes) => {
-                    let arr = Uint8Array::from(bytes.as_ref());
                     let _ = self
                         .runtime
-                        .receive_sync_message_from_server(arr.into(), None);
+                        .receive_sync_message_from_server_bytes(&bytes, None);
                 }
                 SyncEntry::BareString(payload) => {
                     let _ = self
                         .runtime
-                        .receive_sync_message_from_server(JsValue::from_str(&payload), None);
+                        .receive_sync_message_from_server_json(&payload, None);
                 }
                 SyncEntry::SequencedBytes { payload, sequence } => {
-                    let arr = Uint8Array::from(payload.as_ref());
                     let _ = self
                         .runtime
-                        .receive_sync_message_from_server(arr.into(), Some(sequence as f64));
+                        .receive_sync_message_from_server_bytes(&payload, Some(sequence));
                 }
                 SyncEntry::SequencedString { payload, sequence } => {
-                    let _ = self.runtime.receive_sync_message_from_server(
-                        JsValue::from_str(&payload),
-                        Some(sequence as f64),
-                    );
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server_json(&payload, Some(sequence));
                 }
             }
         }
@@ -753,10 +750,9 @@ impl MessagePortBridgeInner {
 
     fn apply_peer_payloads(&self, payloads: Vec<serde_bytes::ByteBuf>) {
         for payload in payloads {
-            let arr = Uint8Array::from(payload.as_ref());
             let _ = self
                 .runtime
-                .receive_sync_message_from_server(arr.into(), None);
+                .receive_sync_message_from_server_bytes(&payload, None);
         }
     }
 

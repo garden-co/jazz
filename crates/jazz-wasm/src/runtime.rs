@@ -1037,6 +1037,18 @@ impl WasmRuntime {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_bytes(payload: &[u8]) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_bytes(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_json(payload: &str) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_json(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+    }
+
     /// Internal worker/bridge hook for server-originated sync payloads.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn receive_sync_message_from_server(
@@ -1044,10 +1056,41 @@ impl WasmRuntime {
         payload: JsValue,
         sequence: Option<f64>,
     ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        self.receive_sync_payload_from_server(payload, sequence)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_bytes(
+        &self,
+        payload: &[u8],
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_bytes(payload)?, sequence)
+    }
+
+    /// String-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_json(
+        &self,
+        payload: &str,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_json(payload)?, sequence)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_server(
+        &self,
+        mut payload: SyncPayload,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
         let _span =
             debug_span!("wasm::receiveSyncMessageFromServer", tier = self.tier_label).entered();
-        let mut payload = self.parse_sync_payload(payload)?;
-        let sequence = Self::parse_optional_sequence(sequence)?;
         if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
             (sequence.as_ref(), &mut payload)
         {
@@ -1082,6 +1125,27 @@ impl WasmRuntime {
         client_id: &str,
         payload: JsValue,
     ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        self.receive_sync_payload_from_client(client_id, payload)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_client`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_client_bytes(
+        &self,
+        client_id: &str,
+        payload: &[u8],
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_client(client_id, Self::parse_sync_payload_bytes(payload)?)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_client(
+        &self,
+        client_id: &str,
+        payload: SyncPayload,
+    ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::receiveSyncMessageFromClient",
             tier = self.tier_label,
@@ -1091,8 +1155,6 @@ impl WasmRuntime {
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
-
-        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
