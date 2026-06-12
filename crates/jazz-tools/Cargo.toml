@@ -76,6 +76,8 @@ small-map = "0.1"
 bitvec = "1.0"
 ahash = "0.8"
 sha2 = "0.10"
+chacha20poly1305 = "0.10"
+hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
 
 tokio = { version = "1", features = ["full"], optional = true }
 rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"], optional = true }

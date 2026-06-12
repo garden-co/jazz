@@ -95,6 +95,8 @@ export interface ColumnDescriptor {
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;
+  /** E2EE: sibling ref column that scopes this column's encryption. */
+  encrypted_with?: string;
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
@@ -150,6 +152,8 @@ export interface TableSchema {
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
   policies?: TablePolicies;
+  /** E2EE: rows of this table own a shared encryption key. */
+  encryption_space?: boolean;
 }
 
 export type Schema = Record<string, TableSchema>;

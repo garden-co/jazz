@@ -82,10 +82,12 @@ interface ColumnBuilder {
   default(value: unknown): this;
   merge(strategy: ColumnMergeStrategyName): this;
   transform(transform: ColumnTransform<unknown, unknown>): ColumnBuilder;
+  encrypted(spaceRef: string): this;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
+  _encryptedWith?: string;
 }
 
 type AllowedColumnMergeStrategy<
@@ -102,7 +104,7 @@ export type TypedColumnBuilder<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
-> = Omit<ColumnBuilder, "optional" | "default"> & {
+> = Omit<ColumnBuilder, "optional" | "default" | "encrypted"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
@@ -133,6 +135,11 @@ export type TypedColumnBuilder<
    * Make the column nullable
    */
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
 };
 
 export type AnyTypedColumnBuilder = TypedColumnBuilder<
@@ -338,6 +345,17 @@ class ScalarBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -345,6 +363,7 @@ class ScalarBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -387,6 +406,17 @@ class EnumBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -394,6 +424,7 @@ class EnumBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -438,6 +469,17 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -445,6 +487,7 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -488,6 +531,17 @@ class RefBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -495,6 +549,7 @@ class RefBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
       references: this._references,
     };
   }
@@ -539,6 +594,17 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -546,6 +612,7 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
       references: this._references,
     };
   }
