@@ -396,6 +396,7 @@ async fn seed_dataset(
                 ("display_name", Value::Text(format!("User {}", i))),
                 ("email", Value::Text(format!("user{}@bench.test", i))),
             ]),
+            None,
         )?;
         users.push(id);
     }
@@ -408,6 +409,7 @@ async fn seed_dataset(
                 ("name", Value::Text(format!("Org {}", i))),
                 ("created_at", Value::Timestamp(start_ts + i as u64)),
             ]),
+            None,
         )?;
         organizations.push(id);
     }
@@ -426,6 +428,7 @@ async fn seed_dataset(
                     Value::Text(if i % 9 == 0 { "admin" } else { "member" }.to_string()),
                 ),
             ]),
+            None,
         )?;
     }
 
@@ -440,6 +443,7 @@ async fn seed_dataset(
                 ("archived", Value::Boolean(false)),
                 ("updated_at", Value::Timestamp(start_ts + i as u64)),
             ]),
+            None,
         )?;
         projects.push(id);
     }
@@ -463,6 +467,7 @@ async fn seed_dataset(
                 ("updated_at", Value::Timestamp(start_ts + i as u64)),
                 ("due_at", Value::Timestamp(start_ts + (i as u64 * 7))),
             ]),
+            None,
         )?;
         tasks.push(TaskRecord { id, project_idx });
     }
@@ -479,6 +484,7 @@ async fn seed_dataset(
                 ("body", Value::Text(format!("Comment {} body", i))),
                 ("created_at", Value::Timestamp(start_ts + i as u64)),
             ]),
+            None,
         )?;
         comments_per_task[task_idx] += 1;
     }
@@ -493,6 +499,7 @@ async fn seed_dataset(
                     ("task_id", Value::Uuid(task.id)),
                     ("user_id", Value::Uuid(watcher)),
                 ]),
+                None,
             )?;
         }
     }
@@ -522,6 +529,7 @@ async fn seed_dataset(
                 ("created_at", Value::Timestamp(start_ts + i as u64)),
                 ("payload", Value::Text(format!("{{\"event\":{}}}", i))),
             ]),
+            None,
         )?;
     }
 
@@ -682,6 +690,7 @@ async fn run_w1_interactive(
                         ("assignee_id".to_string(), Value::Uuid(assignee)),
                         ("updated_at".to_string(), Value::Timestamp(now_micros())),
                     ],
+                    None,
                 )?;
             }
             "insert_comment" => {
@@ -695,6 +704,7 @@ async fn run_w1_interactive(
                         ("body", Value::Text(format!("interactive comment {}", i))),
                         ("created_at", Value::Timestamp(now_micros())),
                     ]),
+                    None,
                 )?;
                 seed.comments_per_task[task_idx] += 1;
             }
@@ -709,6 +719,7 @@ async fn run_w1_interactive(
                         ),
                         ("updated_at".to_string(), Value::Timestamp(now_micros())),
                     ],
+                    None,
                 )?;
             }
             unknown => {
@@ -784,6 +795,7 @@ async fn run_w3_offline_reconnect(
                 ),
                 ("created_at", Value::Timestamp(now_micros())),
             ]),
+            None,
         )?;
         seed.comments_per_task[target_task_idx] += 1;
     }
