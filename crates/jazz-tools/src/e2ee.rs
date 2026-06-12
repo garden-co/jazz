@@ -5,6 +5,8 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hpke::aead::ChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
@@ -13,6 +15,7 @@ use hpke::{single_shot_open, single_shot_seal};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha512};
+use uuid::Uuid;
 
 /// Domain string for deriving the E2EE encryption identity from the auth seed.
 /// Sibling of `jazz-auth-sign-v1` in `identity.rs`.
@@ -200,4 +203,113 @@ pub fn unseal_space_key(keypair: &E2eeKeypair, sealed: &[u8]) -> Result<SpaceKey
         .try_into()
         .map_err(|_| E2eeError::Unseal("unexpected plaintext length".to_string()))?;
     Ok(SpaceKey::from_bytes(bytes))
+}
+
+/// Algorithm id for XChaCha20-Poly1305 value encryption.
+pub const ENVELOPE_ALG_XCHACHA20POLY1305: u8 = 1;
+/// Envelope layout: [alg_id: 1][key_id: 16][nonce: 24][ciphertext+tag].
+pub const ENVELOPE_HEADER_LEN: usize = 1 + 16 + 24;
+
+const AAD_DOMAIN: &str = "jazz-e2ee-aad-v1";
+
+/// Identifies where a ciphertext lives; bound into the AAD so ciphertext cannot
+/// be grafted between rows or columns.
+#[derive(Debug, Clone, Copy)]
+pub struct EncryptionContext<'a> {
+    pub table: &'a str,
+    pub column: &'a str,
+    pub row_id: &'a [u8],
+}
+
+/// Length-prefixed field encoding: no two distinct (table, column, row_id, key_id)
+/// tuples can produce the same AAD bytes.
+fn build_aad(context: &EncryptionContext<'_>, key_id: &Uuid) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        AAD_DOMAIN.len()
+            + context.table.len()
+            + context.column.len()
+            + context.row_id.len()
+            + 16
+            + 5 * 8,
+    );
+    for field in [
+        AAD_DOMAIN.as_bytes(),
+        context.table.as_bytes(),
+        context.column.as_bytes(),
+        context.row_id,
+        key_id.as_bytes().as_slice(),
+    ] {
+        aad.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        aad.extend_from_slice(field);
+    }
+    aad
+}
+
+/// Encrypt a serialized column value under a space key. Output: envelope bytes.
+pub fn encrypt_value(
+    key: &SpaceKey,
+    key_id: &Uuid,
+    context: &EncryptionContext<'_>,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce);
+    let aad = build_aad(context, key_id);
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|e| E2eeError::Encrypt(e.to_string()))?;
+
+    let mut envelope = Vec::with_capacity(ENVELOPE_HEADER_LEN + ciphertext.len());
+    envelope.push(ENVELOPE_ALG_XCHACHA20POLY1305);
+    envelope.extend_from_slice(key_id.as_bytes());
+    envelope.extend_from_slice(&nonce);
+    envelope.extend_from_slice(&ciphertext);
+    Ok(envelope)
+}
+
+/// Read the key id from an envelope without decrypting (the runtime uses this to
+/// pick the right space key from its cache).
+pub fn envelope_key_id(envelope: &[u8]) -> Result<Uuid, E2eeError> {
+    if envelope.len() < ENVELOPE_HEADER_LEN {
+        return Err(E2eeError::MalformedEnvelope);
+    }
+    let alg = envelope[0];
+    if alg != ENVELOPE_ALG_XCHACHA20POLY1305 {
+        return Err(E2eeError::UnsupportedAlgorithm(alg));
+    }
+    let bytes: [u8; 16] = envelope[1..17].try_into().expect("slice length checked");
+    Ok(Uuid::from_bytes(bytes))
+}
+
+/// Decrypt an envelope under a space key. The key id inside the envelope is part
+/// of the AAD, so a swapped key id fails authentication.
+pub fn decrypt_value(
+    key: &SpaceKey,
+    context: &EncryptionContext<'_>,
+    envelope: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
+    if envelope.len() < ENVELOPE_HEADER_LEN {
+        return Err(E2eeError::MalformedEnvelope);
+    }
+    let key_id = envelope_key_id(envelope)?;
+    let nonce = &envelope[17..41];
+    let ciphertext = &envelope[41..];
+    let aad = build_aad(context, &key_id);
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|e| E2eeError::Decrypt(e.to_string()))
 }
