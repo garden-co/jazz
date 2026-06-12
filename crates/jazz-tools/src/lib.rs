@@ -2,6 +2,7 @@ pub mod batch_fate;
 pub mod catalogue;
 pub mod commit;
 pub mod digest;
+pub mod e2ee;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
