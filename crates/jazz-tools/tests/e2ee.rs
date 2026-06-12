@@ -1,6 +1,9 @@
 //! Black-box tests for the E2EE crypto core (public API only).
 
-use jazz_tools::e2ee::{E2eePublicKey, derive_e2ee_keypair};
+use jazz_tools::e2ee::{
+    E2eeError, E2eePublicKey, SEALED_KEY_LEN, SpaceKey, derive_e2ee_keypair, seal_space_key,
+    unseal_space_key,
+};
 use jazz_tools::identity::derive_verifying_key;
 
 #[test]
@@ -38,4 +41,63 @@ fn public_key_base64url_round_trips() {
 fn public_key_rejects_malformed_input() {
     assert!(E2eePublicKey::from_base64url("not base64!!!").is_err());
     assert!(E2eePublicKey::from_base64url("AAAA").is_err()); // wrong length
+}
+
+#[test]
+fn seal_unseal_round_trips() {
+    let recipient = derive_e2ee_keypair(&[1u8; 32]);
+    let space_key = SpaceKey::generate();
+    let sealed = seal_space_key(&recipient.public, &space_key).unwrap();
+    assert_eq!(sealed.len(), SEALED_KEY_LEN); // 81 bytes: alg(1) + encapped(32) + ct(48)
+    assert_eq!(sealed[0], 1); // alg_id 1 = HPKE X25519
+    let unsealed = unseal_space_key(&recipient, &sealed).unwrap();
+    assert_eq!(unsealed.as_bytes(), space_key.as_bytes());
+}
+
+#[test]
+fn unseal_with_wrong_recipient_fails() {
+    let recipient = derive_e2ee_keypair(&[1u8; 32]);
+    let attacker = derive_e2ee_keypair(&[2u8; 32]);
+    let sealed = seal_space_key(&recipient.public, &SpaceKey::generate()).unwrap();
+    assert!(matches!(
+        unseal_space_key(&attacker, &sealed),
+        Err(E2eeError::Unseal(_))
+    ));
+}
+
+#[test]
+fn unseal_rejects_tampered_blob() {
+    let recipient = derive_e2ee_keypair(&[1u8; 32]);
+    let mut sealed = seal_space_key(&recipient.public, &SpaceKey::generate()).unwrap();
+    let last = sealed.len() - 1;
+    sealed[last] ^= 0xff;
+    assert!(unseal_space_key(&recipient, &sealed).is_err());
+}
+
+#[test]
+fn unseal_rejects_malformed_blobs() {
+    let recipient = derive_e2ee_keypair(&[1u8; 32]);
+    assert_eq!(
+        unseal_space_key(&recipient, &[]),
+        Err(E2eeError::MalformedSealedKey)
+    );
+    assert_eq!(
+        unseal_space_key(&recipient, &[1u8; 10]),
+        Err(E2eeError::MalformedSealedKey)
+    );
+    // unknown algorithm id
+    let mut sealed = seal_space_key(&recipient.public, &SpaceKey::generate()).unwrap();
+    sealed[0] = 99;
+    assert_eq!(
+        unseal_space_key(&recipient, &sealed),
+        Err(E2eeError::UnsupportedAlgorithm(99))
+    );
+}
+
+#[test]
+fn space_keys_are_random() {
+    assert_ne!(
+        SpaceKey::generate().as_bytes(),
+        SpaceKey::generate().as_bytes()
+    );
 }
