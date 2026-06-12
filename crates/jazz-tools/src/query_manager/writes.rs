@@ -43,6 +43,7 @@ struct PreparedUpdateWrite {
     descriptor: Arc<RowDescriptor>,
     indexed_columns: Option<Arc<Vec<ColumnName>>>,
     row_layout: Arc<crate::row_format::CompiledRowLayout>,
+    row_locator: RowLocator,
 }
 
 struct PreparedUpdateCommit<'a> {
@@ -67,6 +68,7 @@ struct PreparedLocalRowHistoryWrite<'a> {
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
     row_locator: &'a RowLocator,
     descriptor: Arc<RowDescriptor>,
+    is_known_new_object: bool,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -477,7 +479,9 @@ impl QueryManager {
             index_mutations,
             row_locator,
             descriptor,
+            is_known_new_object,
         } = write;
+        self.persist_row_locator(storage, row_id, row_locator);
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
 
@@ -503,7 +507,7 @@ impl QueryManager {
                 table: table.to_string(),
                 branch: branch_name.as_str().to_string().into(),
                 context,
-                is_known_new_object: true,
+                is_known_new_object,
             },
         )
         .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
@@ -840,6 +844,7 @@ impl QueryManager {
             descriptor: table_write.descriptor.clone(),
             indexed_columns: table_write.indexed_columns.clone(),
             row_layout: table_write.row_layout.clone(),
+            row_locator: table_write.row_locator.clone(),
         })
     }
 
@@ -859,6 +864,7 @@ impl QueryManager {
         } = commit;
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
+        let is_known_new_object = parents.is_empty();
         let row = self.authored_row_batch(
             id,
             branch,
@@ -867,14 +873,20 @@ impl QueryManager {
             self.row_batch_authoring(provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            id,
-            row,
-            index_mutations,
-        )?;
+        let (batch_id, visibility_change) = self
+            .apply_local_row_history_write_with_prepared_context(
+                storage,
+                PreparedLocalRowHistoryWrite {
+                    table,
+                    branch_name: &branch_name,
+                    row_id: id,
+                    row,
+                    index_mutations,
+                    row_locator: &prepared.row_locator,
+                    descriptor: prepared.descriptor.clone(),
+                    is_known_new_object,
+                },
+            )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, batch_id),
@@ -948,8 +960,14 @@ impl QueryManager {
             &mut transform_context,
         )
         .map(|resolved| {
+            let resolved_table = resolve_current_table_name(
+                schema_context,
+                &table,
+                branch_schema_map.get(resolved.branch_name.as_str()),
+            )
+            .unwrap_or_else(|| table.clone());
             (
-                table,
+                resolved_table,
                 resolved.branch_name.as_str().to_string(),
                 resolved.content,
                 resolved.batch_id,
@@ -1177,6 +1195,7 @@ impl QueryManager {
                     index_mutations: &index_mutations,
                     row_locator: &table_write.row_locator,
                     descriptor: table_write.descriptor.clone(),
+                    is_known_new_object: true,
                 },
             )?;
         self.maybe_track_local_pending_batch_overlay(
@@ -2105,6 +2124,7 @@ impl QueryManager {
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
+        let is_known_new_object = parents.is_empty();
         let delete_row = self.authored_row_batch(
             id,
             branch,
@@ -2125,14 +2145,20 @@ impl QueryManager {
             )
         };
         let branch_name = BranchName::new(branch);
-        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            id,
-            delete_row,
-            &index_mutations,
-        )?;
+        let (delete_batch_id, visibility_change) = self
+            .apply_local_row_history_write_with_prepared_context(
+                storage,
+                PreparedLocalRowHistoryWrite {
+                    table,
+                    branch_name: &branch_name,
+                    row_id: id,
+                    row: delete_row,
+                    index_mutations: &index_mutations,
+                    row_locator: &table_write.row_locator,
+                    descriptor: table_write.descriptor.clone(),
+                    is_known_new_object,
+                },
+            )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, delete_batch_id),

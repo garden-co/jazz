@@ -1832,14 +1832,12 @@ async fn table_rename_update_and_delete_copy_on_write() {
         .await
         .expect("alice user reaches edge");
 
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(v2_schema)
-        .with_user_id("bob-table-rename-copy-on-write")
-        .as_admin()
-        .ready_on("people", Duration::from_secs(30))
-        .connect()
-        .await;
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, "bob-table-rename-copy-on-write"),
+    )
+    .await
+    .expect("connect bob");
+    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let batch_id = bob
         .update(
