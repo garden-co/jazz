@@ -309,7 +309,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         // inline-sized, upsert in place without descending. Splits still need
         // the parent path, so NeedSplit falls through to the recursive insert.
         if value.len() <= self.options.overflow_threshold
-            && let Some(page_id) = self.hinted_leaf_for_key_prefiltered(key)?
+            && let Some(page_id) = self.hinted_leaf_for_key(key, true)?
         {
             let new_value = ValueCell::Inline(value.to_vec());
             let upsert = {
@@ -1107,22 +1107,17 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    fn hinted_leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        self.hinted_leaf_for_key_inner(key, false)
-    }
-
-    fn hinted_leaf_for_key_prefiltered(
-        &mut self,
-        key: &[u8],
-    ) -> Result<Option<PageId>, BTreeError> {
-        self.hinted_leaf_for_key_inner(key, true)
-    }
-
     /// Checks the hint slots for a cached leaf whose current key span covers
     /// `key`. Safe across mutations because `raw_leaf_covers_key` re-validates
     /// the page's current bytes on every use; `remove_page` drops freed pages
     /// from the slots and WAL replay clears them all.
-    fn hinted_leaf_for_key_inner(
+    ///
+    /// `prefilter_mru` extends the cached-span prefilter to slot 0: latency
+    /// -sensitive callers (the put fast path, range starts) skip the page
+    /// lookup when even the most recent hint cannot cover `key`, while plain
+    /// point lookups give slot 0 the authoritative check directly because it
+    /// usually hits.
+    fn hinted_leaf_for_key(
         &mut self,
         key: &[u8],
         prefilter_mru: bool,
@@ -1150,7 +1145,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     /// Resolves the leaf for `key`, trying the hint slots before paying for a
     /// full root-to-leaf descent.
     fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        if let Some(page_id) = self.hinted_leaf_for_key(key)? {
+        if let Some(page_id) = self.hinted_leaf_for_key(key, false)? {
             return Ok(Some(page_id));
         }
         let leaf = self.find_leaf_page_id(key)?;
@@ -1166,7 +1161,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     /// cached successor, the successor is provably the right starting leaf and
     /// the descent can be skipped.
     fn leaf_for_range_start(&mut self, start: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        if let Some(page_id) = self.hinted_leaf_for_key_prefiltered(start)? {
+        if let Some(page_id) = self.hinted_leaf_for_key(start, true)? {
             return Ok(Some(page_id));
         }
         for idx in 0..LEAF_HINT_SLOTS {
