@@ -1,13 +1,13 @@
 use std::collections::HashMap;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use std::time::Duration;
 
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::query_manager::query::Query;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::query_manager::types::Value;
 use crate::query_manager::types::{Schema, SchemaHash};
 use crate::row_histories::{
@@ -17,16 +17,16 @@ use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
     MemoryStorage, Storage, StorageError, metadata_from_row_locator, row_locator_from_metadata,
 };
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::{DurabilityTier, JazzClient};
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn persist_test_schema<H: Storage + ?Sized>(storage: &mut H, schema: &Schema) -> SchemaHash {
@@ -136,7 +136,7 @@ pub fn load_test_row_tip_ids<H: Storage>(
 ///
 /// Per-attempt query timeouts and transient query errors are retried until the
 /// outer deadline is reached.
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 pub async fn wait_for_query<T, F>(
     client: &JazzClient,
     query: Query,

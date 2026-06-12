@@ -1,21 +1,21 @@
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use std::time::Duration;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::JazzClient;
 #[cfg(feature = "test-utils")]
 use crate::server::TestingServer;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::sync_manager::DurabilityTier;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::test_support::wait_for_query;
 
 use super::*;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 async fn wait_for_protected_row(
     client: &JazzClient,
     protected_id: ObjectId,
@@ -36,7 +36,7 @@ async fn wait_for_protected_row(
     .await;
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 async fn wait_for_protected_row_absent(
     client: &JazzClient,
     protected_id: ObjectId,
@@ -56,7 +56,7 @@ async fn wait_for_protected_row_absent(
     .await;
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &str) {
     wait_for_query(
         client,
@@ -237,7 +237,7 @@ async fn rebac_update_denied_by_using_exists_policy() {
     server.shutdown().await;
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
     let protected_policies = permissions(|p| {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::batch_fate::BatchFate;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
@@ -27,10 +27,10 @@ use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
@@ -259,7 +259,7 @@ fn rebac_test_schema() -> Schema {
         .build()
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn magic_introspection_schema() -> Schema {
     let is_admin = pe::eq("user_id", pe::session("user_id"));
     let protected_policies = permissions(|p| {
@@ -286,14 +286,14 @@ fn magic_introspection_schema() -> Schema {
         .build()
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn provenance_notes_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("notes").column("title", ColumnType::Text))
         .build()
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn authorship_permissions_schema() -> Schema {
     let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
     let notes_policies = permissions(|p| {
@@ -312,7 +312,7 @@ fn authorship_permissions_schema() -> Schema {
         .build()
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
     let crate::JazzError::Write(message) = err else {
         panic!("expected policy denial write error, got {err:?}");
@@ -324,7 +324,7 @@ fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Op
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let select_inherited = match max_depth {
         Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
@@ -574,7 +574,7 @@ fn enqueue_inherited_insert(
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let source_fk_column = if array_edge { "images" } else { "image" };
     let files_policies = permissions(|p| {
@@ -620,18 +620,18 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
         .build()
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 mod declared_fk_inheritance;
 mod exists_policies;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 mod exists_rel_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 mod magic_provenance;
 mod mutations;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 mod recursive_inheritance;
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 mod select_policies;

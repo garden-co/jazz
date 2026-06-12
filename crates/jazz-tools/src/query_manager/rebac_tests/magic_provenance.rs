@@ -1,9 +1,9 @@
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::JazzClient;
 
 use super::*;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 fn attributed_to(principal: &str) -> WriteContext {
     WriteContext {
         attribution: Some(principal.into()),
@@ -11,7 +11,7 @@ fn attributed_to(principal: &str) -> WriteContext {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 async fn next_subscription_delta(stream: &mut crate::SubscriptionStream) -> crate::OrderedRowDelta {
     tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
@@ -19,7 +19,7 @@ async fn next_subscription_delta(stream: &mut crate::SubscriptionStream) -> crat
         .expect("subscription stream should stay open")
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn magic_columns_reactively_track_update_and_delete_permissions() {
     let schema = magic_introspection_schema();
@@ -105,7 +105,7 @@ async fn magic_columns_reactively_track_update_and_delete_permissions() {
         .expect("magic $canDelete should match actual delete permission");
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn magic_columns_return_null_without_session_and_do_not_change_default_output_shape() {
     let schema = magic_introspection_schema();
@@ -152,7 +152,7 @@ async fn magic_columns_return_null_without_session_and_do_not_change_default_out
     assert_eq!(filtered_values, vec![Value::Text("initial".into())]);
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     let schema = provenance_notes_schema();
@@ -282,7 +282,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     let schema = provenance_notes_schema();
@@ -353,7 +353,7 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     assert_eq!(updated_updated_at, custom_updated_at);
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn created_by_permissions_allow_creators_and_hide_system_rows() {
     let schema = authorship_permissions_schema();
