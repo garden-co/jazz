@@ -14,8 +14,9 @@ use hpke::{Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable};
 use hpke::{single_shot_open, single_shot_seal};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha512};
 use uuid::Uuid;
+
+use crate::identity::derive_key_material;
 
 /// Domain string for deriving the E2EE encryption identity from the auth seed.
 /// Sibling of `jazz-auth-sign-v1` in `identity.rs`.
@@ -86,21 +87,12 @@ pub struct E2eeKeypair {
     pub public: E2eePublicKey,
 }
 
-impl E2eeKeypair {
-    fn secret(&self) -> &<Kem as KemTrait>::PrivateKey {
-        &self.secret
-    }
-}
-
 /// Derive the E2EE keypair from a 32-byte seed.
-/// Key material = SHA-512(domain || seed)[..32], mirroring `identity::derive_signing_key`,
-/// fed as IKM into the HPKE KEM's deterministic keypair derivation.
+/// Key material = `identity::derive_key_material` (same construction as the
+/// signing key, different domain), fed as IKM into the HPKE KEM's deterministic
+/// keypair derivation.
 pub fn derive_e2ee_keypair(seed: &[u8; 32]) -> E2eeKeypair {
-    let mut hasher = Sha512::new();
-    hasher.update(E2EE_SEAL_DOMAIN.as_bytes());
-    hasher.update(seed);
-    let hash = hasher.finalize();
-    let ikm: [u8; 32] = hash[..32].try_into().expect("SHA-512 output is 64 bytes");
+    let ikm = derive_key_material(seed, E2EE_SEAL_DOMAIN);
     let (secret, public) = Kem::derive_keypair(&ikm);
     let public_bytes: [u8; 32] = public
         .to_bytes()
@@ -171,31 +163,30 @@ pub fn seal_space_key(
     Ok(blob)
 }
 
-/// Unseal a space key with the recipient's keypair.
+/// Unseal a space key with the recipient's keypair. Dispatches on the leading
+/// algorithm id; each algorithm owns its payload layout.
 pub fn unseal_space_key(keypair: &E2eeKeypair, sealed: &[u8]) -> Result<SpaceKey, E2eeError> {
-    if sealed.is_empty() {
+    let (&alg, payload) = sealed.split_first().ok_or(E2eeError::MalformedSealedKey)?;
+    match alg {
+        SEALED_ALG_HPKE_X25519 => unseal_hpke_x25519(keypair, payload),
+        other => Err(E2eeError::UnsupportedAlgorithm(other)),
+    }
+}
+
+/// Payload layout for `SEALED_ALG_HPKE_X25519`: [encapped_key: 32][ciphertext: 48].
+fn unseal_hpke_x25519(keypair: &E2eeKeypair, payload: &[u8]) -> Result<SpaceKey, E2eeError> {
+    if payload.len() != SEALED_KEY_LEN - 1 {
         return Err(E2eeError::MalformedSealedKey);
     }
-    let alg = sealed[0];
-    if alg != SEALED_ALG_HPKE_X25519 {
-        // Length check only applies to known layouts; unknown alg wins when long
-        // enough to plausibly carry one, otherwise report malformed.
-        if sealed.len() == SEALED_KEY_LEN {
-            return Err(E2eeError::UnsupportedAlgorithm(alg));
-        }
-        return Err(E2eeError::MalformedSealedKey);
-    }
-    if sealed.len() != SEALED_KEY_LEN {
-        return Err(E2eeError::MalformedSealedKey);
-    }
-    let encapped = <Kem as KemTrait>::EncappedKey::from_bytes(&sealed[1..33])
+    let (encapped_bytes, ciphertext) = payload.split_at(32);
+    let encapped = <Kem as KemTrait>::EncappedKey::from_bytes(encapped_bytes)
         .map_err(|_| E2eeError::MalformedSealedKey)?;
     let plaintext = single_shot_open::<ChaCha20Poly1305, HkdfSha256, Kem>(
         &OpModeR::Base,
-        keypair.secret(),
+        &keypair.secret,
         &encapped,
         E2EE_SEAL_DOMAIN.as_bytes(),
-        &sealed[33..],
+        ciphertext,
         &[],
     )
     .map_err(|e| E2eeError::Unseal(e.to_string()))?;
@@ -274,9 +265,14 @@ pub fn encrypt_value(
     Ok(envelope)
 }
 
-/// Read the key id from an envelope without decrypting (the runtime uses this to
-/// pick the right space key from its cache).
-pub fn envelope_key_id(envelope: &[u8]) -> Result<Uuid, E2eeError> {
+/// Parsed view of an envelope; the single place that knows the header layout.
+struct EnvelopeParts<'a> {
+    key_id: Uuid,
+    nonce: &'a [u8],
+    ciphertext: &'a [u8],
+}
+
+fn parse_envelope(envelope: &[u8]) -> Result<EnvelopeParts<'_>, E2eeError> {
     if envelope.len() < ENVELOPE_HEADER_LEN {
         return Err(E2eeError::MalformedEnvelope);
     }
@@ -284,8 +280,18 @@ pub fn envelope_key_id(envelope: &[u8]) -> Result<Uuid, E2eeError> {
     if alg != ENVELOPE_ALG_XCHACHA20POLY1305 {
         return Err(E2eeError::UnsupportedAlgorithm(alg));
     }
-    let bytes: [u8; 16] = envelope[1..17].try_into().expect("slice length checked");
-    Ok(Uuid::from_bytes(bytes))
+    let key_id_bytes: [u8; 16] = envelope[1..17].try_into().expect("slice length checked");
+    Ok(EnvelopeParts {
+        key_id: Uuid::from_bytes(key_id_bytes),
+        nonce: &envelope[17..ENVELOPE_HEADER_LEN],
+        ciphertext: &envelope[ENVELOPE_HEADER_LEN..],
+    })
+}
+
+/// Read the key id from an envelope without decrypting (the runtime uses this to
+/// pick the right space key from its cache).
+pub fn envelope_key_id(envelope: &[u8]) -> Result<Uuid, E2eeError> {
+    Ok(parse_envelope(envelope)?.key_id)
 }
 
 /// Decrypt an envelope under a space key. The key id inside the envelope is part
@@ -295,12 +301,11 @@ pub fn decrypt_value(
     context: &EncryptionContext<'_>,
     envelope: &[u8],
 ) -> Result<Vec<u8>, E2eeError> {
-    if envelope.len() < ENVELOPE_HEADER_LEN {
-        return Err(E2eeError::MalformedEnvelope);
-    }
-    let key_id = envelope_key_id(envelope)?;
-    let nonce = &envelope[17..41];
-    let ciphertext = &envelope[41..];
+    let EnvelopeParts {
+        key_id,
+        nonce,
+        ciphertext,
+    } = parse_envelope(envelope)?;
     let aad = build_aad(context, &key_id);
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     cipher
