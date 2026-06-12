@@ -552,7 +552,7 @@ export class BrowserBrokerClient {
     this.resolveReconnectDone = null;
     this.reconnectDone = null;
     if (reconnectError) {
-      this.closeWithError(new Error(stringifyError(reconnectError)));
+      this.closeWithError(new Error(stringifyError(reconnectError), { cause: reconnectError }));
       return;
     }
     if (!this.closed) {
