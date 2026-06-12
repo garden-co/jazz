@@ -88,6 +88,7 @@ const pendingFollowerAttachments = new Set<string>();
 const pendingFollowerAttachmentTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const followerAttachmentRetryCounts = new Map<string, number>();
 const attachedFollowerPorts = new Set<string>();
+let warnedStaleInstanceDrop = false;
 let replacementElectionInFlight = false;
 let replacementElectionGeneration = 0;
 let brokerPingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -197,7 +198,17 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
 
 function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void {
   if (message.type === "hello") return;
-  if (message.brokerInstanceId !== brokerInstanceId) return;
+  if (message.brokerInstanceId !== brokerInstanceId) {
+    if (!warnedStaleInstanceDrop) {
+      warnedStaleInstanceDrop = true;
+      console.warn(
+        `[jazz-broker] dropping "${message.type}" from tab ${tabId}: stamped for broker ` +
+          `instance ${String(message.brokerInstanceId)}, current is ${brokerInstanceId}. ` +
+          "This usually means tabs are running different jazz-tools versions against one broker.",
+      );
+    }
+    return;
+  }
 
   switch (message.type) {
     case "visibility":
