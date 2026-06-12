@@ -1,4 +1,4 @@
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::JazzClient;
 #[cfg(feature = "test-utils")]
 use crate::server::TestingServer;
@@ -30,7 +30,7 @@ async fn wait_for_protected_rows(
     .await
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_update_denied_by_using_policy() {
     // Schema with both USING and WITH CHECK for updates
