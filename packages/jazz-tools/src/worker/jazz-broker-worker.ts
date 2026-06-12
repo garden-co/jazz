@@ -221,7 +221,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       updateVisibility(tabId, message.visibility);
       evictStaleTabs();
       return;
-    case "leader-ready":
+    case "leader-ready": {
       if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) {
         const tab = tabs.get(tabId);
         if (tab) {
@@ -231,6 +231,20 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
             leadershipId: message.leadershipId,
           });
         }
+        return;
+      }
+      const activeReset = resetState;
+      const leaderTab = tabs.get(tabId);
+      if (
+        activeReset?.promotedLeadershipId === message.leadershipId &&
+        !leaderTab?.schemaFingerprint
+      ) {
+        // Fresh namespace: no tab ever created a client, so the promoted
+        // leader has nothing to rebuild a worker bridge from. The wipe is
+        // already done before the tab reports ready, so step the placeholder
+        // leader down before reporting reset completion.
+        clearLeader(message.leadershipId, { demoteLeader: true, removeLeaderTab: false });
+        finishStorageReset(activeReset, true);
         return;
       }
       leader.ready = true;
@@ -246,6 +260,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       }
       assignFollowerPorts(leader);
       return;
+    }
     case "follower-port-attached":
       if (!leader || leader.tabId !== tabId || leader.leadershipId !== message.leadershipId) return;
       markFollowerPortAttached(message.followerTabId, message.leadershipId);
