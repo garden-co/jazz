@@ -116,7 +116,6 @@ opentelemetry_sdk = { version = "0.31", features = [
   "rt-tokio",
   "logs",
   "metrics",
-  "experimental_metrics_custom_reader",
 ], optional = true }
 opentelemetry-otlp = { version = "0.31", features = [
   "grpc-tonic",

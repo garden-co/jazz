@@ -283,24 +283,25 @@ mod tests {
         assert_eq!(active_websocket_count(&controller), 0);
     }
 
-    #[test]
-    fn active_websockets_gauge_registers_and_flushes() {
+    #[tokio::test]
+    async fn active_websockets_gauge_registers_and_flushes() {
         use crate::server::ShutdownController;
         use opentelemetry::metrics::MeterProvider as _;
-        use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
         use std::time::Duration;
 
         let controller = ShutdownController::new(Duration::from_secs(30));
         let _guard = controller.try_enter_websocket().expect("enter ws");
 
-        // ManualReader needs no background runtime; force_flush drives a collect,
-        // which invokes the observable callback — proving the wiring runs.
-        let provider = SdkMeterProvider::builder()
-            .with_reader(ManualReader::builder().build())
-            .build();
+        // Use the real stdout PeriodicReader provider (no experimental feature).
+        // force_flush drives a collect, which invokes the observable callback —
+        // proving the wiring runs end to end.
+        let provider = init_meter_provider_with_endpoint("test-service", None);
         let meter = provider.meter("test");
         let _gauge = register_active_websockets_gauge(&meter, controller.clone());
 
-        provider.force_flush().expect("flush collects the gauge without error");
+        provider
+            .force_flush()
+            .expect("flush collects the gauge without error");
+        provider.shutdown().expect("provider shuts down cleanly");
     }
 }
