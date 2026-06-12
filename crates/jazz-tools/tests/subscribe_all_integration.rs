@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::types::RowDescriptor;
+use jazz_tools::row_input;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query,
@@ -143,30 +144,22 @@ struct TodoSeed {
 
 impl TodoSeed {
     fn values(self) -> HashMap<String, Value> {
-        HashMap::from([
-            ("title".to_string(), Value::Text(self.title.to_string())),
-            ("done".to_string(), Value::Boolean(self.done)),
-            (
-                "priority".to_string(),
-                self.priority.map(Value::Integer).unwrap_or(Value::Null),
+        row_input!(
+            "title" => self.title,
+            "done" => self.done,
+            "priority" => self.priority.map(Value::Integer).unwrap_or(Value::Null),
+            "owner_id" => Value::Null,
+            "tags" => Value::Array(
+                self.tags
+                    .iter()
+                    .map(|tag| Value::Text((*tag).to_string()))
+                    .collect(),
             ),
-            ("owner_id".to_string(), Value::Null),
-            (
-                "tags".to_string(),
-                Value::Array(
-                    self.tags
-                        .iter()
-                        .map(|tag| Value::Text((*tag).to_string()))
-                        .collect(),
-                ),
-            ),
-            (
-                "payload".to_string(),
-                self.payload
-                    .map(|bytes| Value::Bytea(bytes.to_vec()))
-                    .unwrap_or(Value::Null),
-            ),
-        ])
+            "payload" => self
+                .payload
+                .map(|bytes| Value::Bytea(bytes.to_vec()))
+                .unwrap_or(Value::Null),
+        )
     }
 }
 
