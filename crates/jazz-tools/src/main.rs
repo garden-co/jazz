@@ -529,6 +529,9 @@ static OTEL_TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTr
 #[cfg(feature = "otel")]
 static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
     std::sync::OnceLock::new();
+#[cfg(feature = "otel")]
+static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
+    std::sync::OnceLock::new();
 
 fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -546,6 +549,10 @@ fn init_tracing() {
             let logger_provider = otel::init_logger_provider();
             let otel_log_layer = otel::log_bridge::<tracing_subscriber::Registry>(&logger_provider);
             let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
+
+            let meter_provider = otel::init_meter_provider();
+            opentelemetry::global::set_meter_provider(meter_provider.clone());
+            let _ = OTEL_METER_PROVIDER.set(meter_provider);
 
             tracing_subscriber::registry()
                 .with(make_env_filter())
@@ -574,6 +581,11 @@ fn shutdown_tracing() {
         if let Some(provider) = OTEL_LOGGER_PROVIDER.get() {
             if let Err(e) = provider.shutdown() {
                 eprintln!("OTel logger shutdown error: {e}");
+            }
+        }
+        if let Some(provider) = OTEL_METER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("OTel meter shutdown error: {e}");
             }
         }
     }
