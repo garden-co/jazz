@@ -1,0 +1,16 @@
+{
+  "name": "mini-sqlite-todo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "predev": "node scripts/build-wasm.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "node scripts/build-wasm.mjs",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "catalog:default"
+  }
+}
