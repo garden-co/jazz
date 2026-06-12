@@ -1,5 +1,58 @@
 # jazz-tools
 
+## 2.0.0-alpha.51
+
+### Minor Changes
+
+- 4a10478: Expose programmatic catalogue publication helpers from `jazz-tools/dev`.
+
+  `jazz-tools/dev` now exports `pushSchema`, `pushPermissions`, `pushMigration`, and `deploy` so tools can publish schema, permissions, migrations, and full deployments without going through the CLI. The existing `pushSchemaCatalogue` compatibility path remains available.
+
+### Patch Changes
+
+- 4831e63: Avoid cloning the entire per-object sent-batch set when syncing. The forwarding walk and the server and client queue paths cloned the whole `sent_batch_ids` set just to test membership of a single batch. Since that set grows with a row's history, forwarding a frequently-updated ("hot") row did work proportional to its accumulated history on every update. Membership is now checked by borrow, so forwarding is independent of how much history has already been sent.
+- 1670073: Fix a `batched_tick` deadlock that left React Native apps spinning at 100% CPU when a server-side query subscription was deferred waiting for its catalogue/schema.
+  - `jazz-tools`: `RuntimeCore::batched_tick` now drains parked sync messages before deciding whether to reschedule, so a `CatalogueEntryUpdated` that arrives while a subscription is parked actually unblocks it instead of sitting in the parked queue forever. Progressless ticks no longer re-arm the scheduler, breaking the reschedule hot loop.
+  - `jazz-rn`: `request_batched_tick` is now deferred off the JS thread (mirroring `schedule_mutation_error_delivery` and `NapiScheduler`) so the JS callback can't synchronously re-enter `batched_tick` and starve `setInterval` / rendering.
+
+- b11d29b: Reject an oversized LZ4 frame on the pre-authentication WebSocket handshake before decompressing it, closing an unauthenticated decompression-bomb that could exhaust server memory. The inbound WebSocket message-size limit is also pinned explicitly.
+- 7c8b790: Deduplicate Jazz clients per config so a single page runs one runtime per identity. Previously the Svelte and Vue bindings created an independent runtime for every `createJazzClient` call, so mounting several components for the same identity in one page produced coexisting runtimes in the shared WASM heap; abruptly tearing one down during active sync could corrupt the others' heap and surface as a `memory access out of bounds` trap. Client lifecycle now goes through a shared, refcounted, `Map`-keyed registry used by the React, Svelte, and Vue bindings (replacing the React binding's single-slot cache, which could not hold two distinct configs at once). Clients with the same config share one runtime; distinct identities (e.g. two principals on one screen) keep their own.
+- 6c97d33: Fix a permissions race where a permissions head arriving before its bundle would flip the client into Enforcing mode without an authorization schema, causing local writes against every table to fail with `policy denied` until the bundle arrived. The mode now only flips when the bundle is applied.
+- baa6494: Support `in` filters for id, enum, string, and reference columns, including empty `in` lists returning no rows.
+- 7568ce7: Export `RowRefValue` and `SessionRefValue` types so user-defined helpers inside `definePermissions(...)` callbacks can be typed against row and session references.
+- 76693c8: Export `resolveRequestSession` from `jazz-tools/backend` so RPC handlers can derive Jazz sessions from request bearer JWTs without manual decoding.
+- 7d5ab71: Fix a crash when syncing a row with a long edit history. Forwarding a row's parent batches to a server walked the history recursively, so a row with a deep history chain (a few hundred edits is enough on a browser worker's stack) could overflow the stack — surfacing as "memory access out of bounds" on the client and out-of-memory on the server. The walk is now iterative and visits each parent batch at most once.
+- 8421937: Fix update permission policies that compare `id` inside `EXISTS` checks.
+- 88168eb: Add `includeDeleted()` to TS query builders for reading soft-deleted rows.
+- 8cf401c: The inspector link logged on server startup no longer embeds the admin secret in the URL. If an admin secret is configured, a follow-up log line prompts you to enter it manually in the inspector.
+- aea994f: The server now logs a prominent warning when local-first auth is silently auto-enabled because `NODE_ENV` is not set to `"production"`. Deployments that forget to set `NODE_ENV=production` will see the warning rather than running wide open with no indication.
+- feea722: `withJazz` no longer adds `jazz-tools` to Next.js `serverExternalPackages`. Externalising it caused the SSR worker and the user's "use client" components to load separate React instances, so the SSR dispatcher was missing on jazz-tools' copy and `useSyncExternalStore` failed with `Cannot read properties of null` when prerendering pages like `/_not-found`. `jazz-napi` stays external (native binary); jazz-tools is now bundled.
+- 6f7a83f: Fix an owner `db.update` of a backend-created row hard-deleting the row instead of updating it on persistent-storage clients. A client write can no longer downgrade a batch the server has already accepted, so the row survives and the update applies.
+- daec2e2: `getSession()` (Svelte) and `useSession()` (Vue) now return reactive handles that track auth changes without destroying the provider.
+  - **Svelte**: `getSession()` returns `{ current: Session | null }` — read `.current` in templates, `$derived`, or `$effect` and it updates automatically on login/logout.
+  - **Vue**: `useSession()` returns `ComputedRef<Session | null>` — bind `.value` in templates or computed properties and it stays in sync via `triggerRef`.
+
+- 56f7539: Bound the reconnect-storm amplification on the server's WebSocket path: enforce a per-`client_id` connection cap (4) with evict-oldest semantics so a single client_id cannot pin unbounded fan-out memory, and time out pre-handshake sockets after 10s so an unauthenticated peer cannot park resources without sending the `AuthHandshake` frame. Evicted clients receive a `RateLimited` error frame followed by a policy close.
+- d0b2440: Rename the public Db callback scope types from `DbTransactionScope` / `DbBatchScope` to `TransactionScope` / `BatchScope`.
+- 5c76bfc: Add soft-deleted row restoration with `db.restore(...)`.
+- 7ab5830: jazz-tools server now has built-in support for OTEL
+- 791e5e2: Stop the inert "memory access out of bounds" WASM trap from surfacing as an uncaught error when a page is reloaded or closed while two or more Jazz clients share the tab. Each client's WebSocket transport is abandoned mid-navigation and the dying page's WASM heap traps; the runtime now swallows that one specific trap inside the `pagehide` teardown window (on both the main thread and the worker), so it no longer reaches the console or the app's error handlers. A genuine out-of-bounds error during normal operation still surfaces.
+- 5c76bfc: `db.update(...)` now fails when trying to update deleted rows, similarly to insert and delete.
+- 03a71b2: Fix a cluster of `useAll` / `QuerySubscription` correctness and parity bugs across the React, Svelte and Vue bindings and the shared subscriptions orchestrator.
+  - **Orchestrator:** New render-safe `computeKey()` / `peekState()` reads back the React rewrite. Subscription-setup failures no longer surface as unhandled promise rejections for callback-only consumers. On a session change, a settled entry is reset to `pending` and its listeners are told to clear, so a previous session's rows are dropped on logout/login rather than served until the new subscription's first delta.
+  - **React:** `useAll` is rewritten on `useSyncExternalStore` with a `getServerSnapshot` path. Reads are render-safe (no subscription opened during render), an inline `app.todos.where(...)` no longer does render-phase work, SSR reads a seeded snapshot synchronously without a layout-effect warning, and a pending suspense query now suspends on its real entry promise (opened during render) instead of one a suspended effect could never resolve, while a not-yet-supplied query still suspends so the boundary shows its fallback. The JWT refresh is now deduped at the client level, so a second provider or a remount cannot double-fire it, and the refresh latch times out so a hung `onJWTExpired` can no longer wedge auth and silently drop every later expiry.
+  - **Svelte:** `QuerySubscription` returns its unsubscribe directly from the effect (no shared mutable field to drop), drops `onDestroy` so it works inside `$effect.root` / `.svelte.ts`, always starts `current` as `undefined`.
+  - **Vue (BREAKING):** `useAll` now returns `{ data, error, loading }` refs instead of a bare `Ref<T[] | undefined>`, so a failed query is distinguishable from loading or empty. Adds a Suspense-compatible `useAllSuspense`. Migrate `const todos = useAll(...)` to `const { data: todos } = useAll(...)`.
+  - **Docs:** the `subscribeAll` JSDoc example uses `change.item` and the now-exported `RowChangeKind.Added` (the old `change.row` / `change.kind === 0` yielded `undefined`), and `SubscriptionDelta.all`'s freshly-allocated-per-delta contract is documented with a pointer to `applyDelta` / `reconcileArray`.
+
+- Updated dependencies [1670073]
+- Updated dependencies [6f7a83f]
+- Updated dependencies [5c76bfc]
+- Updated dependencies [791e5e2]
+- Updated dependencies [5c76bfc]
+  - jazz-rn@2.0.0-alpha.51
+  - jazz-wasm@2.0.0-alpha.51
+
 ## 2.0.0-alpha.50
 
 ### Patch Changes
