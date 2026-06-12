@@ -876,6 +876,30 @@ describe("Worker Bridge with OPFS", () => {
     expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
   });
 
+  it("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
+    const dbName = uniqueDbName("delete-storage-fresh-two-tabs");
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+
+    // Neither tab has used the schema; both join the reset as participants.
+    await dbB.deleteClientStorage();
+
+    // First schema use after the wipe elects a real leader; the other fresh
+    // tab must then get bridged as a follower and observe the write.
+    await dbA
+      .insert(todos, { title: "row after two-tab fresh wipe", done: false })
+      .wait({ tier: "local" });
+    await waitForCondition(
+      async () => (await dbB.all(allTodos, { tier: "local" })).length === 1,
+      8000,
+      "Second fresh tab should observe the row written after the wipe",
+    );
+  });
+
   it("retries OPFS storage deletion after a transient browser lock", async () => {
     const dbName = uniqueDbName("delete-storage-transient-lock");
     const db = track(
