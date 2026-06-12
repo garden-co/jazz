@@ -276,9 +276,18 @@ export class BrowserBrokerClient {
         reject(new Error("Timed out waiting for browser broker hello"));
       }, 5_000);
 
+      const onWorkerError = (event: Event) => {
+        cleanup();
+        const detail =
+          (event as ErrorEvent).message ||
+          "worker error event (possible script URL or version mismatch)";
+        reject(new Error(`Browser broker SharedWorker failed to start: ${detail}`));
+      };
+
       const cleanup = () => {
         clearTimeout(timeout);
         port.removeEventListener("message", onHello);
+        workerEvents?.removeEventListener("error", onWorkerError);
       };
 
       const onHello = (event: MessageEvent) => {
@@ -294,6 +303,13 @@ export class BrowserBrokerClient {
         }
       };
 
+      // Fakes in unit tests (and exotic SharedWorker shims) may not be
+      // EventTargets, so the listener is best-effort.
+      const workerEvents =
+        typeof (worker as Partial<EventTarget>).addEventListener === "function"
+          ? (worker as unknown as EventTarget)
+          : null;
+      workerEvents?.addEventListener("error", onWorkerError);
       port.addEventListener("message", onHello);
     });
 

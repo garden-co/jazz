@@ -357,6 +357,37 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("rejects connect when the SharedWorker fires an error event", async () => {
+    const env = createFakeWorkerEnv({ respondToHello: false });
+
+    const connecting = BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+    // Swallow the rejection until the explicit await below so vitest does not
+    // flag an unhandled rejection in the interim.
+    connecting.catch(() => {});
+
+    await waitFor(() => env.workers.length === 1, 100, "worker should be created");
+    const errorEvent = new Event("error");
+    Object.defineProperty(errorEvent, "message", { value: "script URL mismatch" });
+    env.workers[0]!.dispatchEvent(errorEvent);
+
+    await expect(connecting).rejects.toThrow(
+      "Browser broker SharedWorker failed to start: script URL mismatch",
+    );
+  }, 10_000);
+
   it("cleans up the port and handlers when broker hello times out", async () => {
     vi.useFakeTimers();
     const workers: FakeSharedWorker[] = [];
