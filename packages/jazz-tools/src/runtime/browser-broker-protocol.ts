@@ -39,6 +39,10 @@ export type BrowserBrokerRole = "leader" | "follower";
  *   multiple times across failovers.
  */
 
+export interface BrokerInstanceMessage {
+  brokerInstanceId: string;
+}
+
 export interface BrowserBrokerCandidate {
   tabId: string;
   visibility: BrowserBrokerVisibility;
@@ -70,60 +74,59 @@ export interface BrowserBrokerHelloMessage {
   brokerPongTimeoutMs?: number;
 }
 
-export interface BrowserBrokerVisibilityMessage {
+export interface BrowserBrokerVisibilityMessage extends BrokerInstanceMessage {
   type: "visibility";
   visibility: BrowserBrokerVisibility;
 }
 
-export interface BrowserBrokerLeaderReadyMessage {
+export interface BrowserBrokerLeaderReadyMessage extends BrokerInstanceMessage {
   type: "leader-ready";
   leadershipId: number;
   tabLockName: string;
   workerLockName: string;
 }
 
-export interface BrowserBrokerLeaderFailedMessage {
+export interface BrowserBrokerLeaderFailedMessage extends BrokerInstanceMessage {
   type: "leader-failed";
   leadershipId: number;
   reason: string;
 }
 
-export interface BrowserBrokerFollowerPortAttachedMessage {
+export interface BrowserBrokerFollowerPortAttachedMessage extends BrokerInstanceMessage {
   type: "follower-port-attached";
   leadershipId: number;
   followerTabId: string;
 }
 
-export interface BrowserBrokerFollowerPortClosedMessage {
+export interface BrowserBrokerFollowerPortClosedMessage extends BrokerInstanceMessage {
   type: "follower-port-closed";
   leadershipId: number;
   followerTabId: string;
 }
 
-export interface BrowserBrokerSchemaReadyMessage {
+export interface BrowserBrokerSchemaReadyMessage extends BrokerInstanceMessage {
   type: "schema-ready";
   schemaFingerprint: string;
 }
 
-export interface BrowserBrokerStorageResetRequestMessage {
+export interface BrowserBrokerStorageResetRequestMessage extends BrokerInstanceMessage {
   type: "storage-reset-request";
   requestId: string;
 }
 
-export interface BrowserBrokerStorageResetReadyMessage {
+export interface BrowserBrokerStorageResetReadyMessage extends BrokerInstanceMessage {
   type: "storage-reset-ready";
   requestId: string;
   success: boolean;
   errorMessage?: string;
 }
 
-export interface BrowserBrokerShutdownMessage {
+export interface BrowserBrokerShutdownMessage extends BrokerInstanceMessage {
   type: "shutdown";
 }
 
-export interface BrowserBrokerPongMessage {
+export interface BrowserBrokerPongMessage extends BrokerInstanceMessage {
   type: "broker-pong";
-  brokerInstanceId: string;
 }
 
 export type BrowserBrokerTabMessage =
@@ -139,9 +142,11 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerShutdownMessage
   | BrowserBrokerPongMessage;
 
-export interface BrokerInstanceMessage {
-  brokerInstanceId: string;
-}
+type WithoutBrokerInstance<T> = T extends BrokerInstanceMessage ? Omit<T, "brokerInstanceId"> : T;
+
+export type BrowserBrokerTabMessageInput =
+  | BrowserBrokerHelloMessage
+  | WithoutBrokerInstance<Exclude<BrowserBrokerTabMessage, BrowserBrokerHelloMessage>>;
 
 export interface BrowserBrokerHelloResponse extends BrokerInstanceMessage {
   type: "broker-hello";
@@ -336,6 +341,7 @@ export function createRuntimeSourceIdentity(runtimeSources?: RuntimeSourcesConfi
   return stableStringify({
     baseUrl: runtimeSources.baseUrl ?? null,
     workerUrl: runtimeSources.workerUrl ?? null,
+    brokerWorkerUrl: runtimeSources.brokerWorkerUrl ?? null,
     wasmUrl: runtimeSources.wasmUrl ?? null,
     wasmModule: runtimeSources.wasmModule
       ? getObjectRuntimeSourceIdentity("wasm-module", runtimeSources.wasmModule)

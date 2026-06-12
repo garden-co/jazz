@@ -196,6 +196,9 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
 }
 
 function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void {
+  if (message.type === "hello") return;
+  if (message.brokerInstanceId !== brokerInstanceId) return;
+
   switch (message.type) {
     case "visibility":
       updateVisibility(tabId, message.visibility);
@@ -250,7 +253,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       }
       if (leader?.tabId === tabId && leader.leadershipId === message.leadershipId) {
         markLeaderCandidateFailed(tabId);
-        const cleared = clearLeader(message.leadershipId, "leader-failed", {
+        const cleared = clearLeader(message.leadershipId, {
           demoteLeader: true,
           removeLeaderTab: false,
         });
@@ -268,7 +271,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
         const leadershipId = leader.leadershipId;
         const activeReset = resetState;
         removeTab(tabId, { closePort: false, notifyLeader: false });
-        const cleared = clearLeader(leadershipId, "leader-shutdown", {
+        const cleared = clearLeader(leadershipId, {
           demoteLeader: false,
           removeLeaderTab: false,
         });
@@ -291,13 +294,11 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       resetIfIdle();
       return;
     case "broker-pong":
-      if (message.brokerInstanceId !== brokerInstanceId) return;
       {
         const tab = tabs.get(tabId);
         if (!tab) return;
         tab.lastPongAt = Date.now();
       }
-      evictStaleTabs();
       return;
   }
 }
@@ -332,7 +333,7 @@ function electIfNeeded(): void {
     if (candidate.tabId === leader.tabId) {
       return;
     }
-    clearLeader(leader.leadershipId, "leader-not-ready-for-schema", {
+    clearLeader(leader.leadershipId, {
       demoteLeader: true,
       removeLeaderTab: false,
     });
@@ -479,7 +480,7 @@ function blockTabForSchemaMismatch(tab: TabState): void {
   });
 
   if (leader?.tabId === tab.tabId) {
-    const cleared = clearLeader(leader.leadershipId, "schema mismatch", {
+    const cleared = clearLeader(leader.leadershipId, {
       demoteLeader: true,
       removeLeaderTab: false,
     });
@@ -531,31 +532,30 @@ function startLeaderLockMonitors(nextLeader: LeaderState): void {
 
   nextLeader.tabLockMonitor = monitorWebLockRelease(nextLeader.tabLockName, {
     onGranted: () => {
-      handleLeaderLockReleased(nextLeader.leadershipId, "tab-lock-released");
+      handleLeaderLockReleased(nextLeader.leadershipId);
     },
-    onError: (error) => {
-      handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
+    onError: () => {
+      handleLeaderLockReleased(nextLeader.leadershipId);
     },
   });
   nextLeader.workerLockMonitor = monitorWebLockRelease(nextLeader.workerLockName, {
     onGranted: () => {
-      handleLeaderLockReleased(nextLeader.leadershipId, "worker-lock-released");
+      handleLeaderLockReleased(nextLeader.leadershipId);
     },
-    onError: (error) => {
-      handleLeaderLockReleased(nextLeader.leadershipId, stringifyError(error));
+    onError: () => {
+      handleLeaderLockReleased(nextLeader.leadershipId);
     },
   });
 }
 
-function handleLeaderLockReleased(leadershipId: number, reason: string): void {
+function handleLeaderLockReleased(leadershipId: number): void {
   if (!leader || leader.leadershipId !== leadershipId) return;
-  const cleared = clearLeader(leadershipId, reason, { demoteLeader: true, removeLeaderTab: true });
+  const cleared = clearLeader(leadershipId, { demoteLeader: true, removeLeaderTab: true });
   scheduleReplacementElection(cleared);
 }
 
 function clearLeader(
   leadershipId: number,
-  reason: string,
   options: { demoteLeader: boolean; removeLeaderTab: boolean },
 ): ClearedLeaderState | null {
   const current = leader;
@@ -585,7 +585,6 @@ function clearLeader(
     removeTab(current.tabId, { closePort: false, notifyLeader: false });
   }
   leader = null;
-  void reason;
   return {
     tabId: current.tabId,
     leadershipId: current.leadershipId,
@@ -616,7 +615,7 @@ function startStorageReset(requestingTabId: string, requestId: string): void {
   }
 
   const previousLeader = leader
-    ? clearLeader(leader.leadershipId, "storage-reset", {
+    ? clearLeader(leader.leadershipId, {
         demoteLeader: false,
         removeLeaderTab: false,
       })
@@ -920,7 +919,7 @@ function evictTab(tabId: string, reason: string): void {
   if (leader?.tabId === tabId) {
     const leadershipId = leader.leadershipId;
     const activeReset = resetState;
-    const cleared = clearLeader(leadershipId, reason, {
+    const cleared = clearLeader(leadershipId, {
       demoteLeader: false,
       removeLeaderTab: false,
     });

@@ -9,8 +9,11 @@ import {
   type BrowserBrokerControlMessage,
   type BrowserBrokerRole,
   type BrowserBrokerTabMessage,
+  type BrowserBrokerTabMessageInput,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
+import type { RuntimeSourcesConfig } from "./context.js";
+import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
 
 const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
 
@@ -37,6 +40,7 @@ export interface BrowserBrokerClientOptions {
   forceTakeoverTimeoutMs?: number;
   brokerPingIntervalMs?: number;
   brokerPongTimeoutMs?: number;
+  runtimeSources?: RuntimeSourcesConfig;
   globalLike?: BrowserBrokerCapabilityGlobal;
   respondToBrokerPings?: boolean | (() => boolean);
   onBrokerPing?: () => void;
@@ -95,6 +99,7 @@ export class BrowserBrokerClient {
   private role: BrowserBrokerRole = "follower";
   private leaderTabId: string | null = null;
   private leadershipId = 0;
+  private visibility: BrowserBrokerVisibility;
   private closed = false;
   private closedError: Error | null = null;
   private reconnecting = false;
@@ -106,6 +111,7 @@ export class BrowserBrokerClient {
 
   private constructor(options: BrowserBrokerClientOptions) {
     this.options = options;
+    this.visibility = options.visibility;
   }
 
   static async connect(options: BrowserBrokerClientOptions): Promise<BrowserBrokerClient> {
@@ -170,6 +176,7 @@ export class BrowserBrokerClient {
   }
 
   reportVisibility(visibility: BrowserBrokerVisibility): void {
+    this.visibility = visibility;
     this.send({ type: "visibility", visibility });
   }
 
@@ -233,11 +240,14 @@ export class BrowserBrokerClient {
 
   async shutdown(): Promise<void> {
     if (this.closed) return;
+    const shutdownMessage = this.stampTabMessage({ type: "shutdown" });
     this.closed = true;
     this.closedError = new Error("Browser broker client closed");
     this.stopBrokerLivenessTimer();
     this.queuedMessages.length = 0;
-    this.port?.postMessage({ type: "shutdown" });
+    if (shutdownMessage) {
+      this.port?.postMessage(shutdownMessage);
+    }
     if (this.port) {
       this.detachBrokerPort(this.port);
     }
@@ -293,7 +303,7 @@ export class BrowserBrokerClient {
       appId: this.options.appId,
       dbName: this.options.dbName,
       fingerprint: this.options.fingerprint,
-      visibility: this.options.visibility,
+      visibility: this.visibility,
       forceTakeoverTimeoutMs: this.options.forceTakeoverTimeoutMs,
       brokerPingIntervalMs: this.options.brokerPingIntervalMs,
       brokerPongTimeoutMs: this.options.brokerPongTimeoutMs,
@@ -339,7 +349,15 @@ export class BrowserBrokerClient {
   private createSharedWorker(): SharedWorker {
     const globalLike = this.options.globalLike ?? (globalThis as BrowserBrokerCapabilityGlobal);
     const SharedWorkerCtor = globalLike.SharedWorker as SharedWorkerConstructor;
-    return new SharedWorkerCtor(new URL("../worker/jazz-broker-worker.js", import.meta.url), {
+    const workerUrl =
+      this.options.runtimeSources?.brokerWorkerUrl || this.options.runtimeSources?.baseUrl
+        ? resolveRuntimeConfigBrokerWorkerUrl(
+            import.meta.url,
+            typeof location !== "undefined" ? location.href : undefined,
+            this.options.runtimeSources,
+          )
+        : new URL("../worker/jazz-broker-worker.js", import.meta.url);
+    return new SharedWorkerCtor(workerUrl, {
       type: "module",
       name: `jazz-broker:${this.options.appId}:${this.options.dbName}`,
     });
@@ -484,6 +502,7 @@ export class BrowserBrokerClient {
       }
     }
 
+    let reconnectError: unknown;
     try {
       if (previousLeadershipId > 0) {
         await this.options.onDemote?.(previousLeadershipId);
@@ -494,15 +513,20 @@ export class BrowserBrokerClient {
 
       if (!this.closed) {
         await this.connectToBroker();
-        this.reconnecting = false;
-        this.flushQueuedMessages();
-        this.options.onReconnected?.(this);
-        this.flushQueuedMessages();
       }
-    } catch (reconnectError) {
-      this.closeWithError(toError(reconnectError));
-    } finally {
-      this.reconnecting = false;
+    } catch (error) {
+      reconnectError = error;
+    }
+
+    this.reconnecting = false;
+    if (reconnectError) {
+      this.closeWithError(new Error(stringifyError(reconnectError)));
+      return;
+    }
+    if (!this.closed) {
+      this.send({ type: "visibility", visibility: this.visibility });
+      this.options.onReconnected?.(this);
+      this.flushQueuedMessages();
     }
   }
 
@@ -646,17 +670,26 @@ export class BrowserBrokerClient {
     );
   }
 
-  private send(message: BrowserBrokerTabMessage): void {
+  private send(message: BrowserBrokerTabMessageInput): void {
     if (this.closed) return;
-    if (!this.port || this.reconnecting) {
-      this.queuedMessages.push(message);
+    const stampedMessage = this.stampTabMessage(message);
+    if (!stampedMessage) return;
+    if (this.reconnecting) return;
+    if (!this.port) {
+      this.queuedMessages.push(stampedMessage);
       return;
     }
-    this.port.postMessage(message);
+    this.port.postMessage(stampedMessage);
+  }
+
+  private stampTabMessage(message: BrowserBrokerTabMessageInput): BrowserBrokerTabMessage | null {
+    if (message.type === "hello") return message;
+    if (!this.brokerInstanceId) return null;
+    return { ...message, brokerInstanceId: this.brokerInstanceId };
   }
 
   private flushQueuedMessages(): void {
-    if (this.closed || !this.port) return;
+    if (this.closed || this.reconnecting || !this.port) return;
     const messages = this.queuedMessages.splice(0);
     for (const message of messages) {
       this.port.postMessage(message);
@@ -684,8 +717,4 @@ export class BrowserBrokerClient {
     this.rejectResetWaiters(error);
     this.options.onClosed?.(error);
   }
-}
-
-function toError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }
