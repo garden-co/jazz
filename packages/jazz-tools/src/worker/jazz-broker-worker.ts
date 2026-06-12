@@ -181,6 +181,12 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     addTabToActiveReset(message.tabId);
     return message.tabId;
   }
+  if (leader && leader.tabId === message.tabId) {
+    clearLeader(leader.leadershipId, {
+      demoteLeader: false,
+      removeLeaderTab: false,
+    });
+  }
   if (leader?.ready) {
     post(port, {
       type: "leader-ready",

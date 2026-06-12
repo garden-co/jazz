@@ -1064,6 +1064,79 @@ describe("SharedWorker browser broker", () => {
     );
   });
 
+  it("re-promotes a same-tab leader that reconnects to a live broker", async () => {
+    const dbName = uniqueName("broker-leader-rehello");
+    const rehelloPromotions: number[] = [];
+
+    const firstLeader = await BrowserBrokerClient.connect(createLockingOptions(dbName, "tab-a"));
+    clients.push(firstLeader);
+    await firstLeader.waitForRole("leader", 2000);
+    firstLeader.reportSchemaReady("schema-a");
+    expect(firstLeader.snapshot().leadershipId).toBe(1);
+
+    const secondLeader = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async (client, leadershipId) => {
+        rehelloPromotions.push(leadershipId);
+        client.reportLeaderReady({
+          leadershipId,
+          ...leaderLockNames(dbName),
+        });
+      },
+    });
+    clients.push(secondLeader);
+    secondLeader.reportSchemaReady("schema-a");
+
+    await waitFor(
+      () => rehelloPromotions.some((leadershipId) => leadershipId > 1),
+      2000,
+      "same-tab leader reconnect should receive a fresh promotion",
+    );
+    await secondLeader.waitForRole("leader", 2000);
+    expect(secondLeader.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-a",
+      leaderTabId: "tab-a",
+      leadershipId: rehelloPromotions.at(-1),
+    });
+  });
+
+  it("re-promotes a same-tab non-ready leader that reconnects to a live broker", async () => {
+    const dbName = uniqueName("broker-non-ready-leader-rehello");
+    const initialPromotions: number[] = [];
+    const rehelloPromotions: number[] = [];
+
+    const firstCandidate = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async (_client, leadershipId) => {
+        initialPromotions.push(leadershipId);
+      },
+    });
+    clients.push(firstCandidate);
+
+    await waitFor(
+      () => initialPromotions.includes(1),
+      2000,
+      "first same-tab candidate should receive the initial promotion",
+    );
+
+    const secondCandidate = await BrowserBrokerClient.connect({
+      ...createOptions(dbName, "tab-a"),
+      onBecomeLeader: async (_client, leadershipId) => {
+        rehelloPromotions.push(leadershipId);
+      },
+    });
+    clients.push(secondCandidate);
+    secondCandidate.reportSchemaReady("schema-a");
+
+    await waitFor(
+      () => rehelloPromotions.some((leadershipId) => leadershipId > 1),
+      2000,
+      "same-tab non-ready leader reconnect should receive a fresh promotion",
+    );
+    expect(secondCandidate.snapshot().leadershipId).toBe(rehelloPromotions.at(-1));
+  });
+
   it("reattaches a follower when the leader reports the data port closed", async () => {
     const dbName = uniqueName("broker-follower-port-closed");
     const attachedFollowers: string[] = [];
