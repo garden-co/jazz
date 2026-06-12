@@ -754,7 +754,12 @@ describe("SharedWorker browser broker", () => {
       "broker should ask both tabs to prepare storage reset",
     );
 
-    (first as unknown as { port?: MessagePort | null }).port?.postMessage({ type: "shutdown" });
+    const brokerInstanceId = first.snapshot().brokerInstanceId;
+    if (!brokerInstanceId) throw new Error("Expected first tab to be attached to a broker");
+    (first as unknown as { port?: MessagePort | null }).port?.postMessage({
+      type: "shutdown",
+      brokerInstanceId,
+    });
     releaseDepartedTab();
 
     await new Promise((resolve) => setTimeout(resolve, 150));

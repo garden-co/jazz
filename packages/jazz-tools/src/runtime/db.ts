@@ -1067,6 +1067,7 @@ export class Db {
         tabId: db.tabId,
         fingerprint: Db.createBrokerFingerprint(config, db.primaryDbName),
         visibility: db.currentBrokerVisibility(),
+        runtimeSources: config.runtimeSources,
         onBecomeLeader: (client, leadershipId, resetRequestId) => {
           db.brokerClient = client;
           const promotion = db.promoteViaBroker(leadershipId, resetRequestId);
@@ -1996,9 +1997,7 @@ export class Db {
         }
         if (!isBrokerStorageLockedError(error)) {
           throw new Error(
-            `Failed to delete browser storage for "${namespace}": ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `Failed to delete browser storage for "${namespace}": ${stringifyError(error)}`,
           );
         }
         if (attempt === BROKER_STORAGE_DELETE_MAX_RETRIES) {
