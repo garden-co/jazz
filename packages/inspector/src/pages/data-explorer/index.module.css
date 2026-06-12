@@ -26,6 +26,7 @@
   flex: 0 0 1px;
   cursor: col-resize;
   background: transparent;
+  outline: none;
 }
 
 .resizeHandle::after {
@@ -40,6 +41,7 @@
 }
 
 .resizeHandle:hover::after,
+.resizeHandle:focus-visible::after,
 .resizeHandle[data-resize-handle-state="drag"]::after {
   background: #345273;
 }
