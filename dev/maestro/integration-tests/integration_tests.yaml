@@ -1,0 +1,14 @@
+appId: dev.jazz.integrationtests
+---
+- launchApp
+
+# The app auto-runs the suite on launch. `suite-passed` renders only when every
+# test passed; a red test or a freeze means it never appears and this wait times
+# out, failing the flow. The failure screenshot shows which test died.
+- extendedWaitUntil:
+    visible:
+      id: "suite-passed"
+    timeout: 120000
+
+- assertNotVisible:
+    id: "suite-failed"

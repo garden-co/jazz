@@ -50,7 +50,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
 }
 
 describe("JazzRnRuntimeAdapter", () => {
-  it("defers batched tick execution to avoid re-entrancy", async () => {
+  it("schedules batched tick on a macrotask so timers and rendering can run", async () => {
     const binding = createBinding();
     new JazzRnRuntimeAdapter(binding, {});
 
@@ -61,7 +61,32 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.batchedTick).not.toHaveBeenCalled();
 
     await Promise.resolve();
+    expect(binding.batchedTick).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(binding.batchedTick).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows errors thrown by deferred batched ticks", () => {
+    vi.useFakeTimers();
+    try {
+      const binding = createBinding({
+        batchedTick: vi.fn(() => {
+          throw new Error("tick failed");
+        }),
+      });
+      new JazzRnRuntimeAdapter(binding, {});
+
+      const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
+      const callbackObject = onBatchedTickNeeded.mock.calls[0]![0];
+
+      callbackObject.requestBatchedTick();
+
+      expect(() => vi.runOnlyPendingTimers()).not.toThrow();
+      expect(binding.batchedTick).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("serializes mutation payloads and parses query responses", async () => {

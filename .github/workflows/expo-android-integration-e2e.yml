@@ -1,0 +1,133 @@
+name: Expo Android Integration Tests (Maestro Cloud)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - changeset-release/*
+  pull_request:
+    branches: [main]
+    paths:
+      - crates/jazz-rn/**
+      - packages/jazz-tools/src/react-native/**
+      - dev/integration-tests-expo/**
+      - dev/maestro/integration-tests/**
+      - .github/workflows/expo-android-integration-e2e.yml
+
+concurrency:
+  group: expo-android-integration-e2e-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
+jobs:
+  build-rn:
+    name: Build jazz-rn (Android) artifacts
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: e2e-integration-rn
+      disableAndroid: false
+      disableIOS: true
+
+  expo-android-integration-e2e:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - build-rn
+    timeout-minutes: 60
+    env:
+      COREPACK_HOME: /home/runner/.local/share/corepack
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Download React Native Android artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-android
+          path: crates/jazz-rn
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+      - name: Build Expo E2E JS dependencies
+        run: |
+          pnpm --filter jazz-wasm run build
+          pnpm --filter jazz-tools run build:runtime
+
+      - name: Typecheck the integration-tests app
+        working-directory: dev/integration-tests-expo
+        run: pnpm exec tsc --noEmit
+
+      - name: Expo prebuild (Android)
+        run: pnpm --filter integration-tests-expo run verify:expo:android
+
+      - name: Write Gradle cache scope
+        run: echo "${{ env.CACHE_SCOPE_REPOSITORY_ID }}" > .github-cache-scope
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            .github-cache-scope
+            dev/integration-tests-expo/android/**/*.gradle*
+            dev/integration-tests-expo/android/gradle/wrapper/gradle-wrapper.properties
+            crates/jazz-rn/android/**/*.gradle*
+            crates/jazz-rn/android/gradle.properties
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$SDK_ROOT" ]; then
+            echo "::error::ANDROID_SDK_ROOT and ANDROID_HOME are both unset"
+            exit 1
+          fi
+
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+          rm -rf "${SDK_ROOT}/ndk/27.1.12297006"
+          rm -rf "${SDK_ROOT}/.temp"
+          rm -rf "${HOME}/.android/cache"
+
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+          sdkmanager --install "ndk;27.1.12297006"
+
+      - name: Build release APK
+        working-directory: dev/integration-tests-expo/android
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --build-cache --no-daemon
+
+      - name: Run Maestro Cloud flows
+        id: maestro
+        uses: mobile-dev-inc/action-maestro-cloud@34906065ba3e85fd57ed533b178187eefb042aed # v2
+        with:
+          api-key: ${{ secrets.MAESTRO_KEY }}
+          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+          app-file: dev/integration-tests-expo/android/app/build/outputs/apk/release/app-release.apk
+          workspace: dev/maestro/integration-tests

@@ -48,6 +48,9 @@ export default defineConfig({
       "expo-secure-store": fileURLToPath(
         new URL("./test-support/expo-secure-store-stub.ts", import.meta.url),
       ),
+      "react-native/Libraries/Utilities/PolyfillFunctions": fileURLToPath(
+        new URL("./test-support/react-native-polyfill-functions-stub.ts", import.meta.url),
+      ),
     },
   },
   test: {
