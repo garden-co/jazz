@@ -254,6 +254,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       if (col.mergeStrategy) {
         descriptor.merge_strategy = columnMergeStrategyToWasm(col.mergeStrategy);
       }
+      if (col.encryptedWith) {
+        descriptor.encrypted_with = col.encryptedWith;
+      }
       return descriptor;
     });
 
@@ -261,8 +264,153 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       columns,
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
+      ...(table.encryptionSpace ? { encryption_space: true } : {}),
     };
   }
 
+  normalizeE2eeIndexes(tables);
+  expandE2eeKeysTables(tables);
+  validateE2eeSchema(tables);
+
   return tables;
+}
+
+// ============================================================================
+// E2EE schema normalization and validation.
+//
+// Mirrors `crates/jazz-tools/src/query_manager/types/e2ee_schema.rs`; the two
+// must emit identical schemas (column order is normative — it feeds the schema
+// hash, which is computed by the Rust side).
+// ============================================================================
+
+const E2EE_KEYS_TABLE_SUFFIX = "$keys";
+
+const sessionAuthenticated = (): PolicyExpr => ({
+  type: "SessionIsNotNull",
+  path: ["user_id"],
+});
+
+function e2eeKeysTable(spaceTable: string): TableSchema {
+  return {
+    columns: [
+      {
+        name: "space_id",
+        column_type: { type: "Uuid" },
+        nullable: false,
+        references: spaceTable,
+      },
+      { name: "key_id", column_type: { type: "Uuid" }, nullable: false },
+      { name: "recipient_user_id", column_type: { type: "Uuid" }, nullable: false },
+      { name: "recipient_public_key", column_type: { type: "Text" }, nullable: false },
+      { name: "sealed_key", column_type: { type: "Bytea" }, nullable: false },
+    ],
+    policies: {
+      select: { using: { type: "True" } },
+      insert: { with_check: sessionAuthenticated() },
+      // update intentionally absent: key rows are immutable.
+      delete: { using: sessionAuthenticated() },
+    },
+  };
+}
+
+function normalizeE2eeIndexes(tables: Record<string, TableSchema>): void {
+  for (const table of Object.values(tables)) {
+    const hasEncrypted = table.columns.some((c) => c.encrypted_with);
+    if (!hasEncrypted || table.indexed_columns) {
+      continue;
+    }
+    table.indexed_columns = table.columns.filter((c) => !c.encrypted_with).map((c) => c.name);
+  }
+}
+
+function expandE2eeKeysTables(tables: Record<string, TableSchema>): void {
+  for (const [name, table] of Object.entries(tables)) {
+    const keysName = `${name}${E2EE_KEYS_TABLE_SUFFIX}`;
+    if (table.encryption_space && !tables[keysName]) {
+      tables[keysName] = e2eeKeysTable(name);
+    }
+  }
+}
+
+function validateE2eeSchema(tables: Record<string, TableSchema>): void {
+  for (const [name, table] of Object.entries(tables)) {
+    if (name.includes("$")) {
+      const base = name.endsWith(E2EE_KEYS_TABLE_SUFFIX)
+        ? name.slice(0, -E2EE_KEYS_TABLE_SUFFIX.length)
+        : null;
+      const isGeneratedCompanion =
+        base !== null && !base.includes("$") && tables[base]?.encryption_space === true;
+      if (!isGeneratedCompanion) {
+        throw new Error(`Table "${name}": "$" is reserved for framework tables.`);
+      }
+    }
+
+    for (const col of table.columns) {
+      const spaceRef = col.encrypted_with;
+      if (!spaceRef) continue;
+      const refCol = table.columns.find((c) => c.name === spaceRef);
+      if (!refCol) {
+        throw new Error(
+          `Table "${name}": encrypted column "${col.name}" names unknown ref column "${spaceRef}".`,
+        );
+      }
+      if (refCol.nullable) {
+        throw new Error(
+          `Table "${name}": encrypted column "${col.name}" requires a non-nullable ref column "${spaceRef}".`,
+        );
+      }
+      if (!refCol.references) {
+        throw new Error(
+          `Table "${name}": encrypted column "${col.name}" requires "${spaceRef}" to be a ref column.`,
+        );
+      }
+      const target = tables[refCol.references];
+      if (!target) {
+        throw new Error(
+          `Table "${name}": encrypted column "${col.name}" references unknown table "${refCol.references}".`,
+        );
+      }
+      if (!target.encryption_space) {
+        throw new Error(
+          `Table "${name}": encrypted column "${col.name}" references "${refCol.references}", which is not an encryption space.`,
+        );
+      }
+      if (table.indexed_columns?.includes(col.name)) {
+        throw new Error(`Table "${name}": encrypted column "${col.name}" cannot be indexed.`);
+      }
+    }
+  }
+}
+
+/**
+ * Reject policies that reference encrypted columns. Called after permissions
+ * from `permissions.ts` are merged into the wasm schema.
+ */
+export function validateE2eeSchemaPolicies(tables: Record<string, TableSchema>): void {
+  const referencesColumn = (expr: PolicyExpr | undefined, column: string): boolean => {
+    if (!expr || typeof expr !== "object") return false;
+    if ("column" in expr && expr.column === column) return true;
+    if ("via_column" in expr && expr.via_column === column) return true;
+    if ("exprs" in expr && Array.isArray(expr.exprs)) {
+      return expr.exprs.some((e) => referencesColumn(e, column));
+    }
+    if ("expr" in expr) return referencesColumn(expr.expr, column);
+    if ("condition" in expr) return referencesColumn(expr.condition, column);
+    return false;
+  };
+
+  for (const [name, table] of Object.entries(tables)) {
+    for (const col of table.columns) {
+      if (!col.encrypted_with) continue;
+      const policies = table.policies ?? {};
+      for (const op of ["select", "insert", "update", "delete"] as const) {
+        const policy = policies[op];
+        for (const clause of [policy?.using, policy?.with_check]) {
+          if (clause && referencesColumn(clause, col.name)) {
+            throw new Error(`Table "${name}": policy references encrypted column "${col.name}".`);
+          }
+        }
+      }
+    }
+  }
 }

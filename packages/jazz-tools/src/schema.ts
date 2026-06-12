@@ -87,6 +87,8 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
+  /** E2EE: sibling ref column that scopes this column's encryption. */
+  encryptedWith?: string;
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
@@ -216,6 +218,8 @@ export interface Table {
   columns: Column[];
   indexedColumns?: string[];
   policies?: TablePolicies;
+  /** E2EE: rows of this table own a shared encryption key. */
+  encryptionSpace?: boolean;
 }
 
 export interface Schema {

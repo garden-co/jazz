@@ -29,6 +29,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   constructor(
     public readonly columns: TColumns,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
+    public readonly isEncryptionSpace?: boolean,
   ) {}
 
   indexOnly<
@@ -44,7 +45,12 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, normalizedColumns);
+    return new DefinedTable(this.columns, normalizedColumns, this.isEncryptionSpace);
+  }
+
+  /** Mark rows of this table as owners of a shared E2EE key. */
+  encryptionSpace(): DefinedTable<TColumns> {
+    return new DefinedTable(this.columns, this.indexedColumns, true);
   }
 }
 
@@ -1237,6 +1243,26 @@ function tableIndexedColumns(
   return undefined;
 }
 
+function tableIsEncryptionSpace(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): boolean {
+  if (definition instanceof DefinedTable) {
+    return definition.isEncryptionSpace === true;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      isEncryptionSpace?: boolean;
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.isEncryptionSpace === true;
+    }
+  }
+
+  return false;
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1270,10 +1296,12 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       const indexedColumns = tableIndexedColumns(tableDefinition);
+      const encryptionSpace = tableIsEncryptionSpace(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
+        ...(encryptionSpace ? { encryptionSpace: true } : {}),
       };
     }),
   };

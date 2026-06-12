@@ -6,6 +6,7 @@ import type {
   Value as WasmValue,
   WasmSchema,
 } from "./drivers/types.js";
+import { validateE2eeSchemaPolicies } from "./codegen/schema-reader.js";
 import type { RelExpr, RelPredicateExpr, RelValueRef } from "./ir.js";
 import type {
   OperationPolicy,
@@ -540,5 +541,6 @@ export function mergePermissionsIntoWasmSchema(
       policies: normalizedPermissions[tableName] ?? table.policies,
     };
   }
+  validateE2eeSchemaPolicies(merged);
   return merged;
 }
