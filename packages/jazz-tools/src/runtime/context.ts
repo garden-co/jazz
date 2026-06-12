@@ -16,6 +16,7 @@ export interface RuntimeSourcesConfig {
    * When set, Jazz derives:
    * - `jazz_wasm_bg.wasm`
    * - `worker/jazz-worker.js`
+   * - `worker/jazz-broker-worker.js`
    */
   baseUrl?: string;
 
@@ -24,6 +25,9 @@ export interface RuntimeSourcesConfig {
 
   /** Explicit URL for the worker entry script. Overrides `baseUrl`. */
   workerUrl?: string;
+
+  /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
+  brokerWorkerUrl?: string;
 
   /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
   wasmSource?: BufferSource;

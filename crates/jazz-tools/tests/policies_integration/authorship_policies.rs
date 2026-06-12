@@ -62,6 +62,7 @@ async fn create_note_with_backend_attribution(
     )
     .expect("build backend attributed schema manager");
     let mut runtime = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
+    runtime.set_buffer_outbox_without_sync_sender(true);
     let client_id = ClientId::new();
     runtime.add_server(ServerId::default());
 

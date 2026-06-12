@@ -15,6 +15,7 @@ export interface DbRuntimeClientContext<RuntimeConfig extends DbConfig = DbConfi
   schema: WasmSchema;
   hasWorker: boolean;
   useBinaryEncoding: boolean;
+  bufferOutboxWithoutSyncSender?: boolean;
   onAuthFailure: (reason: AuthFailureReason) => void;
 }
 

@@ -53,6 +53,10 @@ pub struct InitPayloadFields {
     pub jwt_token: Option<String>,
     pub admin_secret: Option<String>,
     pub fallback_wasm_url: Option<String>,
+    pub worker_lock_name: Option<String>,
+    /// Broker leadership this worker serves. Used to fence stale
+    /// follower-port attach/detach messages at the terminal layer.
+    pub leadership_id: Option<u32>,
     pub log_level: Option<String>,
     pub telemetry_collector_url: Option<String>,
 }
@@ -96,7 +100,7 @@ pub enum MainToWorkerWire {
     },
     PeerSync {
         peer_id: String,
-        term: u32,
+        leadership_id: u32,
         payloads: Vec<ByteBuf>,
     },
     PeerClose {
@@ -134,8 +138,16 @@ pub enum WorkerToMainWire {
     },
     PeerSync {
         peer_id: String,
-        term: u32,
+        leadership_id: u32,
         payloads: Vec<ByteBuf>,
+    },
+    FollowerPortAttached {
+        peer_id: String,
+        leadership_id: u32,
+    },
+    FollowerPortClosed {
+        peer_id: String,
+        leadership_id: u32,
     },
     /// Encoded `LocalBatchRecord` storage rows for Rust-side main-runtime
     /// hydration.
@@ -236,6 +248,34 @@ pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
                     .and_then(|v| v.as_string())
                     .unwrap_or_else(|| "worker shim error (no message)".to_string());
                 ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message })
+            }
+            "follower-port-attached" => {
+                let peer_id = Reflect::get(value, &JsValue::from_str("peerId"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let leadership_id = Reflect::get(value, &JsValue::from_str("leadershipId"))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                ParsedWorkerToMain::Wire(WorkerToMainWire::FollowerPortAttached {
+                    peer_id,
+                    leadership_id,
+                })
+            }
+            "follower-port-closed" => {
+                let peer_id = Reflect::get(value, &JsValue::from_str("peerId"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let leadership_id = Reflect::get(value, &JsValue::from_str("leadershipId"))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                ParsedWorkerToMain::Wire(WorkerToMainWire::FollowerPortClosed {
+                    peer_id,
+                    leadership_id,
+                })
             }
             other => ParsedWorkerToMain::UnknownJsObject(other.to_string()),
         };
@@ -489,7 +529,7 @@ mod tests {
         });
         rt_main(&MainToWorkerWire::PeerSync {
             peer_id: "tab-b".into(),
-            term: 7,
+            leadership_id: 7,
             payloads: vec![ByteBuf::from(vec![9, 8, 7])],
         });
         rt_main(&MainToWorkerWire::PeerClose {
@@ -539,7 +579,7 @@ mod tests {
         });
         rt_worker(&WorkerToMainWire::PeerSync {
             peer_id: "p".into(),
-            term: 1,
+            leadership_id: 1,
             payloads: vec![ByteBuf::from(vec![0xff])],
         });
         rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {

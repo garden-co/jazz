@@ -73,6 +73,18 @@ function makeTodosApp() {
   });
 }
 
+function toBase64Url(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function makeJwt(payload: Record<string, unknown>): string {
+  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
+}
+
 function makeClientStub() {
   return {
     shutdown: vi.fn(async () => undefined),
@@ -297,5 +309,24 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(proof).toBe("jwt:alice-secret:proof-audience:7");
     expect(client.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards follower auth refreshes through the follower port bridge", () => {
+    const followerPortBridge = {
+      updateAuth: vi.fn(),
+    };
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: makeJwt({ sub: "alice" }),
+    });
+
+    (db as unknown as { followerPortBridge: typeof followerPortBridge }).followerPortBridge =
+      followerPortBridge;
+
+    const refreshed = makeJwt({ sub: "alice", refresh: 1 });
+    db.updateAuthToken(refreshed);
+
+    expect(followerPortBridge.updateAuth).toHaveBeenCalledWith({ jwtToken: refreshed });
   });
 });

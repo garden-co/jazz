@@ -47,6 +47,7 @@ interface InitMessage {
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
+  workerLockName?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
@@ -208,14 +209,94 @@ async function bootstrapAndHandoff(init: InitMessage): Promise<void> {
       runtimeThread: "worker",
     });
 
+    await runWorkerHostWithOptionalLock(wasmModule, init);
+  } catch (e: any) {
+    self.postMessage({ type: "error", message: `Init failed: ${e?.message ?? e}` });
+  }
+}
+
+async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage): Promise<void> {
+  const handoff = () => {
     // Hand control to Rust. `runAsWorker` synchronously installs its own
     // `self.onmessage` (replacing ours), then spawns an async task that
     // opens the runtime, drains the buffered messages, and posts `init-ok`.
     wasmModule.runAsWorker(init, pendingMessages.slice());
     pendingMessages.length = 0;
-  } catch (e: any) {
-    self.postMessage({ type: "error", message: `Init failed: ${e?.message ?? e}` });
+  };
+
+  if (!init.workerLockName) {
+    handoff();
+    return;
   }
+
+  const locks = (globalThis as { navigator?: { locks?: WorkerLockManager } }).navigator?.locks;
+  if (!locks || typeof locks.request !== "function") {
+    self.postMessage({
+      type: "error",
+      message: `Worker lock preflight failed: Web Locks are unavailable for ${init.workerLockName}`,
+    });
+    return;
+  }
+
+  let lockGranted = false;
+  let lockLossReported = false;
+  try {
+    await locks.request(
+      init.workerLockName,
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          self.postMessage({
+            type: "error",
+            message: `Worker lock preflight failed: ${init.workerLockName} is already held`,
+          });
+          return;
+        }
+
+        lockGranted = true;
+        handoff();
+        await new Promise<void>(() => undefined);
+      },
+    );
+  } catch (error) {
+    if (!lockGranted) {
+      throw error;
+    }
+    reportWorkerLockLost(error);
+    return;
+  }
+
+  if (lockGranted) {
+    reportWorkerLockLost(new Error(`Worker lock ${init.workerLockName} was lost`));
+    return;
+  }
+
+  if (!lockGranted) {
+    pendingMessages.length = 0;
+  }
+
+  function reportWorkerLockLost(reason: unknown): void {
+    if (lockLossReported) return;
+    lockLossReported = true;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    self.onmessage?.(
+      new MessageEvent("message", {
+        data: {
+          type: "worker-lock-lost",
+          workerLockName: init.workerLockName,
+          reason: message,
+        },
+      }),
+    );
+  }
+}
+
+interface WorkerLockManager {
+  request<T>(
+    name: string,
+    options: { mode?: "exclusive" | "shared"; ifAvailable?: boolean },
+    callback: (lock: unknown | null) => Promise<T> | T,
+  ): Promise<T>;
 }
 
 async function startup(): Promise<void> {
