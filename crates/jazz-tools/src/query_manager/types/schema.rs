@@ -618,9 +618,13 @@ impl SchemaBuilder {
         self
     }
 
-    /// Build the complete schema.
+    /// Build the complete schema, applying E2EE normalization (index
+    /// exclusion for encrypted columns, `$keys` companion expansion).
     pub fn build(self) -> Schema {
-        self.tables.into_iter().map(|t| t.build_named()).collect()
+        let mut schema: Schema = self.tables.into_iter().map(|t| t.build_named()).collect();
+        super::e2ee_schema::normalize_e2ee_indexes(&mut schema);
+        super::e2ee_schema::expand_e2ee_keys_tables(&mut schema);
+        schema
     }
 
     /// Compute the schema hash.

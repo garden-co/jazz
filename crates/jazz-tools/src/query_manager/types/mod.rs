@@ -4,6 +4,7 @@ pub(crate) use super::encoding;
 // Sub-modules
 pub mod branch;
 pub mod descriptor;
+pub mod e2ee_schema;
 pub mod policy;
 pub mod row;
 pub mod schema;
