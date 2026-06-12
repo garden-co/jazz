@@ -1,6 +1,13 @@
 import type { RuntimeSourcesConfig } from "./context.js";
 
-export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v1";
+/**
+ * Tab<->broker wire-format version. It is embedded in the hello fingerprint,
+ * so tabs speaking a different protocol version are rejected with
+ * `unsupported` at attach time instead of having their messages silently
+ * dropped later. Bump whenever the shape or required fields of any broker
+ * message change.
+ */
+export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v2";
 export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
 
 // Liveness defaults shared by the broker worker and the tab client — a drift
