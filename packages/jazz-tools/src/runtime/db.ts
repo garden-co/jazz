@@ -1529,7 +1529,7 @@ export class Db {
         // to recreate and no bridge to initialize. The OPFS wipe already
         // happened above, so report readiness directly and let the broker
         // finish the reset instead of waiting for a bridge that will never exist.
-        this.reportBrokerLeaderReady();
+        this.reportBrokerLeaderReady({ bridgelessStorageReset: true });
       }
     } catch (error) {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
@@ -1640,7 +1640,7 @@ export class Db {
     });
   }
 
-  private reportBrokerLeaderReady(): void {
+  private reportBrokerLeaderReady(options?: { bridgelessStorageReset?: boolean }): void {
     if (!this.brokerClient || this.tabRole !== "leader") return;
     if (this.brokerLeaderReadyLeadershipId === this.currentLeadershipId) return;
     this.brokerLeaderReadyLeadershipId = this.currentLeadershipId;
@@ -1648,6 +1648,7 @@ export class Db {
       leadershipId: this.currentLeadershipId,
       tabLockName: this.brokerTabLockName(),
       workerLockName: this.brokerWorkerLockName(),
+      ...(options?.bridgelessStorageReset ? { bridgelessStorageReset: true } : {}),
     });
   }
 

@@ -29,6 +29,7 @@ export interface BrowserBrokerLeaderReadyInput {
   leadershipId: number;
   tabLockName: string;
   workerLockName: string;
+  bridgelessStorageReset?: boolean;
 }
 
 export interface BrowserBrokerClientOptions {
@@ -166,6 +167,7 @@ export class BrowserBrokerClient {
       leadershipId: input.leadershipId,
       tabLockName: input.tabLockName,
       workerLockName: input.workerLockName,
+      ...(input.bridgelessStorageReset ? { bridgelessStorageReset: true } : {}),
     });
   }
 

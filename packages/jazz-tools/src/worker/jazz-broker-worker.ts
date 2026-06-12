@@ -237,12 +237,13 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       const leaderTab = tabs.get(tabId);
       if (
         activeReset?.promotedLeadershipId === message.leadershipId &&
+        message.bridgelessStorageReset &&
         !leaderTab?.schemaFingerprint
       ) {
-        // Fresh namespace: no tab ever created a client, so the promoted
-        // leader has nothing to rebuild a worker bridge from. The wipe is
-        // already done before the tab reports ready, so step the placeholder
-        // leader down before reporting reset completion.
+        // Fresh namespace: the promoted leader declared it has no client to
+        // rebuild a worker bridge from. The wipe is already done before the
+        // tab reports ready, so step the placeholder leader down before
+        // reporting reset completion.
         clearLeader(message.leadershipId, { demoteLeader: true, removeLeaderTab: false });
         finishStorageReset(activeReset, true);
         return;
