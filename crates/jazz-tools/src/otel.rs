@@ -262,7 +262,9 @@ mod tests {
         // No endpoint -> stdout exporter path; just prove construction + clean
         // shutdown work under a runtime (PeriodicReader needs rt-tokio).
         let provider = init_meter_provider_with_endpoint("test-service", None);
-        provider.shutdown().expect("meter provider shuts down cleanly");
+        provider
+            .shutdown()
+            .expect("meter provider shuts down cleanly");
     }
 
     #[test]
