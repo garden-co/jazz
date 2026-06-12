@@ -212,27 +212,108 @@ function LensCard({
 }
 
 const PROJECTION_CSS = `
-@keyframes lens-projection-in {
+@keyframes lens-pill-in {
   from { opacity: 0; transform: translateX(-4px); }
-  to { opacity: 1; transform: translateY(0); }
+  to { opacity: 1; transform: translateX(0); }
 }
-.projection-row { animation: lens-projection-in 200ms ease-out 350ms both; }
+@keyframes lens-pill-key-flip {
+  0%   { opacity: 0; transform: translateY(-3px); }
+  40%  { opacity: 0; }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes lens-json-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.lens-pill { animation: lens-pill-in 220ms ease-out 350ms both; }
+.lens-pill-key.is-renaming { animation: lens-pill-key-flip 320ms ease-out 350ms both; }
+.lens-json { animation: lens-json-in 280ms ease-out 500ms both; }
 `;
+
+type FieldName = "title" | RowField;
+
+const SCHEMA_FIELDS: Record<Version, ReadonlyArray<FieldName>> = {
+  1: ["title"],
+  2: ["title", "completed"],
+  3: ["title", "done"],
+};
+
+// True when `field` exists in both schemas but under a different name — used
+// to swap the key label in place rather than slide a fresh pill in.
+function isRenamedField(field: FieldName, fromV: Version, toV: Version): boolean {
+  if (fromV === toV) return false;
+  if (field !== "done" && field !== "completed") return false;
+  return (fromV === 2 || fromV === 3) && (toV === 2 || toV === 3);
+}
+
+function FieldValue({ value }: { value: unknown }) {
+  if (typeof value === "string") {
+    return (
+      <span className="rounded-sm px-1.5 py-0.5 font-mono text-[10px] leading-4 text-[#146aff] bg-[#146aff]/10">
+        {`"${value}"`}
+      </span>
+    );
+  }
+  if (typeof value === "boolean") {
+    const tone = value
+      ? "text-[#15803d] dark:text-[#4ade80] bg-[#15803d]/10 dark:bg-[#4ade80]/15"
+      : "text-[#dc2626] dark:text-[#f87171] bg-[#dc2626]/10 dark:bg-[#f87171]/15";
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold leading-4 lowercase",
+          tone,
+        )}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-current" />
+        {String(value)}
+      </span>
+    );
+  }
+  return null;
+}
+
+function FieldPill({
+  field,
+  value,
+  renaming,
+}: {
+  field: FieldName;
+  value: unknown;
+  renaming: boolean;
+}) {
+  return (
+    <div className="lens-pill flex items-center justify-between gap-2 px-2 py-1.5">
+      <span
+        className={cn(
+          "lens-pill-key font-mono text-[10px] leading-4 text-fd-muted-foreground tracking-wide",
+          renaming && "is-renaming",
+        )}
+      >
+        {field}
+      </span>
+      <FieldValue value={value} />
+    </div>
+  );
+}
 
 function ClientDevice({
   client,
   setClient,
   projectedRow,
   dataVersion,
+  prevClient,
 }: {
   client: Version;
   setClient: (v: Version) => void;
   projectedRow: Row;
   dataVersion: Version;
+  prevClient: Version;
 }) {
+  const fields = SCHEMA_FIELDS[client];
   return (
     <PhoneChrome className="h-full">
-      <style href="lens-projection" precedence="default">
+      <style href="lens-projection-v2" precedence="default">
         {PROJECTION_CSS}
       </style>
       <div>
@@ -259,25 +340,29 @@ function ClientDevice({
       </div>
 
       <div className="flex-1 rounded-lg border-2 border-[#146aff] bg-fd-card p-2 flex flex-col gap-2 justify-between">
-        <div key={`${client}-${dataVersion}`}>
-          <div className="text-xs uppercase tracking-wide text-[#146aff] font-semibold mb-2">
-            My To Dos
+        <div key={`${client}-${dataVersion}`} className="flex flex-col gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-[#146aff] font-semibold mb-2">
+              My To Dos
+            </div>
+            <div className="flex flex-col rounded-md border border-fd-border bg-fd-card divide-y divide-fd-border">
+              {fields.map((field) => (
+                <FieldPill
+                  key={field}
+                  field={field}
+                  value={(projectedRow as Record<string, unknown>)[field]}
+                  renaming={isRenamedField(field, prevClient, client)}
+                />
+              ))}
+            </div>
           </div>
-          <div className="projection-row text-xs">
-            <label className="mb-2 flex items-center gap-1">
-              {"completed" in projectedRow ? (
-                <input type="checkbox" checked={Boolean(projectedRow.completed)} readOnly />
-              ) : "done" in projectedRow ? (
-                <input type="checkbox" checked={Boolean(projectedRow.done)} readOnly />
-              ) : null}{" "}
-              {projectedRow.title}
-            </label>
-          </div>
-          <div className="text-xs uppercase tracking-wide text-fd-muted-foreground font-semibold mt-6 mb-2">
-            JSON
-          </div>
-          <div className="text-xs font-mono text-fd-foreground whitespace-pre-wrap m-0 border-2 projection-row bg-fd-muted rounded-xl p-1">
-            {JSON.stringify(projectedRow, null, 1)}
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-fd-muted-foreground font-semibold mb-1">
+              JSON
+            </div>
+            <pre className="lens-json text-[11px] leading-[1.35] font-mono text-fd-foreground whitespace-pre-wrap m-0 bg-fd-muted rounded-md px-2 py-1.5">
+              {JSON.stringify(projectedRow, null, 1)}
+            </pre>
           </div>
         </div>
         <div className="text-xs text-fd-muted-foreground italic text-balance">
@@ -293,6 +378,11 @@ function ClientDevice({
 export function LensDiagram() {
   const [client, setClient] = useState<Version>(3);
   const [dataVersion, setDataVersion] = useState<Version>(1);
+  const prevClientRef = useRef<Version>(client);
+  const prevClient = prevClientRef.current;
+  useEffect(() => {
+    prevClientRef.current = client;
+  }, [client]);
   const direction = getDirection(dataVersion, client);
   const projectedRow = project(SCHEMAS[dataVersion].sample, dataVersion, client);
 
@@ -413,6 +503,7 @@ export function LensDiagram() {
           setClient={setClient}
           projectedRow={projectedRow}
           dataVersion={dataVersion}
+          prevClient={prevClient}
         />
       ),
     },
