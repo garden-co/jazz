@@ -4,6 +4,7 @@ mod error;
 mod file;
 mod page;
 mod superblock;
+mod wal;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_bench;
 
