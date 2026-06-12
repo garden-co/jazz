@@ -66,7 +66,7 @@ async fn sync_layers_emit_otel_spans() {
         .await;
 
     let (todo_id, expected_values, batch_id) = alice
-        .insert("todos", todo_values("trace sync telemetry", false))
+        .insert("todos", todo_values("trace sync telemetry", false), None)
         .expect("alice creates persisted todo");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
