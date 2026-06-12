@@ -83,14 +83,9 @@ pub(crate) fn append_commit<F: SyncFile>(
     file.truncate(required_len)?;
 
     let header = header.with_frame_count(frame_count);
-    write_page(
-        file,
-        page_size,
-        start_page_id,
-        &encode_wal_header_page(page_size, header)?,
-    )?;
+    let mut writer = PageRunWriter::new(file, page_size, start_page_id);
+    writer.push(&encode_wal_header_page(page_size, header)?)?;
 
-    let mut cursor = start_page_id + 1;
     for frame in frames {
         let meta = encode_wal_frame_meta_page(
             page_size,
@@ -99,13 +94,16 @@ pub(crate) fn append_commit<F: SyncFile>(
             frame.is_freelist,
             frame.raw,
         )?;
-        write_page(file, page_size, cursor, &meta)?;
-        write_page(file, page_size, cursor + 1, frame.raw)?;
-        cursor += 2;
+        writer.push(&meta)?;
+        writer.push(frame.raw)?;
     }
 
-    let commit = encode_wal_commit_page(page_size, header.generation, frame_count)?;
-    write_page(file, page_size, cursor, &commit)?;
+    writer.push(&encode_wal_commit_page(
+        page_size,
+        header.generation,
+        frame_count,
+    )?)?;
+    writer.flush_run()?;
     Ok(wal_pages)
 }
 
@@ -253,6 +251,81 @@ fn batch_wal_replay_reads() -> bool {
 }
 
 const READ_RUN_PAGES: u64 = 64;
+#[cfg(target_arch = "wasm32")]
+const WRITE_RUN_PAGES: usize = 64;
+
+/// Accumulates consecutive WAL pages and writes them to the backing file in
+/// runs of up to WRITE_RUN_PAGES, so a commit costs one write call per run
+/// instead of one per page.
+struct PageRunWriter<'a, F: SyncFile> {
+    file: &'a F,
+    page_size: usize,
+    next_page_id: PageId,
+    buf: Vec<u8>,
+}
+
+impl<'a, F: SyncFile> PageRunWriter<'a, F> {
+    fn new(file: &'a F, page_size: usize, start_page_id: PageId) -> Self {
+        Self {
+            file,
+            page_size,
+            next_page_id: start_page_id,
+            buf: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, raw: &[u8]) -> Result<(), BTreeError> {
+        if raw.len() != self.page_size {
+            return Err(BTreeError::Corrupt(format!(
+                "WAL page raw length {} does not match page size {}",
+                raw.len(),
+                self.page_size
+            )));
+        }
+        if wal_write_run_pages() == 1 {
+            let offset = page_offset(
+                self.next_page_id,
+                self.page_size,
+                "WAL write offset overflow",
+            )?;
+            self.file.write_all_at(offset, raw)?;
+            self.next_page_id += 1;
+            return Ok(());
+        }
+        self.buf.extend_from_slice(raw);
+        if self.buf.len() >= wal_write_run_pages() * self.page_size {
+            self.flush_run()?;
+        }
+        Ok(())
+    }
+
+    fn flush_run(&mut self) -> Result<(), BTreeError> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let offset = page_offset(
+            self.next_page_id,
+            self.page_size,
+            "WAL write offset overflow",
+        )?;
+        self.file.write_all_at(offset, &self.buf)?;
+        self.next_page_id += (self.buf.len() / self.page_size) as u64;
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wal_write_run_pages() -> usize {
+    WRITE_RUN_PAGES
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wal_write_run_pages() -> usize {
+    // Native backends pay per copy, not per call. OPFS pays enough per write
+    // call for batching to win there.
+    1
+}
 
 /// Serves WAL page reads from a buffered run of up to READ_RUN_PAGES pages,
 /// so sequential replay does one backing-file read per run instead of one
@@ -317,23 +390,6 @@ impl<'a, F: SyncFile> PageRunReader<'a, F> {
         self.buf_page_count = run;
         Ok(())
     }
-}
-
-fn write_page<F: SyncFile>(
-    file: &F,
-    page_size: usize,
-    page_id: PageId,
-    raw: &[u8],
-) -> Result<(), BTreeError> {
-    if raw.len() != page_size {
-        return Err(BTreeError::Corrupt(format!(
-            "WAL page raw length {} does not match page size {}",
-            raw.len(),
-            page_size
-        )));
-    }
-    let offset = page_offset(page_id, page_size, "WAL write offset overflow")?;
-    file.write_all_at(offset, raw)
 }
 
 fn truncate_tail<F: SyncFile>(
