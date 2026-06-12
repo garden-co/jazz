@@ -756,6 +756,80 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("delays storage resets issued during a reconnect until the new broker attaches", async () => {
+    const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a", "instance-b"] });
+    let client: BrowserBrokerClient;
+    let resetResult: Promise<void> | null = null;
+
+    client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+      onDemote: () => {
+        // Fires mid-reconnect, while sends are suppressed.
+        resetResult = client.requestStorageReset("reset-1");
+        resetResult.catch(() => {});
+      },
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "leader-ready",
+      brokerInstanceId: "instance-a",
+      leaderTabId: "tab-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+    await client.waitForRole("leader", 100);
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "broker-ping",
+      brokerInstanceId: "instance-b",
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(() => resetResult !== null, 300, "reset should be requested during demote");
+    await waitFor(
+      () =>
+        env.workers[1]?.port.postedMessages.some(
+          (m) => (m as { type?: string }).type === "storage-reset-request",
+        ) ?? false,
+      300,
+      "reset request should reach the new broker",
+    );
+
+    expect(env.workers[1]!.port.postedMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "storage-reset-request",
+          requestId: "reset-1",
+          brokerInstanceId: "instance-b",
+        }),
+      ]),
+    );
+
+    dispatchPortMessage(env.workers[1]!.port, {
+      type: "storage-reset-started",
+      brokerInstanceId: "instance-b",
+      requestId: "reset-1",
+    } satisfies BrowserBrokerControlMessage);
+    dispatchPortMessage(env.workers[1]!.port, {
+      type: "storage-reset-finished",
+      brokerInstanceId: "instance-b",
+      requestId: "reset-1",
+      success: true,
+    } satisfies BrowserBrokerControlMessage);
+
+    await resetResult!;
+    await client.shutdown();
+  });
+
   it("rejects storage reset completion waiters when the broker reconnects mid-reset", async () => {
     const brokerInstanceIds = ["instance-a", "instance-b"];
     const workers: FakeSharedWorker[] = [];

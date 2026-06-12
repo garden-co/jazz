@@ -103,6 +103,8 @@ export class BrowserBrokerClient {
   private closed = false;
   private closedError: Error | null = null;
   private reconnecting = false;
+  private reconnectDone: Promise<void> | null = null;
+  private resolveReconnectDone: (() => void) | null = null;
   private readonly roleWaiters = new Set<RoleWaiter>();
   private readonly resetWaiters = new Map<string, ResetWaiter[]>();
   private readonly resetStartWaiters = new Map<string, ResetStartWaiter[]>();
@@ -206,6 +208,14 @@ export class BrowserBrokerClient {
   async requestStorageReset(requestId: string): Promise<void> {
     if (this.closed) {
       throw this.closedError ?? new Error("Browser broker client closed");
+    }
+    // A reconnect drops in-flight sends; wait for it to settle so the
+    // reset request reaches the new broker instance instead of vanishing.
+    while (this.reconnecting && this.reconnectDone) {
+      await this.reconnectDone;
+      if (this.closed) {
+        throw this.closedError ?? new Error("Browser broker client closed");
+      }
     }
     let startWaiter!: ResetStartWaiter;
     let waiter!: ResetWaiter;
@@ -496,6 +506,9 @@ export class BrowserBrokerClient {
   private async reconnectAfterBrokerPortFailure(_error: Error): Promise<void> {
     if (this.closed || this.reconnecting) return;
     this.reconnecting = true;
+    this.reconnectDone = new Promise((resolve) => {
+      this.resolveReconnectDone = resolve;
+    });
 
     const previousRole = this.role;
     const previousLeadershipId = this.leadershipId;
@@ -535,6 +548,9 @@ export class BrowserBrokerClient {
     }
 
     this.reconnecting = false;
+    this.resolveReconnectDone?.();
+    this.resolveReconnectDone = null;
+    this.reconnectDone = null;
     if (reconnectError) {
       this.closeWithError(new Error(stringifyError(reconnectError)));
       return;
