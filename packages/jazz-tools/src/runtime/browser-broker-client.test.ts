@@ -535,6 +535,51 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("closes with the reconnect failure as the error cause", async () => {
+    const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a"] });
+    const constructionError = new Error("second construction failed");
+    let constructed = 0;
+    let closedError: Error | null = null;
+
+    class FlakySharedWorker extends env.FakeSharedWorker {
+      constructor(url: string | URL, options?: string | { name?: string; type?: WorkerType }) {
+        constructed += 1;
+        if (constructed > 1) {
+          throw constructionError;
+        }
+        super(url, options);
+      }
+    }
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: FlakySharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+      onClosed: (error) => {
+        closedError = error;
+      },
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "broker-ping",
+      brokerInstanceId: "instance-b",
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(() => closedError !== null, 300, "client should close on reconnect failure");
+    expect(closedError!.message).toContain("second construction failed");
+    expect(closedError!.cause).toBe(constructionError);
+    void client;
+  });
+
   it("notifies the owner when the broker rejects an established tab", async () => {
     const workers: FakeSharedWorker[] = [];
     const onClosed = vi.fn();
