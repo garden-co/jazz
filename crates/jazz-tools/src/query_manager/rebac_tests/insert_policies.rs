@@ -1,9 +1,9 @@
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::JazzClient;
 
 use super::*;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 async fn enforcing_test_client(schema: Schema) -> JazzClient {
     JazzClient::connect_with_row_policy_mode(
         crate::AppContext::test(schema),
@@ -13,7 +13,7 @@ async fn enforcing_test_client(schema: Schema) -> JazzClient {
     .expect("connect enforcing local JazzClient")
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_insert_allowed_by_simple_policy() {
     let client = JazzClient::test_client(rebac_test_schema()).await;
@@ -31,7 +31,7 @@ async fn rebac_insert_allowed_by_simple_policy() {
         .expect("insert should be allowed when owner_id matches the session user");
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_insert_denied_by_simple_policy() {
     let client = JazzClient::test_client(rebac_test_schema()).await;
@@ -512,7 +512,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy()
 {
@@ -540,7 +540,7 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
     let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
@@ -554,7 +554,7 @@ async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_expli
     assert_client_policy_denied(err, "notes", Operation::Insert);
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_two_clients_different_sessions() {
     let client = JazzClient::test_client(rebac_test_schema()).await;
@@ -623,7 +623,7 @@ async fn rebac_two_clients_different_sessions() {
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
     let tasks_policies = permissions(|p| {

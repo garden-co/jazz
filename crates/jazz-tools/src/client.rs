@@ -8,9 +8,9 @@ use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
-#[cfg(test)]
-use crate::query_manager::types::RowPolicyMode;
 use crate::query_manager::types::{OrderedRowDelta, Value};
+#[cfg(test)]
+use crate::query_manager::types::{RowPolicyMode, Schema};
 use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
@@ -492,28 +492,12 @@ impl JazzClient {
     }
 
     pub async fn permissive_test_client(schema: Schema) -> crate::JazzClient {
-        let app_id = crate::AppId::random();
-        let storage: DynStorage = Box::new(MemoryStorage::new());
-        let schema_manager = SchemaManager::new_with_policy_mode(
-            SyncManager::new(),
-            schema,
-            app_id,
-            "client",
-            "main",
-            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        crate::JazzClient::connect_with_row_policy_mode(
+            crate::AppContext::test(schema),
+            RowPolicyMode::PermissiveLocal,
         )
-        .expect("create test schema manager");
-
-        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
-        runtime.persist_schema().expect("persist test schema");
-
-        crate::JazzClient {
-            default_session: None,
-            runtime,
-            has_server: false,
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            next_handle: std::sync::atomic::AtomicU64::new(1),
-        }
+        .await
+        .expect("connect permissive local JazzClient")
     }
 }
 

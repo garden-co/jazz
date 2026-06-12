@@ -1,4 +1,4 @@
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 use crate::JazzClient;
 
 use super::*;
@@ -271,7 +271,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_inherits_filters_select_query_results() {
     // Schema with INHERITS policy
@@ -335,7 +335,7 @@ async fn rebac_inherits_filters_select_query_results() {
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     let documents_policies = permissions(|p| {
@@ -387,7 +387,7 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
     let documents_policies = permissions(|p| {
@@ -424,7 +424,7 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
     let files_policies = permissions(|p| {
@@ -482,7 +482,7 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
     );
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     let folders_policies = permissions(|p| {

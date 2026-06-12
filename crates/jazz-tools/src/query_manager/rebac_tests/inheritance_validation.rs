@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     let schema = recursive_folders_schema(Some(10));
