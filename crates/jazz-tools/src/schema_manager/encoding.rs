@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V7 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -38,6 +38,8 @@ enum SchemaEncodingVersion {
     V5 = 5,
     // v6 schemas include per-table indexed-column overrides.
     V6 = 6,
+    // v7 schemas include E2EE markers (encrypted_with, encryption_space).
+    V7 = 7,
 }
 
 impl SchemaEncodingVersion {
@@ -49,6 +51,7 @@ impl SchemaEncodingVersion {
             4 => Some(Self::V4),
             5 => Some(Self::V5),
             6 => Some(Self::V6),
+            7 => Some(Self::V7),
             _ => None,
         }
     }
@@ -62,15 +65,19 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4 | Self::V5 | Self::V6)
+        self as u8 >= Self::V4 as u8
     }
 
     fn has_column_merge_strategies(self) -> bool {
-        matches!(self, Self::V5 | Self::V6)
+        self as u8 >= Self::V5 as u8
     }
 
     fn has_indexed_columns(self) -> bool {
-        matches!(self, Self::V6)
+        self as u8 >= Self::V6 as u8
+    }
+
+    fn has_e2ee_markers(self) -> bool {
+        self as u8 >= Self::V7 as u8
     }
 }
 
@@ -128,7 +135,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V6;
+    let version = SchemaEncodingVersion::V7;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -201,6 +208,9 @@ pub fn decode_table_descriptor_from_schema(
         if version.has_table_policies() {
             decode_table_policies(data, &mut offset)?;
         }
+        if version.has_e2ee_markers() {
+            let _encryption_space = read_u8(data, &mut offset)?;
+        }
     }
 
     Ok(None)
@@ -219,6 +229,9 @@ fn encode_table_entry_with_version(
     }
     if version.has_table_policies() {
         encode_table_policies(buf, &schema.policies);
+    }
+    if version.has_e2ee_markers() {
+        buf.push(if schema.encryption_space { 1 } else { 0 });
     }
 }
 
@@ -240,6 +253,11 @@ fn decode_table_entry_with_version(
         // separately.
         decode_table_policies(data, offset)?;
     }
+    let encryption_space = if version.has_e2ee_markers() {
+        read_u8(data, offset)? != 0
+    } else {
+        false
+    };
 
     Ok((
         TableName::new(name),
@@ -247,6 +265,7 @@ fn decode_table_entry_with_version(
             columns: descriptor,
             indexed_columns,
             policies: TablePolicies::default(),
+            encryption_space,
         },
     ))
 }
@@ -395,6 +414,15 @@ fn encode_column_descriptor_with_version(
             None => buf.push(0),
         }
     }
+    if version.has_e2ee_markers() {
+        match &col.encrypted_with {
+            Some(space_ref) => {
+                buf.push(1);
+                write_string(buf, space_ref.as_str());
+            }
+            None => buf.push(0),
+        }
+    }
 }
 
 fn decode_column_descriptor_with_version(
@@ -443,6 +471,17 @@ fn decode_column_descriptor_with_version(
         None
     };
 
+    let encrypted_with = if version.has_e2ee_markers() {
+        let has_encrypted_with = read_u8(data, offset)? != 0;
+        if has_encrypted_with {
+            Some(ColumnName::new(read_string(data, offset, "encrypted_with")?))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
@@ -450,6 +489,7 @@ fn decode_column_descriptor_with_version(
         references,
         default,
         merge_strategy,
+        encrypted_with,
     })
 }
 
@@ -484,6 +524,12 @@ fn skip_column_descriptor_with_version(
                     context: "column_merge_strategy",
                 });
             }
+        }
+    }
+    if version.has_e2ee_markers() {
+        let has_encrypted_with = read_u8(data, offset)? != 0;
+        if has_encrypted_with {
+            skip_string(data, offset)?;
         }
     }
     Ok(())
@@ -960,6 +1006,7 @@ fn decode_table_schema(
         columns: descriptor,
         indexed_columns: None,
         policies: TablePolicies::default(),
+        encryption_space: false,
     })
 }
 
@@ -973,6 +1020,7 @@ fn decode_table_schema_v1(
         columns: descriptor,
         indexed_columns: None,
         policies: TablePolicies::default(),
+        encryption_space: false,
     })
 }
 

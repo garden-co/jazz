@@ -835,6 +835,7 @@ mod tests {
                 references: Some(TableName::new("folders")),
                 default: None,
                 merge_strategy: None,
+                encrypted_with: None,
             },
             ColumnDescriptor::new("title", ColumnType::Text),
         ]);
