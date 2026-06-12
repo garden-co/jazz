@@ -24,6 +24,62 @@ async function waitFor(
   throw new Error(`Timed out: ${message}`);
 }
 
+interface FakeWorkerEnvOptions {
+  /** broker-hello instance id per created worker; index N -> Nth worker. */
+  brokerInstanceIds?: string[];
+  /** When false, ports never answer hello (for timeout/error-path tests). */
+  respondToHello?: boolean;
+}
+
+function createFakeWorkerEnv(options: FakeWorkerEnvOptions = {}) {
+  const { brokerInstanceIds = ["instance-a"], respondToHello = true } = options;
+  const workerUrls: string[] = [];
+
+  class FakeBrokerPort extends EventTarget {
+    readonly postedMessages: unknown[] = [];
+    closed = false;
+
+    constructor(private readonly brokerInstanceId: string) {
+      super();
+    }
+
+    postMessage(message: unknown): void {
+      this.postedMessages.push(message);
+      if (respondToHello && (message as { type?: unknown }).type === "hello") {
+        queueMicrotask(() => {
+          dispatchPortMessage(this, {
+            type: "broker-hello",
+            brokerInstanceId: this.brokerInstanceId,
+          });
+        });
+      }
+    }
+
+    start(): void {}
+
+    close(): void {
+      this.closed = true;
+    }
+  }
+
+  class FakeSharedWorker extends EventTarget {
+    readonly port: MessagePort & FakeBrokerPort;
+
+    constructor(url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
+      super();
+      this.port = new FakeBrokerPort(
+        brokerInstanceIds[workers.length] ?? "instance-next",
+      ) as MessagePort & FakeBrokerPort;
+      workerUrls.push(String(url));
+      workers.push(this);
+    }
+  }
+
+  const workers: FakeSharedWorker[] = [];
+
+  return { workers, workerUrls, FakeSharedWorker };
+}
+
 describe("BrowserBrokerClient", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -127,38 +183,7 @@ describe("BrowserBrokerClient", () => {
   });
 
   it("stamps tab messages with the active broker instance", async () => {
-    const workers: FakeSharedWorker[] = [];
-
-    class FakePort extends EventTarget {
-      readonly postedMessages: unknown[] = [];
-      closed = false;
-
-      postMessage(message: unknown): void {
-        this.postedMessages.push(message);
-        if ((message as { type?: unknown }).type === "hello") {
-          queueMicrotask(() => {
-            dispatchPortMessage(this, {
-              type: "broker-hello",
-              brokerInstanceId: "instance-a",
-            });
-          });
-        }
-      }
-
-      start(): void {}
-
-      close(): void {
-        this.closed = true;
-      }
-    }
-
-    class FakeSharedWorker {
-      readonly port = new FakePort() as MessagePort & FakePort;
-
-      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
-        workers.push(this);
-      }
-    }
+    const env = createFakeWorkerEnv();
 
     const client = await BrowserBrokerClient.connect({
       appId: "app",
@@ -167,7 +192,7 @@ describe("BrowserBrokerClient", () => {
       fingerprint: "fingerprint",
       visibility: "visible",
       globalLike: {
-        SharedWorker: FakeSharedWorker,
+        SharedWorker: env.FakeSharedWorker,
         MessageChannel,
         navigator: {
           locks: { request() {} },
@@ -179,7 +204,7 @@ describe("BrowserBrokerClient", () => {
     client.reportSchemaReady("schema-a");
     client.reportLeaderFailed(1, "leader crashed");
 
-    expect(workers[0]!.port.postedMessages).toEqual(
+    expect(env.workers[0]!.port.postedMessages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "visibility",
@@ -204,47 +229,8 @@ describe("BrowserBrokerClient", () => {
   });
 
   it("does not replay reconnect-time messages into a fresh broker instance", async () => {
-    const brokerInstanceIds = ["instance-a", "instance-b"];
-    const workers: FakeSharedWorker[] = [];
+    const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a", "instance-b"] });
     let client: BrowserBrokerClient;
-
-    class FakePort extends EventTarget {
-      readonly postedMessages: unknown[] = [];
-      closed = false;
-
-      constructor(private readonly brokerInstanceId: string) {
-        super();
-      }
-
-      postMessage(message: unknown): void {
-        this.postedMessages.push(message);
-        if ((message as { type?: unknown }).type === "hello") {
-          queueMicrotask(() => {
-            dispatchPortMessage(this, {
-              type: "broker-hello",
-              brokerInstanceId: this.brokerInstanceId,
-            });
-          });
-        }
-      }
-
-      start(): void {}
-
-      close(): void {
-        this.closed = true;
-      }
-    }
-
-    class FakeSharedWorker {
-      readonly port: MessagePort & FakePort;
-
-      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
-        this.port = new FakePort(
-          brokerInstanceIds[workers.length] ?? "instance-next",
-        ) as MessagePort & FakePort;
-        workers.push(this);
-      }
-    }
 
     client = await BrowserBrokerClient.connect({
       appId: "app",
@@ -253,7 +239,7 @@ describe("BrowserBrokerClient", () => {
       fingerprint: "fingerprint",
       visibility: "visible",
       globalLike: {
-        SharedWorker: FakeSharedWorker,
+        SharedWorker: env.FakeSharedWorker,
         MessageChannel,
         navigator: {
           locks: { request() {} },
@@ -265,7 +251,7 @@ describe("BrowserBrokerClient", () => {
       },
     });
 
-    dispatchPortMessage(workers[0]!.port, {
+    dispatchPortMessage(env.workers[0]!.port, {
       type: "leader-ready",
       brokerInstanceId: "instance-a",
       leaderTabId: "tab-a",
@@ -273,7 +259,7 @@ describe("BrowserBrokerClient", () => {
     } satisfies BrowserBrokerControlMessage);
     await client.waitForRole("leader", 100);
 
-    dispatchPortMessage(workers[0]!.port, {
+    dispatchPortMessage(env.workers[0]!.port, {
       type: "broker-ping",
       brokerInstanceId: "instance-b",
     } satisfies BrowserBrokerControlMessage);
@@ -285,7 +271,7 @@ describe("BrowserBrokerClient", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    expect(workers[1]!.port.postedMessages).not.toEqual(
+    expect(env.workers[1]!.port.postedMessages).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "leader-failed",
@@ -293,7 +279,7 @@ describe("BrowserBrokerClient", () => {
         }),
       ]),
     );
-    expect(workers[1]!.port.postedMessages).toEqual(
+    expect(env.workers[1]!.port.postedMessages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "visibility",
@@ -307,46 +293,7 @@ describe("BrowserBrokerClient", () => {
   });
 
   it("replays the latest visibility when reconnecting to a fresh broker instance", async () => {
-    const brokerInstanceIds = ["instance-a", "instance-b"];
-    const workers: FakeSharedWorker[] = [];
-
-    class FakePort extends EventTarget {
-      readonly postedMessages: unknown[] = [];
-      closed = false;
-
-      constructor(private readonly brokerInstanceId: string) {
-        super();
-      }
-
-      postMessage(message: unknown): void {
-        this.postedMessages.push(message);
-        if ((message as { type?: unknown }).type === "hello") {
-          queueMicrotask(() => {
-            dispatchPortMessage(this, {
-              type: "broker-hello",
-              brokerInstanceId: this.brokerInstanceId,
-            });
-          });
-        }
-      }
-
-      start(): void {}
-
-      close(): void {
-        this.closed = true;
-      }
-    }
-
-    class FakeSharedWorker {
-      readonly port: MessagePort & FakePort;
-
-      constructor(_url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
-        this.port = new FakePort(
-          brokerInstanceIds[workers.length] ?? "instance-next",
-        ) as MessagePort & FakePort;
-        workers.push(this);
-      }
-    }
+    const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a", "instance-b"] });
 
     const client = await BrowserBrokerClient.connect({
       appId: "app",
@@ -355,7 +302,7 @@ describe("BrowserBrokerClient", () => {
       fingerprint: "fingerprint",
       visibility: "visible",
       globalLike: {
-        SharedWorker: FakeSharedWorker,
+        SharedWorker: env.FakeSharedWorker,
         MessageChannel,
         navigator: {
           locks: { request() {} },
@@ -365,7 +312,7 @@ describe("BrowserBrokerClient", () => {
 
     client.reportVisibility("hidden");
 
-    dispatchPortMessage(workers[0]!.port, {
+    dispatchPortMessage(env.workers[0]!.port, {
       type: "broker-ping",
       brokerInstanceId: "instance-b",
     } satisfies BrowserBrokerControlMessage);
@@ -376,7 +323,7 @@ describe("BrowserBrokerClient", () => {
       "client should reconnect to the new broker",
     );
 
-    expect(workers[1]!.port.postedMessages[0]).toMatchObject({
+    expect(env.workers[1]!.port.postedMessages[0]).toMatchObject({
       type: "hello",
       visibility: "hidden",
     });
@@ -385,34 +332,7 @@ describe("BrowserBrokerClient", () => {
   });
 
   it("uses an explicit broker worker URL override", async () => {
-    const workerUrls: string[] = [];
-
-    class FakePort extends EventTarget {
-      readonly postedMessages: unknown[] = [];
-
-      postMessage(message: unknown): void {
-        this.postedMessages.push(message);
-        if ((message as { type?: unknown }).type === "hello") {
-          queueMicrotask(() => {
-            dispatchPortMessage(this, {
-              type: "broker-hello",
-              brokerInstanceId: "instance-a",
-            });
-          });
-        }
-      }
-
-      start(): void {}
-      close(): void {}
-    }
-
-    class FakeSharedWorker {
-      readonly port = new FakePort() as MessagePort & FakePort;
-
-      constructor(url: string | URL, _options?: string | { name?: string; type?: WorkerType }) {
-        workerUrls.push(String(url));
-      }
-    }
+    const env = createFakeWorkerEnv();
 
     const client = await BrowserBrokerClient.connect({
       appId: "app",
@@ -424,7 +344,7 @@ describe("BrowserBrokerClient", () => {
         brokerWorkerUrl: "https://cdn.example/jazz/worker/jazz-broker-worker.js",
       },
       globalLike: {
-        SharedWorker: FakeSharedWorker,
+        SharedWorker: env.FakeSharedWorker,
         MessageChannel,
         navigator: {
           locks: { request() {} },
@@ -432,7 +352,7 @@ describe("BrowserBrokerClient", () => {
       },
     });
 
-    expect(workerUrls).toEqual(["https://cdn.example/jazz/worker/jazz-broker-worker.js"]);
+    expect(env.workerUrls).toEqual(["https://cdn.example/jazz/worker/jazz-broker-worker.js"]);
 
     await client.shutdown();
   });
