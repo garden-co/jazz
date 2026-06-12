@@ -69,6 +69,16 @@ pub async fn run(
 
     let state = built.state.clone();
     let shutdown = state.shutdown.clone();
+    // Report the current inbound WebSocket count as an OTel gauge. Held for the
+    // server's lifetime; dropped when `run` returns. Only active when otel is
+    // compiled in and an OTLP endpoint is configured.
+    #[cfg(feature = "otel")]
+    let _active_ws_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_tools::otel::register_active_websockets_gauge(&meter, state.shutdown.clone())
+        });
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
