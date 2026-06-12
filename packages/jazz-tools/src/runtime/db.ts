@@ -1524,6 +1524,13 @@ export class Db {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
       this.recreateFirstClientAfterBrokerReset();
       this.attachWorkerBridgeForExistingClient();
+      if (resetRequestId && !this.workerBridge) {
+        // Fresh namespace: no schema has ever been used, so there is no client
+        // to recreate and no bridge to initialize. The OPFS wipe already
+        // happened above, so report readiness directly and let the broker
+        // finish the reset instead of waiting for a bridge that will never exist.
+        this.reportBrokerLeaderReady();
+      }
     } catch (error) {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
       this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));

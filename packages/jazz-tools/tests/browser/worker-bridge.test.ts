@@ -857,6 +857,25 @@ describe("Worker Bridge with OPFS", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
+  it("resolves a storage reset requested before any schema use", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete-storage-fresh") },
+      }),
+    );
+
+    // No table/query has run yet: no client exists anywhere in the namespace.
+    await db.deleteClientStorage();
+
+    // The same Db must come back to life through a normal election once the
+    // schema is used for the first time.
+    await db
+      .insert(todos, { title: "first row after fresh wipe", done: false })
+      .wait({ tier: "local" });
+    expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
+  });
+
   it("retries OPFS storage deletion after a transient browser lock", async () => {
     const dbName = uniqueDbName("delete-storage-transient-lock");
     const db = track(
