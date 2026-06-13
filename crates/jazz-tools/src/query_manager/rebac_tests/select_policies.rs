@@ -1,9 +1,20 @@
+use crate::JazzClient;
+
 use super::*;
 
-#[test]
-fn rebac_select_policy_with_null_literal_filters_query_results() {
-    use crate::query_manager::query::QueryBuilder;
+async fn query_documents_as_alice(client: &crate::JazzClient) -> HashSet<ObjectId> {
+    client
+        .for_session(Session::new("alice"))
+        .query(QueryBuilder::new("documents").build(), None)
+        .await
+        .expect("query documents as alice")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
 
+#[tokio::test]
+async fn rebac_select_policy_with_null_literal_filters_query_results() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::eq("deleted_at", pe::null()));
     });
@@ -16,47 +27,24 @@ fn rebac_select_policy_with_null_literal_filters_query_results() {
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let visible_id = qm
+    let client = JazzClient::test_client(schema).await;
+    let (visible_id, _, _) = client
         .insert(
-            &mut storage,
             "documents",
-            &[Value::Text("draft".into()), Value::Null],
+            crate::row_input!("title" => "draft", "deleted_at" => Value::Null),
         )
-        .unwrap()
-        .row_id;
-    let hidden_id = qm
+        .expect("seed visible document");
+    let (hidden_id, _, _) = client
         .insert(
-            &mut storage,
             "documents",
-            &[
-                Value::Text("soft-deleted".into()),
-                Value::Text("2026-03-30T12:00:00Z".into()),
-            ],
+            crate::row_input!(
+                "title" => "soft-deleted",
+                "deleted_at" => "2026-03-30T12:00:00Z",
+            ),
         )
-        .unwrap()
-        .row_id;
+        .expect("seed soft-deleted document");
 
-    let sub_id = qm
-        .subscribe_with_session(
-            QueryBuilder::new("documents").build(),
-            Some(Session::new("alice")),
-            None,
-        )
-        .unwrap();
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let visible_ids: HashSet<_> = qm
-        .get_subscription_results(sub_id)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
+    let visible_ids = query_documents_as_alice(&client).await;
     assert!(
         visible_ids.contains(&visible_id),
         "rows with deleted_at = NULL should remain visible"
@@ -67,10 +55,8 @@ fn rebac_select_policy_with_null_literal_filters_query_results() {
     );
 }
 
-#[test]
-fn rebac_select_policy_with_is_null_filters_query_results() {
-    use crate::query_manager::query::QueryBuilder;
-
+#[tokio::test]
+async fn rebac_select_policy_with_is_null_filters_query_results() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::is_null("deleted_at"));
     });
@@ -83,47 +69,24 @@ fn rebac_select_policy_with_is_null_filters_query_results() {
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let visible_id = qm
+    let client = JazzClient::test_client(schema).await;
+    let (visible_id, _, _) = client
         .insert(
-            &mut storage,
             "documents",
-            &[Value::Text("draft".into()), Value::Null],
+            crate::row_input!("title" => "draft", "deleted_at" => Value::Null),
         )
-        .unwrap()
-        .row_id;
-    let hidden_id = qm
+        .expect("seed visible document");
+    let (hidden_id, _, _) = client
         .insert(
-            &mut storage,
             "documents",
-            &[
-                Value::Text("soft-deleted".into()),
-                Value::Text("2026-03-30T12:00:00Z".into()),
-            ],
+            crate::row_input!(
+                "title" => "soft-deleted",
+                "deleted_at" => "2026-03-30T12:00:00Z",
+            ),
         )
-        .unwrap()
-        .row_id;
+        .expect("seed soft-deleted document");
 
-    let sub_id = qm
-        .subscribe_with_session(
-            QueryBuilder::new("documents").build(),
-            Some(Session::new("alice")),
-            None,
-        )
-        .unwrap();
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let visible_ids: HashSet<_> = qm
-        .get_subscription_results(sub_id)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
+    let visible_ids = query_documents_as_alice(&client).await;
     assert!(
         visible_ids.contains(&visible_id),
         "rows with deleted_at IS NULL should remain visible"

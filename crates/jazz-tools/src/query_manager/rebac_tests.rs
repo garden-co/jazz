@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::batch_fate::BatchFate;
-use crate::metadata::{
-    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
-};
+#[cfg(feature = "test-utils")]
+use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
 use crate::storage::{MemoryStorage, Storage};
@@ -20,19 +20,21 @@ use crate::sync_manager::{
     SyncPayload,
 };
 use crate::test_support::{
-    apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    seeded_memory_storage,
+    apply_test_row_batch, create_test_row, load_test_row_tip_ids, seeded_memory_storage,
 };
 
-use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::{Session, WriteContext};
+#[cfg(feature = "test-utils")]
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::Session;
+#[cfg(feature = "test-utils")]
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
-    SchemaBuilder, SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
+    SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
 
@@ -40,16 +42,6 @@ use crate::row_histories::{RowState, StoredRowBatch};
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
-    qm
-}
-
-fn create_query_manager_with_policy_mode(
-    sync_manager: SyncManager,
-    schema: Schema,
-    row_policy_mode: RowPolicyMode,
-) -> QueryManager {
-    let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema_with_policy_mode(schema, "dev", "main", row_policy_mode);
     qm
 }
 
@@ -226,10 +218,6 @@ fn add_row_commit(
     batch_id
 }
 
-fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> Option<HashMap<String, String>> {
-    load_test_row_metadata(storage, row_id)
-}
-
 fn test_row_tip_ids(
     storage: &MemoryStorage,
     row_id: ObjectId,
@@ -271,6 +259,7 @@ fn rebac_test_schema() -> Schema {
         .build()
 }
 
+#[cfg(feature = "test-utils")]
 fn magic_introspection_schema() -> Schema {
     let is_admin = pe::eq("user_id", pe::session("user_id"));
     let protected_policies = permissions(|p| {
@@ -297,12 +286,14 @@ fn magic_introspection_schema() -> Schema {
         .build()
 }
 
+#[cfg(feature = "test-utils")]
 fn provenance_notes_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("notes").column("title", ColumnType::Text))
         .build()
 }
 
+#[cfg(feature = "test-utils")]
 fn authorship_permissions_schema() -> Schema {
     let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
     let notes_policies = permissions(|p| {
@@ -321,25 +312,19 @@ fn authorship_permissions_schema() -> Schema {
         .build()
 }
 
-fn query_rows(
-    qm: &mut QueryManager,
-    storage: &mut MemoryStorage,
-    query: Query,
-    session: Option<Session>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    let sub_id = qm
-        .subscribe_with_session(query, session, None)
-        .expect("query subscription should be created");
-
-    for _ in 0..10 {
-        qm.process(storage);
-    }
-
-    let results = qm.get_subscription_results(sub_id);
-    qm.unsubscribe_with_sync(sub_id);
-    results
+#[cfg(feature = "test-utils")]
+fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
+    let crate::JazzError::Write(message) = err else {
+        panic!("expected policy denial write error, got {err:?}");
+    };
+    let expected = format!("policy denied {operation} on table {table}");
+    assert!(
+        message.ends_with(&expected),
+        "expected denial ending in {expected:?}, got {message:?}",
+    );
 }
 
+#[cfg(feature = "test-utils")]
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     let select_inherited = match max_depth {
         Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
@@ -534,117 +519,6 @@ fn enqueue_inherited_insert(
     commit
 }
 
-fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
-    let schema = recursive_folders_schema(max_depth);
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let root_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("alice".into()),
-                Value::Text("Root".into()),
-                Value::Null,
-            ],
-        )
-        .unwrap();
-    let child_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Child".into()),
-                Value::Uuid(root_handle.row_id),
-            ],
-        )
-        .unwrap();
-    let grand_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Grandchild".into()),
-                Value::Uuid(child_handle.row_id),
-            ],
-        )
-        .unwrap();
-
-    let grand_id = grand_handle.row_id;
-    let branch = get_branch(&qm);
-
-    let client_id = ClientId::new();
-    connect_client(&mut qm, &storage, client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("alice"));
-
-    let mut scope = HashSet::new();
-    scope.insert((grand_id, branch.clone().into()));
-    set_client_query_scope(&mut qm, &storage, client_id, QueryId(100), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-
-    let update_content = encode_row(
-        &folders_descriptor,
-        &[
-            Value::Text("bob".into()),
-            Value::Text("Renamed by Alice".into()),
-            Value::Uuid(child_handle.row_id),
-        ],
-    )
-    .unwrap();
-
-    let update_commit = stored_row_commit(
-        smallvec![grand_handle.batch_id],
-        update_content,
-        4200,
-        ObjectId::new().to_string(),
-        None,
-    );
-
-    let object_metadata = test_row_metadata(&storage, grand_id).unwrap_or_default();
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: row_batch_created_payload(
-            grand_id,
-            &branch,
-            Some(RowMetadata {
-                id: grand_id,
-                metadata: object_metadata,
-            }),
-            &update_commit,
-        ),
-    });
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = client_write_was_rejected(
-        &outbox,
-        client_id,
-        row_batch_id_for_commit(grand_id, &branch, &update_commit),
-    );
-
-    let tips = test_row_tip_ids(&storage, grand_id, &branch).unwrap();
-    let applied = tips.contains(&row_batch_id_for_commit(grand_id, &branch, &update_commit));
-
-    (denied, applied)
-}
-
 /// Test that EXISTS clause in INSERT policy correctly denies writes.
 ///
 /// Scenario: Insert policy requires EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
@@ -700,6 +574,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
 
+#[cfg(feature = "test-utils")]
 fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let source_fk_column = if array_edge { "images" } else { "image" };
     let files_policies = permissions(|p| {
@@ -745,13 +620,18 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
         .build()
 }
 
+#[cfg(feature = "test-utils")]
 mod declared_fk_inheritance;
 mod exists_policies;
+#[cfg(feature = "test-utils")]
 mod exists_rel_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
+#[cfg(feature = "test-utils")]
 mod magic_provenance;
 mod mutations;
+#[cfg(feature = "test-utils")]
 mod recursive_inheritance;
+#[cfg(feature = "test-utils")]
 mod select_policies;

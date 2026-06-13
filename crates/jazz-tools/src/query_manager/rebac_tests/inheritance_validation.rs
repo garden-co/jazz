@@ -1,66 +1,35 @@
 use super::*;
 
-#[test]
-fn rebac_recursive_inherits_cycle_does_not_overgrant() {
-    use crate::query_manager::query::QueryBuilder;
-
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     let schema = recursive_folders_schema(Some(10));
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let client = crate::JazzClient::test_client(schema).await;
 
-    let a = qm
+    let (a, _, _) = client
         .insert(
-            &mut storage,
             "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("A".into()),
-                Value::Null,
-            ],
+            crate::row_input!("owner_id" => "bob", "name" => "A", "parent_id" => Value::Null),
         )
-        .unwrap()
-        .row_id;
-    let b = qm
+        .expect("insert folder A");
+    let (b, _, _) = client
         .insert(
-            &mut storage,
             "folders",
-            &[
-                Value::Text("carol".into()),
-                Value::Text("B".into()),
-                Value::Uuid(a),
-            ],
+            crate::row_input!("owner_id" => "carol", "name" => "B", "parent_id" => a),
         )
-        .unwrap()
-        .row_id;
+        .expect("insert folder B");
 
     // Close the cycle: A.parent_id = B
-    let _ = qm
-        .update(
-            &mut storage,
-            a,
-            &[
-                Value::Text("bob".into()),
-                Value::Text("A".into()),
-                Value::Uuid(b),
-            ],
-        )
-        .unwrap();
+    client
+        .for_session(Session::new("bob"))
+        .update(a, vec![("parent_id".to_string(), Value::Uuid(b))])
+        .expect("close folder cycle");
 
-    let sub_id = qm
-        .subscribe_with_session(
-            QueryBuilder::new("folders").build(),
-            Some(Session::new("alice")),
-            None,
-        )
-        .unwrap();
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let result_ids: HashSet<_> = qm
-        .get_subscription_results(sub_id)
+    let result_ids: HashSet<_> = client
+        .for_session(Session::new("alice"))
+        .query(QueryBuilder::new("folders").build(), None)
+        .await
+        .expect("query folders as alice")
         .into_iter()
         .map(|(id, _)| id)
         .collect();

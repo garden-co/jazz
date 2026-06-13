@@ -1,3 +1,6 @@
+#[cfg(feature = "test-utils")]
+use crate::JazzClient;
+
 use super::*;
 
 #[test]
@@ -268,15 +271,13 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
     );
 }
 
-#[test]
-fn rebac_inherits_filters_select_query_results() {
-    use crate::query_manager::query::QueryBuilder;
-
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn rebac_inherits_filters_select_query_results() {
     // Schema with INHERITS policy
     let folders_table = TableSchema::builder("folders")
         .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text);
-    let folders_descriptor = folders_table.clone().build().columns;
     let folders_policies = permissions(|p| {
         p.allow_read()
             .where_(pe::eq("owner_id", pe::session("user_id")));
@@ -286,7 +287,6 @@ fn rebac_inherits_filters_select_query_results() {
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .nullable_fk_column("folder_id", "folders");
-    let docs_descriptor = docs_table.clone().build().columns;
 
     // SELECT policy: owner_id = @user_id OR INHERITS SELECT VIA folder_id
     let docs_policies = permissions(|p| {
@@ -299,92 +299,43 @@ fn rebac_inherits_filters_select_query_results() {
         .table(folders_table.policies(folders_policies))
         .table(docs_table.policies(docs_policies))
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let folder_id = client
+        .insert(
+            "folders",
+            crate::row_input!("owner_id" => "alice", "name" => "Alice's Folder"),
+        )
+        .expect("seed folder")
+        .0;
+    client
+        .insert(
+            "documents",
+            crate::row_input!(
+                "owner_id" => "bob",
+                "title" => "Bob's Doc in Alice's Folder",
+                "folder_id" => folder_id,
+            ),
+        )
+        .expect("seed document");
 
-    // Create Alice's folder
-    let mut folder_meta = std::collections::HashMap::new();
-    folder_meta.insert(MetadataKey::Table.to_string(), "folders".to_string());
-    let folder_id = create_test_row(&mut storage, Some(folder_meta));
-
-    let folder_content = encode_row(
-        &folders_descriptor,
-        &[
-            Value::Text("alice".into()),
-            Value::Text("Alice's Folder".into()),
-        ],
-    )
-    .unwrap();
-    let author = ObjectId::new();
-    add_row_commit(
-        &mut storage,
-        folder_id,
-        "main",
-        vec![],
-        folder_content,
-        1000,
-        author.to_string(),
-    );
-
-    // Create Bob's document in Alice's folder
-    let mut doc_meta = std::collections::HashMap::new();
-    doc_meta.insert(MetadataKey::Table.to_string(), "documents".to_string());
-    let doc_id = create_test_row(&mut storage, Some(doc_meta));
-
-    let doc_content = encode_row(
-        &docs_descriptor,
-        &[
-            Value::Text("bob".into()),
-            Value::Text("Bob's Doc in Alice's Folder".into()),
-            Value::Uuid(folder_id),
-        ],
-    )
-    .unwrap();
-    add_row_commit(
-        &mut storage,
-        doc_id,
-        "main",
-        vec![],
-        doc_content,
-        1000,
-        author.to_string(),
-    );
-
-    // Charlie subscribes to documents query with his session
-    let charlie_session = Session::new("charlie");
-    let query = QueryBuilder::new("documents").branch("main").build();
-    let sub_id = qm
-        .subscribe_with_session(query, Some(charlie_session), None)
-        .unwrap();
-
-    // Process to settle the query
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    // Get Charlie's query results via take_updates
-    let updates = qm.take_updates();
-    let charlie_update = updates.iter().find(|u| u.subscription_id == sub_id);
+    let charlie_rows = client
+        .for_session(Session::new("charlie"))
+        .query(QueryBuilder::new("documents").build(), None)
+        .await
+        .expect("query documents as charlie");
 
     // Charlie should NOT see Bob's document (doesn't own it, doesn't own folder)
-    // The update should either be missing or have an empty added set
-    let has_rows = charlie_update
-        .map(|u| !u.delta.added.is_empty())
-        .unwrap_or(false);
-
     assert!(
-        !has_rows,
+        charlie_rows.is_empty(),
         "Charlie should not see Bob's document - he owns neither the doc nor the folder. \
          INHERITS should have denied access, but currently it always returns true."
     );
 }
 
-#[test]
-fn inherits_select_denies_when_parent_operation_policy_is_missing() {
-    use crate::query_manager::query::QueryBuilder;
-
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::allowed_to_read("folder_id"));
     });
@@ -402,35 +353,28 @@ fn inherits_select_denies_when_parent_operation_policy_is_missing() {
                 .policies(documents_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let folder = qm
+    let folder = client
         .insert(
-            &mut storage,
             "folders",
-            &[Value::Text("alice".into()), Value::Text("Shared".into())],
+            crate::row_input!("owner_id" => "alice", "name" => "Shared"),
         )
         .expect("folder insert should succeed");
-    qm.insert(
-        &mut storage,
-        "documents",
-        &[
-            Value::Text("bob".into()),
-            Value::Text("Inherited doc".into()),
-            Value::Uuid(folder.row_id),
-        ],
-    )
-    .expect("document insert should succeed");
+    client
+        .insert(
+            "documents",
+            crate::row_input!("owner_id" => "bob", "title" => "Inherited doc", "folder_id" => folder.0))
+        .expect("document insert should succeed");
 
-    let rows = query_rows(
-        &mut qm,
-        &mut storage,
-        QueryBuilder::new("documents").select(&["title"]).build(),
-        Some(Session::new("alice")),
-    );
+    let rows = client
+        .for_session(Session::new("alice"))
+        .query(
+            QueryBuilder::new("documents").select(&["title"]).build(),
+            None,
+        )
+        .await
+        .expect("query documents as alice");
 
     assert!(
         rows.is_empty(),
@@ -438,8 +382,9 @@ fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     );
 }
 
-#[test]
-fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
     let documents_policies = permissions(|p| {
         p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
     });
@@ -453,32 +398,26 @@ fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm =
-        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let client = JazzClient::permissive_test_client(schema).await;
 
-    let folder = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[Value::Text("alice folder".into())],
-        )
+    let folder = client
+        .insert("folders", crate::row_input!("title" => "alice folder"))
         .expect("seed folder row");
 
-    qm.insert_with_session(
-        &mut storage,
-        "documents",
-        &[Value::Text("draft doc".into()), Value::Uuid(folder.row_id)],
-        Some(&Session::new("alice")),
-    )
+    client
+        .for_session(Session::new("alice"))
+        .insert(
+            "documents",
+            crate::row_input!("title" => "draft doc", "folder_id" => folder.0),
+        )
     .expect(
         "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
     );
 }
 
-#[test]
-fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
     let files_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
@@ -499,45 +438,42 @@ fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permis
         )
         .build();
 
-    let sync_manager = SyncManager::new();
-    let mut qm =
-        create_query_manager_with_policy_mode(sync_manager, schema, RowPolicyMode::PermissiveLocal);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+    let client = JazzClient::permissive_test_client(schema).await;
 
-    let file = qm
+    let file = client
         .insert(
-            &mut storage,
             "files",
-            &[Value::Text("bob".into()), Value::Text("shared-file".into())],
+            crate::row_input!("owner_id" => "bob", "name" => "shared-file"),
         )
         .expect("seed file row");
-    qm.insert(
-        &mut storage,
-        "todos",
-        &[
-            Value::Text("alice".into()),
-            Value::Text("todo referencing file".into()),
-            Value::Uuid(file.row_id),
-        ],
-    )
-    .expect("seed referencing todo row");
+    client
+        .insert(
+            "todos",
+            crate::row_input!(
+                "owner_id" => "alice",
+                "title" => "todo referencing file",
+                "file_id" => file.0,
+            ),
+        )
+        .expect("seed referencing todo row");
 
-    qm.update_with_session(
-        &mut storage,
-        file.row_id,
-        &[
-            Value::Text("bob".into()),
-            Value::Text("updated by alice".into()),
-        ],
-        Some(&Session::new("alice")),
-    )
+    client
+        .for_session(Session::new("alice"))
+        .update(
+            file.0,
+            vec![
+                ("owner_id".into(), Value::Text("bob".into())),
+                ("name".into(), Value::Text("updated by alice".into())),
+            ],
+        )
     .expect(
         "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
     );
 }
 
-#[test]
-fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     let folders_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::eq("owner_id", pe::session("user_id")))
@@ -552,53 +488,33 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
                 .policies(folders_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let root = qm
+    let root = client
         .insert(
-            &mut storage,
             "folders",
-            &[
-                Value::Text("alice".into()),
-                Value::Text("Root".into()),
-                Value::Null,
-            ],
+            crate::row_input!("owner_id" => "alice", "name" => "Root", "parent_id" => Value::Null),
         )
         .expect("create root");
-    let child = qm
+    let child = client
         .insert(
-            &mut storage,
             "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Child".into()),
-                Value::Uuid(root.row_id),
-            ],
+            crate::row_input!("owner_id" => "bob", "name" => "Child", "parent_id" => root.0),
         )
         .expect("create child");
 
-    let update_err = qm
-        .update_with_session(
-            &mut storage,
-            child.row_id,
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Child renamed".into()),
-                Value::Uuid(root.row_id),
+    let update_err = client
+        .for_session(Session::new("bob"))
+        .update(
+            child.0,
+            vec![
+                ("owner_id".into(), Value::Text("bob".into())),
+                ("name".into(), Value::Text("Child renamed".into())),
+                ("parent_id".into(), Value::Uuid(root.0)),
             ],
-            Some(&Session::new("bob")),
         )
         .expect_err("update should fail inherited WITH CHECK");
-    assert!(matches!(
-        update_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Update
-        } if table == TableName::new("folders")
-    ));
+    assert_client_policy_denied(update_err, "folders", Operation::Update);
 }
 
 #[test]

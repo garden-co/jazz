@@ -1,7 +1,9 @@
+use crate::JazzClient;
+
 use super::*;
 
-#[test]
-fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
+#[tokio::test]
+async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::all_of([
@@ -29,45 +31,32 @@ fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_re
                 .policies(projects_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    qm.insert(
-        &mut storage,
-        "admins",
-        &[Value::Text("alice".into()), Value::Text("team-a".into())],
-    )
-    .expect("seed admin row");
-    qm.insert(
-        &mut storage,
-        "team_memberships",
-        &[Value::Text("team-a".into()), Value::Text("alice".into())],
-    )
-    .expect("seed membership row");
-
-    let err = qm
-        .insert_with_session(
-            &mut storage,
-            "projects",
-            &[Value::Text("alice project".into())],
-            Some(&Session::new("alice")),
+    client
+        .insert(
+            "admins",
+            crate::row_input!("user_id" => "alice", "team_id" => "team-a"),
         )
+        .expect("seed admin row");
+    client
+        .insert(
+            "team_memberships",
+            crate::row_input!("team_id" => "team-a", "user_id" => "alice"),
+        )
+        .expect("seed membership row");
+
+    let err = client
+        .for_session(Session::new("alice"))
+        .insert("projects", crate::row_input!("name" => "alice project"))
         .expect_err(
             "enforcing mode should deny nested EXISTS_REL checks when the probed table lacks an explicit SELECT policy",
         );
-    assert!(matches!(
-        err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Insert
-        } if table == TableName::new("projects")
-    ));
+    assert_client_policy_denied(err, "projects", Operation::Insert);
 }
 
-#[test]
-fn local_insert_with_exists_rel_policy_denies_non_admin() {
+#[tokio::test]
+async fn local_insert_with_exists_rel_policy_denies_non_admin() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
@@ -85,41 +74,26 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
                 .policies(projects_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+    client
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
 
-    let bob_err = qm
-        .insert_with_session(
-            &mut storage,
-            "projects",
-            &[Value::Text("bob project".into())],
-            Some(&Session::new("bob")),
-        )
+    let bob_err = client
+        .for_session(Session::new("bob"))
+        .insert("projects", crate::row_input!("name" => "bob project"))
         .expect_err("non-admin insert should be denied");
-    assert!(matches!(
-        bob_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Insert
-        } if table == TableName::new("projects")
-    ));
+    assert_client_policy_denied(bob_err, "projects", Operation::Insert);
 
-    qm.insert_with_session(
-        &mut storage,
-        "projects",
-        &[Value::Text("alice project".into())],
-        Some(&Session::new("alice")),
-    )
-    .expect("admin insert should be allowed");
+    client
+        .for_session(Session::new("alice"))
+        .insert("projects", crate::row_input!("name" => "alice project"))
+        .expect("admin insert should be allowed");
 }
 
-#[test]
-fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
+#[tokio::test]
+async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
@@ -133,35 +107,23 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
                 .policies(projects_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+    client
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
 
-    let err = qm
-        .insert_with_session(
-            &mut storage,
-            "projects",
-            &[Value::Text("alice project".into())],
-            Some(&Session::new("alice")),
-        )
+    let err = client
+        .for_session(Session::new("alice"))
+        .insert("projects", crate::row_input!("name" => "alice project"))
         .expect_err(
             "enforcing mode should deny EXISTS_REL scans when the scanned table lacks an explicit SELECT policy",
         );
-    assert!(matches!(
-        err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Insert
-        } if table == TableName::new("projects")
-    ));
+    assert_client_policy_denied(err, "projects", Operation::Insert);
 }
 
-#[test]
-fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
+#[tokio::test]
+async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
@@ -182,54 +144,35 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
                 .policies(projects_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    qm.insert(
-        &mut storage,
-        "admins",
-        &[Value::Text("alice".into()), Value::Null],
-    )
-    .expect("seed active admin row");
-    qm.insert(
-        &mut storage,
-        "admins",
-        &[
-            Value::Text("carol".into()),
-            Value::Text("2026-03-30T12:00:00Z".into()),
-        ],
-    )
-    .expect("seed revoked admin row");
-
-    qm.insert_with_session(
-        &mut storage,
-        "projects",
-        &[Value::Text("alice project".into())],
-        Some(&Session::new("alice")),
-    )
-    .expect("active admin row should satisfy revoked_at = NULL predicate");
-
-    let carol_err = qm
-        .insert_with_session(
-            &mut storage,
-            "projects",
-            &[Value::Text("carol project".into())],
-            Some(&Session::new("carol")),
+    client
+        .insert(
+            "admins",
+            crate::row_input!("user_id" => "alice", "revoked_at" => Value::Null),
         )
+        .expect("seed active admin row");
+    client
+        .insert(
+            "admins",
+            crate::row_input!("user_id" => "carol", "revoked_at" => "2026-03-30T12:00:00Z"),
+        )
+        .expect("seed revoked admin row");
+
+    client
+        .for_session(Session::new("alice"))
+        .insert("projects", crate::row_input!("name" => "alice project"))
+        .expect("active admin row should satisfy revoked_at = NULL predicate");
+
+    let carol_err = client
+        .for_session(Session::new("carol"))
+        .insert("projects", crate::row_input!("name" => "carol project"))
         .expect_err("revoked admin row should fail revoked_at = NULL predicate");
-    assert!(matches!(
-        carol_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Insert
-        } if table == TableName::new("projects")
-    ));
+    assert_client_policy_denied(carol_err, "projects", Operation::Insert);
 }
 
-#[test]
-fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
+#[tokio::test]
+async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     let protected_policies = permissions(|p| {
         p.allow_delete().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
@@ -247,29 +190,29 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
                 .policies(protected_policies),
         )
         .build();
+    let client = JazzClient::test_client(schema).await;
 
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+    client
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
-    let protected = qm
-        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
-        .expect("seed protected row");
+    let protected = client
+        .insert("protected", crate::row_input!("data" => "initial"))
+        .expect("seed protected row")
+        .0;
 
-    let bob_err = qm
-        .delete_with_session(&mut storage, protected.row_id, Some(&Session::new("bob")))
+    let bob_err = client
+        .for_session(Session::new("bob"))
+        .delete(protected)
         .expect_err("non-admin delete should be denied");
-    assert!(matches!(
-        bob_err,
-        QueryError::PolicyDenied {
-            table,
-            operation: Operation::Delete
-        } if table == TableName::new("protected")
-    ));
+    assert_client_policy_denied(bob_err, "protected", Operation::Delete);
 
-    qm.delete_with_session(&mut storage, protected.row_id, Some(&Session::new("alice")))
+    client
+        .for_session(Session::new("alice"))
+        .delete(protected)
         .expect("admin delete should be allowed");
-    assert!(qm.row_is_deleted(&storage, "protected", protected.row_id));
+    let second_delete = client
+        .for_session(Session::new("alice"))
+        .delete(protected)
+        .expect_err("deleted row should not be deleted again");
+    assert!(format!("{second_delete:?}").contains("row already deleted"));
 }

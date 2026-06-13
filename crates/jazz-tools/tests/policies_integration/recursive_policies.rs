@@ -262,8 +262,7 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
     client
         .insert(
             "team_edges",
-            row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)),
-        )
+            row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)))
 
         .expect("create team edge");
 }
@@ -286,8 +285,7 @@ async fn create_resource_access_edge(
     client
         .insert(
             "resource_access_edges",
-            row_input!("team_id" => Value::Uuid(team_id), "resource_id" => Value::Uuid(resource_id), "grant_role" => grant_role),
-        )
+            row_input!("team_id" => Value::Uuid(team_id), "resource_id" => Value::Uuid(resource_id), "grant_role" => grant_role))
 
         .expect("create resource access edge");
 }
