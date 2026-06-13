@@ -521,7 +521,7 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
     let client = JazzClient::test_client(schema).await;
 
     let (note_id, _, _) = client
-        .insert("notes", crate::row_input!("content" => "A note"), None)
+        .insert("notes", crate::row_input!("content" => "A note"))
         .expect("table without explicit policies should allow local writes");
     let rows = client
         .query(

@@ -413,7 +413,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            None,
         )
         .expect("create before restart");
     client
@@ -465,7 +464,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            None,
         )
         .expect("create after restart");
     client
@@ -520,7 +518,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            None,
         )
         .expect("create todo");
 

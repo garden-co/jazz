@@ -7,7 +7,6 @@ fn insert_file(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
         .insert(
             "files",
             crate::row_input!("owner_id" => owner_id, "name" => name),
-            None,
         )
         .expect("insert file")
         .0
@@ -24,7 +23,6 @@ fn insert_todo_with_image(
         .insert(
             "todos",
             crate::row_input!("owner_id" => owner_id, "title" => title, "image" => image),
-            None,
         )
         .expect("insert todo")
         .0
@@ -44,7 +42,6 @@ fn insert_todo_with_images(
                 "title" => title,
                 "images" => Value::Array(images),
             ),
-            None,
         )
         .expect("insert todo")
         .0
@@ -153,7 +150,6 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
         .insert(
             "table_a",
             crate::row_input!("owner_id" => "bob", "b_id" => Value::Null),
-            None,
         )
         .expect("insert table_a")
         .0;
@@ -161,13 +157,12 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
         .insert(
             "table_b",
             crate::row_input!("owner_id" => "carol", "a_id" => a_id),
-            None,
         )
         .expect("insert table_b")
         .0;
 
     client
-        .update(a_id, vec![("b_id".into(), Value::Uuid(b_id))], None)
+        .update(a_id, vec![("b_id".into(), Value::Uuid(b_id))])
         .expect("link table_a");
 
     let visible_ids = query_ids_as(&client, "table_a", "alice").await;
@@ -193,7 +188,7 @@ async fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
     );
 
     client
-        .update(todo_id, vec![("image".into(), Value::Uuid(file_id))], None)
+        .update(todo_id, vec![("image".into(), Value::Uuid(file_id))])
         .expect("link todo image");
 
     let visible_after_link = query_ids_as(&client, "files", "alice").await;

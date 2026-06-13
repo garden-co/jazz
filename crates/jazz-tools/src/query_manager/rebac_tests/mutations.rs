@@ -57,7 +57,6 @@ async fn rebac_update_denied_by_using_policy() {
         .insert(
             "documents",
             crate::row_input!("owner_id" => "alice", "content" => "Alice's secret"),
-            None,
         )
         .expect("seed alice document");
 
@@ -132,10 +131,10 @@ async fn synced_soft_delete_should_use_delete_policy() {
     .expect("connect bob");
 
     let (admin_id, _, _) = alice
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed alice admin row");
     let (protected_id, _, _) = alice
-        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row");
 
     wait_for_query(
@@ -159,7 +158,7 @@ async fn synced_soft_delete_should_use_delete_policy() {
     .await;
 
     let bob_delete_batch = bob
-        .delete(protected_id, None)
+        .delete(protected_id)
         .expect("bob should accept the delete locally");
     let bob_delete = bob
         .wait_for_batch(
@@ -188,7 +187,7 @@ async fn synced_soft_delete_should_use_delete_policy() {
     .await;
 
     alice
-        .delete(protected_id, None)
+        .delete(protected_id)
         .expect("admin soft delete should be accepted locally");
 
     wait_for_protected_rows(

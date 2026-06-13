@@ -106,11 +106,7 @@ async fn rebac_exists_clause_denies_non_matching_insert() {
         .expect("connect alice");
 
     let (protected_id, _, batch_id) = bob
-        .insert(
-            "protected",
-            crate::row_input!("data" => "secret data"),
-            None,
-        )
+        .insert("protected", crate::row_input!("data" => "secret data"))
         .expect("permissive non-admin insert should succeed locally");
     let rejected = bob
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -170,14 +166,10 @@ async fn rebac_update_denied_by_using_exists_policy() {
     .expect("connect permissive bob");
 
     let (admin_id, _, _) = alice
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed alice admin row");
     let (protected_id, _, _) = alice
-        .insert(
-            "protected",
-            crate::row_input!("data" => "original data"),
-            None,
-        )
+        .insert("protected", crate::row_input!("data" => "original data"))
         .expect("seed protected row");
 
     wait_for_admin_row(&bob, admin_id, "alice").await;
@@ -193,7 +185,6 @@ async fn rebac_update_denied_by_using_exists_policy() {
         .update(
             protected_id,
             vec![("data".into(), Value::Text("hacked by bob".into()))],
-            None,
         )
         .expect("permissive non-admin update should succeed locally");
     let rejected = bob
@@ -223,7 +214,6 @@ async fn rebac_update_denied_by_using_exists_policy() {
         .update(
             protected_id,
             vec![("data".into(), Value::Text("updated by admin alice".into()))],
-            None,
         )
         .expect("admin update should be allowed locally");
     wait_for_protected_row(
@@ -263,10 +253,10 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
     let client = JazzClient::test_client(schema).await;
 
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
     let protected = client
-        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row")
         .0;
 
