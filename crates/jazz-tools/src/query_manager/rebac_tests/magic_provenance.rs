@@ -26,7 +26,7 @@ async fn magic_columns_reactively_track_update_and_delete_permissions() {
     let client = JazzClient::test_client(schema).await;
 
     let protected = client
-        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row")
         .0;
 
@@ -63,7 +63,7 @@ async fn magic_columns_reactively_track_update_and_delete_permissions() {
     );
 
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("grant alice admin");
 
     let dependency_delta = next_subscription_delta(&mut subscription).await;
@@ -112,10 +112,10 @@ async fn magic_columns_return_null_without_session_and_do_not_change_default_out
     let client = JazzClient::test_client(schema).await;
 
     client
-        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row");
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("grant alice admin");
 
     let projected_query = QueryBuilder::new("protected")
@@ -200,11 +200,8 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     );
 
     client
-        .update(
-            note,
-            vec![("title".into(), Value::Text("revised".into()))],
-            Some(attributed_to("bob")),
-        )
+        .with_write_context(attributed_to("bob"))
+        .update(note, vec![("title".into(), Value::Text("revised".into()))])
         .expect("attributed update should succeed without a session");
 
     let updated = client
@@ -259,7 +256,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     );
 
     client
-        .insert("notes", crate::row_input!("title" => "system note"), None)
+        .insert("notes", crate::row_input!("title" => "system note"))
         .expect("system-authored note should insert without a session");
     let system = client
         .query(
@@ -316,10 +313,10 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     };
 
     client
+        .with_write_context(bob_backfill)
         .update(
             note,
             vec![("title".into(), Value::Text("backfilled".into()))],
-            Some(bob_backfill),
         )
         .expect("explicit updated_at override should succeed");
 
@@ -368,15 +365,12 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows() {
         .expect("creator-based insert policy should allow alice")
         .0;
     let alice_attributed = client
-        .insert(
-            "notes",
-            crate::row_input!("title" => "alice-attributed"),
-            Some(attributed_to("alice")),
-        )
+        .with_write_context(attributed_to("alice"))
+        .insert("notes", crate::row_input!("title" => "alice-attributed"))
         .expect("backend-attributed note should stamp alice as creator")
         .0;
     client
-        .insert("notes", crate::row_input!("title" => "system-owned"), None)
+        .insert("notes", crate::row_input!("title" => "system-owned"))
         .expect("system note should insert");
 
     let alice_visible = client

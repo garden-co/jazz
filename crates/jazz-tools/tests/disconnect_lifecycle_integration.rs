@@ -56,7 +56,6 @@ async fn client_reconnects_after_server_reaps_stale_state() {
                 ("title".to_string(), Value::Text("survive-reap".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            None,
         )
         .expect("create todo");
 
@@ -133,7 +132,6 @@ async fn client_reconnects_after_server_reaps_stale_state() {
                 "title".to_string(),
                 Value::Text("updated-after-reap".to_string()),
             )],
-            None,
         )
         .expect("update after reconnect");
 
@@ -238,7 +236,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
                 ("title".to_string(), Value::Text("alice-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            None,
         )
         .expect("alice create");
 
@@ -248,7 +245,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
             ("title".to_string(), Value::Text("bob-todo".to_string())),
             ("completed".to_string(), Value::Boolean(false)),
         ]),
-        None,
     )
     .expect("bob create");
 
@@ -307,7 +303,6 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
             ("title".to_string(), Value::Text("bob-todo-2".to_string())),
             ("completed".to_string(), Value::Boolean(false)),
         ]),
-        None,
     )
     .expect("bob create after reap");
 

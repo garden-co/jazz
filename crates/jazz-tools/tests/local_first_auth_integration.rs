@@ -99,7 +99,7 @@ async fn same_seed_syncs_across_devices() {
     .expect("connect alice device A");
 
     let (todo_id, expected_values, _) = alice_device_a
-        .insert("todos", todo_values("buy milk", false), None)
+        .insert("todos", todo_values("buy milk", false))
         .expect("alice device A creates todo");
 
     let alice_device_b = JazzClient::connect(local_first_context(
@@ -157,10 +157,10 @@ async fn different_seeds_produce_distinct_principals() {
     .expect("connect bob");
 
     let (alice_todo_id, alice_values, _) = alice
-        .insert("todos", todo_values("alice's task", false), None)
+        .insert("todos", todo_values("alice's task", false))
         .expect("alice creates todo");
     let (bob_todo_id, bob_values, _) = bob
-        .insert("todos", todo_values("bob's task", true), None)
+        .insert("todos", todo_values("bob's task", true))
         .expect("bob creates todo");
 
     wait_for_rows(
@@ -210,7 +210,7 @@ async fn persistent_seed_reconnects_as_same_principal() {
         .await
         .expect("first connect");
     let (todo_id, expected_values, _) = first
-        .insert("todos", todo_values("remember this", false), None)
+        .insert("todos", todo_values("remember this", false))
         .expect("create todo");
 
     // Let the row settle at EdgeServer so we can verify the server recognized
@@ -412,7 +412,7 @@ async fn expired_token_reconnect_flushes_queued_writes() {
 
     // Pre-expiry write: confirm the session is healthy and reaches the edge.
     let (pre_id, pre_values, _) = client
-        .insert("todos", todo_values("pre-expiry", false), None)
+        .insert("todos", todo_values("pre-expiry", false))
         .expect("pre-expiry create");
     wait_for_rows(
         &client,
@@ -429,7 +429,7 @@ async fn expired_token_reconnect_flushes_queued_writes() {
     // Post-expiry write: commit succeeds locally even though the server would
     // now reject the bearer token on sync.
     let (queued_id, queued_values, _) = client
-        .insert("todos", todo_values("post-expiry", true), None)
+        .insert("todos", todo_values("post-expiry", true))
         .expect("post-expiry create");
 
     client.shutdown().await.expect("shutdown expired client");

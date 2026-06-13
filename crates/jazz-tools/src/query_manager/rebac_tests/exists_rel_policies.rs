@@ -37,14 +37,12 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
         .insert(
             "admins",
             crate::row_input!("user_id" => "alice", "team_id" => "team-a"),
-            None,
         )
         .expect("seed admin row");
     client
         .insert(
             "team_memberships",
             crate::row_input!("team_id" => "team-a", "user_id" => "alice"),
-            None,
         )
         .expect("seed membership row");
 
@@ -79,7 +77,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin() {
     let client = JazzClient::test_client(schema).await;
 
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
 
     let bob_err = client
@@ -112,7 +110,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
     let client = JazzClient::test_client(schema).await;
 
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
 
     let err = client
@@ -152,14 +150,12 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows()
         .insert(
             "admins",
             crate::row_input!("user_id" => "alice", "revoked_at" => Value::Null),
-            None,
         )
         .expect("seed active admin row");
     client
         .insert(
             "admins",
             crate::row_input!("user_id" => "carol", "revoked_at" => "2026-03-30T12:00:00Z"),
-            None,
         )
         .expect("seed revoked admin row");
 
@@ -197,10 +193,10 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin()
     let client = JazzClient::test_client(schema).await;
 
     client
-        .insert("admins", crate::row_input!("user_id" => "alice"), None)
+        .insert("admins", crate::row_input!("user_id" => "alice"))
         .expect("seed admin row");
     let protected = client
-        .insert("protected", crate::row_input!("data" => "initial"), None)
+        .insert("protected", crate::row_input!("data" => "initial"))
         .expect("seed protected row")
         .0;
 

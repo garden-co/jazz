@@ -48,7 +48,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(feature = "client")]
-pub use client::{JazzClient, SessionClient};
+pub use client::JazzClient;
 
 #[cfg(feature = "client")]
 pub use object::ObjectId;
