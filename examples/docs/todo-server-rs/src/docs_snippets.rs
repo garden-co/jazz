@@ -4,9 +4,7 @@
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
-use jazz_tools::{
-    DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
-};
+use jazz_tools::{DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, Value};
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
@@ -38,10 +36,7 @@ pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, St
 // #endregion backend-request-session-rust
 
 // #region backend-request-scoped-client-rust
-pub fn scoped_client_for_session<'a>(
-    client: &'a JazzClient,
-    session: Session,
-) -> SessionClient<'a> {
+pub fn scoped_client_for_session(client: &JazzClient, session: Session) -> JazzClient {
     client.for_session(session)
 }
 // #endregion backend-request-scoped-client-rust
@@ -267,13 +262,12 @@ pub fn build_todo_lineage_query() -> jazz_tools::Query {
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = todo_values("Write docs", "");
 
-    let _new_row = client.insert("todos", values, None)?;
+    let _new_row = client.insert("todos", values)?;
     client.update(
         existing_id,
         vec![("done".to_string(), Value::Boolean(true))],
-        None,
     )?;
-    client.delete(existing_id, None)?;
+    client.delete(existing_id)?;
     Ok(())
 }
 // #endregion writing-crud-rust
@@ -285,7 +279,6 @@ pub async fn write_todo_with_default_durability(
     let (id, _row_values, _batch_id) = client.insert(
         "todos",
         todo_values("Write docs with default durability behavior", ""),
-        None,
     )?;
 
     // Rust currently does not expose per-write durability tier arguments.
@@ -418,7 +411,7 @@ pub async fn clear_nullable_fields(
     todo_id: ObjectId,
 ) -> jazz_tools::Result<()> {
     // Set a nullable column to null
-    client.update(todo_id, vec![("owner_id".to_string(), Value::Null)], None)?;
+    client.update(todo_id, vec![("owner_id".to_string(), Value::Null)])?;
 
     // Only the specified columns are changed; omitted columns are left as-is.
     Ok(())
@@ -441,7 +434,6 @@ pub async fn create_file_from_bytes(
         let (part_id, _, _) = client.insert(
             "file_parts",
             jazz_tools::row_input!("data" => chunk.to_vec()),
-            None,
         )?;
         part_ids.push(Value::Uuid(part_id));
         part_sizes.push(Value::Integer(chunk.len() as i32));
@@ -456,7 +448,7 @@ pub async fn create_file_from_bytes(
         file_values.insert("name".to_string(), name.into());
     }
 
-    let (file_id, _, _) = client.insert("files", file_values, None)?;
+    let (file_id, _, _) = client.insert("files", file_values)?;
     Ok(file_id)
 }
 // #endregion files-create-from-bytes-rust
@@ -476,7 +468,6 @@ pub async fn create_upload_from_bytes(
             "label" => "Profile photo",
             "fileId" => file_id,
         ),
-        None,
     )?;
 
     Ok(upload_id)
@@ -584,14 +575,14 @@ pub async fn delete_upload_with_file(
             // Delete chunks while the parent file row still exists.
             for part_ref in part_ids {
                 if let Value::Uuid(part_id) = part_ref {
-                    client.delete(*part_id, None)?;
+                    client.delete(*part_id)?;
                 }
             }
         }
-        client.delete(*file_row_id, None)?;
+        client.delete(*file_row_id)?;
     }
 
-    client.delete(upload_id, None)?;
+    client.delete(upload_id)?;
     Ok(())
 }
 // #endregion files-delete-rust

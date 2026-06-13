@@ -42,7 +42,7 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
 
 async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .insert("notes", note_input(title), None)
+        .insert("notes", note_input(title))
         .expect("create note without attribution")
         .0
 }

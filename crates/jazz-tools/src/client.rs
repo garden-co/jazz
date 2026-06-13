@@ -45,8 +45,8 @@ struct UnverifiedJwtClaims {
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
-    /// Session inferred from client auth context for user-scoped operations.
-    default_session: Option<Session>,
+    /// Write metadata applied to mutations issued through this client.
+    write_context: Option<WriteContext>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
     /// Whether a server URL was provided at construction time.
@@ -54,7 +54,7 @@ pub struct JazzClient {
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Next subscription handle ID.
-    next_handle: std::sync::atomic::AtomicU64,
+    next_handle: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// State for an active subscription.
@@ -124,7 +124,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
-fn default_session_from_context(context: &AppContext) -> Option<Session> {
+fn write_context_from_context(context: &AppContext) -> Option<WriteContext> {
     if context.backend_secret.is_some() || context.admin_secret.is_some() {
         return None;
     }
@@ -133,6 +133,7 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .jwt_token
         .as_deref()
         .and_then(session_from_unverified_jwt)
+        .map(WriteContext::from_session)
 }
 
 async fn wait_for_initial_transport_handshake(
@@ -175,7 +176,7 @@ impl JazzClient {
         context: AppContext,
         build_schema_manager: impl FnOnce(&DynStorage, &AppContext) -> Result<SchemaManager>,
     ) -> Result<Self> {
-        let default_session = default_session_from_context(&context);
+        let write_context = write_context_from_context(&context);
         // Loaded for its side effect of persisting the client-id file on disk;
         // the wire ClientId is assigned by `TransportManager::create` at connect
         // time and is exposed via `runtime.transport_client_id()`.
@@ -235,11 +236,11 @@ impl JazzClient {
         }
 
         Ok(Self {
-            default_session,
+            write_context,
             runtime,
             has_server,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            next_handle: std::sync::atomic::AtomicU64::new(1),
+            next_handle: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -258,16 +259,6 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_internal(query, self.default_session.clone())
-            .await
-    }
-
-    /// Internal subscribe with optional session.
-    async fn subscribe_internal(
-        &self,
-        query: Query,
-        session: Option<Session>,
-    ) -> Result<SubscriptionStream> {
         let handle = SubscriptionHandle(
             self.next_handle
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
@@ -290,7 +281,9 @@ impl JazzClient {
                     // updates when the consumer falls briefly behind.
                     let _ = tx.send(delta.ordered_delta);
                 },
-                session,
+                self.write_context
+                    .as_ref()
+                    .and_then(|context| context.session.clone()),
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
 
@@ -311,22 +304,13 @@ impl JazzClient {
         query: Query,
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        self.query_internal(query, self.default_session.clone(), durability_tier)
-            .await
-    }
-
-    /// Internal one-shot query with optional session.
-    async fn query_internal(
-        &self,
-        query: Query,
-        session: Option<Session>,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .runtime
             .query(
                 query,
-                session,
+                self.write_context
+                    .as_ref()
+                    .and_then(|context| context.session.clone()),
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
@@ -343,9 +327,8 @@ impl JazzClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-        write_context: Option<WriteContext>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        self.insert_with_id(table, Option::<Uuid>::None, values, write_context)
+        self.insert_with_id(table, Option::<Uuid>::None, values)
     }
 
     /// Create a new row in a table using a caller-supplied UUID.
@@ -354,7 +337,6 @@ impl JazzClient {
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-        write_context: Option<WriteContext>,
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         let (object_id, row_values, batch_id) = self
             .runtime
@@ -362,7 +344,7 @@ impl JazzClient {
                 table,
                 values,
                 object_id.into().map(ObjectId::from_uuid),
-                write_context.as_ref(),
+                self.write_context.as_ref(),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         Ok((object_id, row_values, batch_id))
@@ -374,38 +356,28 @@ impl JazzClient {
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-        write_context: Option<WriteContext>,
     ) -> Result<BatchId> {
         self.runtime
             .upsert(
                 table,
                 ObjectId::from_uuid(object_id),
                 values,
-                write_context.as_ref(),
+                self.write_context.as_ref(),
             )
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Update a row.
-    pub fn update(
-        &self,
-        object_id: ObjectId,
-        updates: Vec<(String, Value)>,
-        write_context: Option<WriteContext>,
-    ) -> Result<BatchId> {
+    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         self.runtime
-            .update(object_id, updates, write_context.as_ref())
+            .update(object_id, updates, self.write_context.as_ref())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Delete a row.
-    pub fn delete(
-        &self,
-        object_id: ObjectId,
-        write_context: Option<WriteContext>,
-    ) -> Result<BatchId> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.runtime
-            .delete(object_id, write_context.as_ref())
+            .delete(object_id, self.write_context.as_ref())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -438,12 +410,20 @@ impl JazzClient {
         self.has_server && self.runtime.transport_ever_connected()
     }
 
-    /// Create a session-scoped client for backend operations.
-    pub fn for_session(&self, session: Session) -> SessionClient<'_> {
-        SessionClient {
-            client: self,
-            session,
+    /// Create a client that uses the given write context for mutations.
+    pub fn with_write_context(&self, write_context: WriteContext) -> JazzClient {
+        JazzClient {
+            write_context: Some(write_context),
+            runtime: self.runtime.clone(),
+            has_server: self.has_server,
+            subscriptions: Arc::clone(&self.subscriptions),
+            next_handle: Arc::clone(&self.next_handle),
         }
+    }
+
+    /// Create a session-scoped client for backend operations.
+    pub fn for_session(&self, session: Session) -> JazzClient {
+        self.with_write_context(WriteContext::from_session(session))
     }
 
     /// Shutdown the client and release resources.
@@ -507,6 +487,10 @@ impl Drop for JazzClient {
     /// that is good-enough for tests (so that we don't require an explicit
     /// `JazzClient.shutdown` at the end of each test case)
     fn drop(&mut self) {
+        if Arc::strong_count(&self.next_handle) > 1 {
+            return;
+        }
+
         if self.has_server {
             self.runtime.disconnect();
         }
@@ -516,92 +500,6 @@ impl Drop for JazzClient {
             let _ = storage.flush_wal();
             let _ = storage.close();
         });
-    }
-}
-
-/// Session-scoped client for backend operations.
-pub struct SessionClient<'a> {
-    client: &'a JazzClient,
-    session: Session,
-}
-
-impl<'a> SessionClient<'a> {
-    pub fn insert(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        self.insert_with_id(table, Option::<Uuid>::None, values)
-    }
-
-    pub fn insert_with_id(
-        &self,
-        table: &str,
-        object_id: impl Into<Option<Uuid>>,
-        values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
-        let write_context = WriteContext::from_session(self.session.clone());
-        let (object_id, row_values, batch_id) = self
-            .client
-            .runtime
-            .insert_with_id(
-                table,
-                values,
-                object_id.into().map(ObjectId::from_uuid),
-                Some(&write_context),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))?;
-        Ok((object_id, row_values, batch_id))
-    }
-
-    pub fn upsert(
-        &self,
-        table: &str,
-        object_id: Uuid,
-        values: HashMap<String, Value>,
-    ) -> Result<BatchId> {
-        let write_context = WriteContext::from_session(self.session.clone());
-        self.client
-            .runtime
-            .upsert(
-                table,
-                ObjectId::from_uuid(object_id),
-                values,
-                Some(&write_context),
-            )
-            .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
-        let write_context = WriteContext::from_session(self.session.clone());
-        self.client
-            .runtime
-            .update(object_id, updates, Some(&write_context))
-            .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
-        let write_context = WriteContext::from_session(self.session.clone());
-        self.client
-            .runtime
-            .delete(object_id, Some(&write_context))
-            .map_err(|e| JazzError::Write(e.to_string()))
-    }
-
-    pub async fn query(
-        &self,
-        query: Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        self.client
-            .query_internal(query, Some(self.session.clone()), durability_tier)
-            .await
-    }
-
-    pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.client
-            .subscribe_internal(query, Some(self.session.clone()))
-            .await
     }
 }
 
@@ -834,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn default_session_from_context_uses_jwt_claims_for_user_clients() {
+    fn write_context_from_context_uses_jwt_claims_for_user_clients() {
         let app_id = AppId::from_name("client-jwt-session");
         let mut context = make_offline_context(
             app_id,
@@ -843,13 +741,14 @@ mod tests {
         );
         context.jwt_token = Some(make_test_jwt("alice", json!({ "join_code": "secret-123" })));
 
-        let session = default_session_from_context(&context).expect("derive session from jwt");
+        let write_context = write_context_from_context(&context).expect("derive write context");
+        let session = write_context.session.expect("derive session from jwt");
         assert_eq!(session.user_id, "alice");
         assert_eq!(session.claims["join_code"], "secret-123");
     }
 
     #[test]
-    fn default_session_from_context_skips_backend_capable_clients() {
+    fn write_context_from_context_skips_backend_capable_clients() {
         let app_id = AppId::from_name("client-backend-session");
         let mut context = make_offline_context(
             app_id,
@@ -860,8 +759,8 @@ mod tests {
         context.backend_secret = Some("backend-secret".to_string());
 
         assert!(
-            default_session_from_context(&context).is_none(),
-            "backend/admin clients should keep using explicit SessionClient scopes"
+            write_context_from_context(&context).is_none(),
+            "backend/admin clients should keep using explicit session scopes"
         );
     }
 

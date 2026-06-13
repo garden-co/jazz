@@ -305,7 +305,6 @@ async fn rebac_inherits_filters_select_query_results() {
         .insert(
             "folders",
             crate::row_input!("owner_id" => "alice", "name" => "Alice's Folder"),
-            None,
         )
         .expect("seed folder")
         .0;
@@ -317,7 +316,6 @@ async fn rebac_inherits_filters_select_query_results() {
                 "title" => "Bob's Doc in Alice's Folder",
                 "folder_id" => folder_id,
             ),
-            None,
         )
         .expect("seed document");
 
@@ -361,15 +359,12 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
         .insert(
             "folders",
             crate::row_input!("owner_id" => "alice", "name" => "Shared"),
-            None,
         )
         .expect("folder insert should succeed");
     client
         .insert(
             "documents",
-            crate::row_input!("owner_id" => "bob", "title" => "Inherited doc", "folder_id" => folder.0),
-            None,
-        )
+            crate::row_input!("owner_id" => "bob", "title" => "Inherited doc", "folder_id" => folder.0))
         .expect("document insert should succeed");
 
     let rows = client
@@ -406,11 +401,7 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
     let client = JazzClient::permissive_test_client(schema).await;
 
     let folder = client
-        .insert(
-            "folders",
-            crate::row_input!("title" => "alice folder"),
-            None,
-        )
+        .insert("folders", crate::row_input!("title" => "alice folder"))
         .expect("seed folder row");
 
     client
@@ -453,7 +444,6 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
         .insert(
             "files",
             crate::row_input!("owner_id" => "bob", "name" => "shared-file"),
-            None,
         )
         .expect("seed file row");
     client
@@ -464,7 +454,6 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
                 "title" => "todo referencing file",
                 "file_id" => file.0,
             ),
-            None,
         )
         .expect("seed referencing todo row");
 
@@ -505,14 +494,12 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable()
         .insert(
             "folders",
             crate::row_input!("owner_id" => "alice", "name" => "Root", "parent_id" => Value::Null),
-            None,
         )
         .expect("create root");
     let child = client
         .insert(
             "folders",
             crate::row_input!("owner_id" => "bob", "name" => "Child", "parent_id" => root.0),
-            None,
         )
         .expect("create child");
 

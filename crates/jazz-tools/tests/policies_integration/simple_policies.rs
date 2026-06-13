@@ -56,7 +56,6 @@ async fn seed_document(
         .insert(
             table_name,
             boolean_policy_document_input(owner_id, title, archived),
-            None,
         )
         .expect("create document")
         .0
@@ -67,34 +66,27 @@ async fn create_row(
     table_name: &str,
     values: HashMap<String, Value>,
 ) -> ObjectId {
-    client
-        .insert(table_name, values, None)
-        .expect("create row")
-        .0
+    client.insert(table_name, values).expect("create row").0
 }
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())], None)
+        .update(document_id, vec![("title".to_string(), title.into())])
         .expect("update document title");
 }
 
 async fn update_document_archived(client: &JazzClient, document_id: ObjectId, archived: bool) {
     client
-        .update(
-            document_id,
-            vec![("archived".to_string(), archived.into())],
-            None,
-        )
+        .update(document_id, vec![("archived".to_string(), archived.into())])
         .expect("update document archived");
 }
 
 async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes, None).expect("update row");
+    client.update(row_id, changes).expect("update row");
 }
 
 async fn delete_document(client: &JazzClient, document_id: ObjectId) {
-    client.delete(document_id, None).expect("delete document");
+    client.delete(document_id).expect("delete document");
 }
 
 fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
