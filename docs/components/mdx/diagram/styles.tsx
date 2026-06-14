@@ -24,6 +24,15 @@ const DIAGRAM_STYLES_CSS = `
     --diagram-card-muted: #f4f4f5;
     --diagram-fg: #18181b;
     --diagram-muted: #71717a;
+    /* Two-author palette for diagrams that need to show "who wrote what".
+       Generic names (a / b) so the engine stays domain-free; the consumer
+       maps actors to slots. Author-a defaults to the brand accent (so a
+       single-author diagram looks identical to one with author-a styling),
+       author-b to a warm contrast. */
+    --diagram-author-a: var(--diagram-accent);
+    --diagram-author-a-rgb: var(--diagram-accent-rgb);
+    --diagram-author-b: #f59e0b;
+    --diagram-author-b-rgb: 245 158 11;
   }
 }
 .diagram-path {
