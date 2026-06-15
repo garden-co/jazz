@@ -345,6 +345,8 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
           values: value.value.values.map(encodePublishedMigrationValue),
         },
       };
+    case "Locked":
+      throw new Error("Locked values cannot be published in migrations");
     default:
       return value;
   }

@@ -26,6 +26,7 @@ import {
   WriteHandle,
   type BatchMode,
   type CreateOptions,
+  type E2eeKeyHolder,
   type RestoreOptions,
   type UpdateOptions,
   type UpsertOptions,
@@ -46,6 +47,7 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import { isLocked } from "../locked.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import {
@@ -520,7 +522,7 @@ function transformOutputColumns(
 
   const transformed = { ...(row as Record<string, unknown>) };
   for (const [column, transform] of Object.entries(source._columnTransforms)) {
-    if (column in transformed) {
+    if (column in transformed && !isLocked(transformed[column])) {
       transformed[column] = transform.from(transformed[column]);
     }
   }
@@ -883,7 +885,35 @@ export class Db {
   /** @internal Store the seed used for local-first auth and schedule token refresh. */
   initLocalFirstAuth(seed: string, ttlSeconds: number): void {
     this._localFirstSecret = seed;
+    for (const client of this.clients.values()) {
+      this.tryEnableClientE2ee(client, seed);
+    }
     this.scheduleLocalFirstRefresh(ttlSeconds);
+  }
+
+  private tryEnableClientE2ee(client: JazzClient, seed: string): void {
+    try {
+      client.enableE2ee(seed);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("does not support E2EE")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private clearLocalFirstAuth(): void {
+    if (!this._localFirstSecret && !this.localFirstRefreshTimer) {
+      return;
+    }
+    this._localFirstSecret = null;
+    if (this.localFirstRefreshTimer) {
+      clearTimeout(this.localFirstRefreshTimer);
+      this.localFirstRefreshTimer = null;
+    }
+    for (const client of this.clients.values()) {
+      client.clearE2ee();
+    }
   }
 
   private scheduleLocalFirstRefresh(ttlSeconds: number): void {
@@ -907,7 +937,7 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      this.updateAuthToken(newToken);
+      this.applyAuthUpdate(newToken);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
@@ -1083,6 +1113,9 @@ export class Db {
       });
 
       this.attachMutationErrorHandler(client);
+      if (this._localFirstSecret) {
+        this.tryEnableClientE2ee(client, this._localFirstSecret);
+      }
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
@@ -1099,6 +1132,14 @@ export class Db {
     }
 
     return this.clients.get(key)!;
+  }
+
+  private getInitializedClient(operation: string): JazzClient {
+    const first = this.clients.values().next().value;
+    if (!first) {
+      throw new Error(`${operation} requires an initialized runtime client.`);
+    }
+    return first;
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -1245,6 +1286,7 @@ export class Db {
       dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
       serverUrl: this.config.serverUrl,
       jwtToken: this.config.jwtToken,
+      e2eeSecret: this._localFirstSecret ?? undefined,
       adminSecret: this.config.adminSecret,
       runtimeSources,
       fallbackWasmUrl,
@@ -1629,10 +1671,12 @@ export class Db {
   }
 
   updateAuthToken(jwtToken: string | null): void {
+    this.clearLocalFirstAuth();
     this.applyAuthUpdate(jwtToken);
   }
 
   updateCookieSession(cookieSession: Session | null): void {
+    this.clearLocalFirstAuth();
     this.applyCookieSessionUpdate(cookieSession);
   }
 
@@ -1809,6 +1853,51 @@ export class Db {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return client.delete(id, options, context?.session, context?.attribution);
+  }
+
+  e2eePublicKey(): string | null {
+    if (this._localFirstSecret && this.runtimeModule) {
+      try {
+        return this.runtimeModule.deriveE2eePublicKey(this._localFirstSecret);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("does not support E2EE")) {
+          throw error;
+        }
+      }
+    }
+    if (this.clients.size === 0) {
+      return null;
+    }
+    return this.getInitializedClient("e2eePublicKey").e2eePublicKey();
+  }
+
+  shareKey<T, Init>(
+    spaceTable: TableProxy<T, Init>,
+    spaceId: string,
+    recipientUserId: string,
+    recipientPublicKey: string,
+  ): WriteHandle {
+    const client = this.getClient(spaceTable._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.shareKey(
+      spaceTable._table,
+      spaceId,
+      recipientUserId,
+      recipientPublicKey,
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  unshareKey(keyRowId: string): WriteHandle {
+    const client = this.getInitializedClient("unshareKey");
+    const context = this.getRuntimeOperationContext();
+    return client.unshareKey(keyRowId, context?.session, context?.attribution);
+  }
+
+  keyHolders<T, Init>(spaceTable: TableProxy<T, Init>, spaceId: string): E2eeKeyHolder[] {
+    const client = this.getClient(spaceTable._schema);
+    return client.keyHolders(spaceTable._table, spaceId);
   }
 
   /**
@@ -2360,6 +2449,34 @@ class ClientBackedDb extends Db {
     }
 
     this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
+  }
+
+  override e2eePublicKey(): string | null {
+    return this.runtimeClient.e2eePublicKey();
+  }
+
+  override shareKey<T, Init>(
+    spaceTable: TableProxy<T, Init>,
+    spaceId: string,
+    recipientUserId: string,
+    recipientPublicKey: string,
+  ): WriteHandle {
+    return this.runtimeClient.shareKey(
+      spaceTable._table,
+      spaceId,
+      recipientUserId,
+      recipientPublicKey,
+      this.session,
+      this.attribution,
+    );
+  }
+
+  override unshareKey(keyRowId: string): WriteHandle {
+    return this.runtimeClient.unshareKey(keyRowId, this.session, this.attribution);
+  }
+
+  override keyHolders<T, Init>(spaceTable: TableProxy<T, Init>, spaceId: string): E2eeKeyHolder[] {
+    return this.runtimeClient.keyHolders(spaceTable._table, spaceId);
   }
 
   protected override getRuntimeOperationContext(): DbRuntimeOperationContext {

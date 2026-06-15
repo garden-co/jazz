@@ -246,6 +246,9 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
+        Value::Locked => {
+            hasher.update(&[13]);
+        }
         Value::Null => {
             hasher.update(&[9]);
         }

@@ -1968,6 +1968,22 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsError> {
     Ok(arr)
 }
 
+fn parse_required_object_id(input: &str, field: &str) -> Result<ObjectId, JsError> {
+    parse_external_object_id(Some(input))
+        .map_err(|message| JsError::new(&message))?
+        .ok_or_else(|| JsError::new(&format!("{field} is required")))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmE2eeKeyHolder {
+    row_id: String,
+    space_id: String,
+    key_id: String,
+    recipient_user_id: String,
+    recipient_public_key: String,
+}
+
 #[wasm_bindgen]
 impl WasmRuntime {
     #[wasm_bindgen(js_name = "deriveUserId")]
@@ -2000,6 +2016,101 @@ impl WasmRuntime {
             now_seconds,
         )
         .map_err(|e| JsError::new(&e))
+    }
+
+    #[wasm_bindgen(js_name = "deriveE2eePublicKey")]
+    pub fn derive_e2ee_public_key_static(seed_b64: &str) -> Result<String, JsError> {
+        let seed = decode_seed(seed_b64)?;
+        Ok(jazz_tools::e2ee::derive_e2ee_keypair(&seed)
+            .public
+            .to_base64url())
+    }
+
+    #[wasm_bindgen(js_name = "enableE2ee")]
+    pub fn enable_e2ee(&self, seed_b64: &str) -> Result<(), JsError> {
+        let seed = decode_seed(seed_b64)?;
+        self.core.borrow_mut().enable_e2ee(&seed);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = "clearE2ee")]
+    pub fn clear_e2ee(&self) {
+        self.core.borrow_mut().clear_e2ee();
+    }
+
+    #[wasm_bindgen(js_name = "e2eePublicKey")]
+    pub fn e2ee_public_key(&self) -> JsValue {
+        self.core
+            .borrow()
+            .e2ee_public_key()
+            .map(|key| JsValue::from_str(&key.to_base64url()))
+            .unwrap_or(JsValue::NULL)
+    }
+
+    #[wasm_bindgen(js_name = "shareKey")]
+    pub fn share_key(
+        &self,
+        space_table: &str,
+        space_id: &str,
+        recipient_user_id: &str,
+        recipient_public_key: &str,
+        write_context_json: Option<String>,
+    ) -> Result<String, JsError> {
+        let space_id = parse_required_object_id(space_id, "spaceId")?;
+        let recipient_user_id = parse_required_object_id(recipient_user_id, "recipientUserId")?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let batch_id = self
+            .core
+            .borrow_mut()
+            .share_key(
+                space_table,
+                space_id,
+                recipient_user_id,
+                recipient_public_key,
+                write_context.as_ref(),
+            )
+            .map_err(|e| JsError::new(&format!("Share key failed: {e}")))?;
+        Ok(batch_id.to_string())
+    }
+
+    #[wasm_bindgen(js_name = "unshareKey")]
+    pub fn unshare_key(
+        &self,
+        key_row_id: &str,
+        write_context_json: Option<String>,
+    ) -> Result<String, JsError> {
+        let key_row_id = parse_required_object_id(key_row_id, "keyRowId")?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let batch_id = self
+            .core
+            .borrow_mut()
+            .unshare_key(key_row_id, write_context.as_ref())
+            .map_err(|e| JsError::new(&format!("Unshare key failed: {e}")))?;
+        Ok(batch_id.to_string())
+    }
+
+    #[wasm_bindgen(js_name = "keyHolders")]
+    pub fn key_holders(&self, space_table: &str, space_id: &str) -> Result<JsValue, JsError> {
+        let space_id = parse_required_object_id(space_id, "spaceId")?;
+        let holders = self
+            .core
+            .borrow()
+            .key_holders(space_table, space_id)
+            .map_err(|e| JsError::new(&format!("Key holders query failed: {e}")))?
+            .into_iter()
+            .map(|holder| WasmE2eeKeyHolder {
+                row_id: holder.row_id.uuid().to_string(),
+                space_id: holder.space_id.uuid().to_string(),
+                key_id: holder.key_id.to_string(),
+                recipient_user_id: holder.recipient_user_id.uuid().to_string(),
+                recipient_public_key: holder.recipient_public_key,
+            })
+            .collect::<Vec<_>>();
+
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        holders
+            .serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {e}")))
     }
 
     /// Connect to a Jazz server over WebSocket.

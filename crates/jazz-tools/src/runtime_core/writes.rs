@@ -5,8 +5,11 @@ use crate::batch_fate::{
 };
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
+use crate::query_manager::types::e2ee_schema::e2ee_keys_table_name;
 use crate::row_histories::{BatchId, RowState, patch_row_batch_state};
 use crate::storage::StorageError;
+use crate::{e2ee, row_format::decode_row};
+use uuid::Uuid;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn begin_batch(&mut self, batch_mode: BatchMode) -> BatchId {
@@ -559,6 +562,83 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     // CRUD Operations
     // =========================================================================
 
+    fn table_is_encryption_space(&self, table: &str) -> bool {
+        self.schema_manager
+            .current_schema()
+            .get(&crate::query_manager::types::TableName::new(table))
+            .is_some_and(|schema| schema.encryption_space)
+    }
+
+    fn table_has_encrypted_columns(&self, table: &str) -> bool {
+        self.schema_manager
+            .current_schema()
+            .get(&crate::query_manager::types::TableName::new(table))
+            .is_some_and(|schema| {
+                schema
+                    .columns
+                    .columns
+                    .iter()
+                    .any(|column| column.encrypted_with.is_some())
+            })
+    }
+
+    fn current_row_values_for_update(
+        &self,
+        object_id: ObjectId,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(String, Vec<Value>), RuntimeError> {
+        let target_branch = write_context
+            .and_then(WriteContext::target_branch_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| self.schema_manager.branch_name().as_str().to_string());
+
+        if let Some(batch_id) = write_context.and_then(WriteContext::batch_id)
+            && let Some((table, row)) = self
+                .schema_manager
+                .query_manager()
+                .load_latest_transactional_staged_row_on_branch(
+                    &self.storage,
+                    object_id,
+                    &target_branch,
+                    batch_id,
+                )
+        {
+            let table_schema = self
+                .schema_manager
+                .current_schema()
+                .get(&crate::query_manager::types::TableName::new(&table))
+                .ok_or_else(|| RuntimeError::WriteError(format!("table `{table}` not found")))?;
+            let values = decode_row(&table_schema.columns, &row.data)
+                .map_err(|err| RuntimeError::WriteError(format!("decode existing row: {err}")))?;
+            return Ok((table, values));
+        }
+
+        let locator = self
+            .storage
+            .load_row_locator(object_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            .ok_or(RuntimeError::NotFound)?;
+        let table = locator.table.to_string();
+        let table_schema = self
+            .schema_manager
+            .current_schema()
+            .get(&crate::query_manager::types::TableName::new(&table))
+            .ok_or_else(|| RuntimeError::WriteError(format!("table `{table}` not found")))?;
+        for branch in self.schema_manager.all_branches() {
+            if let Some(row) = self
+                .storage
+                .load_visible_region_row(&table, branch.as_str(), object_id)
+                .map_err(|err| RuntimeError::WriteError(format!("load visible row: {err}")))?
+            {
+                let values = decode_row(&table_schema.columns, &row.data).map_err(|err| {
+                    RuntimeError::WriteError(format!("decode existing row: {err}"))
+                })?;
+                return Ok((table, values));
+            }
+        }
+        Err(RuntimeError::NotFound)
+    }
+
     /// Insert a row into a table.
     pub fn insert(
         &mut self,
@@ -574,24 +654,109 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn insert_with_id(
         &mut self,
         table: &str,
-        values: HashMap<String, Value>,
-        object_id: Option<ObjectId>,
+        mut values: HashMap<String, Value>,
+        mut object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let write_context = self.resolve_batch_write_context(write_context)?;
-        let write_context = write_context.as_ref();
+        let write_context_ref = write_context.as_ref();
+        if self.table_is_encryption_space(table)
+            && write_context_ref.and_then(WriteContext::batch_id).is_none()
+        {
+            let batch_id = self.begin_batch(BatchMode::Direct);
+            let batch_context = write_context
+                .unwrap_or_default()
+                .with_batch_mode(BatchMode::Direct)
+                .with_batch_id(batch_id);
+            let result = self.insert_with_id(table, values, object_id, Some(&batch_context));
+            match result {
+                Ok(result) => {
+                    self.commit_batch(batch_id)?;
+                    return Ok(result);
+                }
+                Err(err) => {
+                    let _ = self.rollback_batch(batch_id);
+                    return Err(err);
+                }
+            }
+        }
+
+        let write_context = write_context_ref;
         self.ensure_batch_is_writable(write_context)?;
+        let is_space_table = self.table_is_encryption_space(table);
+        let row_id = if is_space_table || self.table_has_encrypted_columns(table) {
+            *object_id.get_or_insert_with(ObjectId::new)
+        } else {
+            object_id.unwrap_or_default()
+        };
+
+        let own_space_key = if is_space_table {
+            let public_key =
+                self.e2ee
+                    .public_key()
+                    .ok_or_else(|| RuntimeError::E2eeKeyUnavailable {
+                        table: table.to_string(),
+                        space_id: row_id.to_string(),
+                    })?;
+            let user_id = self
+                .e2ee
+                .user_id()
+                .ok_or_else(|| RuntimeError::E2eeKeyUnavailable {
+                    table: table.to_string(),
+                    space_id: row_id.to_string(),
+                })?;
+            let key = e2ee::SpaceKey::generate();
+            let key_id = Uuid::new_v4();
+            let sealed = e2ee::seal_space_key(public_key, &key)
+                .map_err(|err| RuntimeError::WriteError(format!("seal own space key: {err}")))?;
+            Some((user_id, public_key.to_base64url(), key_id, key, sealed))
+        } else {
+            None
+        };
+
+        if self.table_has_encrypted_columns(table) {
+            let lookup_values = values.clone();
+            self.encrypt_values_for_write(table, row_id, &mut values, &lookup_values)?;
+        }
+
         let result = self
             .schema_manager
-            .insert(&mut self.storage, table, values, object_id, write_context)
+            .insert(
+                &mut self.storage,
+                table,
+                values,
+                Some(row_id),
+                write_context,
+            )
             .map_err(crate::runtime_core::write_error_from_query)?;
         let row_id = result.row_id;
-        let row_values = result.row_values;
+        let row_values = self.decrypt_row_values(table, row_id, result.row_values);
         let batch_id = result.batch_id;
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(row_id, batch_id, batch_mode)?;
+
+        if let Some((user_id, public_key, key_id, key, sealed)) = own_space_key {
+            let keys_values = HashMap::from([
+                ("space_id".to_string(), Value::Uuid(row_id)),
+                (
+                    "key_id".to_string(),
+                    Value::Uuid(ObjectId::from_uuid(key_id)),
+                ),
+                ("recipient_user_id".to_string(), Value::Uuid(user_id)),
+                ("recipient_public_key".to_string(), Value::Text(public_key)),
+                ("sealed_key".to_string(), Value::Bytea(sealed)),
+            ]);
+            self.insert_with_id(
+                &e2ee_keys_table_name(table),
+                keys_values,
+                None,
+                write_context,
+            )?;
+            self.e2ee.cache_space_key(row_id, key_id, key);
+        }
+
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
             self.commit_batch(batch_id)?;
         }
@@ -605,13 +770,38 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn update(
         &mut self,
         object_id: ObjectId,
-        values: Vec<(String, Value)>,
+        mut values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
         let write_context = self.resolve_batch_write_context(write_context)?;
         let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
+        let (table, current_values) =
+            self.current_row_values_for_update(object_id, write_context)?;
+        if self.table_has_encrypted_columns(&table) {
+            let table_schema = self
+                .schema_manager
+                .current_schema()
+                .get(&crate::query_manager::types::TableName::new(&table))
+                .ok_or_else(|| RuntimeError::WriteError(format!("table `{table}` not found")))?
+                .clone();
+            let mut lookup_values = HashMap::new();
+            for (column, value) in table_schema
+                .columns
+                .columns
+                .iter()
+                .zip(current_values.iter())
+            {
+                lookup_values.insert(column.name_str().to_string(), value.clone());
+            }
+            for (name, value) in &values {
+                lookup_values.insert(name.clone(), value.clone());
+            }
+            let mut update_values = values.into_iter().collect::<HashMap<_, _>>();
+            self.encrypt_values_for_write(&table, object_id, &mut update_values, &lookup_values)?;
+            values = update_values.into_iter().collect();
+        }
         let batch_id = self
             .schema_manager
             .update(&mut self.storage, object_id, &values, write_context)
@@ -633,13 +823,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         &mut self,
         table: &str,
         object_id: ObjectId,
-        values: HashMap<String, Value>,
+        mut values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("upsert", table, %object_id).entered();
         let write_context = self.resolve_batch_write_context(write_context)?;
         let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
+        if self.table_has_encrypted_columns(table) {
+            let mut lookup_values = HashMap::new();
+            if let Ok((existing_table, current_values)) =
+                self.current_row_values_for_update(object_id, write_context)
+                && existing_table == table
+                && let Some(table_schema) = self
+                    .schema_manager
+                    .current_schema()
+                    .get(&crate::query_manager::types::TableName::new(table))
+            {
+                for (column, value) in table_schema.columns.columns.iter().zip(current_values) {
+                    lookup_values.insert(column.name_str().to_string(), value);
+                }
+            }
+            lookup_values.extend(values.clone());
+            self.encrypt_values_for_write(table, object_id, &mut values, &lookup_values)?;
+        }
         let batch_id = self
             .schema_manager
             .upsert(&mut self.storage, table, object_id, values, write_context)

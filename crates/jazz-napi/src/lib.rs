@@ -180,6 +180,12 @@ fn parse_write_context_json(
         .map_err(|err| napi::Error::from_reason(format!("Invalid write context JSON: {}", err)))
 }
 
+fn parse_required_object_id(input: &str, field: &str) -> napi::Result<ObjectId> {
+    parse_external_object_id(Some(input))
+        .map_err(napi::Error::from_reason)?
+        .ok_or_else(|| napi::Error::from_reason(format!("{field} is required")))
+}
+
 fn parse_subscription_inputs(
     query_json: &str,
     session_json: Option<String>,
@@ -485,6 +491,121 @@ impl NapiRuntime {
             Box::new(MemoryStorage::new()),
             tier,
         )
+    }
+
+    #[napi(js_name = "deriveE2eePublicKey")]
+    pub fn derive_e2ee_public_key_static(seed_b64: String) -> napi::Result<String> {
+        let seed = decode_seed_napi(&seed_b64)?;
+        Ok(jazz_tools::e2ee::derive_e2ee_keypair(&seed)
+            .public
+            .to_base64url())
+    }
+
+    #[napi(js_name = "enableE2ee")]
+    pub fn enable_e2ee(&self, seed_b64: String) -> napi::Result<()> {
+        let seed = decode_seed_napi(&seed_b64)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.enable_e2ee(&seed);
+        Ok(())
+    }
+
+    #[napi(js_name = "clearE2ee")]
+    pub fn clear_e2ee(&self) -> napi::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.clear_e2ee();
+        Ok(())
+    }
+
+    #[napi(js_name = "e2eePublicKey")]
+    pub fn e2ee_public_key(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.e2ee_public_key().map(|key| key.to_base64url()))
+    }
+
+    #[napi(js_name = "shareKey")]
+    pub fn share_key(
+        &self,
+        space_table: String,
+        space_id: String,
+        recipient_user_id: String,
+        recipient_public_key: String,
+        write_context_json: Option<String>,
+    ) -> napi::Result<String> {
+        let space_id = parse_required_object_id(&space_id, "spaceId")?;
+        let recipient_user_id = parse_required_object_id(&recipient_user_id, "recipientUserId")?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let batch_id = core
+            .share_key(
+                &space_table,
+                space_id,
+                recipient_user_id,
+                &recipient_public_key,
+                write_context.as_ref(),
+            )
+            .map_err(|e| napi::Error::from_reason(format!("Share key failed: {e}")))?;
+        Ok(batch_id.to_string())
+    }
+
+    #[napi(js_name = "unshareKey")]
+    pub fn unshare_key(
+        &self,
+        key_row_id: String,
+        write_context_json: Option<String>,
+    ) -> napi::Result<String> {
+        let key_row_id = parse_required_object_id(&key_row_id, "keyRowId")?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let batch_id = core
+            .unshare_key(key_row_id, write_context.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Unshare key failed: {e}")))?;
+        Ok(batch_id.to_string())
+    }
+
+    #[napi(
+        js_name = "keyHolders",
+        ts_return_type = "Array<{ rowId: string; spaceId: string; keyId: string; recipientUserId: string; recipientPublicKey: string }>"
+    )]
+    pub fn key_holders(
+        &self,
+        space_table: String,
+        space_id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let space_id = parse_required_object_id(&space_id, "spaceId")?;
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let holders = core
+            .key_holders(&space_table, space_id)
+            .map_err(|e| napi::Error::from_reason(format!("Key holders query failed: {e}")))?
+            .into_iter()
+            .map(|holder| {
+                json!({
+                    "rowId": holder.row_id.uuid().to_string(),
+                    "spaceId": holder.space_id.uuid().to_string(),
+                    "keyId": holder.key_id.to_string(),
+                    "recipientUserId": holder.recipient_user_id.uuid().to_string(),
+                    "recipientPublicKey": holder.recipient_public_key,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::Value::Array(holders))
     }
 
     // =========================================================================

@@ -884,6 +884,7 @@ struct BridgeInitOptions {
     db_name: String,
     server_url: Option<String>,
     jwt_token: Option<String>,
+    e2ee_secret: Option<String>,
     admin_secret: Option<String>,
     fallback_wasm_url: Option<String>,
     log_level: Option<String>,
@@ -912,6 +913,9 @@ fn build_init_message(opts: &BridgeInitOptions, original: &JsValue) -> Result<Js
     }
     if let Some(jwt) = &opts.jwt_token {
         let _ = Reflect::set(&msg, &"jwtToken".into(), &JsValue::from_str(jwt));
+    }
+    if let Some(secret) = &opts.e2ee_secret {
+        let _ = Reflect::set(&msg, &"e2eeSecret".into(), &JsValue::from_str(secret));
     }
     if let Some(secret) = &opts.admin_secret {
         let _ = Reflect::set(&msg, &"adminSecret".into(), &JsValue::from_str(secret));

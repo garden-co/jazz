@@ -15,20 +15,20 @@ Scope for v1: LocalFirst Auth users only.
 
 ## Decisions at a glance
 
-| Question | Decision |
-|---|---|
-| Key scope | Per **space row** — a row of a table marked `.encryptionSpace()` owns one shared key |
-| Key handoff | Sealed at invite time via an explicit `shareKey` call |
-| Revocation | Policy-only in v1 (no rotation); envelope carries `key_id` so epochs can be added later |
-| Public-key directory | App-managed column in the app's own schema; framework never queries it |
-| Schema DX | `s.string().encrypted("refColumn")` — each encrypted column names the ref to its space |
-| Sealed-key persistence | Framework-managed companion table `<table>$keys` per space table |
-| Crypto venue | Rust core (WASM / NAPI / RN) — one implementation, synchronous in-engine |
-| Symmetric cipher | XChaCha20-Poly1305 |
-| Sealing | HPKE (RFC 9180), DHKEM(X25519) + HKDF-SHA256 + ChaCha20-Poly1305 |
-| Post-quantum | Not in v1; algorithm-id byte in every envelope/sealed blob keeps the upgrade additive |
-| LoFi auth key algorithm | Unchanged (ed25519 already ships in the WASM engine) |
-| Rust API | Same core feature surfaced on `JazzClient` (`share_key` / `unshare_key` / `key_holders`); schema via `TableSchemaBuilder` |
+| Question                | Decision                                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Key scope               | Per **space row** — a row of a table marked `.encryptionSpace()` owns one shared key                                      |
+| Key handoff             | Sealed at invite time via an explicit `shareKey` call                                                                     |
+| Revocation              | Policy-only in v1 (no rotation); envelope carries `key_id` so epochs can be added later                                   |
+| Public-key directory    | App-managed column in the app's own schema; framework never queries it                                                    |
+| Schema DX               | `s.string().encrypted("refColumn")` — each encrypted column names the ref to its space                                    |
+| Sealed-key persistence  | Framework-managed companion table `<table>$keys` per space table                                                          |
+| Crypto venue            | Rust core (WASM / NAPI / RN) — one implementation, synchronous in-engine                                                  |
+| Symmetric cipher        | XChaCha20-Poly1305                                                                                                        |
+| Sealing                 | HPKE (RFC 9180), DHKEM(X25519) + HKDF-SHA256 + ChaCha20-Poly1305                                                          |
+| Post-quantum            | Not in v1; algorithm-id byte in every envelope/sealed blob keeps the upgrade additive                                     |
+| LoFi auth key algorithm | Unchanged (ed25519 already ships in the WASM engine)                                                                      |
+| Rust API                | Same core feature surfaced on `JazzClient` (`share_key` / `unshare_key` / `key_holders`); schema via `TableSchemaBuilder` |
 
 ## 1. Identity & private keys
 
@@ -58,14 +58,16 @@ on first use in v1; key transparency / verification is out of scope.
 const schema = {
   users: s.table({
     name: s.string(),
-    e2eeKey: s.string().optional(),      // app-managed directory, ordinary column
+    e2eeKey: s.string().optional(), // app-managed directory, ordinary column
   }),
-  projects: s.table({
-    name: s.string(),
-  }).encryptionSpace(),                   // rows of this table can own a shared key
+  projects: s
+    .table({
+      name: s.string(),
+    })
+    .encryptionSpace(), // rows of this table can own a shared key
   todos: s.table({
     title: s.string().encrypted("projectId"),
-    done: s.boolean(),                    // plaintext, queryable
+    done: s.boolean(), // plaintext, queryable
     projectId: s.ref("projects"),
   }),
 };
@@ -90,13 +92,13 @@ Rules:
 Marking a table with `.encryptionSpace()` generates a framework-managed companion table
 (conceptually `projects$keys`):
 
-| Column | Meaning |
-|---|---|
-| `space_id` | ref → the space row |
-| `key_id` | UUID identifying the key (v1: one per space; future epochs slot in here) |
-| `recipient_user_id` | who this copy is for (policies, member listing) |
-| `recipient_public_key` | the X25519 key the copy was sealed to (what recipients match on) |
-| `sealed_key` | the 32-byte space key, sealed to the recipient (HPKE blob) |
+| Column                 | Meaning                                                                  |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `space_id`             | ref → the space row                                                      |
+| `key_id`               | UUID identifying the key (v1: one per space; future epochs slot in here) |
+| `recipient_user_id`    | who this copy is for (policies, member listing)                          |
+| `recipient_public_key` | the X25519 key the copy was sealed to (what recipients match on)         |
+| `sealed_key`           | the 32-byte space key, sealed to the recipient (HPKE blob)               |
 
 Properties:
 
@@ -107,7 +109,9 @@ Properties:
   conflict is possible (this is why a JSON map on the space row was rejected).
 - **Policies (v1):** rows are world-readable (sealed copies are useless without the
   recipient's private key, and this keeps sync trivial). Insert is allowed for any
-  authenticated user; delete is restricted to one's own rows plus the space creator.
+  authenticated user; delete is likewise open to any authenticated user in v1
+  ("own rows plus the space creator" needs the `created_by` permissions work — a
+  malicious delete is a recoverable annoyance, since re-sharing heals it).
   Open insert permits junk key rows — an annoyance, not a confidentiality loss, since
   clients only trust copies they can unseal (§7). Tightening insert to "members only"
   depends on the `created_by` permissions work
@@ -141,8 +145,8 @@ await db.projects.unshareKey(projectId, recipient.e2eeKey);
 await db.projects.keyHolders(projectId);
 
 // writes & reads: transparent
-await db.todos.insert({ title: "secret", projectId });  // encrypts under projectId's key
-const todo = await db.todos.get(id);                     // decrypts; todo.title is string
+await db.todos.insert({ title: "secret", projectId }); // encrypts under projectId's key
+const todo = await db.todos.get(id); // decrypts; todo.title is string
 ```
 
 `shareKey` / `unshareKey` / `keyHolders` exist only on tables marked
@@ -275,14 +279,14 @@ PQ-resistant; only the sealing step is exposed to harvest-now-decrypt-later. The
 
 ## 9. Cost summary
 
-| Concern | Number | Provenance |
-|---|---|---|
-| Current WASM engine size | 9.3 MB raw, ~3.0 MB gzip −9 | Measured 2026-06-12 on `crates/jazz-wasm/pkg/jazz_wasm_bg.wasm`, built by `wasm-pack build --release`. Caveat: the release profile passes `wasm-opt -O -g`, which keeps the name section for profilers — a size-trimmed production build would be smaller, so the baseline itself is not final. |
-| E2EE bundle delta | Estimate: tens of KB (≲2% even against the 3.0 MB compressed size) | Typical compiled sizes of `chacha20poly1305` + `hpke`; the X25519 curve backend is already present via `ed25519-dalek`. **Must be measured during implementation**: build the engine with and without the E2EE feature, compare stripped + gzipped sizes. |
-| Value encrypt/decrypt throughput | Estimate: order of 100 MB/s+ in WASM; per-value cost µs-scale for byte-to-KB column values | Published ChaCha20-Poly1305 software benchmarks, not measured in this engine. Validate with an in-repo benchmark before relying on transparent decryption in hot query paths. |
-| Per-recipient key row | ~80-byte sealed blob (v1); ~1.1 KB if the PQ hybrid lands | RFC 9180 sizes for DHKEM(X25519) (enc 32 B + ct ≈ 48 B); ML-KEM-768 ciphertext ≈ 1088 B. |
-| LoFi auth key algorithm | Unchanged | ed25519 is already in the engine; no bundle pressure to switch. |
-| Server-side cost | Encrypted columns: no indexing, filtering, sorting, or compression | By design (§2). |
+| Concern                          | Number                                                                                     | Provenance                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Current WASM engine size         | 9.3 MB raw, ~3.0 MB gzip −9                                                                | Measured 2026-06-12 on `crates/jazz-wasm/pkg/jazz_wasm_bg.wasm`, built by `wasm-pack build --release`. Caveat: the release profile passes `wasm-opt -O -g`, which keeps the name section for profilers — a size-trimmed production build would be smaller, so the baseline itself is not final. |
+| E2EE bundle delta                | Estimate: tens of KB (≲2% even against the 3.0 MB compressed size)                         | Typical compiled sizes of `chacha20poly1305` + `hpke`; the X25519 curve backend is already present via `ed25519-dalek`. **Must be measured during implementation**: build the engine with and without the E2EE feature, compare stripped + gzipped sizes.                                       |
+| Value encrypt/decrypt throughput | Estimate: order of 100 MB/s+ in WASM; per-value cost µs-scale for byte-to-KB column values | Published ChaCha20-Poly1305 software benchmarks, not measured in this engine. Validate with an in-repo benchmark before relying on transparent decryption in hot query paths.                                                                                                                   |
+| Per-recipient key row            | ~80-byte sealed blob (v1); ~1.1 KB if the PQ hybrid lands                                  | RFC 9180 sizes for DHKEM(X25519) (enc 32 B + ct ≈ 48 B); ML-KEM-768 ciphertext ≈ 1088 B.                                                                                                                                                                                                        |
+| LoFi auth key algorithm          | Unchanged                                                                                  | ed25519 is already in the engine; no bundle pressure to switch.                                                                                                                                                                                                                                 |
+| Server-side cost                 | Encrypted columns: no indexing, filtering, sorting, or compression                         | By design (§2).                                                                                                                                                                                                                                                                                 |
 
 ## 10. Testing
 
@@ -316,7 +320,7 @@ schemas/permissions via the public API, no JSON-like definitions):
   Key epochs are the designed-for upgrade path (`key_id` in every envelope).
 - **TOFU directory:** a malicious app/server that swaps a published public key can
   intercept future shares. Key verification/transparency is out of scope for v1.
-- **Open insert on key tables** until `created_by` permissions land.
+- **Open insert and delete on key tables** until `created_by` permissions land.
 - **No share hierarchy:** every key holder can re-share (§4); restricting invites to
   owners/admins is app-level convention in v1, upgradeable alongside `created_by`.
 - **Encrypted columns are server-opaque:** no indexes, filters, sorts, compression,

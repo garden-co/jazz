@@ -354,6 +354,7 @@ async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        e2ee_seed: None,
         sync_tracer: None,
     };
 

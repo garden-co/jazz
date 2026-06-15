@@ -33,18 +33,19 @@ pub fn e2ee_keys_table_schema(space_table: &str) -> (TableName, TableSchema) {
         .column("sealed_key", ColumnType::Bytea)
         .build_named();
 
-    let mut policies = TablePolicies::default();
-    // World-readable: sealed copies are useless without the recipient's
-    // private key, and open reads keep sync trivial.
-    policies.select = OperationPolicy::using(PolicyExpr::True);
-    // Open authenticated insert; bogus rows are ignored on unseal failure.
-    // Tighten to members-only once created_by permissions land.
-    policies.insert = OperationPolicy::with_check(session_authenticated());
-    // No update clause: key rows are immutable (share = insert,
-    // revoke = delete). Enforcing runtimes deny missing clauses.
-    // v1 delete is open-authenticated; "own rows + creator" needs created_by.
-    policies.delete = OperationPolicy::using(session_authenticated());
-    table.policies = policies;
+    table.policies = TablePolicies {
+        // World-readable: sealed copies are useless without the recipient's
+        // private key, and open reads keep sync trivial.
+        select: OperationPolicy::using(PolicyExpr::True),
+        // Open authenticated insert; bogus rows are ignored on unseal failure.
+        // Tighten to members-only once created_by permissions land.
+        insert: OperationPolicy::with_check(session_authenticated()),
+        // No update clause: key rows are immutable (share = insert,
+        // revoke = delete). Enforcing runtimes deny missing clauses.
+        // v1 delete is open-authenticated; "own rows + creator" needs created_by.
+        delete: OperationPolicy::using(session_authenticated()),
+        ..TablePolicies::default()
+    };
 
     (name, table)
 }
@@ -82,7 +83,7 @@ pub fn normalize_e2ee_indexes(schema: &mut Schema) {
                 .columns
                 .iter()
                 .filter(|c| c.encrypted_with.is_none())
-                .map(|c| c.name.clone())
+                .map(|c| c.name)
                 .collect(),
         );
     }
@@ -178,12 +179,12 @@ pub fn validate_e2ee_schema(schema: &Schema) -> Result<(), String> {
                     "table '{name}': encrypted column '{col_name}' references '{target}', which is not an encryption space"
                 ));
             }
-            if let Some(indexed) = &table.indexed_columns {
-                if indexed.iter().any(|c| c.as_str() == col_name) {
-                    return Err(format!(
-                        "table '{name}': encrypted column '{col_name}' cannot be indexed"
-                    ));
-                }
+            if let Some(indexed) = &table.indexed_columns
+                && indexed.iter().any(|c| c.as_str() == col_name)
+            {
+                return Err(format!(
+                    "table '{name}': encrypted column '{col_name}' cannot be indexed"
+                ));
             }
 
             let policies = [

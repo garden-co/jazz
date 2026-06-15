@@ -10,6 +10,7 @@ export {
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,
+  type E2eeKeyHolder,
   type QueryExecutionOptions,
   type QueryInput,
   type QueryPropagation,

@@ -99,6 +99,27 @@ declare module "jazz-wasm" {
       nonDurableClient?: boolean,
     );
 
+    enableE2ee(seedB64: string): void;
+    clearE2ee(): void;
+    e2eePublicKey(): string | null;
+    shareKey(
+      spaceTable: string,
+      spaceId: string,
+      recipientUserId: string,
+      recipientPublicKey: string,
+      writeContextJson?: string | null,
+    ): string;
+    unshareKey(keyRowId: string, writeContextJson?: string | null): string;
+    keyHolders(
+      spaceTable: string,
+      spaceId: string,
+    ): Array<{
+      rowId: string;
+      spaceId: string;
+      keyId: string;
+      recipientUserId: string;
+      recipientPublicKey: string;
+    }>;
     insert(
       table: string,
       values: InsertValues,
@@ -167,5 +188,7 @@ declare module "jazz-wasm" {
       ttlSeconds: bigint,
       nowSeconds: bigint,
     ): string;
+    /** Derive the E2EE public key from a base64url-encoded LocalFirst seed. */
+    static deriveE2eePublicKey(seedB64: string): string;
   }
 }

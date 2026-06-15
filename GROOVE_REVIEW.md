@@ -1,0 +1,5 @@
+- [A unit whose physical_ms](https://github.com/garden-co/jazz-and-groove/blob/main/jazz/SPEC/3_transactions.md#32-lifecycle-and-the-atomic-sync-unit) is more than SKEW_TOLERANCE_MS (~30 seconds) ahead of the authority's clock is rejected as ClientClockTooFarAhead (INV-TX-7)
+  - Why? Also, is there no "negotiation"?
+- [Exclusive validation](https://github.com/garden-co/jazz-and-groove/blob/main/jazz/SPEC/3_transactions.md#37-exclusive-validation-serializability)
+- This makes exclusive transactions very strict, and kinda unpredictable. Normally these requirements are part of monolitic databases, where txs are applied almost immediately, so the failure rate is quite low. In Jazz clients see a totally different version of the database (subset, filtered by partial loads and permmissions plus local changes) so it is very likely to end up on situations where txs fail because of a little out-of-sync problem. If we want to go for this road I think we must provide an automatic retry mechanism in a similar fashin of SpacetimeDB. It should be possible to represent exclusive transactions as pure functions, which can be retried on failure.
+-

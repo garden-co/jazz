@@ -30,6 +30,7 @@ export interface WorkerBridgeOptions {
   dbName: string;
   serverUrl?: string;
   jwtToken?: string;
+  e2eeSecret?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;

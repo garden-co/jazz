@@ -193,10 +193,11 @@ fn encrypted_column_must_name_existing_ref() {
                     .column("name", ColumnType::Text)
                     .encryption_space(),
             )
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .encrypted_column("title", ColumnType::Text, "missing"),
-            ),
+            .table(TableSchemaBuilder::new("todos").encrypted_column(
+                "title",
+                ColumnType::Text,
+                "missing",
+            )),
         "missing",
     );
 }

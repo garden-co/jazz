@@ -1,5 +1,6 @@
 import type {
   AnyTypedColumnBuilder,
+  ColumnBuilderEncrypted,
   ColumnBuilderHasDefault,
   ColumnBuilderOptional,
   ColumnBuilderReferences,
@@ -9,6 +10,7 @@ import type {
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
+import type { Locked as LockedValue } from "./locked.js";
 import {
   PERMISSION_INTROSPECTION_COLUMNS,
   PROVENANCE_MAGIC_COLUMNS,
@@ -159,10 +161,14 @@ type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = ColumnBuilderValue<TB
 type StoredColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+type ReadColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderEncrypted<TBuilder> extends true
+    ? ColumnValue<TBuilder> | LockedValue
+    : ColumnValue<TBuilder>;
 type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnValue<TBuilder> | null
-    : ColumnValue<TBuilder>;
+    ? ReadColumnValue<TBuilder> | null
+    : ReadColumnValue<TBuilder>;
 type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
     ? ColumnValue<TBuilder> | null
@@ -199,7 +205,7 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
   {
     id: string;
   } & {
-    [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
+    [TColumn in RequiredColumnName<TSchema, TTable>]: ReturnedColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {

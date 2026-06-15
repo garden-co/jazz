@@ -113,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_secret: None,
         admin_secret: None,
         sync_tracer: None,
+        e2ee_seed: None,
     };
 
     let client = JazzClient::connect(context).await?;

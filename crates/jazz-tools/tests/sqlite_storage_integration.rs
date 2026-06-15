@@ -305,6 +305,7 @@ async fn make_client_external_jwks(
         jwt_token: Some(TestingServer::jwt_for_user(user_id)),
         backend_secret: None,
         admin_secret: None,
+        e2ee_seed: None,
         sync_tracer: None,
     };
 

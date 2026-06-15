@@ -115,7 +115,7 @@ impl ProjectNode {
                         references: source_column.references,
                         default: source_column.default.clone(),
                         merge_strategy: source_column.merge_strategy,
-                        encrypted_with: source_column.encrypted_with.clone(),
+                        encrypted_with: source_column.encrypted_with,
                     }
                 }
                 ProjectionSource::RowId { .. } => ColumnDescriptor {

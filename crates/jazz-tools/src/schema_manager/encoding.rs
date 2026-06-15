@@ -474,7 +474,11 @@ fn decode_column_descriptor_with_version(
     let encrypted_with = if version.has_e2ee_markers() {
         let has_encrypted_with = read_u8(data, offset)? != 0;
         if has_encrypted_with {
-            Some(ColumnName::new(read_string(data, offset, "encrypted_with")?))
+            Some(ColumnName::new(read_string(
+                data,
+                offset,
+                "encrypted_with",
+            )?))
         } else {
             None
         }
@@ -1794,6 +1798,7 @@ const VALUE_ROW: u8 = 8;
 const VALUE_DOUBLE: u8 = 10;
 const VALUE_BYTEA: u8 = 11;
 const VALUE_BATCH_ID: u8 = 12;
+const VALUE_LOCKED: u8 = 13;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -1849,6 +1854,7 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
                 encode_value(buf, v);
             }
         }
+        Value::Locked => buf.push(VALUE_LOCKED),
     }
 }
 
@@ -1917,6 +1923,7 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
             }
             Ok(Value::Row { id: None, values })
         }
+        VALUE_LOCKED => Ok(Value::Locked),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "value",

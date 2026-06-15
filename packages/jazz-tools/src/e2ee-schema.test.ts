@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "./index.js";
+import { Locked, schema as s } from "./index.js";
 
 const validDefinition = () => ({
   projects: s.table({ name: s.string() }).encryptionSpace(),
@@ -43,6 +43,20 @@ describe("E2EE schema DSL", () => {
   it("excludes encrypted columns from indexing", () => {
     const wasm = wasmSchemaOf(s.defineApp(validDefinition()));
     expect(wasm.todos.indexed_columns).toEqual(["done", "projectId"]);
+  });
+
+  it("types encrypted reads as lockable while keeping inserts plaintext", () => {
+    const app = s.defineApp(validDefinition());
+    type TodoRow = s.RowOf<typeof app.todos>;
+    type TodoInsert = s.InsertOf<typeof app.todos>;
+
+    const plaintextRead: TodoRow["title"] = "Secret";
+    const lockedRead: TodoRow["title"] = Locked;
+    const plaintextInsert: TodoInsert["title"] = "Secret";
+    // @ts-expect-error writes stay plaintext-only
+    const lockedInsert: TodoInsert["title"] = Locked;
+
+    expect([plaintextRead, lockedRead, plaintextInsert, lockedInsert]).toBeDefined();
   });
 
   it("rejects encrypted() pointing at a missing column", () => {

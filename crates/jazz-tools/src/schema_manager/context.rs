@@ -75,6 +75,8 @@ pub enum SchemaError {
         expected: Option<ObjectId>,
         current: Option<ObjectId>,
     },
+    /// E2EE schema invariants failed validation.
+    E2ee(String),
 }
 
 impl std::fmt::Display for SchemaError {
@@ -114,6 +116,7 @@ impl std::fmt::Display for SchemaError {
                     expected, current
                 )
             }
+            SchemaError::E2ee(message) => write!(f, "E2EE schema invalid: {message}"),
         }
     }
 }

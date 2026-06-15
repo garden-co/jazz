@@ -416,6 +416,7 @@ impl TestingServer {
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret.clone()),
             admin_secret: None,
+            e2ee_seed: None,
             sync_tracer: None,
         }
     }

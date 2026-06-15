@@ -36,6 +36,18 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
+  enableE2ee?(seed_b64: string): void;
+  clearE2ee?(): void;
+  e2eePublicKey?(): string | null;
+  shareKey?(
+    space_table: string,
+    space_id: string,
+    recipient_user_id: string,
+    recipient_public_key: string,
+    write_context_json?: string | null,
+  ): string;
+  unshareKey?(key_row_id: string, write_context_json?: string | null): string;
+  keyHolders?(space_table: string, space_id: string): E2eeKeyHolder[];
   insert(
     table: string,
     values: InsertValues,
@@ -218,6 +230,14 @@ export interface UpdateOptions extends TimestampOverrideOptions {}
 export interface DeleteOptions extends TimestampOverrideOptions {}
 
 export interface RestoreOptions extends TimestampOverrideOptions {}
+
+export interface E2eeKeyHolder {
+  rowId: string;
+  spaceId: string;
+  keyId: string;
+  recipientUserId: string;
+  recipientPublicKey: string;
+}
 
 /**
  * A mutation error event emitted by {@link JazzClient.onMutationError}.
@@ -714,6 +734,67 @@ export class JazzClient {
 
   rollbackBatch(batchId: BatchId): void {
     this.runtime.rollbackBatch(batchId);
+  }
+
+  enableE2ee(seed: string): void {
+    if (!this.runtime.enableE2ee) {
+      throw new Error("This runtime does not support E2EE");
+    }
+    this.runtime.enableE2ee(seed);
+  }
+
+  clearE2ee(): void {
+    if (!this.runtime.clearE2ee) {
+      return;
+    }
+    this.runtime.clearE2ee();
+  }
+
+  e2eePublicKey(): string | null {
+    if (!this.runtime.e2eePublicKey) {
+      return null;
+    }
+    return this.runtime.e2eePublicKey();
+  }
+
+  shareKey(
+    spaceTable: string,
+    spaceId: string,
+    recipientUserId: string,
+    recipientPublicKey: string,
+    session?: Session,
+    attribution?: string,
+  ): WriteHandle {
+    if (!this.runtime.shareKey) {
+      throw new Error("This runtime does not support E2EE key sharing");
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(effectiveSession, attribution);
+    const batchId = this.runtime.shareKey(
+      spaceTable,
+      spaceId,
+      recipientUserId,
+      recipientPublicKey,
+      writeContext,
+    );
+    return new WriteHandle(batchId, this);
+  }
+
+  unshareKey(keyRowId: string, session?: Session, attribution?: string): WriteHandle {
+    if (!this.runtime.unshareKey) {
+      throw new Error("This runtime does not support E2EE key sharing");
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(effectiveSession, attribution);
+    const batchId = this.runtime.unshareKey(keyRowId, writeContext);
+    return new WriteHandle(batchId, this);
+  }
+
+  keyHolders(spaceTable: string, spaceId: string): E2eeKeyHolder[] {
+    if (!this.runtime.keyHolders) {
+      throw new Error("This runtime does not support E2EE key sharing");
+    }
+    return this.runtime.keyHolders(spaceTable, spaceId);
   }
 
   /**

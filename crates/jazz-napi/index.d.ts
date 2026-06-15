@@ -16,6 +16,13 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
+  static deriveE2eePublicKey(seedB64: string): string
+  enableE2ee(seedB64: string): void
+  clearE2ee(): void
+  e2eePublicKey(): string | null
+  shareKey(spaceTable: string, spaceId: string, recipientUserId: string, recipientPublicKey: string, writeContextJson?: string | undefined | null): string
+  unshareKey(keyRowId: string, writeContextJson?: string | undefined | null): string
+  keyHolders(spaceTable: string, spaceId: string): Array<{ rowId: string; spaceId: string; keyId: string; recipientUserId: string; recipientPublicKey: string }>
   insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any, writeContextJson?: string | undefined | null): any
   upsert(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any

@@ -4,7 +4,7 @@
 
 **Goal:** Make E2EE live in the Rust runtime: an in-memory key service derived from the auth seed, atomic space-key bootstrap on space-row insert, transparent encrypt on write and decrypt on read with a `Value::Locked` fallback, `share_key` / `unshare_key` / `key_holders` on `JazzClient`, and `validate_e2ee_schema` enforced at schema ingestion.
 
-**Architecture:** A new `E2eeService` owned by the runtime core composes plan 1's pure crypto (`crates/jazz-tools/src/e2ee.rs`) with plan 2's schema markers (`encrypted_with`, `encryption_space`, `$keys` tables). Writes are intercepted in `runtime_core/writes.rs` *before* `schema_manager` (plaintext never reaches storage); reads are decrypted where result rows materialize. The sealed-key rows themselves are ordinary rows in `<table>$keys`, written through the normal write path so sync/policies apply unchanged. Spec: `docs/superpowers/specs/2026-06-12-e2ee-shared-keys-design.md` (§4–§7).
+**Architecture:** A new `E2eeService` owned by the runtime core composes plan 1's pure crypto (`crates/jazz-tools/src/e2ee.rs`) with plan 2's schema markers (`encrypted_with`, `encryption_space`, `$keys` tables). Writes are intercepted in `runtime_core/writes.rs` _before_ `schema_manager` (plaintext never reaches storage); reads are decrypted where result rows materialize. The sealed-key rows themselves are ordinary rows in `<table>$keys`, written through the normal write path so sync/policies apply unchanged. Spec: `docs/superpowers/specs/2026-06-12-e2ee-shared-keys-design.md` (§4–§7).
 
 **Tech Stack:** Rust only (`crates/jazz-tools`). Bindings and TS surface are plan 4.
 
@@ -12,16 +12,16 @@
 
 **Known anchors (verified in source):**
 
-- Write path: `runtime_core/writes.rs:563` `insert` → `insert_with_id` → `self.schema_manager.insert(...)`; `update` at `:605` resolves the table *inside* `schema_manager` (`load_row_for_schema_update_in_context`). `begin_batch(batch_mode)` exists at `writes.rs:12`; multi-row batches are exercised by `runtime_core/tests/write_batch/`.
+- Write path: `runtime_core/writes.rs:563` `insert` → `insert_with_id` → `self.schema_manager.insert(...)`; `update` at `:605` resolves the table _inside_ `schema_manager` (`load_row_for_schema_update_in_context`). `begin_batch(batch_mode)` exists at `writes.rs:12`; multi-row batches are exercised by `runtime_core/tests/write_batch/`.
 - `Value` enum: `query_manager/types/value.rs:15` (no `Locked` yet); human-JSON serde via internally tagged `ValueHuman` in the same file.
 - Crypto: `e2ee::{derive_e2ee_keypair, SpaceKey, seal_space_key, unseal_space_key, encrypt_value, decrypt_value, envelope_key_id, EncryptionContext, E2eeError}`.
 - Schema helpers: `query_manager::types::e2ee_schema::{e2ee_keys_table_name, validate_e2ee_schema}`; markers on `ColumnDescriptor.encrypted_with` / `TableSchema.encryption_space`.
 - User id from seed: `identity::user_id_from_seed`-style helpers in `crates/jazz-tools/src/identity.rs` (see `user_id_from_public_key` near line 299; confirm the exact public fn when wiring).
 - Rust client: `client.rs` `JazzClient::{connect(AppContext), insert, update, delete, query, schema}`.
 
-**Plaintext serialization rule (normative):** an encrypted column's schema `column_type` stays the *logical* type. Before encryption the plaintext `Value` is serialized with `postcard::to_allocvec` (already a dependency); after decryption it is restored with `postcard::from_bytes`. The stored/synced physical value is always `Value::Bytea(envelope)`.
+**Plaintext serialization rule (normative):** an encrypted column's schema `column_type` stays the _logical_ type. Before encryption the plaintext `Value` is serialized with `postcard::to_allocvec` (already a dependency); after decryption it is restored with `postcard::from_bytes`. The stored/synced physical value is always `Value::Bytea(envelope)`.
 
-**AAD rule (normative):** `EncryptionContext { table, column, row_id: object_id.as_bytes() }` — the row id is the 16-byte `ObjectId`, so inserts must allocate the `ObjectId` *before* encrypting (pass `Some(id)` down the existing `insert_with_id` path).
+**AAD rule (normative):** `EncryptionContext { table, column, row_id: object_id.as_bytes() }` — the row id is the 16-byte `ObjectId`, so inserts must allocate the `ObjectId` _before_ encrypting (pass `Some(id)` down the existing `insert_with_id` path).
 
 **Conventions:** black-box integration tests in `crates/jazz-tools/tests/`; no AI attribution in commits; commands run from repo root.
 
@@ -30,6 +30,7 @@
 ### Task 1: `E2eeService` and runtime wiring
 
 **Files:**
+
 - Create: `crates/jazz-tools/src/runtime_core/e2ee_service.rs`
 - Modify: `crates/jazz-tools/src/runtime_core/mod.rs` (runtime struct + module decl)
 - Test: `crates/jazz-tools/tests/e2ee_runtime.rs` (new; grows through the plan)
@@ -127,6 +128,7 @@ git commit -m "feat(jazz-tools): runtime E2EE service skeleton"
 ### Task 2: Key lookup from `$keys` rows (cache fill)
 
 **Files:**
+
 - Modify: `crates/jazz-tools/src/runtime_core/e2ee_service.rs` + the runtime impl (new method)
 - Test: `crates/jazz-tools/tests/e2ee_runtime.rs`
 
@@ -182,6 +184,7 @@ git commit -m "feat(jazz-tools): unseal space keys from local \$keys rows"
 ### Task 3: Space-creation bootstrap (atomic key + creator's copy)
 
 **Files:**
+
 - Modify: `crates/jazz-tools/src/runtime_core/writes.rs` (`insert_with_id`)
 - Test: `crates/jazz-tools/tests/e2ee_runtime.rs`
 
@@ -200,7 +203,7 @@ The "own user id" comes from the same seed via the identity module (Step 1.1 anc
 
 Atomicity: when the outer call is already inside a batch (`write_context.batch_id().is_some()`), the recursive insert shares it naturally. For direct writes, wrap: `begin_batch(BatchMode::Transactional)` → both inserts → `commit_batch` — match how `runtime_core/tests/write_batch/transactional.rs` drives multi-write batches. A space row must never commit without its `$keys` row.
 
-If E2EE is *not* enabled and the table is an encryption space, fail the insert with `E2eeKeyUnavailable` — a keyless space row violates the spec invariant (§3) and would strand other members.
+If E2EE is _not_ enabled and the table is an encryption space, fail the insert with `E2eeKeyUnavailable` — a keyless space row violates the spec invariant (§3) and would strand other members.
 
 - [ ] **Step 3.2: Tests + commit**
 
@@ -216,6 +219,7 @@ git commit -m "feat(jazz-tools): atomic space key bootstrap on space-row insert"
 ### Task 4: Transparent encrypt on write
 
 **Files:**
+
 - Modify: `crates/jazz-tools/src/runtime_core/writes.rs` (`insert_with_id`, `update`, `upsert`)
 - Modify: wherever insert values are type-checked against `ColumnType` (discovery below)
 - Test: `crates/jazz-tools/tests/e2ee_runtime.rs`
@@ -249,12 +253,13 @@ Private helper on the runtime impl:
 ```
 
 Call sites:
+
 - **insert/upsert:** table schema known up front. If any encrypted column is present: pre-generate `object_id` when `None`; read each needed `space_ref` value out of `values` (it is non-nullable and therefore required on insert; missing → existing missing-column error path); encrypt; proceed.
 - **update:** the table isn't in the signature. Resolve it the way `upsert` does (`load_row_for_schema_update_in_context`); if the update touches encrypted columns, also read the space-ref value from the loaded existing row (the ref may legitimately be absent from the update). Then encrypt with `row_id = object_id`.
 
 - [ ] **Step 4.3: Tests + commit**
 
-Tests (black-box through the runtime): inserting into an encrypted column stores a `Value::Bytea` envelope (read the raw row through a runtime *without* the key — see Task 5's Locked — or through storage inspection the way existing write tests assert stored rows); `envelope_key_id` of the stored bytes equals the space's `key_id`; update re-encrypts; write without key fails with `E2eeKeyUnavailable` and writes nothing.
+Tests (black-box through the runtime): inserting into an encrypted column stores a `Value::Bytea` envelope (read the raw row through a runtime _without_ the key — see Task 5's Locked — or through storage inspection the way existing write tests assert stored rows); `envelope_key_id` of the stored bytes equals the space's `key_id`; update re-encrypts; write without key fails with `E2eeKeyUnavailable` and writes nothing.
 
 ```bash
 git add crates/jazz-tools
@@ -266,6 +271,7 @@ git commit -m "feat(jazz-tools): transparent encryption of e2ee columns on write
 ### Task 5: `Value::Locked` and transparent decrypt on read
 
 **Files:**
+
 - Modify: `crates/jazz-tools/src/query_manager/types/value.rs` (`Value`, `ValueHuman`, postcard/row encodings)
 - Modify: `crates/jazz-tools/src/row_format.rs` and/or wherever `Value` has a binary tag (discovery)
 - Modify: result materialization point(s) in `runtime_core` (discovery)
@@ -282,6 +288,7 @@ Add to `Value` (value.rs:15) and mirror in `ValueHuman`:
 ```
 
 Run `cargo check -p jazz-tools` and visit every non-exhaustive-match error. Rules for the arms:
+
 - storage/row encodings: `Locked` is unreachable on the write side — `unreachable!("Value::Locked is result-only")` after the write hook rejects it (writes containing `Value::Locked` get a validation error at the same sites as Step 4.1);
 - wire/result encodings (the JSON `ValueHuman`, subscription delta encoding): encode as a real tag (`{"type":"Locked"}` for JSON; the next free byte tag for the binary row encoding — find tags via `grep -n "TYPE_\|tag" crates/jazz-tools/src/row_format.rs | head -20`). Plan 4's TS layer maps it to the `Locked` sentinel.
 - comparisons/indexing/policy evaluation: `Locked` never appears there (encrypted columns are excluded from indexes and policies by plan 2 validation); use `unreachable!` with the same message.
@@ -307,11 +314,11 @@ The decrypt hook must run once, at the shared point both paths flow through, wit
         - postcard::from_bytes -> restored Value. */ }
 ```
 
-The space-ref column is part of the row by construction on full-row reads; for *projections that exclude the ref column*, fall back to `envelope_key_id` + a reverse map on the cache (`key_id -> SpaceKey`) — add that secondary index to `E2eeService` (`HashMap<Uuid, SpaceKey>` maintained alongside `space_keys`); if the key id isn't cached, the value is `Locked` (client can re-query with the ref included or after syncing keys).
+The space-ref column is part of the row by construction on full-row reads; for _projections that exclude the ref column_, fall back to `envelope_key_id` + a reverse map on the cache (`key_id -> SpaceKey`) — add that secondary index to `E2eeService` (`HashMap<Uuid, SpaceKey>` maintained alongside `space_keys`); if the key id isn't cached, the value is `Locked` (client can re-query with the ref included or after syncing keys).
 
 - [ ] **Step 5.4: Tests + commit**
 
-Tests: writer inserts encrypted row; reader runtime *with* the key reads plaintext transparently; reader *without* the key gets `Value::Locked` (and plaintext columns intact); corrupted envelope yields `Locked` not an error; ciphertext copied between rows via a raw write yields `Locked` (AAD context binding, spec §10 item 9); projection without the space-ref column still decrypts when the key is cached.
+Tests: writer inserts encrypted row; reader runtime _with_ the key reads plaintext transparently; reader _without_ the key gets `Value::Locked` (and plaintext columns intact); corrupted envelope yields `Locked` not an error; ciphertext copied between rows via a raw write yields `Locked` (AAD context binding, spec §10 item 9); projection without the space-ref column still decrypts when the key is cached.
 
 ```bash
 git add crates/jazz-tools
@@ -323,6 +330,7 @@ git commit -m "feat(jazz-tools): Value::Locked and transparent decryption on rea
 ### Task 6: `JazzClient` API + schema-ingestion validation
 
 **Files:**
+
 - Modify: `crates/jazz-tools/src/client.rs`
 - Modify: runtime constructors that accept the schema (discovery) — call `validate_e2ee_schema`
 - Test: `crates/jazz-tools/tests/e2ee_runtime.rs`

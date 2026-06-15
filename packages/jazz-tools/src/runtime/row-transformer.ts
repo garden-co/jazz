@@ -4,6 +4,7 @@
 
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
+import { Locked } from "../locked.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import { isProvenanceMagicTimestampColumn, magicColumnType } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
@@ -190,6 +191,8 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;
+    case "Locked":
+      return Locked;
     case "Array":
       if (columnType?.type === "Array") {
         return v.value.map((entry) => unwrapValue(entry, columnType.element));

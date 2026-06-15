@@ -106,7 +106,7 @@ export async function validate(options: BuildOptions): Promise<void> {
     );
   }
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
-    compiled.schema.tables.map((table) => table.name),
+    compiled.schema.tables,
     compiled.permissions,
   )) {
     console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);

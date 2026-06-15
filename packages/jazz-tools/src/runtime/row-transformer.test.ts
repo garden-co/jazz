@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { unwrapValue, transformRows, type WasmValue } from "./row-transformer.js";
 import type { WasmSchema, WasmRow } from "../drivers/types.js";
+import { Locked, isLocked } from "../locked.js";
 
 describe("unwrapValue", () => {
   it("unwraps Text to string", () => {
@@ -66,6 +67,13 @@ describe("unwrapValue", () => {
   it("unwraps Null to null", () => {
     const v: WasmValue = { type: "Null" };
     expect(unwrapValue(v)).toBeNull();
+  });
+
+  it("unwraps Locked to the exported sentinel", () => {
+    const v: WasmValue = { type: "Locked" };
+    const unwrapped = unwrapValue(v);
+    expect(unwrapped).toBe(Locked);
+    expect(isLocked(unwrapped)).toBe(true);
   });
 
   it("unwraps Array recursively", () => {

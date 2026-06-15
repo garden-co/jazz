@@ -25,6 +25,7 @@
 ### Task 1: Binding surface (WASM + NAPI)
 
 **Files:**
+
 - Modify: `crates/jazz-wasm/src/runtime.rs`
 - Modify: `crates/jazz-napi/src/lib.rs` (mirror; find the parallel runtime impl via `grep -n "fn insert\|fn update_auth" crates/jazz-napi/src/lib.rs | head`)
 - Test: existing binding smoke-test location (discovery: `grep -rn "mintJazzSelfSignedToken" crates/jazz-wasm/src/ packages/jazz-tools/src/ --include="*.test.ts" | head`)
@@ -85,6 +86,7 @@ git commit -m "feat(jazz-wasm,jazz-napi): expose e2ee runtime methods"
 ### Task 2: `Locked` sentinel in TS
 
 **Files:**
+
 - Create: `packages/jazz-tools/src/locked.ts`
 - Modify: `packages/jazz-tools/src/drivers/types.ts` (wire `Value` union)
 - Modify: the wire-value→JS decoding path (discovery: `grep -rn "ValueHuman\|\"type\":\|fromWireValue\|decodeValue" packages/jazz-tools/src/runtime/ packages/jazz-tools/src/drivers/ | grep -v test | head`)
@@ -136,6 +138,7 @@ git commit -m "feat(jazz-tools): Locked sentinel for unavailable e2ee values"
 ### Task 3: `db` API + typed gating
 
 **Files:**
+
 - Modify: `packages/jazz-tools/src/runtime/db.ts` (key methods + `e2ee` namespace)
 - Modify: `packages/jazz-tools/src/typed-app.ts` (space-table branding)
 - Modify: `packages/jazz-tools/src/dsl.ts` (encrypted-column read-type branding)
@@ -174,7 +177,7 @@ On `class Db` (db.ts:804), following the `db.insert(app.todos, ...)` call style 
     Promise<{ userId: string; publicKey: string }[]>;
 ```
 
-Each forwards to the binding methods from Task 1 with the table name off the handle. Runtime errors with the `"E2EE key unavailable"` prefix re-throw as a typed `E2eeKeyUnavailableError` (new error class exported from `locked.ts`'s module or a sibling `e2ee-errors.ts`). Calling with a non-space table is a TS compile error via the generic bound *and* a runtime error from Rust (defense in depth).
+Each forwards to the binding methods from Task 1 with the table name off the handle. Runtime errors with the `"E2EE key unavailable"` prefix re-throw as a typed `E2eeKeyUnavailableError` (new error class exported from `locked.ts`'s module or a sibling `e2ee-errors.ts`). Calling with a non-space table is a TS compile error via the generic bound _and_ a runtime error from Rust (defense in depth).
 
 - [ ] **Step 3.4: Tests + commit**
 
@@ -190,6 +193,7 @@ git commit -m "feat(jazz-tools): typed db e2ee key management API"
 ### Task 4: End-to-end black-box tests (spec §10)
 
 **Files:**
+
 - Create: `packages/jazz-tools/tests/ts-dsl/e2ee.test.ts`
 - Modify (fixture): `packages/jazz-tools/tests/ts-dsl/fixtures/` — add an e2ee schema fixture following `fixtures/basic/schema.ts` (see how PR #1017 added fixture columns)
 
@@ -209,7 +213,7 @@ Implement the spec §10 catalogue from the TS surface (numbering from the spec):
 6. write-without-key → rejects with `E2eeKeyUnavailableError`
 7. concurrent invites from two clients → both sealed rows survive
 8. restart persistence → recreate db with same secret + storage, plaintext readable without re-share
-11. `$keys` update rejected by policy
+9. `$keys` update rejected by policy
 
 (9 context-binding and 10 Rust-parity live in the Rust suite.)
 
@@ -227,7 +231,7 @@ git commit -m "test(jazz-tools): e2ee end-to-end scenarios"
 ### Task 5: WASM rebuild + full verification
 
 - [ ] **Step 5.1:** Rebuild the WASM artifact so TS tests exercise the new runtime: `cd crates/jazz-wasm && pnpm build` (wasm-pack `--release`). Note: Task 4 tests cannot pass before this; if executing tasks in order, run this build between Tasks 1 and 4 as well.
-- [ ] **Step 5.2:** `cargo test -p jazz-tools` and `cd packages/jazz-tools && pnpm test` — all green except failures reproducible on `main` (the stale-WASM empty-`in` failure should *disappear* after the rebuild; if it persists, it is a real bug to surface, not to fix here).
+- [ ] **Step 5.2:** `cargo test -p jazz-tools` and `cd packages/jazz-tools && pnpm test` — all green except failures reproducible on `main` (the stale-WASM empty-`in` failure should _disappear_ after the rebuild; if it persists, it is a real bug to surface, not to fix here).
 - [ ] **Step 5.3:** Measure the **bundle delta** promised by spec §9: compare `jazz_wasm_bg.wasm` size (raw + `gzip -9`) against the pre-E2EE artifact (`git stash` the Cargo changes or rebuild from `origin/main` in a worktree). Record both numbers in spec §9, replacing the "must be measured during implementation" caveat.
 - [ ] **Step 5.4:**
 
