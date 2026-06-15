@@ -143,6 +143,25 @@ impl QueryManager {
         &self,
         query: &crate::query_manager::query::Query,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+        if let Some(composed) = query
+            .branches
+            .first()
+            .and_then(|branch| ComposedBranchName::parse(&BranchName::new(branch)))
+            && let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash)
+            && let Some(target_schema) = self
+                .schema_context
+                .get_schema(&full_hash)
+                .cloned()
+                .or_else(|| self.known_schemas.get(&full_hash).cloned())
+            && (target_schema.contains_key(&query.table) || self.schema.is_empty())
+        {
+            return Some(self.server_subscription_context_for_schema(
+                target_schema,
+                &composed.env,
+                &composed.user_branch,
+            ));
+        }
+
         if !self.schema.is_empty() {
             return Some((self.schema.clone(), self.schema_context.clone()));
         }
@@ -154,25 +173,42 @@ impl QueryManager {
         let full_hash = self.find_schema_by_short_hash(&composed.schema_hash)?;
         let target_schema = self.known_schemas.get(&full_hash)?.clone();
 
-        let mut schema_context = crate::schema_manager::SchemaContext::new(
-            target_schema.clone(),
+        Some(self.server_subscription_context_for_schema(
+            target_schema,
             &composed.env,
             &composed.user_branch,
-        );
+        ))
+    }
 
+    fn server_subscription_context_for_schema(
+        &self,
+        target_schema: Schema,
+        env: &str,
+        user_branch: &str,
+    ) -> (Arc<Schema>, crate::schema_manager::SchemaContext) {
+        let mut schema_context =
+            crate::schema_manager::SchemaContext::new(target_schema.clone(), env, user_branch);
         for lens in self.schema_context.lenses.values() {
             schema_context.register_lens(lens.clone());
         }
 
+        for hash in self.schema_context.all_live_hashes() {
+            if hash != schema_context.current_hash
+                && let Some(schema) = self.schema_context.get_schema(&hash)
+            {
+                schema_context.add_pending_schema_with_hash(hash, schema.clone());
+            }
+        }
+
         for (hash, schema) in self.known_schemas.iter() {
-            if *hash != full_hash {
+            if *hash != schema_context.current_hash {
                 schema_context.add_pending_schema_with_hash(*hash, schema.clone());
             }
         }
 
         schema_context.try_activate_pending();
 
-        Some((Arc::new(target_schema), schema_context))
+        (Arc::new(target_schema), schema_context)
     }
 
     pub(super) fn branch_schema_map_for_context(
