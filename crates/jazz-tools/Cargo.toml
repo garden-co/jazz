@@ -124,7 +124,7 @@ opentelemetry-otlp = { version = "0.31", features = [
   "logs",
   "metrics",
 ], optional = true }
-opentelemetry-stdout = { version = "0.31", features = ["trace", "metrics"], optional = true }
+opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 lz4_flex = "0.13.1"
@@ -133,6 +133,10 @@ lz4_flex = "0.13.1"
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [dev-dependencies]
+# Test-only: exposes `InMemoryMetricExporter` for asserting observed metric
+# values. Scoped to dev-dependencies so the `testing` feature never reaches a
+# production build (Cargo enables dev-dependency features only for tests).
+opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
