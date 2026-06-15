@@ -214,4 +214,94 @@ describe("chat permissions", () => {
     ]);
     await expect(carolDb.all(app.reactions.where({ id: reaction.id }))).resolves.toEqual([]);
   });
+
+  it("lets the sender delete their own message but no one else", async () => {
+    const message = testApp.seed((db) => {
+      const { value: aliceProfile } = db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      });
+      const { value: chat } = db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        createdBy: "alice",
+        joinCode: "del-1",
+      });
+      db.insert(app.chatMembers, { chatId: chat.id, userId: "alice", joinCode: "del-1" });
+      db.insert(app.chatMembers, { chatId: chat.id, userId: "bob", joinCode: "del-1" });
+      const { value: message } = db.insert(app.messages, {
+        chatId: chat.id,
+        text: "alice's message",
+        senderId: aliceProfile.id,
+        createdAt: new Date("2026-01-01T00:00:04.000Z"),
+      });
+      return message;
+    });
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+    const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) => db.delete(app.messages, message.id));
+    bobDb.expectDenied((db) => db.delete(app.messages, message.id));
+  });
+
+  it("lets the sender cascade-delete a message's attachments, files and reactions", async () => {
+    const seeded = testApp.seed((db) => {
+      const { value: aliceProfile } = db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      });
+      const { value: chat } = db.insert(app.chats, {
+        name: "Uploads",
+        isPublic: false,
+        createdBy: "alice",
+        joinCode: "del-2",
+      });
+      db.insert(app.chatMembers, { chatId: chat.id, userId: "alice", joinCode: "del-2" });
+      db.insert(app.chatMembers, { chatId: chat.id, userId: "bob", joinCode: "del-2" });
+      const { value: message } = db.insert(app.messages, {
+        chatId: chat.id,
+        text: "see attachment",
+        senderId: aliceProfile.id,
+        createdAt: new Date("2026-01-01T00:00:05.000Z"),
+      });
+      const { value: filePart } = db.insert(app.file_parts, {
+        data: new Uint8Array([1, 2, 3]),
+      });
+      const { value: file } = db.insert(app.files, {
+        name: "note.txt",
+        mimeType: "text/plain",
+        partIds: [filePart.id],
+        partSizes: [3],
+      });
+      const { value: attachment } = db.insert(app.attachments, {
+        messageId: message.id,
+        type: "file",
+        name: "note.txt",
+        fileId: file.id,
+        size: 3,
+      });
+      // A reaction left by someone *other* than the sender must also be removable
+      // when the sender deletes the message it hangs off.
+      const { value: bobReaction } = db.insert(app.reactions, {
+        messageId: message.id,
+        userId: "bob",
+        emoji: "🔥",
+      });
+      return { message, filePart, file, attachment, bobReaction };
+    });
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+    const carolDb = testApp.as({ user_id: "carol", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) => {
+      db.delete(app.file_parts, seeded.filePart.id);
+      db.delete(app.files, seeded.file.id);
+      db.delete(app.attachments, seeded.attachment.id);
+      db.delete(app.reactions, seeded.bobReaction.id);
+      db.delete(app.messages, seeded.message.id);
+    });
+
+    carolDb.expectDenied((db) => db.delete(app.attachments, seeded.attachment.id));
+  });
 });
