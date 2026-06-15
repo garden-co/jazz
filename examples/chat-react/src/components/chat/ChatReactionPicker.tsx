@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SmilePlus } from "lucide-react";
-import { useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenuLabel,
@@ -25,13 +25,18 @@ export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
   const emojiRegex =
     /^(\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Presentation}|\s)+$/u;
 
+  const myReactions =
+    useAll(app.reactions.where({ messageId, userId: session?.user_id ?? "__none__" })) ?? [];
+
   const addReaction = (emoji: string) => {
     if (!session?.user_id) return;
-    db.insert(app.reactions, {
-      messageId,
-      userId: session.user_id,
-      emoji,
-    });
+    if (!myReactions.some((reaction) => reaction.emoji === emoji)) {
+      db.insert(app.reactions, {
+        messageId,
+        userId: session.user_id,
+        emoji,
+      });
+    }
     onPick(emoji);
   };
 
