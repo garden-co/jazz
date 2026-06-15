@@ -5,7 +5,6 @@
 //! in NAPI. Standard OTel env vars (`OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`,
 //! etc.) are respected automatically by the SDK.
 
-use crate::server::ShutdownController;
 use opentelemetry::metrics::{Meter, ObservableGauge};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
@@ -144,19 +143,19 @@ where
 /// Metric name for the active inbound WebSocket gauge.
 const ACTIVE_WEBSOCKETS_METRIC: &str = "jazz.server.active_websockets";
 
-/// Register an observable gauge that samples the server's active inbound
-/// WebSocket count on each metric collection. The returned instrument must be
-/// kept alive for as long as the metric should be reported.
-pub fn register_active_websockets_gauge(
-    meter: &Meter,
-    controller: ShutdownController,
-) -> ObservableGauge<u64> {
+/// Register an observable gauge that samples `count` on each metric collection
+/// and reports it as `jazz.server.active_websockets`. The returned instrument
+/// must be kept alive for as long as the metric should be reported.
+pub fn register_active_websockets_gauge<F>(meter: &Meter, count: F) -> ObservableGauge<u64>
+where
+    F: Fn() -> u64 + Send + Sync + 'static,
+{
     meter
         .u64_observable_gauge(ACTIVE_WEBSOCKETS_METRIC)
         .with_description("Currently active inbound WebSocket connections")
         .with_unit("{connection}")
         .with_callback(move |observer| {
-            observer.observe(controller.active_websockets() as u64, &[]);
+            observer.observe(count(), &[]);
         })
         .build()
 }
@@ -166,26 +165,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn active_websockets_gauge_registers_and_flushes() {
-        use crate::server::ShutdownController;
+    async fn active_websockets_gauge_reports_the_count() {
         use opentelemetry::metrics::MeterProvider as _;
-        use std::time::Duration;
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 
-        let controller = ShutdownController::new(Duration::from_secs(30));
-        let _guard = controller.try_enter_websocket().expect("enter ws");
-
-        // A stdout PeriodicReader provider gives a real collect path; force_flush
-        // drives a collect, invoking the observable callback — proving the wiring
-        // runs end to end.
+        let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
-            .with_periodic_exporter(opentelemetry_stdout::MetricExporter::default())
+            .with_periodic_exporter(exporter.clone())
             .build();
         let meter = provider.meter("test");
-        let _gauge = register_active_websockets_gauge(&meter, controller.clone());
 
-        provider
-            .force_flush()
-            .expect("flush collects the gauge without error");
-        provider.shutdown().expect("provider shuts down cleanly");
+        // Wire the gauge to a fixed count and force a collect, then assert the
+        // exported datapoint actually carries that value — not merely that the
+        // flush succeeded.
+        let _gauge = register_active_websockets_gauge(&meter, || 1);
+        provider.force_flush().expect("flush collects the gauge");
+
+        let observed = exporter
+            .get_finished_metrics()
+            .expect("metrics collected")
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .find(|m| m.name() == "jazz.server.active_websockets")
+            .and_then(|m| match m.data() {
+                AggregatedMetrics::U64(MetricData::Gauge(g)) => {
+                    g.data_points().next().map(|dp| dp.value())
+                }
+                _ => None,
+            })
+            .expect("active_websockets gauge datapoint present");
+        assert_eq!(observed, 1);
     }
 }
