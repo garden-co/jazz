@@ -280,15 +280,20 @@ fn current_unix_timestamp_secs() -> Result<u64, String> {
         .map(|duration| duration.as_secs())
 }
 
-/// Derive a signing key from a 32-byte seed and a domain string.
-/// Uses SHA-512(domain || seed), taking the first 32 bytes as the Ed25519 key material.
-pub fn derive_signing_key(seed: &[u8; 32], domain: &str) -> SigningKey {
+/// Derive 32 bytes of domain-separated key material from a seed:
+/// SHA-512(domain || seed), first 32 bytes.
+pub fn derive_key_material(seed: &[u8; 32], domain: &str) -> [u8; 32] {
     let mut hasher = Sha512::new();
     hasher.update(domain.as_bytes());
     hasher.update(seed);
     let hash = hasher.finalize();
-    let key_bytes: [u8; 32] = hash[..32].try_into().expect("SHA-512 output is 64 bytes");
-    SigningKey::from_bytes(&key_bytes)
+    hash[..32].try_into().expect("SHA-512 output is 64 bytes")
+}
+
+/// Derive a signing key from a 32-byte seed and a domain string.
+/// Uses SHA-512(domain || seed), taking the first 32 bytes as the Ed25519 key material.
+pub fn derive_signing_key(seed: &[u8; 32], domain: &str) -> SigningKey {
+    SigningKey::from_bytes(&derive_key_material(seed, domain))
 }
 
 /// Derive the verifying (public) key from a 32-byte seed using the standard sign domain.

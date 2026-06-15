@@ -160,6 +160,7 @@ pub struct SubscriptionHandle(pub u64);
 
 // Re-export QueryHandle from query_manager for convenience
 pub use crate::query_manager::manager::QueryHandle as QMQueryHandle;
+pub use e2ee_service::{E2eeKeyHolder, E2eeService};
 pub use subscriptions::ReadDurabilityOptions;
 
 /// Errors from runtime operations.
@@ -168,6 +169,10 @@ pub enum RuntimeError {
     QueryError(String),
     WriteError(String),
     NotFound,
+    E2eeKeyUnavailable {
+        table: String,
+        space_id: String,
+    },
     AnonymousWriteDenied {
         table: crate::query_manager::types::TableName,
         operation: crate::query_manager::policy::Operation,
@@ -180,6 +185,12 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::QueryError(s) => write!(f, "Query error: {}", s),
             RuntimeError::WriteError(s) => write!(f, "Write error: {}", s),
             RuntimeError::NotFound => write!(f, "Not found"),
+            RuntimeError::E2eeKeyUnavailable { table, space_id } => {
+                write!(
+                    f,
+                    "E2EE key unavailable for table '{table}', space '{space_id}'"
+                )
+            }
             RuntimeError::AnonymousWriteDenied { table, operation } => {
                 write!(
                     f,
@@ -312,6 +323,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     schema_manager: SchemaManager,
     pub(crate) storage: S,
     scheduler: Sch,
+    pub(crate) e2ee: E2eeService,
     /// True when storage was mutated since the last WAL flush barrier.
     storage_write_pending_flush: bool,
     /// True after scheduling one retry for the current failed WAL flush barrier.
@@ -463,6 +475,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             schema_manager,
             storage,
             scheduler,
+            e2ee: E2eeService::default(),
             storage_write_pending_flush: false,
             storage_flush_retry_scheduled: false,
             storage_flush_error: None,
@@ -877,6 +890,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 }
 
 mod durability;
+mod e2ee_service;
 mod subscriptions;
 mod sync;
 mod ticks;

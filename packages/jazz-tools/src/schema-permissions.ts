@@ -6,6 +6,7 @@ import type {
   Value as WasmValue,
   WasmSchema,
 } from "./drivers/types.js";
+import { validateE2eeSchemaPolicies } from "./codegen/schema-reader.js";
 import type { RelExpr, RelPredicateExpr, RelValueRef } from "./ir.js";
 import type {
   OperationPolicy,
@@ -24,6 +25,10 @@ export interface MissingExplicitPolicyDiagnostic {
   operation: ExplicitPolicyOperation;
   message: string;
 }
+
+type ExplicitPolicyDiagnosticTable =
+  | string
+  | Pick<Schema["tables"][number], "name" | "encryptionSpace">;
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -458,6 +463,23 @@ function missingExplicitPolicyMessage(
   return `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; enforcing runtimes default to deny.`;
 }
 
+function diagnosticTableName(table: ExplicitPolicyDiagnosticTable): string {
+  return typeof table === "string" ? table : table.name;
+}
+
+function isEncryptionSpaceDiagnosticTable(
+  table: ExplicitPolicyDiagnosticTable,
+): table is Pick<Schema["tables"][number], "name" | "encryptionSpace"> {
+  return typeof table !== "string" && table.encryptionSpace === true;
+}
+
+function generatedE2eeKeyTableNames(tables: readonly ExplicitPolicyDiagnosticTable[]): Set<string> {
+  const encryptionSpaceTables = new Set(
+    tables.filter(isEncryptionSpaceDiagnosticTable).map((table) => table.name),
+  );
+  return new Set([...encryptionSpaceTables].map((tableName) => `${tableName}$keys`));
+}
+
 export function validatePermissionsAgainstSchema(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
@@ -466,24 +488,28 @@ export function validatePermissionsAgainstSchema(
 }
 
 export function collectMissingExplicitPolicyDiagnostics(
-  schemaTableNames: readonly string[],
+  schemaTables: readonly ExplicitPolicyDiagnosticTable[],
   compiledPermissions?: CompiledPermissionsMap,
 ): MissingExplicitPolicyDiagnostic[] {
   const operations: ExplicitPolicyOperation[] = ["read", "insert", "update", "delete"];
+  const ignoredTableNames = generatedE2eeKeyTableNames(schemaTables);
+  const schemaTableNames = schemaTables.map(diagnosticTableName);
 
   return schemaTableNames.flatMap((tableName) =>
-    operations.flatMap((operation) => {
-      const tablePolicies = compiledPermissions?.[tableName];
-      return hasExplicitPolicy(tablePolicies, operation)
-        ? []
-        : [
-            {
-              tableName,
-              operation,
-              message: missingExplicitPolicyMessage(tableName, operation, tablePolicies),
-            },
-          ];
-    }),
+    ignoredTableNames.has(tableName)
+      ? []
+      : operations.flatMap((operation) => {
+          const tablePolicies = compiledPermissions?.[tableName];
+          return hasExplicitPolicy(tablePolicies, operation)
+            ? []
+            : [
+                {
+                  tableName,
+                  operation,
+                  message: missingExplicitPolicyMessage(tableName, operation, tablePolicies),
+                },
+              ];
+        }),
   );
 }
 
@@ -540,5 +566,6 @@ export function mergePermissionsIntoWasmSchema(
       policies: normalizedPermissions[tableName] ?? table.policies,
     };
   }
+  validateE2eeSchemaPolicies(merged);
   return merged;
 }

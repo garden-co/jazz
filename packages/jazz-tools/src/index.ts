@@ -227,4 +227,5 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
+export { Locked, isLocked, type Locked as LockedValue } from "./locked.js";
 export * from "./dev-tools/index.js";

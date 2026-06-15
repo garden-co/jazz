@@ -618,7 +618,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                             .filter_map(|row| {
                                 decode_row(&update.descriptor, &row.row.data)
                                     .ok()
-                                    .map(|values| (row.row.id, values))
+                                    .map(|values| {
+                                        (
+                                            row.row.id,
+                                            self.decrypt_query_row_values(
+                                                &update.descriptor,
+                                                row.row.id,
+                                                values,
+                                            ),
+                                        )
+                                    })
                             })
                             .collect();
                         let _ = sender.send(Ok(results));

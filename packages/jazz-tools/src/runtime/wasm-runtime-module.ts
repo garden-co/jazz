@@ -119,4 +119,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       options.nowSeconds,
     );
   }
+
+  override deriveE2eePublicKey(secret: string): string {
+    return this.wasmModule.WasmRuntime.deriveE2eePublicKey(secret);
+  }
 }

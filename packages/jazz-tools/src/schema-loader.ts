@@ -142,6 +142,7 @@ function wasmColumnToAst(column: ColumnDescriptor): Column {
         : wasmValueToDefault(column.default, column.column_type),
     references: column.references,
     mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
+    encryptedWith: column.encrypted_with,
   };
 }
 
@@ -151,6 +152,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     columns: table.columns.map(wasmColumnToAst),
     indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
     policies: table.policies as TablePolicies | undefined,
+    encryptionSpace: table.encryption_space,
   };
 }
 
@@ -276,7 +278,20 @@ async function tryLoadPermissionsFromSchemaModule(
 }
 
 function findInlinePolicyTables(schema: Schema): string[] {
-  return schema.tables.filter((table) => table.policies).map((table) => table.name);
+  return schema.tables
+    .filter((table) => table.policies && !isGeneratedE2eeKeysTable(schema, table.name))
+    .map((table) => table.name);
+}
+
+function isGeneratedE2eeKeysTable(schema: Schema, tableName: string): boolean {
+  if (!tableName.endsWith("$keys")) {
+    return false;
+  }
+
+  const spaceTableName = tableName.slice(0, -"$keys".length);
+  return schema.tables.some(
+    (table) => table.name === spaceTableName && table.encryptionSpace === true,
+  );
 }
 
 interface SchemaRootCandidate {

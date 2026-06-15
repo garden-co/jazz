@@ -51,6 +51,7 @@ pub struct InitPayloadFields {
     pub client_id: String,
     pub server_url: Option<String>,
     pub jwt_token: Option<String>,
+    pub e2ee_secret: Option<String>,
     pub admin_secret: Option<String>,
     pub fallback_wasm_url: Option<String>,
     pub log_level: Option<String>,

@@ -252,6 +252,12 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         }
     };
 
+    if let Some(secret) = &f.e2ee_secret {
+        runtime
+            .enable_e2ee(secret)
+            .map_err(|err| format!("enable E2EE: {}", js_error_message(&err.into())))?;
+    }
+
     // 2. Register main thread as a peer client.
     let main_client_id = runtime.add_client();
     runtime

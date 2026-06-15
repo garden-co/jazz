@@ -24,7 +24,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
 use crate::row_histories::BatchId;
-pub use crate::runtime_core::SubscriptionHandle;
+pub use crate::runtime_core::{E2eeKeyHolder, SubscriptionHandle};
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
@@ -180,6 +180,7 @@ pub enum RuntimeError {
     QueryError(String),
     WriteError(String),
     NotFound,
+    E2eeKeyUnavailable { table: String, space_id: String },
     LockError,
 }
 
@@ -189,6 +190,12 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::QueryError(s) => write!(f, "Query error: {}", s),
             RuntimeError::WriteError(s) => write!(f, "Write error: {}", s),
             RuntimeError::NotFound => write!(f, "Not found"),
+            RuntimeError::E2eeKeyUnavailable { table, space_id } => {
+                write!(
+                    f,
+                    "E2EE key unavailable for table '{table}', space '{space_id}'"
+                )
+            }
             RuntimeError::LockError => write!(f, "Lock error"),
         }
     }
@@ -202,6 +209,9 @@ impl From<CoreRuntimeError> for RuntimeError {
             CoreRuntimeError::QueryError(s) => RuntimeError::QueryError(s),
             CoreRuntimeError::WriteError(s) => RuntimeError::WriteError(s),
             CoreRuntimeError::NotFound => RuntimeError::NotFound,
+            CoreRuntimeError::E2eeKeyUnavailable { table, space_id } => {
+                RuntimeError::E2eeKeyUnavailable { table, space_id }
+            }
             CoreRuntimeError::AnonymousWriteDenied { table, operation } => {
                 RuntimeError::WriteError(format!(
                     "anonymous session cannot {} on table {}",
@@ -328,6 +338,61 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.publish_lens(lens)?)
+    }
+
+    pub fn enable_e2ee(&self, seed: &[u8; 32]) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.enable_e2ee(seed);
+        Ok(())
+    }
+
+    pub fn clear_e2ee(&self) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.clear_e2ee();
+        Ok(())
+    }
+
+    pub fn e2ee_public_key(&self) -> Result<Option<crate::e2ee::E2eePublicKey>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.e2ee_public_key())
+    }
+
+    pub fn share_key(
+        &self,
+        space_table: &str,
+        space_id: ObjectId,
+        recipient_user_id: ObjectId,
+        recipient_public_key: &str,
+        session: Option<&Session>,
+    ) -> Result<BatchId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        Ok(core.share_key(
+            space_table,
+            space_id,
+            recipient_user_id,
+            recipient_public_key,
+            owned.as_ref(),
+        )?)
+    }
+
+    pub fn unshare_key(
+        &self,
+        key_row_id: ObjectId,
+        session: Option<&Session>,
+    ) -> Result<BatchId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        Ok(core.unshare_key(key_row_id, owned.as_ref())?)
+    }
+
+    pub fn key_holders(
+        &self,
+        space_table: &str,
+        space_id: ObjectId,
+    ) -> Result<Vec<E2eeKeyHolder>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.key_holders(space_table, space_id)?)
     }
 
     // =========================================================================

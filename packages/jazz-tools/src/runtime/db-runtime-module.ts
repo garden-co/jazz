@@ -65,4 +65,8 @@ export abstract class DbRuntimeModule<RuntimeConfig extends DbConfig = DbConfig>
   mintAnonymousToken(_options: RuntimeTokenOptions): string {
     throw new Error("Db runtime module does not support anonymous auth");
   }
+
+  deriveE2eePublicKey(_secret: string): string {
+    throw new Error("Db runtime module does not support E2EE");
+  }
 }

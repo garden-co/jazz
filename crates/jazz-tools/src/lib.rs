@@ -2,6 +2,7 @@ pub mod batch_fate;
 pub mod catalogue;
 pub mod commit;
 pub mod digest;
+pub mod e2ee;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -99,6 +100,8 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
+    /// 32-byte LocalFirst Auth seed used to derive the runtime E2EE keypair.
+    pub e2ee_seed: Option<[u8; 32]>,
 
     /// Optional sync message tracer for test observability.
     /// Set via `TestingClient::with_tracer()` — `None` in production.

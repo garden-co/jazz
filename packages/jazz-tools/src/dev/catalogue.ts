@@ -961,7 +961,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
 
   const warnings: string[] = [];
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
-    compiled.schema.tables.map((table) => table.name),
+    compiled.schema.tables,
     compiled.permissions,
   )) {
     emitWarning(options, warnings, diagnostic.message);

@@ -11,6 +11,7 @@ type JsonFFIValue =
   | { type: "Bytea"; value: string }
   | { type: "Array"; value: JsonFFIValue[] }
   | { type: "Row"; value: { id?: string; values: JsonFFIValue[] } }
+  | { type: "Locked" }
   | { type: "Null" };
 
 type JsonFFIRecord = Record<string, JsonFFIValue>;
@@ -60,6 +61,7 @@ function encodeJsonFFIValue(value: Value): JsonFFIValue {
     case "Text":
     case "Timestamp":
     case "Uuid":
+    case "Locked":
     case "Null":
       return { ...value };
   }
@@ -86,6 +88,7 @@ function decodeJsonFFIValue(value: JsonFFIValue): Value {
     case "Text":
     case "Timestamp":
     case "Uuid":
+    case "Locked":
     case "Null":
       return { ...value };
   }

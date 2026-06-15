@@ -162,6 +162,11 @@ impl JazzClient {
         // Create runtime. The sync callback is a no-op — the WS TransportManager
         // drives the outbox directly via its own channel.
         let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
+        if let Some(seed) = context.e2ee_seed {
+            runtime
+                .enable_e2ee(&seed)
+                .map_err(|e| JazzError::Write(e.to_string()))?;
+        }
 
         // Attach the tracer to the runtime so all outbox/inbox traffic is
         // recorded under the participant name.
@@ -367,6 +372,47 @@ impl JazzClient {
         self.has_server && self.runtime.transport_ever_connected()
     }
 
+    pub fn e2ee_public_key(&self) -> Result<Option<String>> {
+        self.runtime
+            .e2ee_public_key()
+            .map(|key| key.map(|key| key.to_base64url()))
+            .map_err(|e| JazzError::Query(e.to_string()))
+    }
+
+    pub fn share_key(
+        &self,
+        space_table: &str,
+        space_id: ObjectId,
+        recipient_user_id: ObjectId,
+        recipient_public_key: &str,
+    ) -> Result<BatchId> {
+        self.runtime
+            .share_key(
+                space_table,
+                space_id,
+                recipient_user_id,
+                recipient_public_key,
+                self.default_session.as_ref(),
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub fn unshare_key(&self, key_row_id: ObjectId) -> Result<BatchId> {
+        self.runtime
+            .unshare_key(key_row_id, self.default_session.as_ref())
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub fn key_holders(
+        &self,
+        space_table: &str,
+        space_id: ObjectId,
+    ) -> Result<Vec<crate::runtime_core::E2eeKeyHolder>> {
+        self.runtime
+            .key_holders(space_table, space_id)
+            .map_err(|e| JazzError::Query(e.to_string()))
+    }
+
     /// Create a session-scoped client for backend operations.
     pub fn for_session(&self, session: Session) -> SessionClient<'_> {
         SessionClient {
@@ -503,6 +549,32 @@ impl<'a> SessionClient<'a> {
             .subscribe_internal(query, Some(self.session.clone()))
             .await
     }
+
+    pub fn share_key(
+        &self,
+        space_table: &str,
+        space_id: ObjectId,
+        recipient_user_id: ObjectId,
+        recipient_public_key: &str,
+    ) -> Result<BatchId> {
+        self.client
+            .runtime
+            .share_key(
+                space_table,
+                space_id,
+                recipient_user_id,
+                recipient_public_key,
+                Some(&self.session),
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub fn unshare_key(&self, key_row_id: ObjectId) -> Result<BatchId> {
+        self.client
+            .runtime
+            .unshare_key(key_row_id, Some(&self.session))
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
 }
 
 async fn wait_for_batch_write(
@@ -574,6 +646,7 @@ mod tests {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            e2ee_seed: None,
             sync_tracer: None,
         }
     }

@@ -33,6 +33,8 @@ pub enum Value {
         id: Option<ObjectId>,
         values: Vec<Value>,
     },
+    /// Encrypted value that could not be decrypted by this runtime.
+    Locked,
     Null,
 }
 
@@ -51,6 +53,7 @@ enum ValueHuman {
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
+    Locked,
     Null,
 }
 
@@ -75,6 +78,7 @@ enum ValueBinary {
     Bytea(Vec<u8>),
     Array(Vec<ValueBinary>),
     Row(Vec<ValueBinary>),
+    Locked,
     Null,
 }
 
@@ -144,6 +148,7 @@ impl From<&Value> for ValueHuman {
                 id: *id,
                 values: values.iter().map(ValueHuman::from).collect(),
             }),
+            Value::Locked => ValueHuman::Locked,
             Value::Null => ValueHuman::Null,
         }
     }
@@ -166,6 +171,7 @@ impl From<ValueHuman> for Value {
                 id: r.id,
                 values: r.values.into_iter().map(Value::from).collect(),
             },
+            ValueHuman::Locked => Value::Locked,
             ValueHuman::Null => Value::Null,
         }
     }
@@ -187,6 +193,7 @@ impl From<&Value> for ValueBinary {
             Value::Row { values, .. } => {
                 ValueBinary::Row(values.iter().map(ValueBinary::from).collect())
             }
+            Value::Locked => ValueBinary::Locked,
             Value::Null => ValueBinary::Null,
         }
     }
@@ -209,6 +216,7 @@ impl From<ValueBinary> for Value {
                 id: None,
                 values: v.into_iter().map(Value::from).collect(),
             },
+            ValueBinary::Locked => Value::Locked,
             ValueBinary::Null => Value::Null,
         }
     }
@@ -263,6 +271,7 @@ impl PartialEq for Value {
                     values: b,
                 },
             ) => id_a == id_b && a == b,
+            (Value::Locked, Value::Locked) => true,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -296,6 +305,7 @@ impl Value {
             }
             // Row type requires external schema, can't be inferred
             Value::Row { .. } => None,
+            Value::Locked => None,
             Value::Null => None,
         }
     }

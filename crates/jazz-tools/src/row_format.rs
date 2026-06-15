@@ -122,7 +122,16 @@ fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
     let mut variable_index = 0usize;
 
     for column in &descriptor.columns {
-        if let Some(fixed_value_size) = column.column_type.fixed_size() {
+        if column_stores_e2ee_envelope(column) {
+            columns.push(CompiledColumnLayout {
+                fixed_offset: None,
+                fixed_total_size: None,
+                fixed_value_size: None,
+                variable_index: Some(variable_index),
+                nullable: column.nullable,
+            });
+            variable_index += 1;
+        } else if let Some(fixed_value_size) = column.column_type.fixed_size() {
             let fixed_total_size = fixed_value_size + usize::from(column.nullable);
             columns.push(CompiledColumnLayout {
                 fixed_offset: Some(fixed_offset),
@@ -169,6 +178,32 @@ pub fn compiled_row_layout(descriptor: &RowDescriptor) -> Arc<CompiledRowLayout>
     compiled
 }
 
+fn column_stores_e2ee_envelope(col: &ColumnDescriptor) -> bool {
+    col.encrypted_with.is_some()
+}
+
+fn column_is_variable_storage(col: &ColumnDescriptor) -> bool {
+    column_stores_e2ee_envelope(col) || col.column_type.is_variable()
+}
+
+fn value_matches_storage_column_type(value: &Value, col: &ColumnDescriptor) -> bool {
+    if column_stores_e2ee_envelope(col) {
+        // E2EE: encrypted columns store envelope bytes; logical type applies to plaintext only.
+        return matches!(value, Value::Bytea(_));
+    }
+    value_matches_column_type(value, &col.column_type)
+}
+
+fn validate_storage_value_size(col: &ColumnDescriptor, val: &Value) -> Result<(), EncodingError> {
+    if column_stores_e2ee_envelope(col) {
+        if let Value::Bytea(bytes) = val {
+            return validate_bytea_size(col.name_str(), bytes);
+        }
+        return Ok(());
+    }
+    validate_value_size(val, &col.column_type, col.name_str())
+}
+
 /// Binary row format:
 ///
 /// ```text
@@ -203,7 +238,7 @@ pub(crate) fn encode_row_with_layout(
         .columns
         .iter()
         .zip(values.iter())
-        .filter(|(col, _)| col.column_type.is_variable())
+        .filter(|(col, _)| column_is_variable_storage(col))
         .map(|(col, val)| estimated_variable_value_len(col, val))
         .sum::<usize>();
 
@@ -216,7 +251,7 @@ pub(crate) fn encode_row_with_layout(
 
     for (i, (col, val)) in descriptor.columns.iter().zip(values.iter()).enumerate() {
         // Validate type match
-        if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
+        if !val.is_null() && !value_matches_storage_column_type(val, col) {
             return Err(EncodingError::TypeMismatch {
                 column: col.name.to_string(),
                 expected: col.column_type.clone(),
@@ -233,10 +268,10 @@ pub(crate) fn encode_row_with_layout(
 
         // Enforce BYTEA payload limits (including nested bytea in arrays/rows).
         if !val.is_null() {
-            validate_value_size(val, &col.column_type, col.name_str())?;
+            validate_storage_value_size(col, val)?;
         }
 
-        if col.column_type.is_variable() {
+        if column_is_variable_storage(col) {
             var_columns.push((i, col, val));
         } else {
             // Encode fixed-size value
@@ -298,7 +333,7 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
         .columns
         .iter()
         .zip(prefix_values.iter())
-        .filter(|(col, _)| col.column_type.is_variable())
+        .filter(|(col, _)| column_is_variable_storage(col))
         .map(|(col, val)| estimated_variable_value_len(col, val))
         .sum::<usize>();
 
@@ -308,7 +343,7 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
         Vec::with_capacity(dst_layout.fixed_section_size + offset_table_size + var_data.capacity());
 
     for (dst_col_index, dst_col) in dst_descriptor.columns.iter().enumerate() {
-        if dst_col.column_type.is_variable() {
+        if column_is_variable_storage(dst_col) {
             continue;
         }
 
@@ -330,7 +365,7 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
     }
 
     for (dst_col_index, dst_col) in dst_descriptor.columns.iter().enumerate() {
-        if !dst_col.column_type.is_variable() {
+        if !column_is_variable_storage(dst_col) {
             continue;
         }
 
@@ -362,7 +397,7 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
 }
 
 fn validate_column_value(col: &ColumnDescriptor, val: &Value) -> Result<(), EncodingError> {
-    if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
+    if !val.is_null() && !value_matches_storage_column_type(val, col) {
         return Err(EncodingError::TypeMismatch {
             column: col.name.to_string(),
             expected: col.column_type.clone(),
@@ -377,7 +412,7 @@ fn validate_column_value(col: &ColumnDescriptor, val: &Value) -> Result<(), Enco
     }
 
     if !val.is_null() {
-        validate_value_size(val, &col.column_type, col.name_str())?;
+        validate_storage_value_size(col, val)?;
     }
 
     Ok(())
@@ -477,6 +512,14 @@ fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
         return nullable_prefix;
     }
 
+    if column_stores_e2ee_envelope(col) {
+        return nullable_prefix
+            + match val {
+                Value::Bytea(bytes) => bytes.len(),
+                _ => 0,
+            };
+    }
+
     nullable_prefix
         + match val {
             Value::Text(s) => s.len(),
@@ -502,7 +545,7 @@ fn estimated_row_len(descriptor: &RowDescriptor, values: &[Value]) -> usize {
             .columns
             .iter()
             .zip(values.iter())
-            .filter(|(col, _)| col.column_type.is_variable())
+            .filter(|(col, _)| column_is_variable_storage(col))
             .map(|(col, val)| estimated_variable_value_len(col, val))
             .sum::<usize>()
 }
@@ -693,6 +736,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Bytea(_) => unreachable!("Bytea is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row { .. } => unreachable!("Row is not fixed-size"),
+        Value::Locked => unreachable!("Locked values cannot be stored"),
     }
 }
 
@@ -708,6 +752,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
     }
 
     match val {
+        Value::Bytea(bytes) if column_stores_e2ee_envelope(col) => buf.extend_from_slice(bytes),
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
         Value::Array(elements) => encode_array_into(buf, elements, &col.column_type),
@@ -727,6 +772,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
             }
         }
         Value::Null => {} // Already handled above for nullable
+        Value::Locked => unreachable!("Locked values cannot be stored"),
         _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
     }
 }
@@ -934,6 +980,10 @@ pub(crate) fn decode_column_with_layout(
 
     if is_null {
         return Ok(Value::Null);
+    }
+
+    if column_stores_e2ee_envelope(col) {
+        return decode_non_null_value(bytes, &ColumnType::Bytea, DecodeValueContext::Column);
     }
 
     // Decode based on type
@@ -1172,6 +1222,13 @@ pub fn compare_column(
     }
 
     let col = &descriptor.columns[col_index];
+    if column_stores_e2ee_envelope(col) {
+        return Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: ColumnType::Bytea,
+            operation: "ordering".to_string(),
+        });
+    }
 
     match &col.column_type {
         ColumnType::Integer => {
@@ -1235,6 +1292,13 @@ pub fn compare_column_to_value(
     }
 
     let col = &descriptor.columns[col_index];
+    if column_stores_e2ee_envelope(col) {
+        return Err(EncodingError::UnsupportedComparison {
+            column: col.name_str().to_string(),
+            column_type: ColumnType::Bytea,
+            operation: "ordering".to_string(),
+        });
+    }
 
     match &col.column_type {
         ColumnType::Integer => {
@@ -1318,6 +1382,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::Bytea(bytes) => bytes.clone(),
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row { .. } => panic!("Row values require a descriptor - use encode_value_with_type"),
+        Value::Locked => vec![],
         Value::Null => vec![],
     }
 }

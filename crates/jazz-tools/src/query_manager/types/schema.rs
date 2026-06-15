@@ -235,6 +235,10 @@ pub struct ColumnDescriptor {
     /// Optional per-column merge strategy. Absence means MRCA-relative LWW.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_strategy: Option<ColumnMergeStrategy>,
+    /// E2EE: name of the sibling ref column that scopes this column's
+    /// encryption to a space row. `Some` marks the column as encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_with: Option<ColumnName>,
 }
 
 impl ColumnDescriptor {
@@ -246,6 +250,7 @@ impl ColumnDescriptor {
             references: None,
             default: None,
             merge_strategy: None,
+            encrypted_with: None,
         }
     }
 
@@ -390,10 +395,17 @@ pub struct TableSchema {
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
+    /// E2EE: rows of this table own a shared encryption key.
+    #[serde(default, skip_serializing_if = "encryption_space_is_unset")]
+    pub encryption_space: bool,
 }
 
 fn table_policies_are_default(policies: &TablePolicies) -> bool {
     *policies == TablePolicies::default()
+}
+
+fn encryption_space_is_unset(value: &bool) -> bool {
+    !*value
 }
 
 impl TableSchema {
@@ -405,6 +417,7 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies: TablePolicies::default(),
+            encryption_space: false,
         }
     }
 
@@ -414,6 +427,7 @@ impl TableSchema {
             columns,
             indexed_columns: None,
             policies,
+            encryption_space: false,
         }
     }
 
@@ -449,6 +463,7 @@ pub struct TableSchemaBuilder {
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
     policies: TablePolicies,
+    encryption_space: bool,
 }
 
 impl TableSchemaBuilder {
@@ -459,7 +474,28 @@ impl TableSchemaBuilder {
             columns: Vec::new(),
             indexed_columns: None,
             policies: TablePolicies::default(),
+            encryption_space: false,
         }
+    }
+
+    /// Mark rows of this table as owners of a shared E2EE key.
+    pub fn encryption_space(mut self) -> Self {
+        self.encryption_space = true;
+        self
+    }
+
+    /// Add a non-nullable encrypted column scoped to the space referenced by
+    /// the sibling ref column `space_ref`.
+    pub fn encrypted_column(
+        mut self,
+        name: &str,
+        column_type: ColumnType,
+        space_ref: &str,
+    ) -> Self {
+        let mut descriptor = ColumnDescriptor::new(name, column_type);
+        descriptor.encrypted_with = Some(space_ref.into());
+        self.columns.push(descriptor);
+        self
     }
 
     /// Add a column to the table.
@@ -547,6 +583,7 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
+            encryption_space: self.encryption_space,
         }
     }
 
@@ -557,6 +594,7 @@ impl TableSchemaBuilder {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             policies: self.policies,
+            encryption_space: self.encryption_space,
         };
         (name, schema)
     }
@@ -580,9 +618,13 @@ impl SchemaBuilder {
         self
     }
 
-    /// Build the complete schema.
+    /// Build the complete schema, applying E2EE normalization (index
+    /// exclusion for encrypted columns, `$keys` companion expansion).
     pub fn build(self) -> Schema {
-        self.tables.into_iter().map(|t| t.build_named()).collect()
+        let mut schema: Schema = self.tables.into_iter().map(|t| t.build_named()).collect();
+        super::e2ee_schema::normalize_e2ee_indexes(&mut schema);
+        super::e2ee_schema::expand_e2ee_keys_tables(&mut schema);
+        schema
     }
 
     /// Compute the schema hash.

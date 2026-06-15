@@ -1,5 +1,6 @@
 import type {
   AnyTypedColumnBuilder,
+  ColumnBuilderEncrypted,
   ColumnBuilderHasDefault,
   ColumnBuilderOptional,
   ColumnBuilderReferences,
@@ -9,6 +10,7 @@ import type {
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
+import type { Locked as LockedValue } from "./locked.js";
 import {
   PERMISSION_INTROSPECTION_COLUMNS,
   PROVENANCE_MAGIC_COLUMNS,
@@ -29,6 +31,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   constructor(
     public readonly columns: TColumns,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
+    public readonly isEncryptionSpace?: boolean,
   ) {}
 
   indexOnly<
@@ -44,7 +47,12 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, normalizedColumns);
+    return new DefinedTable(this.columns, normalizedColumns, this.isEncryptionSpace);
+  }
+
+  /** Mark rows of this table as owners of a shared E2EE key. */
+  encryptionSpace(): DefinedTable<TColumns> {
+    return new DefinedTable(this.columns, this.indexedColumns, true);
   }
 }
 
@@ -153,10 +161,14 @@ type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = ColumnBuilderValue<TB
 type StoredColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+type ReadColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderEncrypted<TBuilder> extends true
+    ? ColumnValue<TBuilder> | LockedValue
+    : ColumnValue<TBuilder>;
 type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnValue<TBuilder> | null
-    : ColumnValue<TBuilder>;
+    ? ReadColumnValue<TBuilder> | null
+    : ReadColumnValue<TBuilder>;
 type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
     ? ColumnValue<TBuilder> | null
@@ -193,7 +205,7 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
   {
     id: string;
   } & {
-    [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
+    [TColumn in RequiredColumnName<TSchema, TTable>]: ReturnedColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
@@ -1237,6 +1249,26 @@ function tableIndexedColumns(
   return undefined;
 }
 
+function tableIsEncryptionSpace(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): boolean {
+  if (definition instanceof DefinedTable) {
+    return definition.isEncryptionSpace === true;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      isEncryptionSpace?: boolean;
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.isEncryptionSpace === true;
+    }
+  }
+
+  return false;
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1270,10 +1302,12 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       const indexedColumns = tableIndexedColumns(tableDefinition);
+      const encryptionSpace = tableIsEncryptionSpace(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
+        ...(encryptionSpace ? { encryptionSpace: true } : {}),
       };
     }),
   };

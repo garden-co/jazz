@@ -82,10 +82,12 @@ interface ColumnBuilder {
   default(value: unknown): this;
   merge(strategy: ColumnMergeStrategyName): this;
   transform(transform: ColumnTransform<unknown, unknown>): ColumnBuilder;
+  encrypted(spaceRef: string): this;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
+  _encryptedWith?: string;
 }
 
 type AllowedColumnMergeStrategy<
@@ -102,24 +104,26 @@ export type TypedColumnBuilder<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
-> = Omit<ColumnBuilder, "optional" | "default"> & {
+  Encrypted extends boolean = false,
+> = Omit<ColumnBuilder, "optional" | "default" | "encrypted"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
   readonly __jazzHasDefault: HasDefault;
   readonly __jazzValue: Value;
+  readonly __jazzEncrypted: Encrypted;
   /**
    * Set the default value for the column
    */
   default(
     value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, true, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, true, Value, Encrypted>;
   /**
    * Set the merge strategy for the column (defaults to LWW)
    */
   merge(
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Encrypted>;
   /**
    * Transform stored column values at the TypeScript boundary.
    *
@@ -128,17 +132,24 @@ export type TypedColumnBuilder<
   transform<TransformedValue>(transform: {
     from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
     to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue>;
+  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue, Encrypted>;
   /**
    * Make the column nullable
    */
-  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
+  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Encrypted>;
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, true>;
 };
 
 export type AnyTypedColumnBuilder = TypedColumnBuilder<
   SqlType,
   boolean,
   string | undefined,
+  boolean,
+  TSTypeFromSqlType<SqlType>,
   boolean
 >;
 export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
@@ -150,6 +161,8 @@ export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
 export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzHasDefault"];
 export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
+export type ColumnBuilderEncrypted<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzEncrypted"];
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {
   from(value: Stored): View;
@@ -160,43 +173,51 @@ export type StringColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value, Encrypted>;
 export type BooleanColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = boolean,
-> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value, Encrypted>;
 export type IntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value, Encrypted>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Date,
-> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value, Encrypted>;
 export type FloatColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value, Encrypted>;
 export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Uint8Array,
-> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value, Encrypted>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Output,
-> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value, Encrypted>;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Variants[number],
+  Encrypted extends boolean = false,
 > = TypedColumnBuilder<
   {
     kind: "ENUM";
@@ -205,20 +226,23 @@ export type EnumColumn<
   Optional,
   undefined,
   HasDefault,
-  Value
+  Value,
+  Encrypted
 >;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value>;
+  Encrypted extends boolean = false,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value, Encrypted>;
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
   Ref extends string | undefined = undefined,
   HasDefault extends boolean = false,
   Value = TSTypeFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
+  Encrypted extends boolean = false,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
@@ -227,7 +251,8 @@ export type ArrayColumn<
   Optional,
   Ref,
   HasDefault,
-  Value
+  Value,
+  Encrypted
 >;
 export type ColumnAlias<
   Sql extends SqlType = SqlType,
@@ -235,33 +260,34 @@ export type ColumnAlias<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
+  Encrypted extends boolean = false,
 > = Sql extends {
   kind: "ARRAY";
   element: infer ElementSql extends SqlType;
 }
-  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value>
+  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value, Encrypted>
   : Ref extends string
-    ? RefColumn<Ref, Optional, HasDefault, Value>
+    ? RefColumn<Ref, Optional, HasDefault, Value, Encrypted>
     : Sql extends "TEXT"
-      ? StringColumn<Optional, HasDefault, Value>
+      ? StringColumn<Optional, HasDefault, Value, Encrypted>
       : Sql extends "BOOLEAN"
-        ? BooleanColumn<Optional, HasDefault, Value>
+        ? BooleanColumn<Optional, HasDefault, Value, Encrypted>
         : Sql extends "INTEGER"
-          ? IntColumn<Optional, HasDefault, Value>
+          ? IntColumn<Optional, HasDefault, Value, Encrypted>
           : Sql extends "TIMESTAMP"
-            ? TimestampColumn<Optional, HasDefault, Value>
+            ? TimestampColumn<Optional, HasDefault, Value, Encrypted>
             : Sql extends "REAL"
-              ? FloatColumn<Optional, HasDefault, Value>
+              ? FloatColumn<Optional, HasDefault, Value, Encrypted>
               : Sql extends "BYTEA"
-                ? BytesColumn<Optional, HasDefault, Value>
+                ? BytesColumn<Optional, HasDefault, Value, Encrypted>
                 : Sql extends JsonSqlType<infer Output>
-                  ? JsonColumn<Output, Optional, HasDefault, Value>
+                  ? JsonColumn<Output, Optional, HasDefault, Value, Encrypted>
                   : Sql extends {
                         kind: "ENUM";
                         variants: infer Variants extends readonly string[];
                       }
-                    ? EnumColumn<Variants, Optional, HasDefault, Value>
-                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
+                    ? EnumColumn<Variants, Optional, HasDefault, Value, Encrypted>
+                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value, Encrypted>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
@@ -338,6 +364,17 @@ class ScalarBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -345,6 +382,7 @@ class ScalarBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -387,6 +425,17 @@ class EnumBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -394,6 +443,7 @@ class EnumBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -438,6 +488,17 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -445,6 +506,7 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
     };
   }
 
@@ -488,6 +550,17 @@ class RefBuilder implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -495,6 +568,7 @@ class RefBuilder implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
       references: this._references,
     };
   }
@@ -539,6 +613,17 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     return this;
   }
 
+  _encryptedWith?: string;
+
+  /**
+   * Encrypt this column end-to-end, scoped to the space row referenced by the
+   * sibling ref column `spaceRef`. The server only ever sees ciphertext.
+   */
+  encrypted(spaceRef: string): this {
+    this._encryptedWith = spaceRef;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -546,6 +631,7 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
+      ...(this._encryptedWith === undefined ? {} : { encryptedWith: this._encryptedWith }),
       references: this._references,
     };
   }

@@ -19,6 +19,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
+use crate::query_manager::types::e2ee_schema::validate_e2ee_schema;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
@@ -187,6 +188,7 @@ impl SchemaManager {
         user_branch: &str,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self, SchemaError> {
+        validate_e2ee_schema(&schema).map_err(SchemaError::E2ee)?;
         let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -513,6 +515,7 @@ impl SchemaManager {
     ///
     /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
+        validate_e2ee_schema(&old_schema).map_err(SchemaError::E2ee)?;
         let old_schema = strip_schema_policies(&old_schema);
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
@@ -553,6 +556,7 @@ impl SchemaManager {
         old_schema: Schema,
         lens: Lens,
     ) -> Result<(), SchemaError> {
+        validate_e2ee_schema(&old_schema).map_err(SchemaError::E2ee)?;
         let old_schema = strip_schema_policies(&old_schema);
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {

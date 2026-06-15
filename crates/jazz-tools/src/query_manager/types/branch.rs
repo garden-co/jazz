@@ -101,6 +101,11 @@ impl SchemaHash {
                     hasher.update(&[0]);
                 }
             }
+
+            // E2EE marker. Absent must hash exactly like pre-E2EE schemas.
+            if table_schema.encryption_space {
+                hasher.update(&[2]);
+            }
         }
 
         Self(*hasher.finalize().as_bytes())
@@ -164,6 +169,14 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
         hasher.update(&[1]);
         hash_value(hasher, default);
     } else {
+        hasher.update(&[0]);
+    }
+
+    // E2EE marker. Absent must hash exactly like pre-E2EE schemas, so nothing
+    // is written for None.
+    if let Some(ref space_ref) = col.encrypted_with {
+        hasher.update(&[2]);
+        hasher.update(space_ref.as_str().as_bytes());
         hasher.update(&[0]);
     }
 
@@ -232,6 +245,9 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             for inner in values {
                 hash_value(hasher, inner);
             }
+        }
+        Value::Locked => {
+            hasher.update(&[13]);
         }
         Value::Null => {
             hasher.update(&[9]);

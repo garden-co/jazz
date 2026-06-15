@@ -2962,5 +2962,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
             bytes.extend_from_slice(json.as_bytes());
             bytes
         }
+
+        Value::Locked => vec![0x0B],
     }
 }
