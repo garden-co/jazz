@@ -1955,6 +1955,10 @@ impl<F: SyncFile> OpfsBTree<F> {
             if Some(*page_id) == protected_page
                 || Some(*page_id) == root_page_id
                 || self.dirty_pages.contains(page_id)
+                // A page whose newest bytes exist only in the cache/WAL must not be
+                // evicted, otherwise a later cache miss would read the stale
+                // home-location copy from disk. WAL-resident pages stay pinned until
+                // the next checkpoint writes them home.
                 || self.wal_pages.contains(page_id)
             {
                 continue;
