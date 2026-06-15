@@ -1,18 +1,32 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
 
+type ErrorKind = "unauthorised" | "deleted" | "unavailable" | "unknown";
+
+function classifyError(error: Error): ErrorKind {
+  const message = error.message?.toLowerCase() ?? "";
+
+  if (
+    message.includes("unauthorized") ||
+    message.includes("unauthorised") ||
+    message.includes("permission") ||
+    message.includes("not allowed") ||
+    // The runtime surfaces policy failures as "policy denied <op> on table …".
+    message.includes("denied")
+  ) {
+    return "unauthorised";
+  }
+  if (message.includes("deleted")) return "deleted";
+  if (message.includes("unavailable") || message.includes("not found")) return "unavailable";
+  return "unknown";
+}
+
 function ErrorUI({ error }: { error: Error }) {
   console.error(error.stack);
 
-  const message = error.message?.toLowerCase() ?? "";
-  const isUnauthorised =
-    message.includes("unauthorized") ||
-    message.includes("permission") ||
-    message.includes("access");
-  const isDeleted = message.includes("deleted");
-  const isUnavailable = message.includes("unavailable") || message.includes("not found");
+  const kind = classifyError(error);
 
-  if (isUnauthorised) {
+  if (kind === "unauthorised") {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
         <div className="max-w-2xl space-y-4">
@@ -31,7 +45,7 @@ function ErrorUI({ error }: { error: Error }) {
     );
   }
 
-  if (isDeleted) {
+  if (kind === "deleted") {
     return (
       <div className="flex min-h-screen items-center justify-center p-8">
         <div className="max-w-2xl space-y-4">
@@ -50,7 +64,7 @@ function ErrorUI({ error }: { error: Error }) {
     );
   }
 
-  if (isUnavailable) {
+  if (kind === "unavailable") {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
         <div className="max-w-2xl space-y-4">
