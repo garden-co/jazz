@@ -112,12 +112,17 @@ reqwest = { version = "0.12", default-features = false, features = [
 thiserror = { version = "1", optional = true }
 
 opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = [
+  "rt-tokio",
+  "logs",
+  "metrics",
+], optional = true }
 opentelemetry-otlp = { version = "0.31", features = [
   "grpc-tonic",
   "http-json",
   "reqwest-blocking-client",
   "logs",
+  "metrics",
 ], optional = true }
 opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
@@ -128,6 +133,10 @@ lz4_flex = "0.13.1"
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [dev-dependencies]
+# Test-only: exposes `InMemoryMetricExporter` for asserting observed metric
+# values. Scoped to dev-dependencies so the `testing` feature never reaches a
+# production build (Cargo enables dev-dependency features only for tests).
+opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
