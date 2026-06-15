@@ -99,6 +99,8 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     }
   }, []);
 
+  useEffect(() => () => observer.current?.disconnect(), []);
+
   const messages =
     useAll(
       app.messages
@@ -110,8 +112,26 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const hasMore = messages.length > showNLastMessages;
 
-  const handleDelete = (messageId: string) => {
-    db.delete(app.messages, messageId);
+  const handleDelete = async (messageId: string) => {
+    // Deletes don't cascade, so remove the message's children first: its
+    // attachments (with the file + file_parts each points at) and its reactions.
+    const [attachments, reactions] = await Promise.all([
+      db.all(app.attachments.where({ messageId })),
+      db.all(app.reactions.where({ messageId })),
+    ]);
+    const files = (
+      await Promise.all(attachments.map((att) => db.all(app.files.where({ id: att.fileId }))))
+    ).flat();
+
+    db.batch((b) => {
+      for (const file of files) {
+        for (const partId of file.partIds) b.delete(app.file_parts, partId);
+        b.delete(app.files, file.id);
+      }
+      for (const att of attachments) b.delete(app.attachments, att.id);
+      for (const reaction of reactions) b.delete(app.reactions, reaction.id);
+      b.delete(app.messages, messageId);
+    });
   };
 
   if (chatRowsResult !== undefined && !chatKnown && userId) {
@@ -135,7 +155,11 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
                 message={msg}
                 sender={msg.sender ?? undefined}
                 isMe={msg.senderId === myProfile?.id || msg.sender?.userId === userId}
-                onDelete={() => handleDelete(msg.id)}
+                onDelete={() =>
+                  handleDelete(msg.id).catch((error) =>
+                    console.error("failed to delete message", error),
+                  )
+                }
               />
             ))
         ) : (
