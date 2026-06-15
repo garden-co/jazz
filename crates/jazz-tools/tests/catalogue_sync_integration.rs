@@ -43,6 +43,10 @@ fn user_values_v3(
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
 }
 
+fn draft_lens_values_v1(id: jazz_tools::ObjectId) -> HashMap<String, Value> {
+    row_input!("id" => id)
+}
+
 fn schema_v1() -> jazz_tools::Schema {
     SchemaBuilder::new()
         .table(
@@ -82,6 +86,26 @@ fn v1_to_v2_lens() -> Lens {
 
 fn v2_to_v3_lens() -> Lens {
     generate_lens(&schema_v2(), &schema_v3())
+}
+
+fn draft_lens_schema_v1() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+        .build()
+}
+
+fn draft_lens_schema_v2() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("org_id", ColumnType::Uuid),
+        )
+        .build()
+}
+
+fn draft_lens_v1_to_v2() -> Lens {
+    generate_lens(&draft_lens_schema_v1(), &draft_lens_schema_v2())
 }
 
 fn rename_chain_values_v1(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
@@ -320,6 +344,51 @@ fn multi_hop_table_rename_v2_to_v3_lens() -> Lens {
     )
 }
 
+fn removed_readded_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+    row_input!("id" => id, "name" => name)
+}
+
+fn removed_readded_values_v3(
+    id: jazz_tools::ObjectId,
+    name: &str,
+    email: &str,
+) -> HashMap<String, Value> {
+    row_input!("id" => id, "name" => name, "email" => email)
+}
+
+fn removed_readded_schema_v1() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build()
+}
+
+fn removed_readded_schema_v2() -> jazz_tools::Schema {
+    SchemaBuilder::new().build()
+}
+
+fn removed_readded_schema_v3() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text),
+        )
+        .build()
+}
+
+fn removed_readded_v1_to_v2_lens() -> Lens {
+    generate_lens(&removed_readded_schema_v1(), &removed_readded_schema_v2())
+}
+
+fn removed_readded_v2_to_v3_lens() -> Lens {
+    generate_lens(&removed_readded_schema_v2(), &removed_readded_schema_v3())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishSchemaHttpResponse {
@@ -365,6 +434,36 @@ async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Sche
     )
     .await
     .expect("push schema catalogue");
+}
+
+async fn assert_edge_query_does_not_include_row(
+    client: &JazzClient,
+    query: jazz_tools::Query,
+    row_id: jazz_tools::ObjectId,
+    timeout: Duration,
+    description: &str,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if let Ok(Ok(rows)) = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+        )
+        .await
+        {
+            assert!(
+                rows.iter().all(|(id, _)| *id != row_id),
+                "{description}: query unexpectedly included row {row_id}; rows: {rows:?}"
+            );
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 // Test topology:
@@ -1150,6 +1249,194 @@ async fn column_addition_new_client_can_read_old_rows() {
         Value::Null,
         "email should be null (default from lens transform)"
     );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cannot_read_from_old_schema_until_lens_is_added() {
+    let server = TestingServer::start().await;
+    let v1_schema = schema_v1();
+    let v2_schema = schema_v2();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(&v1_schema),
+        &[],
+    )
+    .await
+    .expect("push initial v1 catalogue");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema.clone(), "alice-schema-before-lens"),
+    )
+    .await
+    .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+
+    let user_id = jazz_tools::ObjectId::new();
+    let (row_id, _, batch_id) = alice
+        .insert("users", user_values_v1(user_id, "Alice Pending Lens"))
+        .expect("alice creates v1 user");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge");
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema.clone(), v2_schema.clone()],
+        &[],
+    )
+    .await
+    .expect("push v2 schema without lens");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v2_schema,
+    )
+    .await;
+
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema.clone(), "bob-schema-before-lens"),
+    )
+    .await
+    .expect("connect bob");
+    let query = QueryBuilder::new("users").build();
+    assert_edge_query_does_not_include_row(
+        &bob,
+        query.clone(),
+        row_id,
+        Duration::from_secs(2),
+        "bob should not see v1 row before the lens arrives",
+    )
+    .await;
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema, v2_schema],
+        &[v1_to_v2_lens()],
+    )
+    .await
+    .expect("push v1 to v2 lens");
+    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+
+    let rows = wait_for_query(
+        &bob,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "bob sees alice row after lens arrives",
+        |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Uuid(user_id),
+            Value::Text("Alice Pending Lens".to_string()),
+            Value::Null,
+        ]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn draft_lens_does_make_rows_from_old_schema_visible() {
+    let server = TestingServer::start().await;
+    let v1_schema = draft_lens_schema_v1();
+    let v2_schema = draft_lens_schema_v2();
+    let draft_lens = draft_lens_v1_to_v2();
+    assert!(
+        draft_lens.is_draft(),
+        "test fixture should use a draft lens"
+    );
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(&v1_schema),
+        &[],
+    )
+    .await
+    .expect("push initial draft-lens v1 catalogue");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema.clone(), "alice-draft-lens"),
+    )
+    .await
+    .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+
+    let user_id = jazz_tools::ObjectId::new();
+    let (row_id, _, batch_id) = alice
+        .insert("users", draft_lens_values_v1(user_id))
+        .expect("alice creates v1 user");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge");
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema, v2_schema.clone()],
+        &[draft_lens],
+    )
+    .await
+    .expect("push v2 schema with draft lens");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v2_schema,
+    )
+    .await;
+
+    let bob = JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-draft-lens"))
+        .await
+        .expect("connect bob");
+    assert_edge_query_does_not_include_row(
+        &bob,
+        QueryBuilder::new("users").build(),
+        row_id,
+        Duration::from_secs(2),
+        "bob should not see v1 row through a draft lens",
+    )
+    .await;
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -2191,6 +2478,112 @@ async fn multi_hop_table_renames_and_column_rename() {
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     carol.shutdown().await.expect("shutdown carol");
+    server.shutdown().await;
+}
+
+/// A table name reused after the table was removed is a new lineage. A v3
+/// `users` query must not resurface rows from the v1 `users` table that was
+/// removed in v2.
+#[tokio::test]
+async fn removed_table_then_readded_does_not_resurface_old_rows() {
+    let server = TestingServer::start().await;
+    let v1_schema = removed_readded_schema_v1();
+    let v2_schema = removed_readded_schema_v2();
+    let v3_schema = removed_readded_schema_v3();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema.clone(), v2_schema, v3_schema.clone()],
+        &[
+            removed_readded_v1_to_v2_lens(),
+            removed_readded_v2_to_v3_lens(),
+        ],
+    )
+    .await
+    .expect("push removed/re-added table catalogue");
+
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, "alice-removed-readded-v1"),
+    )
+    .await
+    .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+
+    let alice_id = jazz_tools::ObjectId::new();
+    let (alice_row_id, _, batch_id) = alice
+        .insert(
+            "users",
+            removed_readded_values_v1(alice_id, "Alice Old Lineage"),
+        )
+        .expect("alice creates v1 user");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice row reaches edge");
+
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v3_schema,
+    )
+    .await;
+
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v3_schema, "bob-removed-readded-v3"),
+    )
+    .await
+    .expect("connect bob");
+    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+
+    let bob_id = jazz_tools::ObjectId::new();
+    let (bob_row_id, _, batch_id) = bob
+        .insert(
+            "users",
+            removed_readded_values_v3(bob_id, "Bob New Lineage", "bob@example.com"),
+        )
+        .expect("bob creates v3 user");
+    bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("bob row reaches edge");
+
+    let rows = wait_for_query(
+        &bob,
+        QueryBuilder::new("users").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "v3 users query only sees rows from the re-added table lineage",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == bob_row_id
+                && rows.iter().all(|(id, _)| *id != alice_row_id))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Uuid(bob_id),
+            Value::Text("Bob New Lineage".to_string()),
+            Value::Text("bob@example.com".to_string()),
+        ]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
