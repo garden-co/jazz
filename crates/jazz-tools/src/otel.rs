@@ -144,11 +144,6 @@ where
 /// Metric name for the active inbound WebSocket gauge.
 const ACTIVE_WEBSOCKETS_METRIC: &str = "jazz.server.active_websockets";
 
-/// Current inbound WebSocket connection count, as observed by the gauge.
-pub fn active_websocket_count(controller: &ShutdownController) -> u64 {
-    controller.active_websockets() as u64
-}
-
 /// Register an observable gauge that samples the server's active inbound
 /// WebSocket count on each metric collection. The returned instrument must be
 /// kept alive for as long as the metric should be reported.
@@ -161,7 +156,7 @@ pub fn register_active_websockets_gauge(
         .with_description("Currently active inbound WebSocket connections")
         .with_unit("{connection}")
         .with_callback(move |observer| {
-            observer.observe(active_websocket_count(&controller), &[]);
+            observer.observe(controller.active_websockets() as u64, &[]);
         })
         .build()
 }
@@ -169,24 +164,6 @@ pub fn register_active_websockets_gauge(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn active_websocket_count_tracks_controller() {
-        use crate::server::ShutdownController;
-        use std::time::Duration;
-
-        let controller = ShutdownController::new(Duration::from_secs(30));
-        assert_eq!(active_websocket_count(&controller), 0);
-
-        let g1 = controller.try_enter_websocket().expect("enter ws 1");
-        let g2 = controller.try_enter_websocket().expect("enter ws 2");
-        assert_eq!(active_websocket_count(&controller), 2);
-
-        drop(g1);
-        assert_eq!(active_websocket_count(&controller), 1);
-        drop(g2);
-        assert_eq!(active_websocket_count(&controller), 0);
-    }
 
     #[tokio::test]
     async fn active_websockets_gauge_registers_and_flushes() {
