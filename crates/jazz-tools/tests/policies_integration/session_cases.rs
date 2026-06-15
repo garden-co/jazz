@@ -9,7 +9,6 @@ use super::support::{
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
-use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -101,6 +100,21 @@ fn in_session_array_policy_schema() -> Schema {
         .build()
 }
 
+fn authorized_pagination_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("paginated_documents")
+                .column("title", ColumnType::Text)
+                .column("score", ColumnType::Integer)
+                .column("owner_id", ColumnType::Text)
+                .policies(super::explicit_allow_all_policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                )),
+        )
+        .build()
+}
+
 fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
     TableSchema::builder(table_name)
         .column("owner_id", ColumnType::Text)
@@ -125,6 +139,10 @@ fn boolean_policy_document_input(
 
 fn team_document_input(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
     row_input!("team_id" => Value::Uuid(team_id), "title" => title)
+}
+
+fn paginated_document_input(owner_id: &str, title: &str, score: i32) -> HashMap<String, Value> {
+    row_input!("title" => title, "score" => Value::Integer(score), "owner_id" => owner_id)
 }
 
 /// Returns row values for the 2-column `documents` table used in write policy tests.
@@ -208,6 +226,21 @@ async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &st
     client
         .insert("team_documents", team_document_input(team_id, title))
         .expect("create team document")
+        .0
+}
+
+async fn create_paginated_document(
+    client: &JazzClient,
+    owner_id: &str,
+    title: &str,
+    score: i32,
+) -> ObjectId {
+    client
+        .insert(
+            "paginated_documents",
+            paginated_document_input(owner_id, title, score),
+        )
+        .expect("create paginated document")
         .0
 }
 
@@ -330,6 +363,90 @@ async fn select_policies_filter_subscription_results_per_client_session() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that pagination is applied after SELECT policy visibility.
+///
+/// Admin seeds one hidden row and two alice-visible rows ordered by score.
+/// Alice subscribes with `ORDER BY score OFFSET 1 LIMIT 1`; the hidden bob row
+/// must not count toward the offset, so Alice receives `Alice second`.
+///
+/// ```text
+/// admin ──insert Bob(1), Alice first(2), Alice second(3)──► server
+/// alice ──subscribe order score offset 1 limit 1──────────► Alice second
+/// ```
+#[tokio::test]
+async fn select_policy_pagination_offsets_over_visible_rows_only() {
+    let schema = authorized_pagination_schema();
+    let table_name = "paginated_documents";
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("admin-authorized-pagination")
+        .as_admin()
+        .ready_on(table_name, READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let hidden_bob = create_paginated_document(&admin, "bob", "Bob private", 1).await;
+    let alice_first = create_paginated_document(&admin, "alice", "Alice first", 2).await;
+    let alice_second = create_paginated_document(&admin, "alice", "Alice second", 3).await;
+
+    wait_for_rows(
+        &admin,
+        QueryBuilder::new(table_name).build(),
+        "admin sees all seeded paginated documents",
+        |rows| {
+            (rows.iter().any(|(id, _)| *id == hidden_bob)
+                && rows.iter().any(|(id, _)| *id == alice_first)
+                && rows.iter().any(|(id, _)| *id == alice_second))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let query = QueryBuilder::new(table_name)
+        .order_by("score")
+        .offset(1)
+        .limit(1)
+        .build();
+    let mut stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("alice subscribes to authorized paginated query");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "alice receives the second visible row",
+        |log| {
+            has_added(log, alice_second)
+                && !has_any_change(log, hidden_bob)
+                && !has_any_change(log, alice_first)
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    assert!(has_added(&log, alice_second));
+    assert!(
+        !has_any_change(&log, hidden_bob),
+        "hidden row must not appear in alice's subscription stream"
+    );
+    assert!(
+        !has_any_change(&log, alice_first),
+        "first visible row must be skipped by offset"
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
 

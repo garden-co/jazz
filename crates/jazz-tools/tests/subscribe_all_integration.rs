@@ -43,6 +43,18 @@ fn subscription_schema() -> Schema {
                 .nullable_fk_column("team_id", "teams"),
         )
         .table(
+            TableSchema::builder("posts")
+                .column("id", ColumnType::Integer)
+                .column("title", ColumnType::Text)
+                .column("author_name", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("comments")
+                .column("id", ColumnType::Integer)
+                .column("text", ColumnType::Text)
+                .column("post_id", ColumnType::Integer),
+        )
+        .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean)
@@ -211,6 +223,26 @@ async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>)
             ]),
         )
         .expect("create user")
+        .0
+}
+
+async fn create_post(client: &JazzClient, id: i32, title: &str, author_name: &str) -> ObjectId {
+    client
+        .insert(
+            "posts",
+            row_input!("id" => id, "title" => title, "author_name" => author_name),
+        )
+        .expect("create post")
+        .0
+}
+
+async fn create_comment(client: &JazzClient, id: i32, text: &str, post_id: i32) -> ObjectId {
+    client
+        .insert(
+            "comments",
+            row_input!("id" => id, "text" => text, "post_id" => post_id),
+        )
+        .expect("create comment")
         .0
 }
 
@@ -449,6 +481,579 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
         !rows.iter().any(|(id, _)| *id == todo_id),
         "latest query results should no longer include the removed todo"
     );
+
+    pair.shutdown().await;
+}
+
+/// Alice seeds three todos before Bob subscribes. Bob subscribes to
+/// `priority > 50` and receives only the two matching rows in his initial
+/// subscription result.
+#[tokio::test]
+async fn subscribe_all_only_returns_rows_that_match_query() {
+    let schema = subscription_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let writer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("cold-filter-writer")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let alice_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "Alice",
+            done: false,
+            priority: Some(75),
+            tags: &["score"],
+            payload: None,
+        },
+    )
+    .await;
+    let bob_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "Bob",
+            done: false,
+            priority: Some(30),
+            tags: &["score"],
+            payload: None,
+        },
+    )
+    .await;
+    let charlie_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "Charlie",
+            done: false,
+            priority: Some(90),
+            tags: &["score"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_rows(
+        &writer,
+        QueryBuilder::new("todos").build(),
+        "writer sees all seeded todos before cold subscriber connects",
+        |rows| {
+            (rows.iter().any(|(id, _)| *id == alice_id)
+                && rows.iter().any(|(id, _)| *id == bob_id)
+                && rows.iter().any(|(id, _)| *id == charlie_id))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    let subscriber = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("cold-filter-subscriber")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("todos")
+        .filter_gt("priority", Value::Integer(50))
+        .build();
+    let mut stream = subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to cold filtered query");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "cold filtered subscription receives existing matching rows",
+        |log| {
+            has_added(log, alice_id) && has_added(log, charlie_id) && !has_any_change(log, bob_id)
+        },
+    )
+    .await;
+
+    let rows = wait_for_rows(
+        &subscriber,
+        query,
+        "cold filtered query result contains only matching rows",
+        |rows| {
+            (rows.len() == 2
+                && rows.iter().any(|(id, _)| *id == alice_id)
+                && rows.iter().any(|(id, _)| *id == charlie_id)
+                && rows.iter().all(|(id, _)| *id != bob_id))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
+
+    writer.shutdown().await.expect("shutdown writer");
+    subscriber.shutdown().await.expect("shutdown subscriber");
+    server.shutdown().await;
+}
+
+/// Verifies that subscriptions with both `OFFSET` and `LIMIT`
+/// only return rows for that page.
+///
+/// ```text
+/// alice ──insert priorities [1, 2, 3, 4]──► server
+/// bob   ──subscribe order asc offset 2 limit 1──► stream add C
+/// ```
+#[tokio::test]
+async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
+    let schema = subscription_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let writer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("cold-page-writer")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let a_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "A",
+            done: false,
+            priority: Some(1),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let b_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "B",
+            done: false,
+            priority: Some(2),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let c_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "C",
+            done: false,
+            priority: Some(3),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let d_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "D",
+            done: false,
+            priority: Some(4),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_rows(
+        &writer,
+        QueryBuilder::new("todos").build(),
+        "writer sees all rows before cold paginated subscriber connects",
+        |rows| {
+            (rows.iter().any(|(id, _)| *id == a_id)
+                && rows.iter().any(|(id, _)| *id == b_id)
+                && rows.iter().any(|(id, _)| *id == c_id)
+                && rows.iter().any(|(id, _)| *id == d_id))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    let subscriber = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("cold-page-subscriber")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("todos")
+        .order_by("priority")
+        .offset(2)
+        .limit(1)
+        .build();
+    let mut stream = subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to cold paginated query");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "cold paginated subscription receives requested row",
+        |log| {
+            has_added(log, c_id)
+                && !has_any_change(log, a_id)
+                && !has_any_change(log, b_id)
+                && !has_any_change(log, d_id)
+        },
+    )
+    .await;
+
+    let rows = wait_for_rows(
+        &subscriber,
+        query,
+        "cold paginated query result contains only the requested row",
+        |rows| (rows.len() == 1 && rows[0].0 == c_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(rows[0].1[0], Value::Text("C".to_string()));
+    assert_eq!(rows[0].1[2], Value::Integer(3));
+
+    writer.shutdown().await.expect("shutdown writer");
+    subscriber.shutdown().await.expect("shutdown subscriber");
+    server.shutdown().await;
+}
+
+/// Verifies that a subscription with `OFFSET` but no `LIMIT`
+/// returns all rows after the requested offset.
+#[tokio::test]
+async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit() {
+    let schema = subscription_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let writer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("cold-offset-writer")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let a_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "A",
+            done: false,
+            priority: Some(1),
+            tags: &["offset"],
+            payload: None,
+        },
+    )
+    .await;
+    let b_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "B",
+            done: false,
+            priority: Some(2),
+            tags: &["offset"],
+            payload: None,
+        },
+    )
+    .await;
+    let c_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "C",
+            done: false,
+            priority: Some(3),
+            tags: &["offset"],
+            payload: None,
+        },
+    )
+    .await;
+    let d_id = create_todo(
+        &writer,
+        TodoSeed {
+            title: "D",
+            done: false,
+            priority: Some(4),
+            tags: &["offset"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_rows(
+        &writer,
+        QueryBuilder::new("todos").build(),
+        "writer sees all rows before cold offset subscriber connects",
+        |rows| {
+            (rows.iter().any(|(id, _)| *id == a_id)
+                && rows.iter().any(|(id, _)| *id == b_id)
+                && rows.iter().any(|(id, _)| *id == c_id)
+                && rows.iter().any(|(id, _)| *id == d_id))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    let subscriber = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("cold-offset-subscriber")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("todos")
+        .order_by("priority")
+        .offset(2)
+        .build();
+    let mut stream = subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to cold offset-only query");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "cold offset-only subscription receives trailing rows",
+        |log| {
+            has_added(log, c_id)
+                && has_added(log, d_id)
+                && !has_any_change(log, a_id)
+                && !has_any_change(log, b_id)
+        },
+    )
+    .await;
+
+    let rows = wait_for_rows(
+        &subscriber,
+        query,
+        "cold offset-only query result contains trailing rows",
+        |rows| (rows.len() == 2 && rows[0].0 == c_id && rows[1].0 == d_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(rows[0].1[0], Value::Text("C".to_string()));
+    assert_eq!(rows[1].1[0], Value::Text("D".to_string()));
+
+    writer.shutdown().await.expect("shutdown writer");
+    subscriber.shutdown().await.expect("shutdown subscriber");
+    server.shutdown().await;
+}
+
+/// Verifies that a live ordered/limited subscription evicts the old tail row
+/// when a new row sorts ahead of the existing page.
+#[tokio::test]
+async fn subscribe_all_sorted_limited_subscription_reorders_when_new_top_row_arrives() {
+    let pair = ClientPair::start().await;
+    let query = QueryBuilder::new("todos")
+        .order_by_desc("priority")
+        .limit(2)
+        .build();
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to sorted limited query");
+    let mut log = Vec::new();
+
+    let alice_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "Alice",
+            done: false,
+            priority: Some(100),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let bob_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "Bob",
+            done: false,
+            priority: Some(50),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let charlie_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "Charlie",
+            done: false,
+            priority: Some(75),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_rows(
+        &pair.subscriber,
+        query.clone(),
+        "initial sorted limited page contains Alice and Charlie",
+        |rows| {
+            (rows.len() == 2 && rows[0].0 == alice_id && rows[1].0 == charlie_id).then_some(rows)
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    log.clear();
+
+    let diana_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "Diana",
+            done: false,
+            priority: Some(125),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "new top row replaces previous limited page tail",
+        |log| {
+            log.iter().any(|delta| {
+                delta
+                    .added
+                    .iter()
+                    .any(|change| change.id == diana_id && change.index == 0)
+                    && delta.removed.iter().any(|change| change.id == charlie_id)
+            })
+        },
+    )
+    .await;
+    assert!(
+        !has_any_change(&log, bob_id),
+        "Bob should remain outside the limited page"
+    );
+
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "sorted limited page reorders around the new top row",
+        |rows| (rows.len() == 2 && rows[0].0 == diana_id && rows[1].0 == alice_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(rows[0].1[0], Value::Text("Diana".to_string()));
+    assert_eq!(rows[1].1[0], Value::Text("Alice".to_string()));
+
+    pair.shutdown().await;
+}
+
+/// Verifies that deleting a row before an offset/limited page shifts the live
+/// window forward and emits the newly visible row.
+#[tokio::test]
+async fn subscribe_all_offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
+    let pair = ClientPair::start().await;
+    let query = QueryBuilder::new("todos")
+        .order_by("priority")
+        .offset(1)
+        .limit(2)
+        .build();
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to offset limited query");
+    let mut log = Vec::new();
+
+    let a_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "A",
+            done: false,
+            priority: Some(1),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let b_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "B",
+            done: false,
+            priority: Some(2),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let c_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "C",
+            done: false,
+            priority: Some(3),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let d_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "D",
+            done: false,
+            priority: Some(4),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_rows(
+        &pair.subscriber,
+        query.clone(),
+        "initial offset limited page contains B and C",
+        |rows| (rows.len() == 2 && rows[0].0 == b_id && rows[1].0 == c_id).then_some(rows),
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    log.clear();
+
+    pair.writer
+        .delete(a_id)
+        .expect("delete row before offset window");
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "offset limited page shifts after deleting row before window",
+        |log| {
+            log.iter().any(|delta| {
+                delta.removed.iter().any(|change| change.id == b_id)
+                    && delta
+                        .added
+                        .iter()
+                        .any(|change| change.id == d_id && change.index == 1)
+            })
+        },
+    )
+    .await;
+    assert!(
+        !has_any_change(&log, a_id),
+        "A was before the window and should not appear in the page delta"
+    );
+
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "offset limited page contains C and D after deleting A",
+        |rows| (rows.len() == 2 && rows[0].0 == c_id && rows[1].0 == d_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(rows[0].1[0], Value::Text("C".to_string()));
+    assert_eq!(rows[1].1[0], Value::Text("D".to_string()));
 
     pair.shutdown().await;
 }
@@ -1099,6 +1704,163 @@ async fn subscribe_all_does_not_emit_add_for_non_matching_contains_query() {
     pair.shutdown().await;
 }
 
+#[tokio::test]
+async fn subscribe_all_join_emits_when_matching_joined_row_is_inserted() {
+    let pair = ClientPair::start().await;
+
+    let user_id = create_user(&pair.writer, "Alice", None).await;
+    wait_for_rows(
+        &pair.subscriber,
+        QueryBuilder::new("users").build(),
+        "subscriber sees base join user before joined-table insert",
+        |rows| rows.iter().any(|(id, _)| *id == user_id).then_some(rows),
+    )
+    .await;
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.author_name")
+        .build();
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to join query");
+    let mut log = Vec::new();
+
+    create_post(&pair.writer, 100, "Test Post", "Alice").await;
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "joined-table insert emits joined result",
+        |log| has_added(log, user_id),
+    )
+    .await;
+
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "join query contains newly matched row",
+        |rows| (rows.len() == 1 && rows[0].0 == user_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Text("Alice".to_string()),
+            Value::Null,
+            Value::Integer(100),
+            Value::Text("Test Post".to_string()),
+            Value::Text("Alice".to_string()),
+        ]
+    );
+
+    pair.shutdown().await;
+}
+
+/// Verifies that a default join result is keyed by the base row and contains
+/// values from both the base and joined tables.
+#[tokio::test]
+async fn subscribe_all_join_returns_base_and_joined_table_values() {
+    let pair = ClientPair::start().await;
+
+    let user_id = create_user(&pair.writer, "Alice", None).await;
+    let post_id = create_post(&pair.writer, 100, "Hello World", "Alice").await;
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.author_name")
+        .build();
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "join query returns combined tuple",
+        |rows| (rows.len() == 1 && rows[0].0 == user_id).then_some(rows),
+    )
+    .await;
+
+    assert_ne!(
+        rows[0].0, post_id,
+        "default join output should be keyed by the base row id"
+    );
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Text("Alice".to_string()),
+            Value::Null,
+            Value::Integer(100),
+            Value::Text("Hello World".to_string()),
+            Value::Text("Alice".to_string()),
+        ]
+    );
+
+    pair.shutdown().await;
+}
+
+/// Verifies that filters can target a column supplied by the joined table.
+#[tokio::test]
+async fn subscribe_all_join_filter_on_joined_table_column() {
+    let pair = ClientPair::start().await;
+
+    create_user(&pair.writer, "Alice", None).await;
+    let bob_id = create_user(&pair.writer, "Bob", None).await;
+    create_post(&pair.writer, 100, "Hello World", "Alice").await;
+    create_post(&pair.writer, 101, "Learning Rust", "Bob").await;
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.author_name")
+        .filter_eq("title", Value::Text("Learning Rust".to_string()))
+        .build();
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "join query filters by joined table title",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_id).then_some(rows),
+    )
+    .await;
+
+    assert_eq!(rows[0].1[0], Value::Text("Bob".to_string()));
+    assert_eq!(rows[0].1[3], Value::Text("Learning Rust".to_string()));
+
+    pair.shutdown().await;
+}
+
+/// Verifies that alias-qualified filters resolve against the intended side of
+/// a join.
+#[tokio::test]
+async fn subscribe_all_join_filter_on_scoped_alias_columns() {
+    let pair = ClientPair::start().await;
+
+    create_user(&pair.writer, "Alice", None).await;
+    let bob_id = create_user(&pair.writer, "Bob", None).await;
+    create_post(&pair.writer, 100, "Hello World", "Alice").await;
+    create_post(&pair.writer, 101, "Learning Rust", "Bob").await;
+
+    let query = QueryBuilder::new("users")
+        .alias("u")
+        .join("posts")
+        .alias("p")
+        .on("u.name", "p.author_name")
+        .filter_eq("u.name", Value::Text("Bob".to_string()))
+        .filter_eq("p.title", Value::Text("Learning Rust".to_string()))
+        .build();
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "join query filters by scoped aliases",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_id).then_some(rows),
+    )
+    .await;
+
+    assert_eq!(rows[0].1[0], Value::Text("Bob".to_string()));
+    assert_eq!(rows[0].1[3], Value::Text("Learning Rust".to_string()));
+
+    pair.shutdown().await;
+}
+
 /// Verifies that a `with_array` projected include delivers a correctly typed
 /// sub-array column, starting empty when the parent row has no related rows.
 ///
@@ -1148,6 +1910,60 @@ async fn subscribe_all_supports_array_include_queries() {
             .is_empty(),
         "new owner should start with an empty included todos array"
     );
+
+    pair.shutdown().await;
+}
+
+/// Verifies that a projected array include can contain a joined subquery.
+#[tokio::test]
+async fn subscribe_all_array_subquery_with_join() {
+    let pair = ClientPair::start().await;
+
+    let user_id = create_user(&pair.writer, "Alice", None).await;
+    create_post(&pair.writer, 100, "Post A", "Alice").await;
+    create_post(&pair.writer, 101, "Post B", "Alice").await;
+    create_comment(&pair.writer, 1000, "Comment on A", 100).await;
+    create_comment(&pair.writer, 1001, "Another on A", 100).await;
+    create_comment(&pair.writer, 1002, "Comment on B", 101).await;
+
+    let query = QueryBuilder::new("users")
+        .with_array("post_comments", |sub| {
+            sub.from("posts")
+                .join("comments")
+                .on("posts.id", "comments.post_id")
+                .correlate("author_name", "users.name")
+        })
+        .build();
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "array include with joined subquery returns all post/comment pairs",
+        |rows| (rows.len() == 1 && rows[0].0 == user_id).then_some(rows),
+    )
+    .await;
+
+    assert_eq!(rows[0].1[0], Value::Text("Alice".to_string()));
+    assert_eq!(rows[0].1[1], Value::Null);
+    let post_comments = rows[0].1[2]
+        .as_array()
+        .expect("post_comments should be an array");
+    assert_eq!(
+        post_comments.len(),
+        3,
+        "Post A has two comments and Post B has one"
+    );
+    for pair in post_comments {
+        let values = pair
+            .as_row()
+            .expect("joined subquery element should be a row");
+        assert_eq!(values.len(), 6);
+        assert!(pair.row_id().is_some(), "joined row should retain an id");
+        let Value::Integer(post_id) = values[0] else {
+            panic!("joined post id should be an integer");
+        };
+        assert!(post_id == 100 || post_id == 101);
+        assert_eq!(values[5], Value::Integer(post_id));
+    }
 
     pair.shutdown().await;
 }

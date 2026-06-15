@@ -268,6 +268,30 @@ fn exists_join_policy_schema() -> Schema {
         .build()
 }
 
+fn joined_table_select_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("join_users")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("join_posts")
+                .column("owner_name", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+                ),
+        )
+        .build()
+}
+
 fn exists_hop_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
@@ -385,6 +409,23 @@ async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug:
             row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
         )
         .expect("create group membership");
+}
+
+async fn create_join_policy_user(client: &JazzClient, name: &str) -> ObjectId {
+    client
+        .insert("join_users", row_input!("name" => name.to_string()))
+        .expect("create join policy user")
+        .0
+}
+
+async fn create_join_policy_post(client: &JazzClient, owner_name: &str, title: &str) -> ObjectId {
+    client
+        .insert(
+            "join_posts",
+            row_input!("owner_name" => owner_name.to_string(), "title" => title.to_string()),
+        )
+        .expect("create join policy post")
+        .0
 }
 
 /// Verifies that correlated `EXISTS` policies bind outer-row references
@@ -577,6 +618,67 @@ async fn exists_rel_join_grants_and_denies_correctly() {
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");
     dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Verifies that join queries apply `SELECT` policies to rows from joined
+/// tables, not only to the base table.
+#[tokio::test]
+async fn join_query_applies_policy_filter_on_joined_table() {
+    let schema = joined_table_select_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "join_users", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "join_users", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "join_users", READY_TIMEOUT).await;
+
+    let alice_user = create_join_policy_user(&admin, "alice").await;
+    let bob_user = create_join_policy_user(&admin, "bob").await;
+    create_join_policy_post(&admin, "alice", "Alice post").await;
+    create_join_policy_post(&admin, "bob", "Bob post").await;
+
+    let query = QueryBuilder::new("join_users")
+        .join("join_posts")
+        .on("join_users.name", "join_posts.owner_name")
+        .build();
+
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees joined row allowed by joined-table policy",
+        |rows| (rows.len() == 1 && rows[0].0 == alice_user).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![
+            Value::Text("alice".to_string()),
+            Value::Text("alice".to_string()),
+            Value::Text("Alice post".to_string()),
+        ]
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob,
+        query,
+        "bob sees joined row allowed by joined-table policy",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_user).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        vec![
+            Value::Text("bob".to_string()),
+            Value::Text("bob".to_string()),
+            Value::Text("Bob post".to_string()),
+        ]
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
