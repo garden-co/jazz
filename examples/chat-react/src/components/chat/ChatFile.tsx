@@ -1,5 +1,6 @@
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { downloadBlob, formatBytes } from "@/lib/utils";
 import { app, type Attachment } from "../../../schema.js";
@@ -13,8 +14,12 @@ export function ChatFile({ attachment }: ChatFileProps) {
   const fileReadOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const handleDownload = async () => {
-    const blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
-    downloadBlob(blob, attachment.name);
+    try {
+      const blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
+      downloadBlob(blob, attachment.name);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed");
+    }
   };
 
   return (
