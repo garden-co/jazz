@@ -15,14 +15,18 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 
 const DEFAULT_SERVICE_NAME: &str = "jazz-server";
 
+/// Resolve the service name from `OTEL_SERVICE_NAME`, falling back to
+/// `DEFAULT_SERVICE_NAME`. Used by the env-driven provider builders. The
+/// explicit-name path (`*_with_endpoint`, e.g. the NAPI dev-server) passes its
+/// own name straight to `otel_resource` and intentionally bypasses this.
+fn resolved_service_name() -> String {
+    std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into())
+}
+
 /// Build an OTel TracerProvider exporting to the OTLP/HTTP endpoint
 /// configured via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 pub fn init_tracer_provider() -> SdkTracerProvider {
-    let builder = tracer_provider_builder(
-        std::env::var("OTEL_SERVICE_NAME")
-            .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into())
-            .as_str(),
-    );
+    let builder = tracer_provider_builder(&resolved_service_name());
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
@@ -103,9 +107,7 @@ pub fn init_logger_provider() -> SdkLoggerProvider {
         .expect("failed to build OTLP log exporter");
 
     SdkLoggerProvider::builder()
-        .with_resource(otel_resource(
-            &std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into()),
-        ))
+        .with_resource(otel_resource(&resolved_service_name()))
         .with_batch_exporter(exporter)
         .build()
 }
@@ -120,9 +122,7 @@ pub fn init_meter_provider() -> SdkMeterProvider {
         .expect("failed to build OTLP metric exporter");
 
     SdkMeterProvider::builder()
-        .with_resource(otel_resource(
-            &std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.into()),
-        ))
+        .with_resource(otel_resource(&resolved_service_name()))
         .with_periodic_exporter(exporter)
         .build()
 }
