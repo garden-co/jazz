@@ -1201,11 +1201,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     let alice_user_id = jazz_tools::ObjectId::new();
     let (alice_row_id, _, alice_batch_id) = alice
-        .insert(
-            "users",
-            user_values_v1(alice_user_id, "Alice Multi-Hop"),
-            None,
-        )
+        .insert("users", user_values_v1(alice_user_id, "Alice Multi-Hop"))
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
@@ -1222,7 +1218,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
         .insert(
             "users",
             user_values_v2(bob_user_id, "Bob Multi-Hop", "bob@example.com"),
-            None,
         )
         .expect("bob creates v2 user");
     bob.wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
@@ -1244,7 +1239,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
                 "charlie@example.com",
                 "admin",
             ),
-            None,
         )
         .expect("charlie creates v3 user");
     charlie
@@ -1363,7 +1357,6 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
         .insert(
             "users",
             rename_chain_values_v1(user_id, "alice@example.com"),
-            None,
         )
         .expect("alice creates v1 user");
     alice
@@ -1443,11 +1436,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
 
     let user_id = jazz_tools::ObjectId::new();
     let (row_id, _, batch_id) = bob
-        .insert(
-            "users",
-            rename_chain_values_v3(user_id, "bob@example.com"),
-            None,
-        )
+        .insert("users", rename_chain_values_v3(user_id, "bob@example.com"))
         .expect("bob creates v3 user");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
@@ -1528,7 +1517,6 @@ async fn table_rename_new_client_can_read_old_rows() {
         .insert(
             "users",
             table_rename_values_v1(user_id, "alice@example.com"),
-            None,
         )
         .expect("alice creates v1 user");
     alice
@@ -1629,7 +1617,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
         .insert(
             "users",
             table_rename_values_v1(user_id, "alice@example.com"),
-            None,
         )
         .expect("alice creates v1 user");
 
@@ -1668,7 +1655,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
 /// schema v2 where that table is named `people`; when Bob writes to `people`,
 /// Alice's old subscription receives the row through the table rename lens.
 #[tokio::test]
-#[ignore = "TODO: existing old-table subscriptions do not receive new-table writes after table rename schema evolution"]
 async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
     let server = TestingServer::start().await;
     let v1_schema = table_rename_schema_v1();
@@ -1746,11 +1732,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
 
     let user_id = jazz_tools::ObjectId::new();
     let (row_id, _, batch_id) = bob
-        .insert(
-            "people",
-            table_rename_values_v2(user_id, "bob@example.com"),
-            None,
-        )
+        .insert("people", table_rename_values_v2(user_id, "bob@example.com"))
         .expect("bob creates v2 person");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
@@ -1824,7 +1806,6 @@ async fn table_rename_update_and_delete_copy_on_write() {
         .insert(
             "users",
             table_rename_values_v1(user_id, "alice@example.com"),
-            None,
         )
         .expect("alice creates v1 user");
     alice
@@ -1846,7 +1827,6 @@ async fn table_rename_update_and_delete_copy_on_write() {
                 "email".to_string(),
                 Value::Text("alice+updated@example.com".to_string()),
             )],
-            None,
         )
         .expect("bob updates renamed row");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -1875,7 +1855,7 @@ async fn table_rename_update_and_delete_copy_on_write() {
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    let batch_id = bob.delete(row_id, None).expect("bob deletes renamed row");
+    let batch_id = bob.delete(row_id).expect("bob deletes renamed row");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("bob delete reaches edge");
@@ -1929,11 +1909,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
 
     let author_id = jazz_tools::ObjectId::new();
     let (_, _, batch_id) = alice
-        .insert(
-            "users",
-            table_rename_join_user_values(author_id, "Alice"),
-            None,
-        )
+        .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -1945,7 +1921,6 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
         .insert(
             "posts",
             table_rename_join_post_values(post_id, author_id, "Hello from v1"),
-            None,
         )
         .expect("alice creates v1 post");
     alice
@@ -2023,11 +1998,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
 
     let author_id = jazz_tools::ObjectId::new();
     let (author_row_id, _, batch_id) = alice
-        .insert(
-            "users",
-            table_rename_join_user_values(author_id, "Alice"),
-            None,
-        )
+        .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -2039,7 +2010,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
         .insert(
             "posts",
             table_rename_join_post_values(post_id, author_id, "Alice post"),
-            None,
         )
         .expect("alice creates v1 post");
     alice
@@ -2126,7 +2096,6 @@ async fn multi_hop_table_renames_and_column_rename() {
         .insert(
             "users",
             multi_hop_table_rename_values_v1(alice_id, "alice@example.com"),
-            None,
         )
         .expect("alice creates v1 user");
     alice
@@ -2152,7 +2121,6 @@ async fn multi_hop_table_renames_and_column_rename() {
         .insert(
             "people",
             multi_hop_table_rename_values_v2(bob_id, "bob@example.com"),
-            None,
         )
         .expect("bob creates v2 person");
     bob.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
@@ -2177,7 +2145,6 @@ async fn multi_hop_table_renames_and_column_rename() {
         .insert(
             "members",
             multi_hop_table_rename_values_v3(carol_id, "carol@example.com"),
-            None,
         )
         .expect("carol creates v3 member");
     carol
