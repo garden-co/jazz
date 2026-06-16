@@ -45,6 +45,10 @@ const SYNTHETIC_QUERY_ID: QueryId = QueryId(1);
 /// query-scoped and permission-filtered, ready to seed a cold client's store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBundle {
+    // INVARIANT: `version` must stay the first field and be checked before any
+    // `payloads` are trusted. postcard is non-self-describing, so a future
+    // version's bytes can decode as a current-shape `SyncBundle`; the version
+    // gate in `from_bytes` is the only thing that catches it.
     version: u8,
     /// The server's outbound payloads for the synthetic subscription, in the
     /// order the server emitted them.
@@ -133,6 +137,7 @@ pub fn compose_query_bundle<H: Storage>(
     // produces nothing further — that empty round is the quiescence signal. The
     // round cap is a runaway backstop, not the expected exit.
     let mut payloads = Vec::new();
+    let mut settled = false;
     for _ in 0..MAX_COMPOSE_ROUNDS {
         server.process(server_io);
         let mut produced = false;
@@ -149,8 +154,17 @@ pub fn compose_query_bundle<H: Storage>(
         }
         server.sync_manager_mut().prepend_outbox(retained);
         if !produced {
+            settled = true;
             break;
         }
+    }
+    if !settled {
+        // The bundle may be partial: surface it rather than seeding a client
+        // with a silently-incomplete result.
+        tracing::warn!(
+            max_rounds = MAX_COMPOSE_ROUNDS,
+            "sync bundle compose hit the round cap before settling; bundle may be incomplete"
+        );
     }
 
     // Tear down the synthetic subscription so the composing server keeps no
