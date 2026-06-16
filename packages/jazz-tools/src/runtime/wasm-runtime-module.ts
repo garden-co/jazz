@@ -51,6 +51,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
     schema,
     hasWorker,
     useBinaryEncoding,
+    bufferOutboxWithoutSyncSender,
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
@@ -63,7 +64,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       nonDurableClientRuntime: hasWorker,
     };
 
-    return JazzClient.connectSync(
+    const client = JazzClient.connectSync(
       this.wasmModule,
       {
         appId: config.appId,
@@ -83,6 +84,12 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       },
       runtimeOptions,
     );
+
+    if (bufferOutboxWithoutSyncSender) {
+      client.getRuntime().enableOutboxBufferingWithoutSyncSender?.();
+    }
+
+    return client;
   }
 
   override installTelemetry({
