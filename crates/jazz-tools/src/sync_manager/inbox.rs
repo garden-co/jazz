@@ -664,10 +664,14 @@ impl SyncManager {
         let context =
             crate::storage::resolve_history_row_write_context(storage, table, &row).ok()?;
         let branch_name = BranchName::new(&row.branch);
-        let row_locator = RowLocator {
-            table: table.to_string().into(),
-            origin_schema_hash: Some(context.history_row_raw_table_id().schema_hash),
-        };
+        let row_locator = storage
+            .load_row_locator(row.row_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| RowLocator {
+                table: table.to_string().into(),
+                origin_schema_hash: Some(context.history_row_raw_table_id().schema_hash),
+            });
 
         apply_row_batch_with_context(
             storage,
