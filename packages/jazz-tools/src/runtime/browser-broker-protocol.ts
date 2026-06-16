@@ -1,4 +1,5 @@
 import type { RuntimeSourcesConfig } from "./context.js";
+import type { BrowserBrokerUnsupportedCode } from "./browser-broker-errors.js";
 
 /**
  * Tab<->broker wire-format version. It is embedded in the hello fingerprint,
@@ -237,6 +238,7 @@ export interface BrowserBrokerStorageResetFinishedMessage extends BrokerInstance
 
 export interface BrowserBrokerUnsupportedMessage extends BrokerInstanceMessage {
   type: "unsupported";
+  code?: BrowserBrokerUnsupportedCode;
   reason: string;
 }
 

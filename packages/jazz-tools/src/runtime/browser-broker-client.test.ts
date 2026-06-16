@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
+  IncompatibleBrowserBrokerConfigurationError,
+} from "./browser-broker-errors.js";
 import { BrowserBrokerClient } from "./browser-broker-client.js";
 import type { BrowserBrokerControlMessage } from "./browser-broker-protocol.js";
 
@@ -357,6 +361,35 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("rejects connect with a typed error when the broker rejects hello compatibility", async () => {
+    const env = createFakeWorkerEnv({ respondToHello: false });
+
+    const connecting = BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    } as Parameters<typeof BrowserBrokerClient.connect>[0]);
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "unsupported",
+      brokerInstanceId: "instance-a",
+      code: INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
+      reason: "incompatible persistent browser configuration",
+    } satisfies BrowserBrokerControlMessage);
+
+    await expect(connecting).rejects.toBeInstanceOf(IncompatibleBrowserBrokerConfigurationError);
+    expect(env.workers[0]!.port.closed).toBe(true);
+  });
+
   it("rejects connect when the SharedWorker fires an error event", async () => {
     const env = createFakeWorkerEnv({ respondToHello: false });
 
@@ -634,15 +667,19 @@ describe("BrowserBrokerClient", () => {
     dispatchPortMessage(workers[0]!.port, {
       type: "unsupported",
       brokerInstanceId: "instance-a",
-      reason: "incompatible persistent browser schema",
+      code: INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
+      reason: "incompatible persistent browser configuration",
     } satisfies BrowserBrokerControlMessage);
 
     expect(onClosed).toHaveBeenCalledTimes(1);
-    expect(onClosed.mock.calls[0]![0].message).toBe("incompatible persistent browser schema");
+    expect(onClosed.mock.calls[0]![0]).toBeInstanceOf(IncompatibleBrowserBrokerConfigurationError);
+    expect(onClosed.mock.calls[0]![0].message).toBe(
+      "incompatible persistent browser configuration",
+    );
     expect(workers[0]!.port.closed).toBe(true);
 
     await expect(client.waitForRole("leader", 10)).rejects.toThrow(
-      "incompatible persistent browser schema",
+      "incompatible persistent browser configuration",
     );
   });
 
