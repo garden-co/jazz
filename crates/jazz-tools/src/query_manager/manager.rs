@@ -237,7 +237,7 @@ enum SubscriptionRowMark {
 
 #[derive(Debug, Clone)]
 struct SubscriptionVisibilityEffect {
-    table: String,
+    tables: Vec<String>,
     row_id: ObjectId,
     local_dirty: bool,
     row_mark: SubscriptionRowMark,
@@ -257,45 +257,47 @@ struct BatchedSubscriptionVisibilityEffects {
 impl BatchedSubscriptionVisibilityEffects {
     fn push(&mut self, effect: SubscriptionVisibilityEffect) {
         let SubscriptionVisibilityEffect {
-            table,
+            tables,
             row_id,
             local_dirty,
             row_mark,
             local_row_overlay,
         } = effect;
 
-        if local_dirty {
-            self.local_dirty_tables.insert(table.clone());
-        } else {
-            self.remote_dirty_tables.insert(table.clone());
-        }
+        for table in tables {
+            if local_dirty {
+                self.local_dirty_tables.insert(table.clone());
+            } else {
+                self.remote_dirty_tables.insert(table.clone());
+            }
 
-        match (row_mark, local_row_overlay) {
-            (SubscriptionRowMark::Updated, true) => {
-                self.local_updated.entry(table).or_default().insert(row_id);
-            }
-            (SubscriptionRowMark::Updated, false) => {
-                self.remote_updated.entry(table).or_default().insert(row_id);
-            }
-            (SubscriptionRowMark::Deleted, true) => {
-                self.local_deleted.entry(table).or_default().insert(row_id);
-            }
-            (SubscriptionRowMark::Deleted, false) => {
-                self.remote_deleted.entry(table).or_default().insert(row_id);
-            }
-            (SubscriptionRowMark::UpdatedAndDeleted, true) => {
-                self.local_updated
-                    .entry(table.clone())
-                    .or_default()
-                    .insert(row_id);
-                self.local_deleted.entry(table).or_default().insert(row_id);
-            }
-            (SubscriptionRowMark::UpdatedAndDeleted, false) => {
-                self.remote_updated
-                    .entry(table.clone())
-                    .or_default()
-                    .insert(row_id);
-                self.remote_deleted.entry(table).or_default().insert(row_id);
+            match (row_mark, local_row_overlay) {
+                (SubscriptionRowMark::Updated, true) => {
+                    self.local_updated.entry(table).or_default().insert(row_id);
+                }
+                (SubscriptionRowMark::Updated, false) => {
+                    self.remote_updated.entry(table).or_default().insert(row_id);
+                }
+                (SubscriptionRowMark::Deleted, true) => {
+                    self.local_deleted.entry(table).or_default().insert(row_id);
+                }
+                (SubscriptionRowMark::Deleted, false) => {
+                    self.remote_deleted.entry(table).or_default().insert(row_id);
+                }
+                (SubscriptionRowMark::UpdatedAndDeleted, true) => {
+                    self.local_updated
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(row_id);
+                    self.local_deleted.entry(table).or_default().insert(row_id);
+                }
+                (SubscriptionRowMark::UpdatedAndDeleted, false) => {
+                    self.remote_updated
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(row_id);
+                    self.remote_deleted.entry(table).or_default().insert(row_id);
+                }
             }
         }
     }
@@ -1015,52 +1017,86 @@ impl QueryManager {
             Vec::new();
 
         // Recompile server-side subscriptions
-        for ((client_id, query_id), sub) in &mut self.server_subscriptions {
-            if sub.needs_recompile {
-                let query_for_compile =
-                    Self::query_for_server_compile(&sub.query, &sub.schema_context);
-                let compile_schema: Schema = sub
-                    .schema_context
-                    .current_schema
-                    .iter()
-                    .map(|(table_name, table_schema)| {
-                        let mut structural = table_schema.clone();
-                        structural.policies = TablePolicies::default();
-                        (*table_name, structural)
-                    })
-                    .collect();
-                // Recompile the graph
-                match Self::compile_graph(
-                    &query_for_compile,
-                    &compile_schema,
-                    sub.session.clone(),
-                    &sub.schema_context,
-                    RowPolicyMode::PermissiveLocal,
-                ) {
-                    Ok(new_graph) => {
-                        sub.branches = Self::resolved_server_query_branches(
-                            &query_for_compile,
-                            &sub.schema_context,
-                        );
+        let stale_server_subscription_keys: Vec<_> = self
+            .server_subscriptions
+            .iter()
+            .filter_map(|(key, sub)| sub.needs_recompile.then_some(*key))
+            .collect();
+
+        for (client_id, query_id) in stale_server_subscription_keys {
+            let Some((query, session, propagation)) = self
+                .server_subscriptions
+                .get(&(client_id, query_id))
+                .map(|sub| (sub.query.clone(), sub.session.clone(), sub.propagation))
+            else {
+                continue;
+            };
+
+            let Some((schema_for_compile, subscription_context)) =
+                self.build_server_subscription_context(&query)
+            else {
+                let reason = "schema context unavailable for query recompile".to_string();
+                tracing::error!(
+                    %client_id,
+                    query_id = query_id.0,
+                    error = %reason,
+                    "server subscription stale recompile failed; dropping subscription"
+                );
+                failed_server.push((
+                    client_id,
+                    query_id,
+                    "query_recompile_failed".to_string(),
+                    reason,
+                    propagation,
+                ));
+                continue;
+            };
+
+            let query_for_compile = Self::query_for_server_compile(&query, &subscription_context);
+            let compile_schema: Schema = schema_for_compile
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect();
+
+            // Recompile the graph
+            match Self::compile_graph(
+                &query_for_compile,
+                &compile_schema,
+                session,
+                &subscription_context,
+                RowPolicyMode::PermissiveLocal,
+            ) {
+                Ok(new_graph) => {
+                    let branches = Self::resolved_server_query_branches(
+                        &query_for_compile,
+                        &subscription_context,
+                    );
+                    if let Some(sub) = self.server_subscriptions.get_mut(&(client_id, query_id)) {
+                        sub.schema_context = subscription_context;
+                        sub.branches = branches;
                         sub.graph = new_graph;
                         sub.needs_recompile = false;
                     }
-                    Err(err) => {
-                        let reason = err.to_string();
-                        tracing::error!(
-                            %client_id,
-                            query_id = query_id.0,
-                            error = %reason,
-                            "server subscription stale recompile failed; dropping subscription"
-                        );
-                        failed_server.push((
-                            *client_id,
-                            *query_id,
-                            "query_recompile_failed".to_string(),
-                            reason,
-                            sub.propagation,
-                        ));
-                    }
+                }
+                Err(err) => {
+                    let reason = err.to_string();
+                    tracing::error!(
+                        %client_id,
+                        query_id = query_id.0,
+                        error = %reason,
+                        "server subscription stale recompile failed; dropping subscription"
+                    );
+                    failed_server.push((
+                        client_id,
+                        query_id,
+                        "query_recompile_failed".to_string(),
+                        reason,
+                        propagation,
+                    ));
                 }
             }
         }
@@ -1775,6 +1811,8 @@ impl QueryManager {
             translate_table_name_to_schema(&self.schema_context, &logical_table, &schema_hash)
                 .unwrap_or_else(|| original_table.to_string())
         };
+        let subscription_tables =
+            self.subscription_table_aliases(&logical_table, &original_table, &branch_table);
         let table_name = TableName::new(&branch_table);
 
         let table_schema = if schema_hash == self.schema_context.current_hash {
@@ -1859,7 +1897,7 @@ impl QueryManager {
                 );
             }
             return Some(SubscriptionVisibilityEffect {
-                table: logical_table,
+                tables: subscription_tables,
                 row_id: update.object_id,
                 local_dirty: local_update,
                 row_mark: SubscriptionRowMark::Deleted,
@@ -1905,7 +1943,7 @@ impl QueryManager {
                 }
             }
             return Some(SubscriptionVisibilityEffect {
-                table: logical_table,
+                tables: subscription_tables,
                 row_id: update.object_id,
                 local_dirty: local_update,
                 row_mark: SubscriptionRowMark::Deleted,
@@ -1937,7 +1975,7 @@ impl QueryManager {
                 );
             }
             return Some(SubscriptionVisibilityEffect {
-                table: logical_table,
+                tables: subscription_tables,
                 row_id: update.object_id,
                 local_dirty: local_update,
                 row_mark: SubscriptionRowMark::Updated,
@@ -1992,7 +2030,7 @@ impl QueryManager {
 
         if local_update {
             Some(SubscriptionVisibilityEffect {
-                table: logical_table,
+                tables: subscription_tables,
                 row_id: update.object_id,
                 local_dirty: true,
                 row_mark: SubscriptionRowMark::Updated,
@@ -2017,7 +2055,7 @@ impl QueryManager {
                 )
             {
                 return Some(SubscriptionVisibilityEffect {
-                    table: logical_table,
+                    tables: subscription_tables,
                     row_id: update.object_id,
                     local_dirty: false,
                     row_mark: SubscriptionRowMark::UpdatedAndDeleted,
@@ -2025,13 +2063,38 @@ impl QueryManager {
                 });
             }
             Some(SubscriptionVisibilityEffect {
-                table: logical_table,
+                tables: subscription_tables,
                 row_id: update.object_id,
                 local_dirty: false,
                 row_mark: SubscriptionRowMark::Updated,
                 local_row_overlay: false,
             })
         }
+    }
+
+    fn subscription_table_aliases(
+        &self,
+        logical_table: &str,
+        original_table: &str,
+        branch_table: &str,
+    ) -> Vec<String> {
+        let mut aliases = HashSet::from([
+            logical_table.to_string(),
+            original_table.to_string(),
+            branch_table.to_string(),
+        ]);
+
+        for schema_hash in self.schema_context.all_live_hashes() {
+            if let Some(table) =
+                translate_table_name_to_schema(&self.schema_context, logical_table, &schema_hash)
+            {
+                aliases.insert(table);
+            }
+        }
+
+        let mut aliases = aliases.into_iter().collect::<Vec<_>>();
+        aliases.sort();
+        aliases
     }
 
     fn select_policy_columns_changed(

@@ -536,10 +536,31 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
+        target_branch_name: Option<&BranchName>,
         object_ids: &[ObjectId],
     ) -> Vec<(String, StoredRowBatch)> {
         let mut rows = Vec::new();
         for row_id in object_ids {
+            if let Some(target_branch_name) = target_branch_name
+                && let Ok(Some(locator)) = storage.load_history_row_batch_table_locator(
+                    target_branch_name.as_str(),
+                    *row_id,
+                    batch_id,
+                )
+            {
+                let table = locator.table_name.to_string();
+                if let Ok(Some(row)) = storage.load_history_row_batch_for_schema_hash(
+                    &table,
+                    locator.schema_hash,
+                    target_branch_name.as_str(),
+                    *row_id,
+                    batch_id,
+                ) {
+                    rows.push((table, row));
+                    continue;
+                }
+            }
+
             let Ok(Some(row_locator)) = storage.load_row_locator(*row_id) else {
                 continue;
             };
@@ -583,12 +604,90 @@ impl SyncManager {
         }
         if let Ok(Some(submission)) = storage.load_sealed_batch_submission(batch_id) {
             object_ids.extend(submission.members.iter().map(|member| member.object_id));
+            return self.transactional_batch_rows(
+                storage,
+                batch_id,
+                Some(&submission.target_branch_name),
+                &object_ids.into_iter().collect::<Vec<_>>(),
+            );
         }
         self.transactional_batch_rows(
             storage,
             batch_id,
+            None,
             &object_ids.into_iter().collect::<Vec<_>>(),
         )
+    }
+
+    fn metadata_for_batch_row<H: Storage>(
+        &self,
+        storage: &H,
+        table: &str,
+        row: &StoredRowBatch,
+    ) -> Option<HashMap<String, String>> {
+        if let Ok(Some(locator)) = storage.load_history_row_batch_table_locator(
+            row.branch.as_str(),
+            row.row_id,
+            row.batch_id(),
+        ) {
+            return Some(metadata_from_row_locator(&RowLocator {
+                table: locator.table_name,
+                origin_schema_hash: Some(locator.schema_hash),
+            }));
+        }
+
+        storage
+            .load_row_locator(row.row_id)
+            .ok()
+            .flatten()
+            .map(|locator| metadata_from_row_locator(&locator))
+            .or_else(|| {
+                crate::storage::resolve_history_row_write_context(storage, table, row)
+                    .ok()
+                    .map(|context| {
+                        metadata_from_row_locator(&RowLocator {
+                            table: table.to_string().into(),
+                            origin_schema_hash: Some(
+                                context.history_row_raw_table_id().schema_hash,
+                            ),
+                        })
+                    })
+            })
+    }
+
+    fn apply_row_batch_for_table<H: Storage>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        row: StoredRowBatch,
+    ) -> Option<crate::row_histories::ApplyRowBatchResult> {
+        let context =
+            crate::storage::resolve_history_row_write_context(storage, table, &row).ok()?;
+        let branch_name = BranchName::new(&row.branch);
+        let row_locator = storage
+            .load_row_locator(row.row_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| RowLocator {
+                table: table.to_string().into(),
+                origin_schema_hash: Some(context.history_row_raw_table_id().schema_hash),
+            });
+
+        apply_row_batch_with_context(
+            storage,
+            ApplyRowBatchWithContext {
+                object_id: row.row_id,
+                branch_name: &branch_name,
+                row,
+                index_mutations: &[],
+                row_locator,
+                table: table.to_string(),
+                branch: branch_name.as_str().to_string().into(),
+                context,
+                is_known_new_object: false,
+            },
+        )
+        .ok()
     }
 
     fn apply_transactional_batch_fate_to_rows<H: Storage>(
@@ -601,21 +700,16 @@ impl SyncManager {
         let server_ids: Vec<_> = self.servers.keys().copied().collect();
         match fate {
             BatchFate::DurableDirect { .. } => {
-                for (_table, row) in batch_rows {
+                for (table, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
                     let mut direct_row = row.clone();
                     direct_row.state = RowState::VisibleDirect;
                     direct_row.confirmed_tier = None;
                     let applied =
-                        apply_row_batch(storage, row_id, &branch_name, direct_row.clone(), &[])
-                            .ok();
+                        self.apply_row_batch_for_table(storage, table, direct_row.clone());
 
-                    let metadata = storage
-                        .load_row_locator(row_id)
-                        .ok()
-                        .flatten()
-                        .map(|locator| metadata_from_row_locator(&locator));
+                    let metadata = self.metadata_for_batch_row(storage, table, &direct_row);
 
                     if let Some(metadata) = metadata {
                         for server_id in &server_ids {
@@ -661,19 +755,14 @@ impl SyncManager {
                 }
             }
             BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
-                for (_table, row) in batch_rows {
+                for (table, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
                     let accepted_row = row.accepted_transaction_output(*confirmed_tier);
                     let applied =
-                        apply_row_batch(storage, row_id, &branch_name, accepted_row.clone(), &[])
-                            .ok();
+                        self.apply_row_batch_for_table(storage, table, accepted_row.clone());
 
-                    let metadata = storage
-                        .load_row_locator(row_id)
-                        .ok()
-                        .flatten()
-                        .map(|locator| metadata_from_row_locator(&locator));
+                    let metadata = self.metadata_for_batch_row(storage, table, &accepted_row);
 
                     if let Some(metadata) = metadata {
                         for server_id in &server_ids {
@@ -1000,6 +1089,7 @@ impl SyncManager {
         let batch_rows = self.transactional_batch_rows(
             storage,
             batch_id,
+            Some(&submission.target_branch_name),
             &submission
                 .members
                 .iter()
@@ -1102,6 +1192,7 @@ impl SyncManager {
             let batch_rows = self.transactional_batch_rows(
                 storage,
                 submission.batch_id,
+                Some(&submission.target_branch_name),
                 &submission
                     .members
                     .iter()
@@ -1767,6 +1858,7 @@ impl SyncManager {
                     let batch_rows = self.transactional_batch_rows(
                         storage,
                         submission.batch_id,
+                        Some(&submission.target_branch_name),
                         &submission
                             .members
                             .iter()
