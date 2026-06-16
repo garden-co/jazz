@@ -5,17 +5,17 @@ and toward `TestingServer` + `JazzClient`.
 
 ## Default Shape
 
-- Start a real `TestingServer` with the test schema. If a single runtime is enough for the test,
-  use `JazzClient::test_client` instead.
-- Connect `JazzClient`s with `server.make_client_context_for_user(...)`.
-  - To simulate untrusted clients, create them with
-    `JazzClient::connect_with_row_policy_mode(..., RowPolicyMode::PermissiveLocal)`.
 - Use public schema and permission builders (`SchemaBuilder`and `TableSchema::builder`).
   Do not use JSON-like schema, permission, or query definitions.
+- Set up the database topology.
+  - If a single runtime is enough for the test, use `JazzClient::test_client`.
+  - Otherwise use a `TestingServer` and connect `TestingClient`s to it
+  - To simulate untrusted clients, create them with
+    `JazzClient::connect_with_row_policy_mode(..., RowPolicyMode::PermissiveLocal)`.
 - Use `row_input!` for inserts.
 - Assert user-visible effects through public client APIs: query rows,
   subscription deltas, accepted/rejected write settlement, or visible row state.
-  - Use higher-level utils like `crate::test_support::wait_for_query` to wait for results
+  - Use higher-level utils like `wait_for_query` to wait for results
 
 ## What Should Stay Internal
 
