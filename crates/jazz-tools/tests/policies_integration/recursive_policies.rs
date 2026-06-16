@@ -205,6 +205,35 @@ fn recursive_relation_policy_schema() -> Schema {
         .build()
 }
 
+fn recursive_step_magic_column_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("teams")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("team_edges")
+                .column("child_team", ColumnType::Uuid)
+                .column("parent_team", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True)
+                        .with_update(
+                            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                            PolicyExpr::True,
+                        ),
+                ),
+        )
+        .build()
+}
+
 // -- Value constructors --
 
 fn recursive_folder_values(owner_id: &str, name: &str, parent_id: Option<ObjectId>) -> Vec<Value> {
@@ -267,6 +296,24 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
         .expect("create team edge");
 }
 
+async fn create_owned_team_edge(
+    client: &JazzClient,
+    child_team: ObjectId,
+    parent_team: ObjectId,
+    owner_id: &str,
+) {
+    client
+        .insert(
+            "team_edges",
+            row_input!(
+                "child_team" => child_team,
+                "parent_team" => parent_team,
+                "owner_id" => owner_id,
+            ),
+        )
+        .expect("create owned team edge");
+}
+
 async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: ObjectId) {
     client
         .insert(
@@ -298,6 +345,77 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
 }
 
 // -- Tests --
+
+/// Verifies that magic permission columns inside a recursive step are evaluated
+/// with the reader's session.
+///
+/// Actors: admin seeds the graph, alice reads it.
+///
+/// ```text
+/// Platform --editable-by-alice--> API --editable-by-bob--> Finance
+///
+/// alice query from Platform with recursive step filter $canEdit=true
+///   -> {Platform, API}
+/// ```
+#[tokio::test]
+async fn recursive_query_step_magic_columns_use_reader_session() {
+    let schema = recursive_step_magic_column_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "teams", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "teams", READY_TIMEOUT).await;
+
+    let platform = create_team(&admin, "Platform").await;
+    let api = create_team(&admin, "API").await;
+    let finance = create_team(&admin, "Finance").await;
+    create_owned_team_edge(&admin, platform, api, "alice").await;
+    create_owned_team_edge(&admin, api, finance, "bob").await;
+
+    let query = QueryBuilder::new("teams")
+        .filter_eq("name", Value::Text("Platform".to_string()))
+        .with_recursive(|r| {
+            r.from("team_edges")
+                .correlate("child_team", "_id")
+                .filter_eq("$canEdit", Value::Boolean(true))
+                .hop("teams", "parent_team")
+                .max_depth(10)
+        })
+        .build();
+
+    let rows = wait_for_rows(
+        &alice,
+        query,
+        "alice sees only teams reached through editable recursive edges",
+        |rows| {
+            let mut names = rows
+                .iter()
+                .filter_map(|(_, values)| match values.first() {
+                    Some(Value::Text(name)) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            (names == vec!["API".to_string(), "Platform".to_string()]).then_some(rows)
+        },
+    )
+    .await;
+
+    let mut names = rows
+        .iter()
+        .filter_map(|(_, values)| match values.first() {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, vec!["API", "Platform"]);
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
 
 /// Verifies that recursive `INHERITS` grants access through an owned ancestor
 /// and still fails closed for a session with no reachable owned folder.
