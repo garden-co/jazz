@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import ClientTodo from "./ClientTodo";
 import ServerTodo from "./ServerTodo";
-import HydratedTodoServer from "./HydratedTodoServer";
+import TodoPanel from "./TodoPanel";
+import PrefetchedTodoPanel from "./PrefetchedTodoPanel";
 import { RenderChip, ClientChip } from "./RenderChip";
 import { Chip } from "./Chip";
 
@@ -34,7 +34,7 @@ export default function Home() {
             This column includes a fully client-rendered to-do list. Adding items works locally, and
             they sync to the server in the background.
           </ColumnNote>
-          <ClientTodo />
+          <TodoPanel />
         </section>
         <section className="border border-foreground/10 rounded-lg p-5">
           <span className="text-xs font-mono text-foreground/40 uppercase tracking-widest mb-4 block">
@@ -60,7 +60,7 @@ export default function Home() {
             time. You will see this column and the client-rendered column update in real time if you
             add items here.
           </ColumnNote>
-          <HydratedTodoServer />
+          <PrefetchedTodoPanel />
         </section>
       </div>
     </main>

@@ -39,10 +39,10 @@ Set up a backend context, then run the page's queries at the route level and tur
   ../examples/docs/todo-server-ts/src/ssr-hydration-snippets.ts#nextjs-jazz-server
 </include>
 
-In a server component, run the page's queries and turn the result into a snapshot:
+In a server component, run the page's queries, turn the result into a snapshot, and hand it to the client panel:
 
-<include cwd lang="tsx" meta='title="app/HydratedTodoServer.tsx"'>
-  ../examples/nextjs-csr-ssr/app/HydratedTodoServer.tsx#prefetch
+<include cwd lang="tsx" meta='title="app/PrefetchedTodoPanel.tsx"'>
+  ../examples/nextjs-csr-ssr/app/PrefetchedTodoPanel.tsx#prefetch
 </include>
 
 </Tab>
@@ -68,11 +68,15 @@ The snapshot travels with its query, at the call site&hairsp;—&hairsp;not on t
 <Tabs groupId="jazz-framework" items={["React", "Svelte"]} persist updateAnchor>
 <Tab value="React">
 
-<include cwd lang="tsx" meta='title="app/HydratedTodoClient.tsx"'>
-  ../examples/nextjs-csr-ssr/app/HydratedTodoClient.tsx
+<include cwd lang="tsx" meta='title="app/TodoPanel.tsx"'>
+  ../examples/nextjs-csr-ssr/app/TodoPanel.tsx
 </include>
 
-`<JazzProvider ssr>` renders straight away&hairsp;—&hairsp;on the server and on the client's first render&hairsp;—&hairsp;and `useAll(app.todos, { snapshot })` seeds the rows for that render. It's the same query the server prefetched (`prefetch(db, app.todos)`), so the seeded result matches and the client shows it with no loading state. When the live client connects it attaches to the same provider, the bundle hydrates the store, and sync takes over.
+<include cwd lang="tsx" meta='title="app/TodoList.tsx"'>
+  ../examples/nextjs-csr-ssr/app/TodoList.tsx
+</include>
+
+`<JazzProvider ssr={!!snapshot}>` renders straight away when there's a snapshot&hairsp;—&hairsp;on the server and on the client's first render&hairsp;—&hairsp;and `useAll(app.todos, { snapshot })` seeds the rows for that render. It's the same query the server prefetched (`prefetch(db, app.todos)`), so the seeded result matches and the client shows it with no loading state. When the live client connects it attaches to the same provider, the bundle hydrates the store, and sync takes over. The same `TodoPanel` renders the client-only column too&hairsp;—&hairsp;pass a snapshot and it seeds, leave it off and it just waits for the client.
 
 </Tab>
 <Tab value="Svelte">
