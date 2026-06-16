@@ -815,7 +815,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
             } else if let Some(sync_sender) = self.sync_sender.as_ref() {
                 sync_sender.send_sync_message(msg);
-            } else {
+            } else if self.buffer_outbox_without_sync_sender {
                 unsent.push(msg);
             }
         }

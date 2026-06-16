@@ -335,6 +335,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     pub(crate) sync_sender: Option<Box<dyn SyncSender>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
+    /// When true, server-bound outbox entries are retained while no transport
+    /// or fallback sync sender is installed. Browser broker tab runtimes enable
+    /// this so writes made during leader election/reconnect remain awaitable.
+    buffer_outbox_without_sync_sender: bool,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -469,6 +473,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             transport: None,
             transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
+            buffer_outbox_without_sync_sender: true,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -863,6 +868,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
+    }
+
+    /// Remove the fallback sync sender without draining or acknowledging the
+    /// current outbox. Subsequent ticks retain server-bound messages until a
+    /// transport or replacement sender is installed.
+    pub fn clear_sync_sender(&mut self) {
+        self.sync_sender = None;
+    }
+
+    pub fn set_buffer_outbox_without_sync_sender(&mut self, enabled: bool) {
+        self.buffer_outbox_without_sync_sender = enabled;
     }
 
     #[cfg(test)]

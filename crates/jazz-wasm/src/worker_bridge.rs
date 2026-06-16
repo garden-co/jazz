@@ -30,7 +30,7 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{MessageEvent, Worker};
+use web_sys::{MessageEvent, MessagePort, Worker};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -61,6 +61,13 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
     let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
 }
 
+fn post_wire_to_port(port: &MessagePort, msg: &MainToWorkerWire) {
+    let Ok((value, transfer)) = main_to_worker_post(msg) else {
+        return;
+    };
+    let _ = port.post_message_with_transferable(&value, transfer.as_ref());
+}
+
 // =============================================================================
 // Public bridge
 // =============================================================================
@@ -68,6 +75,11 @@ fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
 #[wasm_bindgen]
 pub struct WasmWorkerBridge {
     inner: Rc<BridgeInner>,
+}
+
+#[wasm_bindgen]
+pub struct WasmMessagePortBridge {
+    inner: Rc<MessagePortBridgeInner>,
 }
 
 #[wasm_bindgen]
@@ -243,7 +255,7 @@ impl WasmWorkerBridge {
     }
 
     #[wasm_bindgen(js_name = sendPeerSync)]
-    pub fn send_peer_sync(&self, peer_id: &str, term: u32, payload: Array) {
+    pub fn send_peer_sync(&self, peer_id: &str, leadership_id: u32, payload: Array) {
         if self.inner.is_inactive() {
             return;
         }
@@ -263,7 +275,7 @@ impl WasmWorkerBridge {
             &self.inner.worker,
             &MainToWorkerWire::PeerSync {
                 peer_id: peer_id.to_string(),
-                term,
+                leadership_id,
                 payloads,
             },
         );
@@ -280,6 +292,55 @@ impl WasmWorkerBridge {
                 peer_id: peer_id.to_string(),
             },
         );
+    }
+
+    #[wasm_bindgen(js_name = attachFollowerPort)]
+    pub fn attach_follower_port(&self, peer_id: &str, leadership_id: u32, port: MessagePort) {
+        if self.inner.is_inactive() {
+            return;
+        }
+
+        let message = Object::new();
+        let _ = Reflect::set(
+            &message,
+            &"type".into(),
+            &JsValue::from_str("attach-follower-port"),
+        );
+        let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+        let _ = Reflect::set(
+            &message,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
+        );
+        let _ = Reflect::set(&message, &"port".into(), port.as_ref());
+
+        let transfer = Array::new();
+        transfer.push(port.as_ref());
+        let _ = self
+            .inner
+            .worker
+            .post_message_with_transfer(&message, transfer.as_ref());
+    }
+
+    #[wasm_bindgen(js_name = detachFollowerPort)]
+    pub fn detach_follower_port(&self, peer_id: &str, leadership_id: u32) {
+        if self.inner.is_inactive() {
+            return;
+        }
+
+        let message = Object::new();
+        let _ = Reflect::set(
+            &message,
+            &"type".into(),
+            &JsValue::from_str("detach-follower-port"),
+        );
+        let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+        let _ = Reflect::set(
+            &message,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
+        );
+        let _ = self.inner.worker.post_message(&message);
     }
 
     #[wasm_bindgen(js_name = setServerPayloadForwarder)]
@@ -377,6 +438,9 @@ impl WasmWorkerBridge {
         let mut slots = self.inner.listeners.borrow_mut();
         slots.on_peer_sync = read_optional_function(&listeners, "onPeerSync");
         slots.on_auth_failure = read_optional_function(&listeners, "onAuthFailure");
+        slots.on_follower_port_attached =
+            read_optional_function(&listeners, "onFollowerPortAttached");
+        slots.on_follower_port_closed = read_optional_function(&listeners, "onFollowerPortClosed");
     }
 
     /// Get the worker-assigned client id (post-init), or `null`.
@@ -482,6 +546,83 @@ impl Drop for WasmWorkerBridge {
     }
 }
 
+#[wasm_bindgen]
+impl WasmMessagePortBridge {
+    #[wasm_bindgen(js_name = attach)]
+    pub fn attach(
+        port: MessagePort,
+        runtime: &WasmRuntime,
+    ) -> Result<WasmMessagePortBridge, JsError> {
+        let runtime = runtime.clone();
+        let sender = RustOutboxSender::new(true);
+        sender.attach_target(port.clone().into(), None, None, None);
+        runtime
+            .core
+            .borrow_mut()
+            .set_sync_sender(Box::new(sender.clone()));
+        runtime
+            .add_server(None, Some(1.0))
+            .map_err(|e| JsError::new(&format!("addServer: {e:?}")))?;
+        runtime.batched_tick();
+
+        let inner = Rc::new(MessagePortBridgeInner {
+            port: port.clone(),
+            runtime,
+            sender,
+            on_message_closure: RefCell::new(None),
+            on_auth_failure: RefCell::new(None),
+            disposed: Cell::new(false),
+        });
+
+        let on_message = {
+            let inner = Rc::clone(&inner);
+            Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+                inner.handle_message(event);
+            })
+        };
+        port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        port.start();
+        *inner.on_message_closure.borrow_mut() = Some(on_message);
+
+        Ok(WasmMessagePortBridge { inner })
+    }
+
+    #[wasm_bindgen]
+    pub fn shutdown(&self) {
+        self.inner.shutdown();
+    }
+
+    #[wasm_bindgen(js_name = detachForReconnect)]
+    pub fn detach_for_reconnect(&self) {
+        self.inner.detach_for_reconnect();
+    }
+
+    #[wasm_bindgen(js_name = updateAuth)]
+    pub fn update_auth(&self, jwt_token: Option<String>) {
+        if self.inner.disposed.get() {
+            return;
+        }
+        post_wire_to_port(
+            &self.inner.port,
+            &MainToWorkerWire::UpdateAuth { jwt_token },
+        );
+    }
+
+    #[wasm_bindgen(js_name = onAuthFailure)]
+    pub fn on_auth_failure(&self, callback: Function) {
+        if self.inner.disposed.get() {
+            return;
+        }
+        *self.inner.on_auth_failure.borrow_mut() = Some(callback);
+    }
+}
+
+impl Drop for WasmMessagePortBridge {
+    fn drop(&mut self) {
+        self.inner.shutdown();
+    }
+}
+
 // `run_init` and `run_shutdown` are now inlined into the wasm-bindgen
 // `init` / `shutdown` methods so synchronous setup happens eagerly. See
 // the method bodies above.
@@ -504,6 +645,8 @@ enum BridgeState {
 struct Listeners {
     on_peer_sync: Option<Function>,
     on_auth_failure: Option<Function>,
+    on_follower_port_attached: Option<Function>,
+    on_follower_port_closed: Option<Function>,
 }
 
 struct BridgeInner {
@@ -527,6 +670,119 @@ struct BridgeInner {
     has_forwarder: Cell<bool>,
     upstream_ready_promise: RefCell<js_sys::Promise>,
     upstream_ready_resolver: RefCell<Option<Function>>,
+}
+
+struct MessagePortBridgeInner {
+    port: MessagePort,
+    runtime: WasmRuntime,
+    sender: RustOutboxSender,
+    on_message_closure: RefCell<Option<Closure<dyn FnMut(MessageEvent)>>>,
+    on_auth_failure: RefCell<Option<Function>>,
+    disposed: Cell<bool>,
+}
+
+impl MessagePortBridgeInner {
+    fn handle_message(&self, event: MessageEvent) {
+        if self.disposed.get() {
+            return;
+        }
+
+        match parse_worker_to_main(&event.data()) {
+            ParsedWorkerToMain::Wire(WorkerToMainWire::Sync { payloads }) => {
+                let had_payloads = !payloads.is_empty();
+                self.apply_sync_entries(payloads);
+                if had_payloads {
+                    self.runtime.batched_tick();
+                }
+            }
+            ParsedWorkerToMain::Wire(WorkerToMainWire::PeerSync { payloads, .. }) => {
+                let had_payloads = !payloads.is_empty();
+                self.apply_peer_payloads(payloads);
+                if had_payloads {
+                    self.runtime.batched_tick();
+                }
+            }
+            ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message }) => {
+                tracing::warn!("message port bridge error: {message}");
+            }
+            ParsedWorkerToMain::Wire(WorkerToMainWire::AuthFailed { reason }) => {
+                let cb = self.on_auth_failure.borrow().clone();
+                if let Some(cb) = cb {
+                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+                } else {
+                    tracing::warn!("message port bridge auth failed: {reason}");
+                }
+            }
+            ParsedWorkerToMain::Ready
+            | ParsedWorkerToMain::UnknownJsObject(_)
+            | ParsedWorkerToMain::DecodeError(_)
+            | ParsedWorkerToMain::Malformed
+            | ParsedWorkerToMain::Wire(_) => {}
+        }
+    }
+
+    fn apply_sync_entries(&self, payloads: Vec<SyncEntry>) {
+        for entry in payloads {
+            match entry {
+                SyncEntry::BareBytes(bytes) => {
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server_bytes(&bytes, None);
+                }
+                SyncEntry::BareString(payload) => {
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server_json(&payload, None);
+                }
+                SyncEntry::SequencedBytes { payload, sequence } => {
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server_bytes(&payload, Some(sequence));
+                }
+                SyncEntry::SequencedString { payload, sequence } => {
+                    let _ = self
+                        .runtime
+                        .receive_sync_message_from_server_json(&payload, Some(sequence));
+                }
+            }
+        }
+    }
+
+    fn apply_peer_payloads(&self, payloads: Vec<serde_bytes::ByteBuf>) {
+        for payload in payloads {
+            let _ = self
+                .runtime
+                .receive_sync_message_from_server_bytes(&payload, None);
+        }
+    }
+
+    fn shutdown(&self) {
+        if self.disposed.replace(true) {
+            return;
+        }
+        self.runtime.batched_tick();
+        self.sender.flush_now();
+        self.runtime.install_noop_sync_sender();
+        self.sender.set_server_payload_forwarder(None);
+        self.runtime.remove_server();
+        self.port.set_onmessage(None);
+        self.port.close();
+        *self.on_message_closure.borrow_mut() = None;
+        *self.on_auth_failure.borrow_mut() = None;
+    }
+
+    fn detach_for_reconnect(&self) {
+        if self.disposed.replace(true) {
+            return;
+        }
+        self.sender.set_server_payload_forwarder(None);
+        self.runtime.clear_sync_sender();
+        self.runtime.remove_server();
+        self.port.set_onmessage(None);
+        self.port.close();
+        *self.on_message_closure.borrow_mut() = None;
+        *self.on_auth_failure.borrow_mut() = None;
+    }
 }
 
 impl BridgeInner {
@@ -797,7 +1053,7 @@ impl BridgeInner {
             }
             WorkerToMainWire::PeerSync {
                 peer_id,
-                term,
+                leadership_id,
                 payloads,
             } => {
                 let cb = self.listeners.borrow().on_peer_sync.clone();
@@ -809,9 +1065,45 @@ impl BridgeInner {
                     }
                     let batch = Object::new();
                     let _ = Reflect::set(&batch, &"peerId".into(), &JsValue::from_str(&peer_id));
-                    let _ = Reflect::set(&batch, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = Reflect::set(
+                        &batch,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
                     let _ = Reflect::set(&batch, &"payload".into(), &payload_array);
                     let _ = cb.call1(&JsValue::NULL, &batch.into());
+                }
+            }
+            WorkerToMainWire::FollowerPortAttached {
+                peer_id,
+                leadership_id,
+            } => {
+                let cb = self.listeners.borrow().on_follower_port_attached.clone();
+                if let Some(cb) = cb {
+                    let event = Object::new();
+                    let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
+                    let _ = Reflect::set(
+                        &event,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
+                    let _ = cb.call1(&JsValue::NULL, &event.into());
+                }
+            }
+            WorkerToMainWire::FollowerPortClosed {
+                peer_id,
+                leadership_id,
+            } => {
+                let cb = self.listeners.borrow().on_follower_port_closed.clone();
+                if let Some(cb) = cb {
+                    let event = Object::new();
+                    let _ = Reflect::set(&event, &"peerId".into(), &JsValue::from_str(&peer_id));
+                    let _ = Reflect::set(
+                        &event,
+                        &"leadershipId".into(),
+                        &JsValue::from_f64(leadership_id as f64),
+                    );
+                    let _ = cb.call1(&JsValue::NULL, &event.into());
                 }
             }
             WorkerToMainWire::Sync { payloads } => {
@@ -886,6 +1178,8 @@ struct BridgeInitOptions {
     jwt_token: Option<String>,
     admin_secret: Option<String>,
     fallback_wasm_url: Option<String>,
+    worker_lock_name: Option<String>,
+    leadership_id: Option<u32>,
     log_level: Option<String>,
     telemetry_collector_url: Option<String>,
 }
@@ -921,6 +1215,20 @@ fn build_init_message(opts: &BridgeInitOptions, original: &JsValue) -> Result<Js
             &msg,
             &"fallbackWasmUrl".into(),
             &JsValue::from_str(fallback),
+        );
+    }
+    if let Some(lock_name) = &opts.worker_lock_name {
+        let _ = Reflect::set(
+            &msg,
+            &"workerLockName".into(),
+            &JsValue::from_str(lock_name),
+        );
+    }
+    if let Some(leadership_id) = opts.leadership_id {
+        let _ = Reflect::set(
+            &msg,
+            &"leadershipId".into(),
+            &JsValue::from_f64(leadership_id as f64),
         );
     }
     if let Some(level) = &opts.log_level {

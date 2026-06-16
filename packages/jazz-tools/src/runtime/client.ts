@@ -96,6 +96,8 @@ export interface Runtime {
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
+  /** @internal Enable senderless outbox buffering for brokered browser-tab runtimes. */
+  enableOutboxBufferingWithoutSyncSender?(): void;
 }
 
 /**

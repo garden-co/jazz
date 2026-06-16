@@ -581,7 +581,7 @@ struct RustOutboxSenderInner {
     /// Worker-side: the runtime client id assigned to the main-thread peer.
     /// `None` on the main side and during the brief window before init.
     main_client_id: RefCell<Option<String>>,
-    /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
+    /// Worker-side: `(clientId: string) => { peerId, leadershipId } | null` lookup
     /// for routing client-bound payloads to the right follower-tab peer.
     peer_routing_lookup: RefCell<Option<Function>>,
     /// Worker-side: `() => void` invoked after each batch flush that
@@ -793,7 +793,7 @@ impl SyncSender for RustOutboxSender {
             return;
         }
 
-        // Peer client: look up (peerId, term) and post peer-sync immediately.
+        // Peer client: look up (peerId, leadership_id) and post peer-sync immediately.
         let routing = inner.peer_routing_lookup.borrow();
         let Some(lookup) = routing.as_ref() else {
             return;
@@ -818,15 +818,19 @@ impl SyncSender for RustOutboxSender {
             Ok(v) => v.as_string(),
             Err(_) => None,
         };
-        let term = match js_sys::Reflect::get(&routing_value, &"term".into()) {
+        let leadership_id = match js_sys::Reflect::get(&routing_value, &"leadershipId".into()) {
             Ok(v) => v.as_f64(),
             Err(_) => None,
         };
-        let (Some(peer_id), Some(term)) = (peer_id, term) else {
+        let (Some(peer_id), Some(leadership_id)) = (peer_id, leadership_id) else {
             return;
         };
+        let target_override = match js_sys::Reflect::get(&routing_value, &"target".into()) {
+            Ok(v) if !v.is_null() && !v.is_undefined() => Some(v),
+            _ => None,
+        };
 
-        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
+        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, leadership_id, payloads:[bytes] }`
         // and post the Uint8Array with the underlying ArrayBuffer transferred.
         let bytes_payload = match encoded {
             SyncEntry::BareBytes(b) | SyncEntry::SequencedBytes { payload: b, .. } => b,
@@ -835,7 +839,7 @@ impl SyncSender for RustOutboxSender {
         };
         let wire = crate::worker_protocol::WorkerToMainWire::PeerSync {
             peer_id,
-            term: term as u32,
+            leadership_id: leadership_id as u32,
             payloads: vec![bytes_payload],
         };
         let Ok(bytes) = postcard::to_allocvec(&wire) else {
@@ -845,8 +849,12 @@ impl SyncSender for RustOutboxSender {
         let transferables = js_sys::Array::new();
         transferables.push(&arr.buffer().into());
 
-        let target = inner.target.borrow();
-        let _ = post_message_with_transfer(&target, &arr, &transferables);
+        if let Some(target) = target_override {
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        } else {
+            let target = inner.target.borrow();
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1029,6 +1037,18 @@ impl WasmRuntime {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_bytes(payload: &[u8]) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_bytes(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_json(payload: &str) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_json(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+    }
+
     /// Internal worker/bridge hook for server-originated sync payloads.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn receive_sync_message_from_server(
@@ -1036,10 +1056,41 @@ impl WasmRuntime {
         payload: JsValue,
         sequence: Option<f64>,
     ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        self.receive_sync_payload_from_server(payload, sequence)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_bytes(
+        &self,
+        payload: &[u8],
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_bytes(payload)?, sequence)
+    }
+
+    /// String-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_json(
+        &self,
+        payload: &str,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_json(payload)?, sequence)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_server(
+        &self,
+        mut payload: SyncPayload,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
         let _span =
             debug_span!("wasm::receiveSyncMessageFromServer", tier = self.tier_label).entered();
-        let mut payload = self.parse_sync_payload(payload)?;
-        let sequence = Self::parse_optional_sequence(sequence)?;
         if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
             (sequence.as_ref(), &mut payload)
         {
@@ -1074,6 +1125,27 @@ impl WasmRuntime {
         client_id: &str,
         payload: JsValue,
     ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        self.receive_sync_payload_from_client(client_id, payload)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_client`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_client_bytes(
+        &self,
+        client_id: &str,
+        payload: &[u8],
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_client(client_id, Self::parse_sync_payload_bytes(payload)?)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_client(
+        &self,
+        client_id: &str,
+        payload: SyncPayload,
+    ) -> Result<(), JsError> {
         let _span = debug_span!(
             "wasm::receiveSyncMessageFromClient",
             tier = self.tier_label,
@@ -1083,8 +1155,6 @@ impl WasmRuntime {
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
-
-        let payload = self.parse_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
@@ -1500,6 +1570,15 @@ impl WasmRuntime {
         crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createMessagePortBridge)]
+    pub fn create_message_port_bridge(
+        &self,
+        port: web_sys::MessagePort,
+    ) -> Result<crate::worker_bridge::WasmMessagePortBridge, JsError> {
+        crate::worker_bridge::WasmMessagePortBridge::attach(port, self)
+    }
+
     /// Bridge/host shutdown: replace the active sync sender with a noop so
     /// post-shutdown outbox drains do nothing — even if the runtime keeps
     /// emitting (e.g. follower-tab promotion). Mirrors the spec's
@@ -1509,6 +1588,21 @@ impl WasmRuntime {
         self.core
             .borrow_mut()
             .set_sync_sender(Box::new(NoopSyncSender));
+    }
+
+    /// Temporary bridge detach: leave no fallback sender installed so the
+    /// runtime keeps future outbox entries until a replacement bridge attaches.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn clear_sync_sender(&self) {
+        self.core.borrow_mut().clear_sync_sender();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = enableOutboxBufferingWithoutSyncSender)]
+    pub fn enable_outbox_buffering_without_sync_sender(&self) {
+        self.core
+            .borrow_mut()
+            .set_buffer_outbox_without_sync_sender(true);
     }
 
     /// Register a callback for unhandled mutation errors.
