@@ -170,6 +170,11 @@ interface DbLike {
     options?: QueryOptions,
     session?: Session,
   ): () => void;
+  /**
+   * Apply a sync bundle to the live store. Absent on the db-less seed db used
+   * before {@link SubscriptionsOrchestrator.attachDb}.
+   */
+  applyQueryBundle?(bytes: Uint8Array): void;
 }
 
 export class SubscriptionsOrchestrator {
@@ -180,10 +185,12 @@ export class SubscriptionsOrchestrator {
   // entry exists; keeps the snapshot identity stable for useSyncExternalStore.
   private readonly seededStates = new Map<string, UseAllState<any>>();
   private session?: Session | null;
+  /** Bundles queued before the live db attaches; drained by {@link attachDb}. */
+  private readonly pendingBundles: Uint8Array[] = [];
 
   constructor(
     private readonly config: { appId: string },
-    private readonly db: DbLike,
+    private db: DbLike,
     session?: Session | null,
   ) {
     this.session = session;
@@ -198,6 +205,32 @@ export class SubscriptionsOrchestrator {
 
     this.session = session;
 
+    for (const entry of this.entries.values()) {
+      this.resubscribeEntry(entry);
+    }
+  }
+
+  /**
+   * Queue a sync bundle to seed the live store the moment the db attaches.
+   * Pre-attach (server SSR and the client's first paint) there is no live store
+   * to apply it to; {@link attachDb} drains the queue.
+   */
+  queueBundle(bytes: Uint8Array): void {
+    this.pendingBundles.push(bytes);
+  }
+
+  /**
+   * Attach the live db. Applies any queued bundles to the store first — so the
+   * store already holds the rows when re-subscription's first delivery lands,
+   * flash-free — then re-points every entry's subscription at the live db. This
+   * is the single gate the whole pre-attach → live transition turns on.
+   */
+  attachDb(db: DbLike): void {
+    this.db = db;
+    for (const bytes of this.pendingBundles) {
+      this.db.applyQueryBundle?.(bytes);
+    }
+    this.pendingBundles.length = 0;
     for (const entry of this.entries.values()) {
       this.resubscribeEntry(entry);
     }
@@ -227,10 +260,12 @@ export class SubscriptionsOrchestrator {
     snapshot?: T[],
   ): string {
     const key = this.computeKey(query, options);
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
+    const resolvedSnapshot = snapshot ? [...snapshot] : previous?.snapshot;
     this.queryDefinitions.set(key, {
       query,
       options,
-      snapshot: snapshot ? [...snapshot] : undefined,
+      snapshot: resolvedSnapshot,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
     this.seededStates.delete(key);
@@ -242,6 +277,24 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  seedSnapshot<T extends { id: string }>(key: string, snapshot: T[]): void {
+    const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
+    this.queryDefinitions.set(key, {
+      query: previous?.query as QueryBuilder<T>,
+      options: previous?.options,
+      snapshot: [...snapshot],
+    });
+
+    const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
+    if (existing && existing.state.status === "pending") {
+      existing.state = { status: "fulfilled", data: [...snapshot], error: null };
+      existing.resolvefulfilled([...snapshot]);
+      for (const listener of Array.from(existing.listeners)) {
+        listener.onfulfilled?.(existing.state.data);
+      }
+    }
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -479,7 +532,17 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
     return true;
   }
 
-  return JSON.stringify(a) === JSON.stringify(b);
+  // Key-order-insensitive, consistent with the query-key serialization, so two
+  // semantically-identical sessions don't trigger a full resubscribe.
+  return canonicalStringify(a) === canonicalStringify(b);
+}
+
+export function computeQueryKey<T extends { id: string }>(
+  appId: string,
+  query: QueryBuilder<T>,
+  options?: QueryOptions,
+): string {
+  return `${appId}:${serializeQueryOptions(options)}:${query._build()}`;
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
@@ -487,5 +550,22 @@ function serializeQueryOptions(options?: QueryOptions): string {
     return "{}";
   }
 
-  return JSON.stringify(options);
+  return canonicalStringify(options);
+}
+
+function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalStringify(item)).join(",")}]`;
+  }
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((key) => {
+      const serialized = canonicalStringify((value as Record<string, unknown>)[key]);
+      return serialized === undefined ? undefined : `${JSON.stringify(key)}:${serialized}`;
+    })
+    .filter((entry): entry is string => entry !== undefined);
+  return `{${entries.join(",")}}`;
 }

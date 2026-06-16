@@ -759,7 +759,7 @@ impl NapiRuntime {
         let mut core = self
             .core
             .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+            .map_err(|_| napi::Error::from_reason("failed to acquire runtime lock"))?;
         let bundle = core.compose_query_bundle(query, session);
         let bytes = bundle
             .to_bytes()
