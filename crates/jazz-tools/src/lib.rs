@@ -18,7 +18,7 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub mod test_support;
 pub mod wire_types;
 
@@ -105,7 +105,7 @@ pub struct AppContext {
     pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
 impl AppContext {
     pub fn test(schema: Schema) -> AppContext {
         AppContext {

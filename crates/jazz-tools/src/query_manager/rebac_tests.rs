@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::batch_fate::BatchFate;
-#[cfg(feature = "test-utils")]
-use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
@@ -27,11 +25,7 @@ use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-#[cfg(feature = "test-utils")]
-use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session;
-#[cfg(feature = "test-utils")]
-use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
     SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
@@ -259,106 +253,6 @@ fn rebac_test_schema() -> Schema {
         .build()
 }
 
-#[cfg(feature = "test-utils")]
-fn magic_introspection_schema() -> Schema {
-    let is_admin = pe::eq("user_id", pe::session("user_id"));
-    let protected_policies = permissions(|p| {
-        p.allow_read().always();
-        p.allow_update()
-            .where_old(pe::exists(pe::table("admins").where_(is_admin.clone())))
-            .where_new(pe::always());
-        p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
-        ));
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("admins")
-                .column("user_id", ColumnType::Text)
-                .policies(permissions(|p| p.allow_read().always())),
-        )
-        .table(
-            TableSchema::builder("protected")
-                .column("data", ColumnType::Text)
-                .policies(protected_policies),
-        )
-        .build()
-}
-
-#[cfg(feature = "test-utils")]
-fn provenance_notes_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("notes").column("title", ColumnType::Text))
-        .build()
-}
-
-#[cfg(feature = "test-utils")]
-fn authorship_permissions_schema() -> Schema {
-    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
-    let notes_policies = permissions(|p| {
-        p.allow_read().where_(created_by_is_session.clone());
-        p.allow_insert().where_(created_by_is_session.clone());
-        p.allow_update().where_(created_by_is_session.clone());
-        p.allow_delete().where_(created_by_is_session);
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("notes")
-                .column("title", ColumnType::Text)
-                .policies(notes_policies),
-        )
-        .build()
-}
-
-#[cfg(feature = "test-utils")]
-fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
-    let crate::JazzError::Write(message) = err else {
-        panic!("expected policy denial write error, got {err:?}");
-    };
-    let expected = format!("policy denied {operation} on table {table}");
-    assert!(
-        message.ends_with(&expected),
-        "expected denial ending in {expected:?}, got {message:?}",
-    );
-}
-
-#[cfg(feature = "test-utils")]
-fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
-    let select_inherited = match max_depth {
-        Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
-        None => pe::allowed_to_read("parent_id"),
-    };
-    let update_inherited = match max_depth {
-        Some(max_depth) => pe::allowed_to_update_with_depth("parent_id", max_depth),
-        None => pe::allowed_to_update("parent_id"),
-    };
-
-    let folders_policies = permissions(|p| {
-        p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
-            select_inherited,
-        ]));
-        p.allow_update()
-            .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
-                update_inherited,
-            ]))
-            .where_new(pe::always());
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("folders")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .nullable_fk_column("parent_id", "folders")
-                .policies(folders_policies),
-        )
-        .build()
-}
-
 /// Helper to encode a document row
 fn encode_document(owner_id: &str, title: &str, folder_id: Option<ObjectId>) -> Vec<u8> {
     let docs_desc = RowDescriptor::new(vec![
@@ -573,65 +467,6 @@ fn enqueue_inherited_insert(
 /// Test that valid INHERITS chains (no cycles) pass validation.
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
-
-#[cfg(feature = "test-utils")]
-fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
-    let source_fk_column = if array_edge { "images" } else { "image" };
-    let files_policies = permissions(|p| {
-        p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
-            pe::allowed_to_read_referencing("todos", source_fk_column),
-        ]));
-        p.allow_update()
-            .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
-                pe::allowed_to_update_referencing("todos", source_fk_column),
-            ]))
-            .where_new(pe::always());
-    });
-
-    let todos_table = if array_edge {
-        TableSchema::builder("todos")
-            .column("owner_id", ColumnType::Text)
-            .column("title", ColumnType::Text)
-            .array_fk_column("images", "files")
-    } else {
-        TableSchema::builder("todos")
-            .column("owner_id", ColumnType::Text)
-            .column("title", ColumnType::Text)
-            .nullable_fk_column("image", "files")
-    };
-    let todos_policies = permissions(|p| {
-        p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
-        p.allow_update()
-            .where_old(pe::eq("owner_id", pe::session("user_id")))
-            .where_new(pe::always());
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("files")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .policies(files_policies),
-        )
-        .table(todos_table.policies(todos_policies))
-        .build()
-}
-
-#[cfg(feature = "test-utils")]
-mod declared_fk_inheritance;
-mod exists_policies;
-#[cfg(feature = "test-utils")]
-mod exists_rel_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
-#[cfg(feature = "test-utils")]
-mod magic_provenance;
-mod mutations;
-#[cfg(feature = "test-utils")]
-mod recursive_inheritance;
-#[cfg(feature = "test-utils")]
-mod select_policies;

@@ -9,7 +9,7 @@ use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{OrderedRowDelta, Value};
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
 use crate::query_manager::types::{RowPolicyMode, Schema};
 use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
@@ -84,7 +84,7 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     Ok(schema_manager)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
 fn build_client_schema_manager_with_policy_mode<S: Storage + ?Sized>(
     storage: &S,
     context: &AppContext,
@@ -246,8 +246,8 @@ impl JazzClient {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn connect_with_row_policy_mode(
+    #[cfg(feature = "test-utils")]
+    pub async fn connect_with_row_policy_mode(
         context: AppContext,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self> {
@@ -467,7 +467,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
 impl JazzClient {
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
         let context = crate::AppContext::test(schema);
