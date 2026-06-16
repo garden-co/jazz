@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant};
 
 use jazz_tools::Schema;
-use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::query_manager::policy::PolicyExpr;
+use jazz_tools::query_manager::types::{SchemaHash, TableName, TablePolicies};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue, json};
@@ -27,35 +28,29 @@ struct PermissionsHeadResponse {
     head: Option<PublishedPermissionsHead>,
 }
 
-pub fn allow_all_permissions(schema: &Schema) -> Map<String, JsonValue> {
+pub fn allow_all_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
     schema
         .keys()
         .map(|table_name| {
             (
-                table_name.to_string(),
-                json!({
-                    "select": { "using": { "type": "True" } },
-                    "insert": { "with_check": { "type": "True" } },
-                    "update": {
-                        "using": { "type": "True" },
-                        "with_check": { "type": "True" }
-                    },
-                    "delete": { "using": { "type": "True" } }
-                }),
+                *table_name,
+                TablePolicies::new()
+                    .with_select(PolicyExpr::True)
+                    .with_insert(PolicyExpr::True)
+                    .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                    .with_delete(PolicyExpr::True),
             )
         })
         .collect()
 }
 
-pub fn deny_all_select_permissions(schema: &Schema) -> Map<String, JsonValue> {
+pub fn deny_all_select_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
     schema
         .keys()
         .map(|table_name| {
             (
-                table_name.to_string(),
-                json!({
-                    "select": { "using": { "type": "False" } }
-                }),
+                *table_name,
+                TablePolicies::new().with_select(PolicyExpr::False),
             )
         })
         .collect()
@@ -79,6 +74,33 @@ pub async fn publish_allow_all_permissions(
 }
 
 pub async fn publish_permissions(
+    base_url: &str,
+    app_id: impl std::fmt::Display,
+    admin_secret: &str,
+    schema: &Schema,
+    permissions: impl IntoIterator<Item = (TableName, TablePolicies)>,
+    expected_parent_bundle_object_id: Option<String>,
+) -> PublishedPermissionsHead {
+    let permissions = permissions
+        .into_iter()
+        .map(|(table_name, policies)| {
+            let value = serde_json::to_value(policies).expect("serialize table policies");
+            (table_name.to_string(), value)
+        })
+        .collect();
+
+    publish_permissions_payload(
+        base_url,
+        app_id,
+        admin_secret,
+        schema,
+        permissions,
+        expected_parent_bundle_object_id,
+    )
+    .await
+}
+
+async fn publish_permissions_payload(
     base_url: &str,
     app_id: impl std::fmt::Display,
     admin_secret: &str,
