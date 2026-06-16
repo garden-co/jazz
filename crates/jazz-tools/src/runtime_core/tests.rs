@@ -2102,3 +2102,26 @@ mod query_subscription;
 mod schema_catalogue;
 mod sync_replay;
 mod write_batch;
+
+#[test]
+fn rc_compose_and_apply_bundle_seeds_a_cold_core() {
+    let mut server = create_runtime_with_schema(test_schema(), "bundle-app");
+    for name in ["Alice", "Bob"] {
+        server
+            .insert("users", user_insert_values(ObjectId::new(), name), None)
+            .unwrap();
+    }
+    server.immediate_tick();
+
+    let bundle = server.compose_query_bundle(QueryBuilder::new("users").build(), None);
+
+    let mut client = create_runtime_with_schema(test_schema(), "bundle-app");
+    client.apply_query_bundle(&bundle);
+
+    let results = execute_query(&mut client, QueryBuilder::new("users").build());
+    assert_eq!(
+        results.len(),
+        2,
+        "a cold runtime seeded by the bundle should see both users"
+    );
+}
