@@ -1,19 +1,17 @@
 #![cfg(feature = "test")]
 
-mod support;
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::support::{
+    QueryRows, TestingClient, has_added, has_any_change, wait_for_rows,
+    wait_for_subscription_update,
+};
 use jazz_tools::row_input;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, JazzClient, ObjectId, Query, QueryBuilder, Schema, SchemaBuilder, TableSchema,
     Value,
-};
-use support::{
-    QueryRows, TestingClient, has_added, has_any_change, wait_for_rows,
-    wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -220,6 +218,108 @@ fn has_user_post_count(rows: &QueryRows, user_id: ObjectId, count: usize) -> boo
                 .and_then(Value::as_array)
                 .is_some_and(|posts| posts.len() == count)
     })
+}
+
+/// Verifies that a projected array include starts empty when the parent row has
+/// no related rows.
+///
+/// Actors: alice writes one user with no posts, bob subscribes to users with
+/// included posts and sees an empty array for that include.
+#[tokio::test]
+async fn array_subquery_subscription_adds_parent_with_empty_array() {
+    let clients = Clients::start().await;
+    let query = users_with_posts_query();
+    let mut stream = clients
+        .bob
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to users with posts");
+    let mut log = Vec::new();
+
+    let user_id = create_user(&clients.alice, "Owner").await;
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "include query add delta",
+        |log| has_added(log, user_id),
+    )
+    .await;
+
+    let rows = wait_for_rows(&clients.bob, query, "include query row", |rows| {
+        rows.iter().any(|(id, _)| *id == user_id).then_some(rows)
+    })
+    .await;
+    assert_eq!(rows.len(), 1);
+    let values = find_row_by_id(&rows, user_id);
+    assert_eq!(values[0], Value::Text("Owner".to_string()));
+    assert!(
+        posts_array(values).is_empty(),
+        "new owner should start with an empty included posts array"
+    );
+
+    clients.shutdown().await;
+}
+
+/// Verifies that a projected array include can contain a joined subquery.
+///
+/// Actors: alice writes one user, two posts, and comments on each post; bob
+/// reads the user with an array of joined post/comment tuples.
+#[tokio::test]
+async fn array_subquery_with_join_returns_joined_elements() {
+    let clients = Clients::start().await;
+
+    let user_id = create_user(&clients.alice, "Alice").await;
+    let post_a = create_post(&clients.alice, 100, "Post A", user_id).await;
+    let post_b = create_post(&clients.alice, 101, "Post B", user_id).await;
+    create_comment(&clients.alice, 1000, "Comment on A", post_a, user_id).await;
+    create_comment(&clients.alice, 1001, "Another on A", post_a, user_id).await;
+    create_comment(&clients.alice, 1002, "Comment on B", post_b, user_id).await;
+
+    let query = QueryBuilder::new("users")
+        .with_array("post_comments", |sub| {
+            sub.from("posts")
+                .join("comments")
+                .on("posts._id", "comments.post_id")
+                .correlate("author_id", "users._id")
+        })
+        .build();
+    let rows = wait_for_rows(
+        &clients.bob,
+        query,
+        "array include with joined subquery returns all post/comment pairs",
+        |rows| (rows.len() == 1 && rows[0].0 == user_id).then_some(rows),
+    )
+    .await;
+
+    assert_eq!(rows[0].1[0], Value::Text("Alice".to_string()));
+    let post_comments = rows[0].1[1]
+        .as_array()
+        .expect("post_comments should be an array");
+    assert_eq!(
+        post_comments.len(),
+        3,
+        "Post A has two comments and Post B has one"
+    );
+    for pair in post_comments {
+        let values = pair
+            .as_row()
+            .expect("joined subquery element should be a row");
+        assert_eq!(values.len(), 7);
+        assert!(pair.row_id().is_some(), "joined row should retain an id");
+        let Value::Integer(post_number) = values[0] else {
+            panic!("joined post id should be an integer");
+        };
+        let expected_post_id = match post_number {
+            100 => post_a,
+            101 => post_b,
+            other => panic!("unexpected joined post id: {other}"),
+        };
+        assert_eq!(values[5], Value::Uuid(expected_post_id));
+    }
+
+    clients.shutdown().await;
 }
 
 /// Verifies that an array subquery returns related rows for one parent.
