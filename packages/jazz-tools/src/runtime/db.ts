@@ -45,6 +45,10 @@ import {
   WorkerBridge,
   type WorkerBridgeOptions,
 } from "./worker-bridge.js";
+import {
+  isIncompatibleBrowserBrokerConfigurationError,
+  type IncompatibleBrowserBrokerConfigurationHandler,
+} from "./browser-broker-errors.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -128,6 +132,12 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
+  /**
+   * Called when this tab cannot join the persistent browser broker because
+   * another tab is already connected with an incompatible app/runtime version.
+   * The default browser behavior shows a reload prompt.
+   */
+  onIncompatibleBrowserBrokerConfiguration?: IncompatibleBrowserBrokerConfigurationHandler;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -2948,6 +2958,32 @@ function createRuntimeTokenOptions(
   };
 }
 
+const DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE =
+  "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?";
+
+function handleIncompatibleBrowserBrokerConfiguration(error: unknown, config: DbConfig): void {
+  if (!isIncompatibleBrowserBrokerConfigurationError(error)) {
+    return;
+  }
+
+  if (config.onIncompatibleBrowserBrokerConfiguration) {
+    config.onIncompatibleBrowserBrokerConfiguration(error);
+    return;
+  }
+
+  showDefaultIncompatibleBrowserBrokerConfigurationPrompt();
+}
+
+function showDefaultIncompatibleBrowserBrokerConfigurationPrompt(): void {
+  if (typeof window === "undefined" || typeof window.confirm !== "function") {
+    return;
+  }
+
+  if (window.confirm(DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE)) {
+    window.location.reload();
+  }
+}
+
 export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeModule: DbRuntimeModule<RuntimeConfig>,
@@ -2995,7 +3031,12 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     isBrowser() &&
     driver.type === "persistent"
   ) {
-    db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+    try {
+      db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+    } catch (error) {
+      handleIncompatibleBrowserBrokerConfiguration(error, resolvedConfig);
+      throw error;
+    }
   } else {
     db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   }

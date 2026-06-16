@@ -10,6 +10,7 @@ import {
   type BrowserBrokerTabMessage,
   type BrowserBrokerVisibility,
 } from "../runtime/browser-broker-protocol.js";
+import { INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE } from "../runtime/browser-broker-errors.js";
 import {
   monitorWebLockRelease,
   stealAndReleaseWebLock,
@@ -147,6 +148,7 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
     post(port, {
       type: "unsupported",
       brokerInstanceId,
+      code: INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
       reason: "incompatible persistent browser configuration",
     });
     port.close();

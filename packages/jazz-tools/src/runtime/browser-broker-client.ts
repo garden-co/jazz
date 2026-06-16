@@ -12,6 +12,7 @@ import {
   type BrowserBrokerTabMessageInput,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
+import { createBrowserBrokerUnsupportedError } from "./browser-broker-errors.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
 
@@ -311,7 +312,7 @@ export class BrowserBrokerClient {
         }
         if (message?.type === "unsupported") {
           cleanup();
-          reject(new Error(message.reason));
+          reject(createBrowserBrokerUnsupportedError(message.reason, message.code));
         }
       };
 
@@ -492,7 +493,7 @@ export class BrowserBrokerClient {
         this.options.onSchemaBlocked?.(message.reason);
         return;
       case "unsupported":
-        this.closeWithError(new Error(message.reason));
+        this.closeWithError(createBrowserBrokerUnsupportedError(message.reason, message.code));
         return;
     }
   }

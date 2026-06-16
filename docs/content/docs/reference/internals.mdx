@@ -207,9 +207,12 @@ checkpoint.
 
 ### Tab coordination
 
-Jazz uses the Web Locks API (`navigator.locks`) to elect a single tab as the storage leader; other
-tabs route through it via `BroadcastChannel`. When a leader tab closes, the browser releases the
-lock and the first follower to acquire it becomes the new leader.
+Jazz uses a browser broker backed by `SharedWorker`, `MessageChannel`, and the Web Locks API
+(`navigator.locks`) to keep one OPFS-backed worker per persistent browser namespace. The broker
+elects a leader tab, and that leader owns the dedicated worker. Follower tabs receive broker-routed
+message ports to the leader's worker instead of spawning their own OPFS worker.
+
+When the leader tab closes, the browser releases the lock and the broker promotes another tab.
 
 ### React Native
 
