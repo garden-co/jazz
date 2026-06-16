@@ -486,7 +486,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl Drop for JazzClient {
     /// This is a simplified and synchronous implementation of `JazzClient.shutdown`
     /// that is good-enough for tests (so that we don't require an explicit
