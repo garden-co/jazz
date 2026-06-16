@@ -1,4 +1,6 @@
 import { useEffect, type ReactNode } from "react";
+import type { DehydratedSnapshot } from "../backend/ssr.js";
+import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
@@ -45,6 +47,8 @@ export type JazzProviderProps = {
   onJWTExpired?: () => Promise<string | null | undefined>;
   /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
+  snapshot?: DehydratedSnapshot;
+  schema?: WasmSchemaInput;
 };
 
 export function JazzProvider({
@@ -53,6 +57,8 @@ export function JazzProvider({
   children,
   onJWTExpired,
   autoAttachDevTools,
+  snapshot,
+  schema,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
@@ -61,6 +67,8 @@ export function JazzProvider({
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
+      snapshot={snapshot}
+      schema={schema}
     >
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}

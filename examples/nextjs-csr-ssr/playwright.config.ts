@@ -28,18 +28,6 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "pnpm run sync-server",
-      url: `${SERVER_URL}/health`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
-      env: {
-        NEXT_PUBLIC_JAZZ_APP_ID: APP_ID,
-        BACKEND_SECRET,
-        ADMIN_SECRET,
-        JAZZ_SERVER_PORT: String(new URL(SERVER_URL).port),
-      },
-    },
-    {
       command: `pnpm dev --hostname 127.0.0.1 --port ${WEB_PORT}`,
       url: `http://localhost:${WEB_PORT}`,
       reuseExistingServer: !process.env.CI,

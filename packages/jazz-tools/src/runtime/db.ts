@@ -1544,6 +1544,9 @@ export class Db {
    */
   composeQueryBundle<T extends { id: string }>(
     query: QueryBuilder<T>,
+    // Query options are intentionally unused: the bundle is the server's
+    // permission-filtered delivery for the query *predicate*; tier / propagation
+    // / localUpdates are client transport concerns, not row selectors.
     _options?: QueryOptions,
     session?: Session,
   ): Uint8Array {
