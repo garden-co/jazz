@@ -10,7 +10,9 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::SchemaHash;
+use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::row_input;
 use jazz_tools::schema_manager::{Lens, LensOp, LensTransform, generate_lens};
 use jazz_tools::server::TestingServer;
@@ -260,6 +262,66 @@ fn table_rename_join_v1_to_v2_lens() -> Lens {
         LensTransform::with_ops(vec![LensOp::RenameTable {
             old_name: "users".to_string(),
             new_name: "people".to_string(),
+        }]),
+    )
+}
+
+fn legacy_join_provenance_user_values(name: &str) -> HashMap<String, Value> {
+    row_input!("name" => name)
+}
+
+fn legacy_join_provenance_post_values(owner_name: &str, title: &str) -> HashMap<String, Value> {
+    row_input!("owner_name" => owner_name, "title" => title)
+}
+
+fn legacy_join_provenance_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("posts")
+                .column("owner_name", ColumnType::Text)
+                .column("title", ColumnType::Text),
+        )
+        .build()
+}
+
+fn current_join_provenance_permission_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("posts")
+                .column("owner_name", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .column("viewer_name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "viewer_name",
+                            vec!["user_id".into()],
+                        )),
+                ),
+        )
+        .build()
+}
+
+fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
+    Lens::new(
+        SchemaHash::compute(&legacy_join_provenance_schema()),
+        SchemaHash::compute(&current_join_provenance_permission_schema()),
+        LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "posts".to_string(),
+            column: "viewer_name".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("bob".to_string()),
         }]),
     )
 }
@@ -2339,6 +2401,130 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
     assert_eq!(first_post[1], Value::Uuid(author_id));
     assert_eq!(first_post[2], Value::Text("Alice post".to_string()));
 
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
+    let server = TestingServer::start().await;
+    let legacy_schema = legacy_join_provenance_schema();
+    let current_schema = current_join_provenance_permission_schema();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[legacy_schema.clone(), current_schema.clone()],
+        &[legacy_join_provenance_to_current_permissions_lens()],
+    )
+    .await
+    .expect("push join provenance catalogue");
+
+    let current_permissions = current_schema
+        .iter()
+        .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
+        .collect::<Vec<_>>();
+    publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &current_schema,
+        current_permissions,
+        None,
+    )
+    .await;
+
+    let admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(legacy_schema)
+        .with_user_id("join-provenance-admin")
+        .as_admin()
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+    wait_for_edge_query_ready(&admin, "posts", Duration::from_secs(30)).await;
+
+    let (bob_user_id, _, batch_id) = admin
+        .insert("users", legacy_join_provenance_user_values("bob"))
+        .expect("admin creates legacy user");
+    admin
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("legacy user reaches edge");
+
+    let (_, _, batch_id) = admin
+        .insert(
+            "posts",
+            legacy_join_provenance_post_values("bob", "Bob private post"),
+        )
+        .expect("admin creates legacy post");
+    admin
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("legacy post reaches edge");
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(current_schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+    wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(current_schema)
+        .with_user_id("bob")
+        .as_user()
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+    wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+
+    let bob_rows = wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "bob sees joined row after provenance lens applies current permissions",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_user_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        vec![
+            Value::Text("bob".to_string()),
+            Value::Text("bob".to_string()),
+            Value::Text("Bob private post".to_string()),
+            Value::Text("bob".to_string()),
+        ]
+    );
+
+    let alice_rows = wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "alice does not see joined row denied by transformed joined provenance",
+        Some,
+    )
+    .await;
+    assert!(
+        alice_rows.is_empty(),
+        "Alice should not see Bob's joined post after current-permissions filtering"
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
