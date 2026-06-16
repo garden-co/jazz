@@ -746,6 +746,27 @@ impl NapiRuntime {
         Ok(serde_json::Value::Array(json_rows))
     }
 
+    /// Compose an SSR sync bundle of this runtime's state for `query` under
+    /// `session`, returning its wire bytes for a client to apply.
+    #[napi]
+    pub fn compose_query_bundle(
+        &self,
+        query_json: String,
+        session_json: Option<String>,
+    ) -> napi::Result<Buffer> {
+        let query = parse_query(&query_json)?;
+        let session = parse_session_json(session_json)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let bundle = core.compose_query_bundle(query, session);
+        let bytes = bundle
+            .to_bytes()
+            .map_err(|e| napi::Error::from_reason(format!("Compose sync bundle failed: {e}")))?;
+        Ok(bytes.into())
+    }
+
     // =========================================================================
     // Subscriptions
     // =========================================================================

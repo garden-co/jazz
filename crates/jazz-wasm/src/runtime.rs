@@ -108,6 +108,7 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
+use jazz_tools::sync_bundle::SyncBundle;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::sync_manager::QueryPropagation;
 #[cfg(target_arch = "wasm32")]
@@ -1880,6 +1881,19 @@ impl WasmRuntime {
                 Err(_) => Err(JsValue::from_str("Wait for batch cancelled")),
             }
         }))
+    }
+
+    /// Seed this runtime's store from an SSR sync bundle, before sync connects,
+    /// so hydrated rows are present on first paint.
+    #[wasm_bindgen(js_name = applyQueryBundle)]
+    pub fn apply_query_bundle(&self, bytes: Uint8Array) -> Result<(), JsError> {
+        let mut data = vec![0; bytes.length() as usize];
+        bytes.copy_to(&mut data);
+        let bundle = SyncBundle::from_bytes(&data)
+            .map_err(|e| JsError::new(&format!("Decode sync bundle failed: {e}")))?;
+        let mut core = self.core.borrow_mut();
+        core.apply_query_bundle(&bundle);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = rollbackBatch)]

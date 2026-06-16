@@ -98,6 +98,16 @@ export interface Runtime {
   onAuthFailure(callback: (reason: string) => void): void;
   /** @internal Enable senderless outbox buffering for brokered browser-tab runtimes. */
   enableOutboxBufferingWithoutSyncSender?(): void;
+  /**
+   * Compose an SSR sync bundle of this runtime's CRDT state for a query,
+   * returning its wire bytes for a client to apply. Server-side (NAPI).
+   */
+  composeQueryBundle?(query_json: string, session_json?: string | null): Uint8Array;
+  /**
+   * Seed this runtime's store from an SSR sync bundle before sync connects, so
+   * hydrated rows are present on first paint. Client-side (WASM).
+   */
+  applyQueryBundle?(bytes: Uint8Array): void;
 }
 
 /**
