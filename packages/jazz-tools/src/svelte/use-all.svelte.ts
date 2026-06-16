@@ -1,10 +1,11 @@
 import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import type { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { applyDelta } from "../reconcile-array.js";
 import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
-import { getJazzContext } from "./context.svelte.js";
+import { getJazzContext, type JazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
 
@@ -61,6 +62,26 @@ export class QuerySubscription<T extends { id: string }> {
   ) {
     const ctx = getJazzContext();
 
+    // Synchronous seed + first read: runs on the server (where $effect never
+    // fires) and on the client's first init, so the seeded rows are in the SSR
+    // HTML and the first paint — flash-free when live sync connects. The $effect
+    // below re-reads (idempotent) and takes over for the live subscription.
+    const initialQuery = resolve(query);
+    if (initialQuery && ctx.manager) {
+      const queryKeyOptions = this.#seed(ctx.manager, ctx, initialQuery, resolve(options));
+      try {
+        const entry = ctx.manager.getCacheEntry<T>(
+          ctx.manager.makeQueryKey(initialQuery, queryKeyOptions),
+        );
+        if (entry.state.status === "fulfilled") {
+          this.current = entry.state.data;
+          this.loading = false;
+        }
+      } catch {
+        // Any error surfaces through the $effect subscription on the client.
+      }
+    }
+
     $effect(() => {
       const resolvedQuery = resolve(query);
       if (!resolvedQuery) {
@@ -73,30 +94,7 @@ export class QuerySubscription<T extends { id: string }> {
       const manager = ctx.manager;
       if (!manager) return;
 
-      const resolvedOptions = resolve(options);
-      let snapshot: DehydratedSnapshot | undefined;
-      // Strip the snapshot from the options used for the query key (it must not
-      // affect the key), preserving `undefined` when no query options remain.
-      let queryKeyOptions: QueryOptions | undefined = resolvedOptions;
-      if (resolvedOptions && "snapshot" in resolvedOptions) {
-        const { snapshot: snap, ...rest } = resolvedOptions;
-        snapshot = snap;
-        queryKeyOptions = Object.keys(rest).length > 0 ? rest : undefined;
-      }
-
-      if (snapshot && !this.#snapshotApplied) {
-        this.#snapshotApplied = true;
-        applySnapshot({
-          manager,
-          snapshot,
-          // The client's own fingerprint comes from the query's schema: a
-          // snapshot built against a different schema is skipped, not seeded.
-          expected: {
-            principalId: ctx.session?.user_id ?? null,
-            schemaFingerprint: computeSchemaFingerprint(resolvedQuery._schema),
-          },
-        });
-      }
+      const queryKeyOptions = this.#seed(manager, ctx, resolvedQuery, resolve(options));
 
       this.loading = true;
       this.error = null;
@@ -149,5 +147,39 @@ export class QuerySubscription<T extends { id: string }> {
         unsubscribe?.();
       };
     });
+  }
+
+  // Split the snapshot out of the options (it must not affect the query key) and
+  // apply it once — seeding the rows and queueing the bundle. Returns the options
+  // to use for the query key (undefined when none remain).
+  #seed(
+    manager: SubscriptionsOrchestrator,
+    ctx: JazzContext,
+    query: QueryBuilder<T>,
+    resolvedOptions: QuerySubscriptionOptions | undefined,
+  ): QueryOptions | undefined {
+    let snapshot: DehydratedSnapshot | undefined;
+    let queryKeyOptions: QueryOptions | undefined = resolvedOptions;
+    if (resolvedOptions && "snapshot" in resolvedOptions) {
+      const { snapshot: snap, ...rest } = resolvedOptions;
+      snapshot = snap;
+      queryKeyOptions = Object.keys(rest).length > 0 ? rest : undefined;
+    }
+
+    if (snapshot && !this.#snapshotApplied) {
+      this.#snapshotApplied = true;
+      applySnapshot({
+        manager,
+        snapshot,
+        // The client's own fingerprint comes from the query's schema: a snapshot
+        // built against a different schema is skipped, not seeded.
+        expected: {
+          principalId: ctx.session?.user_id ?? null,
+          schemaFingerprint: computeSchemaFingerprint(query._schema),
+        },
+      });
+    }
+
+    return queryKeyOptions;
   }
 }
