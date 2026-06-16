@@ -1,8 +1,12 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
-import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
-import { applyDelta } from "../reconcile-array.js";
-import type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
+import { applyDelta } from "../shared/index.js";
+import type {
+  CacheEntryHandle,
+  QueryBuilder,
+  QueryOptions,
+  SubscriptionDelta,
+  UseAllState,
+} from "../shared/index.js";
 import { useJazzClient } from "./provider.js";
 
 /**
