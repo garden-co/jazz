@@ -327,4 +327,39 @@ describe("applySnapshot", () => {
     expect(queueSpy).toHaveBeenCalledTimes(1);
     expect(Array.from(queueSpy.mock.calls[0]![0])).toEqual(Array.from(bundleBytes));
   });
+
+  it("ignores the snapshot once the db has attached, so a late mount uses the live store", () => {
+    const manager = makeOrchestrator("app-late");
+    // The db has already attached (the live transition happened).
+    manager.attachDb({
+      subscribeAll: () => () => {},
+      applyQueryBundle: () => {},
+    } as never);
+
+    const query = makeQuery();
+    const key = computeQueryKey("app-late", query);
+    const snapshot = sealSnapshot({
+      v: 1,
+      appId: "app-late",
+      principalId: null,
+      schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      payload: { kind: "rows", entries: [{ key, result: [{ id: "1", title: "stale" }] }] },
+    });
+
+    const outcome = applySnapshot({
+      manager,
+      snapshot,
+      expected: {
+        appId: "app-late",
+        principalId: null,
+        schemaFingerprint: computeSchemaFingerprint(SCHEMA),
+      },
+    });
+
+    expect(outcome).toBe("post-attach");
+    // The frozen snapshot seeded nothing — the live store is authoritative now.
+    expect(
+      (manager as unknown as { queryDefinitions: Map<string, unknown> }).queryDefinitions.size,
+    ).toBe(0);
+  });
 });

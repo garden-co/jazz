@@ -1,10 +1,24 @@
 import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
+import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import { applySnapshot } from "../ssr/apply-snapshot.js";
 import type { UseAllState } from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
 
-type UseAllOptions = {
+/** Options for {@link useAll}: ordinary query options plus an optional SSR snapshot. */
+type UseAllOptions = QueryOptions & {
+  /**
+   * A server-rendered snapshot for this query, co-located at the call site.
+   * Seeds the rows for synchronous first paint and queues its sync bundle for
+   * flash-free hydration when the db attaches. The orchestrator decides what to
+   * do with it; the hook just hands it over.
+   */
+  snapshot?: DehydratedSnapshot;
+};
+
+type UseAllBaseOptions = {
   suspense?: boolean;
+  snapshot?: DehydratedSnapshot;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -16,10 +30,24 @@ const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
-  options?: UseAllOptions,
+  options?: UseAllBaseOptions,
 ): T[] | undefined {
-  const { suspense = false } = options ?? {};
-  const { manager } = useJazzClient();
+  const { suspense = false, snapshot } = options ?? {};
+  const client = useJazzClient();
+  const { manager } = client;
+
+  // Apply the co-located snapshot exactly once, synchronously, before the first
+  // key lookup — so the first paint already reads the seeded rows. The ref
+  // guards against React's double-render (StrictMode) re-applying it.
+  const snapshotApplied = useRef(false);
+  if (snapshot && !snapshotApplied.current) {
+    snapshotApplied.current = true;
+    applySnapshot({
+      manager,
+      snapshot,
+      expected: { principalId: client.session?.user_id ?? null },
+    });
+  }
 
   // Pure, render-safe key: computeKey neither registers the query nor opens a
   // subscription, so the render phase stays side-effect free (concurrent/strict
@@ -103,14 +131,33 @@ function useAllBase<T extends { id: string }>(
  * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
+ * @param options - query options, optionally including a server-rendered `snapshot`
  *
  * @returns the matching rows, or `undefined` if the query is not yet executed
  */
+/**
+ * Split a `useAll` options bag into the snapshot and the remaining query
+ * options, preserving `undefined` when no query options are left — so the cache
+ * key matches a caller that passed no options at all (the snapshot must never
+ * affect the key).
+ */
+function splitSnapshot(options?: UseAllOptions): {
+  queryOptions?: QueryOptions;
+  snapshot?: DehydratedSnapshot;
+} {
+  if (!options || !("snapshot" in options)) {
+    return { queryOptions: options };
+  }
+  const { snapshot, ...rest } = options;
+  return { queryOptions: Object.keys(rest).length > 0 ? rest : undefined, snapshot };
+}
+
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
-  options?: QueryOptions,
+  options?: UseAllOptions,
 ): T[] | undefined {
-  return useAllBase(query, options, { suspense: false });
+  const { queryOptions, snapshot } = splitSnapshot(options);
+  return useAllBase(query, queryOptions, { suspense: false, snapshot });
 }
 
 /**
@@ -124,12 +171,14 @@ export function useAll<T extends { id: string }>(
  * promise does not resolve server-side).
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
+ * @param options - query options, optionally including a server-rendered `snapshot`
  *
  * @returns the matching rows
  */
 export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
-  options?: QueryOptions,
+  options?: UseAllOptions,
 ): T[] {
-  return useAllBase(query, options, { suspense: true }) as T[];
+  const { queryOptions, snapshot } = splitSnapshot(options);
+  return useAllBase(query, queryOptions, { suspense: true, snapshot }) as T[];
 }

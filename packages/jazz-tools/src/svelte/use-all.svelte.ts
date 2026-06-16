@@ -1,9 +1,21 @@
+import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { applyDelta } from "../reconcile-array.js";
+import { applySnapshot } from "../ssr/apply-snapshot.js";
 import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
+
+/** Query options for a {@link QuerySubscription}, plus an optional SSR snapshot. */
+type QuerySubscriptionOptions = QueryOptions & {
+  /**
+   * A server-rendered snapshot for this query, co-located at the call site.
+   * Seeds rows for synchronous first paint and queues its sync bundle for
+   * flash-free hydration when the db attaches.
+   */
+  snapshot?: DehydratedSnapshot;
+};
 
 function resolve<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
@@ -40,9 +52,11 @@ export class QuerySubscription<T extends { id: string }> {
   loading: boolean = $state(true);
   error: Error | null = $state(null);
 
+  #snapshotApplied = false;
+
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
-    options?: MaybeGetter<QueryOptions | undefined>,
+    options?: MaybeGetter<QuerySubscriptionOptions | undefined>,
   ) {
     const ctx = getJazzContext();
 
@@ -59,6 +73,27 @@ export class QuerySubscription<T extends { id: string }> {
       if (!manager) return;
 
       const resolvedOptions = resolve(options);
+      let snapshot: DehydratedSnapshot | undefined;
+      // Strip the snapshot from the options used for the query key (it must not
+      // affect the key), preserving `undefined` when no query options remain.
+      let queryKeyOptions: QueryOptions | undefined = resolvedOptions;
+      if (resolvedOptions && "snapshot" in resolvedOptions) {
+        const { snapshot: snap, ...rest } = resolvedOptions;
+        snapshot = snap;
+        queryKeyOptions = Object.keys(rest).length > 0 ? rest : undefined;
+      }
+
+      // Apply the co-located snapshot once, before the first makeQueryKey
+      // lookup, so the first render reads seeded rows. The orchestrator decides
+      // what to do with it (seed + queue pre-attach; ignore post-attach).
+      if (snapshot && !this.#snapshotApplied) {
+        this.#snapshotApplied = true;
+        applySnapshot({
+          manager,
+          snapshot,
+          expected: { principalId: ctx.session?.user_id ?? null },
+        });
+      }
 
       this.loading = true;
       this.error = null;
@@ -69,7 +104,7 @@ export class QuerySubscription<T extends { id: string }> {
       // which lets the class be used inside `$effect.root` and `.svelte.ts`.
       let unsubscribe: (() => void) | null = null;
       try {
-        const key = manager.makeQueryKey(resolvedQuery, resolvedOptions);
+        const key = manager.makeQueryKey(resolvedQuery, queryKeyOptions);
         const entry = manager.getCacheEntry<T>(key);
 
         // Apply initial state from cache

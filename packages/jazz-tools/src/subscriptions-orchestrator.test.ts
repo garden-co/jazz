@@ -847,4 +847,21 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
     await manager.shutdown();
   });
+
+  it("SO-U31 queueBundle applies immediately when a live db is already attached", async () => {
+    type Db = ConstructorParameters<typeof SubscriptionsOrchestrator>[1];
+    const applied: Uint8Array[] = [];
+    const liveDb = {
+      subscribeAll: () => () => {},
+      applyQueryBundle: (b: Uint8Array) => applied.push(b),
+    } as Db;
+    const manager = new SubscriptionsOrchestrator({ appId: "live" }, liveDb);
+
+    const bundle = new Uint8Array([1, 2, 3]);
+    manager.queueBundle(bundle);
+
+    // No separate seed phase: the live store hydrates right away.
+    expect(applied).toEqual([bundle]);
+    await manager.shutdown();
+  });
 });

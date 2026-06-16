@@ -16,7 +16,12 @@ export type ApplySnapshotInput = {
   expected: ApplySnapshotExpected;
 };
 
-export type ApplySnapshotOutcome = "applied" | "no-snapshot" | "appId-mismatch" | "schema-mismatch";
+export type ApplySnapshotOutcome =
+  | "applied"
+  | "no-snapshot"
+  | "post-attach"
+  | "appId-mismatch"
+  | "schema-mismatch";
 
 export function applySnapshot({
   manager,
@@ -25,6 +30,13 @@ export function applySnapshot({
 }: ApplySnapshotInput): ApplySnapshotOutcome {
   if (!snapshot) {
     return "no-snapshot";
+  }
+
+  // Once the live db has attached, it is authoritative: a late-mounting hook
+  // (tab, modal, client-side nav) drops its frozen render-time snapshot rather
+  // than seeding stale rows, and just subscribes to the live store.
+  if (manager.isAttached()) {
+    return "post-attach";
   }
 
   const env = openSnapshot(snapshot);
