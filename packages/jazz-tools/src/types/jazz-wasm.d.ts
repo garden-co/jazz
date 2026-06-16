@@ -123,6 +123,7 @@ declare module "jazz-wasm" {
       writeContextJson?: string | null,
     ): { batchId: string };
     delete(objectId: string, writeContextJson?: string | null): { batchId: string };
+    applyQueryBundle(bytes: Uint8Array): void;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
     beginBatch(batchMode: "direct" | "transactional"): string;
     rollbackBatch(batchId: string): boolean;
