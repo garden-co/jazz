@@ -19,6 +19,8 @@ async fn next_subscription_delta(stream: &mut crate::SubscriptionStream) -> crat
         .expect("subscription stream should stay open")
 }
 
+/// Verifies that `$canRead`, `$canEdit`, and `$canDelete` reflect the current
+/// session's permissions and update active subscriptions when dependencies change.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn magic_columns_reactively_track_update_and_delete_permissions() {
@@ -105,6 +107,8 @@ async fn magic_columns_reactively_track_update_and_delete_permissions() {
         .expect("magic $canDelete should match actual delete permission");
 }
 
+/// Verifies that permission magic columns return NULL without a session and do
+/// not appear in the default projection unless explicitly selected.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn magic_columns_return_null_without_session_and_do_not_change_default_output_shape() {
@@ -152,6 +156,8 @@ async fn magic_columns_return_null_without_session_and_do_not_change_default_out
     assert_eq!(filtered_values, vec![Value::Text("initial".into())]);
 }
 
+/// Verifies provenance magic columns for normal session writes, backend
+/// attribution, timestamps, query filters, and system-authored writes.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
@@ -279,6 +285,8 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     );
 }
 
+/// Verifies that write contexts can explicitly override `$updatedAt` while
+/// preserving the original creator and creation timestamp.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn provenance_magic_columns_allow_explicit_updated_at_override() {
@@ -350,6 +358,8 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     assert_eq!(updated_updated_at, custom_updated_at);
 }
 
+/// Verifies `$createdBy`-based row policies: creators can read/update/delete
+/// their rows, backend-attributed rows behave as creator-owned, and system rows stay hidden.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn created_by_permissions_allow_creators_and_hide_system_rows() {

@@ -30,6 +30,8 @@ async fn wait_for_protected_rows(
     .await
 }
 
+/// Verifies that UPDATE evaluates the USING/old-row policy, not only the
+/// WITH CHECK/new-row policy, so invisible rows cannot be edited.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_update_denied_by_using_policy() {
@@ -92,6 +94,8 @@ async fn rebac_update_denied_by_using_policy() {
     );
 }
 
+/// Verifies that synced soft deletes are authorized by DELETE policies, and
+/// that a rejected optimistic delete restores the row for the originating peer.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn synced_soft_delete_should_use_delete_policy() {

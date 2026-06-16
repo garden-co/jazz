@@ -53,6 +53,8 @@ async fn query_folder_name_as(
         })
 }
 
+/// Verifies unbounded recursive inheritance: ownership of an ancestor folder
+/// grants visibility through the full descendant chain.
 #[tokio::test]
 async fn rebac_recursive_inherits_allows_ancestor_access() {
     let schema = recursive_folders_schema(None);
@@ -75,6 +77,8 @@ async fn rebac_recursive_inherits_allows_ancestor_access() {
     );
 }
 
+/// Verifies that recursive inheritance depth limits are honored, granting
+/// access only to descendants within the configured max depth.
 #[tokio::test]
 async fn rebac_recursive_inherits_respects_depth_override() {
     let schema = recursive_folders_schema(Some(1));
@@ -117,6 +121,8 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     (result.is_err(), name == "Renamed by Alice")
 }
 
+/// Verifies recursive inherited UPDATE checks: too-shallow depth denies and
+/// preserves the row, while sufficient depth allows the update.
 #[tokio::test]
 async fn rebac_recursive_inherits_write_checks_allow_and_deny() {
     let (denied_shallow, applied_shallow) = run_recursive_folder_update(Some(1)).await;

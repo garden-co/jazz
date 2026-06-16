@@ -58,6 +58,8 @@ async fn query_ids_as(client: &JazzClient, table: &str, user_id: &str) -> HashSe
         .collect()
 }
 
+/// Verifies that declared reverse-FK inheritance can grant SELECT on a target
+/// row when the current session owns a row that references it.
 #[tokio::test]
 async fn rebac_declared_fk_inheritance_grants_select_access() {
     let schema = declared_file_inheritance_schema(false);
@@ -74,6 +76,8 @@ async fn rebac_declared_fk_inheritance_grants_select_access() {
     );
 }
 
+/// Verifies that declared reverse-FK inheritance can grant UPDATE on a target
+/// row through a visible referencing row.
 #[tokio::test]
 async fn rebac_declared_fk_inheritance_grants_update_access() {
     let schema = declared_file_inheritance_schema(false);
@@ -95,6 +99,8 @@ async fn rebac_declared_fk_inheritance_grants_update_access() {
     );
 }
 
+/// Verifies that declared reverse-FK inheritance also works for UUID-array
+/// reference columns, including duplicate target ids in the array.
 #[tokio::test]
 async fn rebac_declared_fk_inheritance_array_membership_grants_access() {
     let schema = declared_file_inheritance_schema(true);
@@ -116,6 +122,8 @@ async fn rebac_declared_fk_inheritance_array_membership_grants_access() {
     );
 }
 
+/// Verifies that cyclic declared reverse-FK inheritance fails closed instead
+/// of recursively granting access through the cycle.
 #[tokio::test]
 async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
     let a_policies = permissions(|p| {
@@ -173,6 +181,8 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
     );
 }
 
+/// Verifies that access through a declared reverse-FK path is re-evaluated
+/// when the referencing FK column changes from NULL to a target id.
 #[tokio::test]
 async fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
     let schema = declared_file_inheritance_schema(false);
