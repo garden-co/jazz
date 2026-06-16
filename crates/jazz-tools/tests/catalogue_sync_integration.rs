@@ -1364,7 +1364,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
 }
 
 #[tokio::test]
-async fn draft_lens_does_make_rows_from_old_schema_visible() {
+async fn draft_lens_does_not_make_rows_from_old_schema_visible() {
     let server = TestingServer::start().await;
     let v1_schema = draft_lens_schema_v1();
     let v2_schema = draft_lens_schema_v2();
