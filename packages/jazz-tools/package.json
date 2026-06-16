@@ -40,6 +40,10 @@
       "react-native": "./dist/react-native/react-core.js",
       "default": "./dist/react-core/index.js"
     },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "default": "./dist/shared/index.js"
+    },
     "./permissions": {
       "types": "./dist/permissions/index.d.ts",
       "default": "./dist/permissions/index.js"
