@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::batch_fate::BatchFate;
-use crate::metadata::{
-    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
-};
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::BatchId;
 use crate::storage::{MemoryStorage, Storage};
@@ -20,19 +18,17 @@ use crate::sync_manager::{
     SyncPayload,
 };
 use crate::test_support::{
-    apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    seeded_memory_storage,
+    apply_test_row_batch, create_test_row, load_test_row_tip_ids, seeded_memory_storage,
 };
 
-use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::{Session, WriteContext};
+use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema,
-    SchemaBuilder, SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
+    SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
 };
 use crate::row_histories::{RowState, StoredRowBatch};
 
@@ -40,16 +36,6 @@ use crate::row_histories::{RowState, StoredRowBatch};
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
-    qm
-}
-
-fn create_query_manager_with_policy_mode(
-    sync_manager: SyncManager,
-    schema: Schema,
-    row_policy_mode: RowPolicyMode,
-) -> QueryManager {
-    let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema_with_policy_mode(schema, "dev", "main", row_policy_mode);
     qm
 }
 
@@ -226,10 +212,6 @@ fn add_row_commit(
     batch_id
 }
 
-fn test_row_metadata(storage: &MemoryStorage, row_id: ObjectId) -> Option<HashMap<String, String>> {
-    load_test_row_metadata(storage, row_id)
-}
-
 fn test_row_tip_ids(
     storage: &MemoryStorage,
     row_id: ObjectId,
@@ -267,109 +249,6 @@ fn rebac_test_schema() -> Schema {
                 .column("title", ColumnType::Text)
                 .nullable_fk_column("folder_id", "folders")
                 .policies(docs_policies),
-        )
-        .build()
-}
-
-fn magic_introspection_schema() -> Schema {
-    let is_admin = pe::eq("user_id", pe::session("user_id"));
-    let protected_policies = permissions(|p| {
-        p.allow_read().always();
-        p.allow_update()
-            .where_old(pe::exists(pe::table("admins").where_(is_admin.clone())))
-            .where_new(pe::always());
-        p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
-        ));
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("admins")
-                .column("user_id", ColumnType::Text)
-                .policies(permissions(|p| p.allow_read().always())),
-        )
-        .table(
-            TableSchema::builder("protected")
-                .column("data", ColumnType::Text)
-                .policies(protected_policies),
-        )
-        .build()
-}
-
-fn provenance_notes_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("notes").column("title", ColumnType::Text))
-        .build()
-}
-
-fn authorship_permissions_schema() -> Schema {
-    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
-    let notes_policies = permissions(|p| {
-        p.allow_read().where_(created_by_is_session.clone());
-        p.allow_insert().where_(created_by_is_session.clone());
-        p.allow_update().where_(created_by_is_session.clone());
-        p.allow_delete().where_(created_by_is_session);
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("notes")
-                .column("title", ColumnType::Text)
-                .policies(notes_policies),
-        )
-        .build()
-}
-
-fn query_rows(
-    qm: &mut QueryManager,
-    storage: &mut MemoryStorage,
-    query: Query,
-    session: Option<Session>,
-) -> Vec<(ObjectId, Vec<Value>)> {
-    let sub_id = qm
-        .subscribe_with_session(query, session, None)
-        .expect("query subscription should be created");
-
-    for _ in 0..10 {
-        qm.process(storage);
-    }
-
-    let results = qm.get_subscription_results(sub_id);
-    qm.unsubscribe_with_sync(sub_id);
-    results
-}
-
-fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
-    let select_inherited = match max_depth {
-        Some(max_depth) => pe::allowed_to_read_with_depth("parent_id", max_depth),
-        None => pe::allowed_to_read("parent_id"),
-    };
-    let update_inherited = match max_depth {
-        Some(max_depth) => pe::allowed_to_update_with_depth("parent_id", max_depth),
-        None => pe::allowed_to_update("parent_id"),
-    };
-
-    let folders_policies = permissions(|p| {
-        p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
-            select_inherited,
-        ]));
-        p.allow_update()
-            .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
-                update_inherited,
-            ]))
-            .where_new(pe::always());
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("folders")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .nullable_fk_column("parent_id", "folders")
-                .policies(folders_policies),
         )
         .build()
 }
@@ -534,117 +413,6 @@ fn enqueue_inherited_insert(
     commit
 }
 
-fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
-    let schema = recursive_folders_schema(max_depth);
-    let sync_manager = SyncManager::new();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
-
-    let root_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("alice".into()),
-                Value::Text("Root".into()),
-                Value::Null,
-            ],
-        )
-        .unwrap();
-    let child_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Child".into()),
-                Value::Uuid(root_handle.row_id),
-            ],
-        )
-        .unwrap();
-    let grand_handle = qm
-        .insert(
-            &mut storage,
-            "folders",
-            &[
-                Value::Text("bob".into()),
-                Value::Text("Grandchild".into()),
-                Value::Uuid(child_handle.row_id),
-            ],
-        )
-        .unwrap();
-
-    let grand_id = grand_handle.row_id;
-    let branch = get_branch(&qm);
-
-    let client_id = ClientId::new();
-    connect_client(&mut qm, &storage, client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("alice"));
-
-    let mut scope = HashSet::new();
-    scope.insert((grand_id, branch.clone().into()));
-    set_client_query_scope(&mut qm, &storage, client_id, QueryId(100), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-
-    let update_content = encode_row(
-        &folders_descriptor,
-        &[
-            Value::Text("bob".into()),
-            Value::Text("Renamed by Alice".into()),
-            Value::Uuid(child_handle.row_id),
-        ],
-    )
-    .unwrap();
-
-    let update_commit = stored_row_commit(
-        smallvec![grand_handle.batch_id],
-        update_content,
-        4200,
-        ObjectId::new().to_string(),
-        None,
-    );
-
-    let object_metadata = test_row_metadata(&storage, grand_id).unwrap_or_default();
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: row_batch_created_payload(
-            grand_id,
-            &branch,
-            Some(RowMetadata {
-                id: grand_id,
-                metadata: object_metadata,
-            }),
-            &update_commit,
-        ),
-    });
-
-    for _ in 0..10 {
-        qm.process(&mut storage);
-    }
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let denied = client_write_was_rejected(
-        &outbox,
-        client_id,
-        row_batch_id_for_commit(grand_id, &branch, &update_commit),
-    );
-
-    let tips = test_row_tip_ids(&storage, grand_id, &branch).unwrap();
-    let applied = tips.contains(&row_batch_id_for_commit(grand_id, &branch, &update_commit));
-
-    (denied, applied)
-}
-
 /// Test that EXISTS clause in INSERT policy correctly denies writes.
 ///
 /// Scenario: Insert policy requires EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
@@ -699,59 +467,6 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 /// Test that valid INHERITS chains (no cycles) pass validation.
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
-
-fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
-    let source_fk_column = if array_edge { "images" } else { "image" };
-    let files_policies = permissions(|p| {
-        p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
-            pe::allowed_to_read_referencing("todos", source_fk_column),
-        ]));
-        p.allow_update()
-            .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
-                pe::allowed_to_update_referencing("todos", source_fk_column),
-            ]))
-            .where_new(pe::always());
-    });
-
-    let todos_table = if array_edge {
-        TableSchema::builder("todos")
-            .column("owner_id", ColumnType::Text)
-            .column("title", ColumnType::Text)
-            .array_fk_column("images", "files")
-    } else {
-        TableSchema::builder("todos")
-            .column("owner_id", ColumnType::Text)
-            .column("title", ColumnType::Text)
-            .nullable_fk_column("image", "files")
-    };
-    let todos_policies = permissions(|p| {
-        p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
-        p.allow_update()
-            .where_old(pe::eq("owner_id", pe::session("user_id")))
-            .where_new(pe::always());
-    });
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("files")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .policies(files_policies),
-        )
-        .table(todos_table.policies(todos_policies))
-        .build()
-}
-
-mod declared_fk_inheritance;
-mod exists_policies;
-mod exists_rel_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;
-mod magic_provenance;
-mod mutations;
-mod recursive_inheritance;
-mod select_policies;

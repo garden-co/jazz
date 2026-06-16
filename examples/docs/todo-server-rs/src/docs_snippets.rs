@@ -4,9 +4,7 @@
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
-use jazz_tools::{
-    DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, SessionClient, Value,
-};
+use jazz_tools::{DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, Value};
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
@@ -38,10 +36,7 @@ pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, St
 // #endregion backend-request-session-rust
 
 // #region backend-request-scoped-client-rust
-pub fn scoped_client_for_session<'a>(
-    client: &'a JazzClient,
-    session: Session,
-) -> SessionClient<'a> {
+pub fn scoped_client_for_session(client: &JazzClient, session: Session) -> JazzClient {
     client.for_session(session)
 }
 // #endregion backend-request-scoped-client-rust
