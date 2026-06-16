@@ -101,7 +101,7 @@ describe("react/create-jazz-client unit", () => {
     }
   });
 
-  it("RC-U01: initializes and shuts down cleanly", async () => {
+  it("initializes and shuts down cleanly", async () => {
     const config: DbConfig = { appId: "react-client-unit-1" };
     const session: Session = {
       user_id: "local:test",
@@ -135,7 +135,7 @@ describe("react/create-jazz-client unit", () => {
     );
   });
 
-  it("RC-U02: rejects when db creation fails", async () => {
+  it("rejects when db creation fails", async () => {
     const config: DbConfig = { appId: "react-client-unit-2" };
     const dbError = new Error("createDb failed");
 
@@ -145,7 +145,7 @@ describe("react/create-jazz-client unit", () => {
     expect(mocks.orchestratorInstances).toHaveLength(0);
   });
 
-  it("RC-U03: tracks auth session updates from the db", async () => {
+  it("tracks auth session updates from the db", async () => {
     const config: DbConfig = { appId: "react-client-unit-3" };
     const db = createMockDb({
       user_id: "alice",
@@ -176,7 +176,7 @@ describe("react/create-jazz-client unit", () => {
     });
   });
 
-  it("RC-U04: rejects when orchestrator init fails", async () => {
+  it("rejects when orchestrator init fails", async () => {
     const config: DbConfig = { appId: "react-client-unit-4" };
     const initError = new Error("orchestrator init failed");
     const db = createMockDb();
@@ -189,7 +189,7 @@ describe("react/create-jazz-client unit", () => {
     expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
 
-  it("RC-U05: forwards runtimeSources through framework client creation", async () => {
+  it("forwards runtimeSources through framework client creation", async () => {
     const config: DbConfig = {
       appId: "react-client-unit-5",
       runtimeSources: {
@@ -207,7 +207,7 @@ describe("react/create-jazz-client unit", () => {
     expect(mocks.createDb).toHaveBeenCalledWith(config);
   });
 
-  it("RC-U06: exposes window.__jazz.clearStorage for the only live namespace", async () => {
+  it("exposes window.__jazz.clearStorage for the only live namespace", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const config: DbConfig = {
@@ -238,7 +238,7 @@ describe("react/create-jazz-client unit", () => {
     expect(api?.listLiveStorageNamespaces()).toEqual([]);
   });
 
-  it("RC-U07: requires a namespace when multiple live contexts exist", async () => {
+  it("requires a namespace when multiple live contexts exist", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const aliceConfig: DbConfig = {

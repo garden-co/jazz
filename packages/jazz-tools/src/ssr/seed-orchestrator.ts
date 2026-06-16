@@ -50,9 +50,10 @@ export function createSeedOrchestrator(
 /**
  * Build an empty, db-less {@link SubscriptionsOrchestrator} for the per-hook
  * seed phase: the hooks themselves seed it via `useAll(query, { snapshot })`,
- * and the provider points it at the live db once connected. Its appId is taken
- * from the snapshot so the keys line up with the seeded entries.
+ * and the provider points it at the live db once connected. Keyed to the app's
+ * own appId — the same one the live client uses — so the cache keys line up with
+ * the seeded entries across the seed→live swap.
  */
-export function createDbLessOrchestrator(snapshot: DehydratedSnapshot): SubscriptionsOrchestrator {
-  return new SubscriptionsOrchestrator({ appId: openSnapshot(snapshot).appId }, NOOP_SEED_DB);
+export function createDbLessOrchestrator(appId: string): SubscriptionsOrchestrator {
+  return new SubscriptionsOrchestrator({ appId }, NOOP_SEED_DB);
 }

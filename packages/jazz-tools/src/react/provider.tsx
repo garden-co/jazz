@@ -1,5 +1,4 @@
 import { useEffect, type ReactNode } from "react";
-import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
@@ -47,7 +46,12 @@ export type JazzProviderProps = {
   onJWTExpired?: () => Promise<string | null | undefined>;
   /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
-  snapshot?: DehydratedSnapshot;
+  /**
+   * Opt into the synchronous seed phase for SSR/hydration. When set, a child
+   * `useAll(query, { snapshot })` can render its rows on the first paint without
+   * suspending on the live client.
+   */
+  ssr?: boolean;
   schema?: WasmSchemaInput;
 };
 
@@ -57,7 +61,7 @@ export function JazzProvider({
   children,
   onJWTExpired,
   autoAttachDevTools,
-  snapshot,
+  ssr,
   schema,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
@@ -67,7 +71,7 @@ export function JazzProvider({
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
-      snapshot={snapshot}
+      ssr={ssr}
       schema={schema}
     >
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}

@@ -13,7 +13,7 @@ export default function HydratedTodoClient({ snapshot }: Props) {
         appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
         serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
       }}
-      snapshot={snapshot}
+      ssr
     >
       <TodoList snapshot={snapshot} />
     </JazzProvider>
