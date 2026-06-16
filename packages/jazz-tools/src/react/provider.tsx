@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
@@ -33,7 +32,12 @@ export type JazzProviderProps = {
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
-  snapshot?: DehydratedSnapshot;
+  /**
+   * Opt into the synchronous seed phase for SSR/hydration. When set, a child
+   * `useAll(query, { snapshot })` can render its rows on the first paint without
+   * suspending on the live client.
+   */
+  ssr?: boolean;
   schema?: WasmSchemaInput;
 };
 
@@ -42,7 +46,7 @@ export function JazzProvider({
   fallback,
   children,
   onJWTExpired,
-  snapshot,
+  ssr,
   schema,
 }: JazzProviderProps) {
   return (
@@ -51,7 +55,7 @@ export function JazzProvider({
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
-      snapshot={snapshot}
+      ssr={ssr}
       schema={schema}
     >
       {children}

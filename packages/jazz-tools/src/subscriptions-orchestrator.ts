@@ -163,7 +163,7 @@ const SHARED_PENDING: UseAllStatePending<any> = {
   error: null,
 };
 
-interface DbLike {
+export interface DbLike {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,

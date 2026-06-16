@@ -3,7 +3,7 @@ import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import type { UseAllState } from "../subscriptions-orchestrator.js";
-import { useManager } from "./provider.js";
+import { useIsSeedPhase, useManager, useSchemaFingerprint } from "./provider.js";
 
 /** Options for {@link useAll}: ordinary query options plus an optional SSR snapshot. */
 type UseAllOptions = QueryOptions & {
@@ -26,6 +26,9 @@ type UseAllBaseOptions = {
 // its fallback meanwhile). Distinct from a pending real query, which suspends on
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
+// Stable empty result for a degraded seed-phase suspense read, so consumers
+// don't re-render on identity churn.
+const EMPTY_ROWS: never[] = [];
 
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
@@ -38,22 +41,26 @@ function useAllBase<T extends { id: string }>(
   // the server and on the client) renders the seeded rows synchronously instead
   // of suspending on the live client.
   const manager = useManager();
+  // The client's own fingerprint (from the provider's `schema` prop): a snapshot
+  // sealed by a server on a different build is discarded rather than seeded.
+  const schemaFingerprint = useSchemaFingerprint();
+  const seedPhase = useIsSeedPhase();
 
-  // Apply the co-located snapshot synchronously, before the first makeQueryKey
-  // lookup, so the first paint already reads the seeded rows. Re-apply whenever
-  // the manager changes: the provider transitions from the db-less seed
-  // orchestrator to the live one, and the seed must land on the live
-  // orchestrator too — otherwise it would flash to empty when the live store
-  // connects. (Same-manager re-renders, incl. StrictMode, don't re-apply.)
-  // principalId is null in the seed phase (no live session yet); the seed is
-  // display-only and the live subscription supersedes it.
-  const seededManager = useRef<ReturnType<typeof useManager> | null>(null);
-  if (snapshot && seededManager.current !== manager) {
-    seededManager.current = manager;
+  // Apply the co-located snapshot once, synchronously, before the first
+  // makeQueryKey lookup, so the first paint already reads the seeded rows. The
+  // orchestrator is stable across the seed→live transition (the live db attaches
+  // to it rather than the provider swapping orchestrators), so a single
+  // application suffices: the rows seed the cache entry for paint, and the queued
+  // bundle hydrates the store when the db attaches. principalId is null in the
+  // seed phase (no live session yet); the seed is display-only and the live
+  // subscription supersedes it. (StrictMode's double-invoke is guarded by the ref.)
+  const seeded = useRef(false);
+  if (snapshot && !seeded.current) {
+    seeded.current = true;
     applySnapshot({
       manager,
       snapshot,
-      expected: { principalId: null },
+      expected: { principalId: null, schemaFingerprint },
     });
   }
 
@@ -62,6 +69,18 @@ function useAllBase<T extends { id: string }>(
   // and SSR safe). Registration + subscription happen in the commit-phase
   // `subscribe` callback below.
   const key = query ? manager.computeKey(query, queryOptions) : null;
+
+  // A suspense hook that ever renders in the seed phase (no live client yet —
+  // the whole server render, and the client's first paint) latches into a
+  // non-suspending mode for its lifetime: on the server nothing can resolve it,
+  // and on the client suspending would block the provider's connect. It returns
+  // empty until data arrives. CSR mounts (live client already present) never
+  // latch, so their suspense is unchanged.
+  const noSuspend = useRef(false);
+  if (suspense && seedPhase) {
+    noSuspend.current = true;
+  }
+  const suspends = suspense && !noSuspend.current;
 
   // Keep the latest query/options in refs so the keyed `subscribe`/`getSnapshot`
   // callbacks can read them without depending on object identity — an inline
@@ -98,32 +117,39 @@ function useAllBase<T extends { id: string }>(
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   if (suspense) {
+    // No query yet: a real suspense hook waits for one; a degraded seed-phase
+    // hook returns empty rather than suspending (nothing can resolve it).
     if (!query || key === null) {
-      return use(SUSPEND_FOREVER as unknown as Usable<T[]>);
+      return suspends ? use(SUSPEND_FOREVER as unknown as Usable<T[]>) : EMPTY_ROWS;
     }
 
-    if (state) {
-      if (state.status === "fulfilled") {
-        return state.data;
-      }
-      if (state.status === "rejected") {
-        throw state.error;
-      }
+    // Errors always surface, whether suspending or degraded.
+    if (state?.status === "rejected") {
+      throw state.error;
+    }
+    if (state?.status === "fulfilled") {
+      return state.data;
     }
 
-    // Pending: a suspense data source must start fetching during render — the
-    // `subscribe` effect can't run while the boundary is suspended — so create
-    // the entry here and suspend on its real promise (which resolves on the
-    // first result), rather than a sentinel that never resolves.
-    manager.makeQueryKey(query, queryOptions);
-    const entry = manager.getCacheEntry<T>(key);
-    if (entry.state.status === "rejected") {
-      throw entry.state.error;
+    if (suspends) {
+      // Pending: a suspense data source must start fetching during render — the
+      // `subscribe` effect can't run while the boundary is suspended — so create
+      // the entry here and suspend on its real promise (which resolves on the
+      // first result), rather than a sentinel that never resolves.
+      manager.makeQueryKey(query, queryOptions);
+      const entry = manager.getCacheEntry<T>(key);
+      if (entry.state.status === "rejected") {
+        throw entry.state.error;
+      }
+      if (entry.state.status === "fulfilled") {
+        return entry.state.data;
+      }
+      return use(entry.promise as unknown as Usable<T[]>);
     }
-    if (entry.state.status === "fulfilled") {
-      return entry.state.data;
-    }
-    return use(entry.promise as unknown as Usable<T[]>);
+
+    // Degraded seed-phase suspense: never suspend; return empty until data lands
+    // (the commit-phase subscription re-renders with real rows once it arrives).
+    return EMPTY_ROWS;
   }
 
   return state?.status === "fulfilled" ? state.data : undefined;
