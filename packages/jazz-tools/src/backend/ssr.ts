@@ -65,6 +65,16 @@ export type PrefetchableDb = {
    * minimal `Db` (e.g. a test double) still satisfies the type.
    */
   getAuthState?(): { session: Session | null };
+  /**
+   * Compose the CRDT sync bundle for a query under this Db's scope, returning
+   * its wire bytes. Present on a runtime-backed Db; absent on a minimal Db, in
+   * which case the snapshot ships rendered rows only (no flash-free hydration).
+   */
+  composeQueryBundle?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Uint8Array;
 };
 
 export type SnapshotBuilder = {
@@ -80,7 +90,7 @@ export type SnapshotBuilder = {
 const DEFAULT_PREFETCH_TIMEOUT_MS = 30_000;
 
 export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBuilder {
-  const entries = new Map<string, RowEntry>();
+  const entries = new Map<string, RowEntry & { bundle?: string }>();
   const schemaFingerprint = computeSchemaFingerprint(resolveWasmSchema(config.schema));
   const timeoutMs = config.prefetchTimeoutMs ?? DEFAULT_PREFETCH_TIMEOUT_MS;
 
@@ -98,7 +108,13 @@ export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBu
     ): Promise<T[]> {
       const result = await prefetchOnce<T>(db, query, options, session, timeoutMs);
       const key = computeQueryKey(config.appId, query, options);
-      entries.set(key, { key, result });
+      // Compose the CRDT bundle alongside the rendered rows so the client can
+      // hydrate its store flash-free. A minimal Db without a runtime ships rows
+      // only.
+      const bundle = db.composeQueryBundle
+        ? encodeBundleBase64(db.composeQueryBundle(query, options, session))
+        : undefined;
+      entries.set(key, { key, result, bundle });
 
       const principal = readPrefetchPrincipal(db, session);
       if (principal !== undefined) {
@@ -115,12 +131,28 @@ export function createSnapshotBuilder(config: SnapshotBuilderConfig): SnapshotBu
       return result;
     },
     dehydrate(): DehydratedSnapshot {
+      const all = Array.from(entries.values());
+      // Ship the bundle form only when every prefetched query produced one, so a
+      // partial mix can't leave some queries flashing to empty on hydration.
+      const everyHasBundle = all.length > 0 && all.every((entry) => entry.bundle !== undefined);
       return sealSnapshot({
         v: 1,
         appId: config.appId,
         principalId: resolvePrincipalId(derivedPrincipalId, config.principalId),
         schemaFingerprint,
-        payload: { kind: "rows", entries: Array.from(entries.values()) },
+        payload: everyHasBundle
+          ? {
+              kind: "bundle",
+              entries: all.map((entry) => ({
+                key: entry.key,
+                result: entry.result,
+                bundle: entry.bundle!,
+              })),
+            }
+          : {
+              kind: "rows",
+              entries: all.map((entry) => ({ key: entry.key, result: entry.result })),
+            },
       });
     },
   };
@@ -158,6 +190,18 @@ function resolvePrincipalId(
     );
   }
   return derived;
+}
+
+/** Encode sync-bundle wire bytes as base64, so the snapshot stays JSON-safe. */
+function encodeBundleBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 function prefetchOnce<T extends { id: string }>(

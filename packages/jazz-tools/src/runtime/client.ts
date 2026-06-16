@@ -1095,6 +1095,30 @@ export class JazzClient {
   }
 
   /**
+   * Compose the CRDT sync bundle for a translated query under `sessionJson`,
+   * returning its wire bytes for a client to apply (SSR hydration). Throws if
+   * the underlying runtime cannot compose (e.g. a browser/WASM runtime).
+   */
+  composeQueryBundle(queryJson: string, sessionJson?: string | null): Uint8Array {
+    if (!this.runtime.composeQueryBundle) {
+      throw new Error("Underlying runtime does not support composeQueryBundle()");
+    }
+    return this.runtime.composeQueryBundle(queryJson, sessionJson ?? null);
+  }
+
+  /**
+   * Seed this runtime's store from a sync bundle's wire bytes, before sync
+   * connects. Throws if the underlying runtime cannot apply (e.g. a server/NAPI
+   * runtime).
+   */
+  applyQueryBundle(bytes: Uint8Array): void {
+    if (!this.runtime.applyQueryBundle) {
+      throw new Error("Underlying runtime does not support applyQueryBundle()");
+    }
+    this.runtime.applyQueryBundle(bytes);
+  }
+
+  /**
    * Get the current schema.
    */
   getSchema(): WasmSchema {

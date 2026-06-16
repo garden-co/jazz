@@ -2670,6 +2670,45 @@ export class Db {
   }
 
   /**
+   * Compose the CRDT sync bundle for `query` under this Db's scope, returning
+   * its wire bytes. The SSR snapshot builder ships this so the client hydrates
+   * its store flash-free. Mirrors {@link Db.subscribeAll}'s query translation.
+   */
+  composeQueryBundle<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    _options?: QueryOptions,
+    session?: Session,
+  ): Uint8Array {
+    const client = this.getClient(query._schema);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
+    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const context = this.getRuntimeOperationContext();
+    const effectiveSession = context?.session ?? session;
+    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    return client.composeQueryBundle(wasmQuery, sessionJson);
+  }
+
+  /**
+   * Seed the live store from a sync bundle's wire bytes (SSR hydration), before
+   * sync connects. Applies to every memoized runtime client — for the common
+   * single-schema app that is the one client.
+   */
+  applyQueryBundle(bytes: Uint8Array): void {
+    for (const client of this.clients.values()) {
+      client.applyQueryBundle(bytes);
+    }
+  }
+
+  /**
    * Shutdown the Db and release all resources.
    * Closes all memoized JazzClient connections and the worker.
    *
