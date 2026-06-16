@@ -228,14 +228,18 @@ export class SubscriptionsOrchestrator {
   }
 
   /**
-   * Attach the live db. Applies any queued bundles to the store first — so the
-   * store already holds the rows when re-subscription's first delivery lands,
-   * flash-free — then re-points every entry's subscription at the live db. This
-   * is the single gate the whole pre-attach → live transition turns on.
+   * Attach the live db, optionally setting the session in the same pass. Drains
+   * any queued bundles into the store first — so the rows are present when the
+   * first re-subscription delivery lands, flash-free — then re-subscribes every
+   * entry against the live db. Passing the session here, rather than a separate
+   * setSession call, means each entry re-subscribes once, under the right user.
    */
-  attachDb(db: DbLike): void {
+  attachDb(db: DbLike, session?: Session | null): void {
     this.db = db;
     this.attached = true;
+    if (session !== undefined) {
+      this.session = session;
+    }
     for (const bytes of this.pendingBundles) {
       this.db.applyQueryBundle?.(bytes);
     }
@@ -277,12 +281,15 @@ export class SubscriptionsOrchestrator {
     snapshot?: T[],
   ): string {
     const key = this.computeKey(query, options);
+    // Keep an already-stored snapshot when this call doesn't carry one:
+    // seedSnapshot() puts the seed in the query definition, and useAll calls
+    // makeQueryKey() (with no snapshot) right after — it must not wipe the seed
+    // before getCacheEntry() reads it.
     const previous = this.queryDefinitions.get(key) as QueryDefinition<T> | undefined;
-    const resolvedSnapshot = snapshot ? [...snapshot] : previous?.snapshot;
     this.queryDefinitions.set(key, {
       query,
       options,
-      snapshot: resolvedSnapshot,
+      snapshot: snapshot ? [...snapshot] : previous?.snapshot,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
     this.seededStates.delete(key);

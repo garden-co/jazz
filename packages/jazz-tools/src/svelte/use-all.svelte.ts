@@ -1,4 +1,5 @@
 import type { DehydratedSnapshot } from "../backend/ssr.js";
+import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import { applyDelta } from "../shared/index.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
@@ -82,15 +83,17 @@ export class QuerySubscription<T extends { id: string }> {
         queryKeyOptions = Object.keys(rest).length > 0 ? rest : undefined;
       }
 
-      // Apply the co-located snapshot once, before the first makeQueryKey
-      // lookup, so the first render reads seeded rows. The orchestrator decides
-      // what to do with it (seed + queue pre-attach; ignore post-attach).
       if (snapshot && !this.#snapshotApplied) {
         this.#snapshotApplied = true;
         applySnapshot({
           manager,
           snapshot,
-          expected: { principalId: ctx.session?.user_id ?? null },
+          // The client's own fingerprint comes from the query's schema: a
+          // snapshot built against a different schema is skipped, not seeded.
+          expected: {
+            principalId: ctx.session?.user_id ?? null,
+            schemaFingerprint: computeSchemaFingerprint(resolvedQuery._schema),
+          },
         });
       }
 

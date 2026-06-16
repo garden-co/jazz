@@ -1,5 +1,4 @@
 import { useEffect, type ReactNode } from "react";
-import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
@@ -52,7 +51,6 @@ export type JazzProviderProps = {
    * suspending on the live client.
    */
   ssr?: boolean;
-  schema?: WasmSchemaInput;
 };
 
 export function JazzProvider({
@@ -62,7 +60,6 @@ export function JazzProvider({
   onJWTExpired,
   autoAttachDevTools,
   ssr,
-  schema,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
@@ -72,7 +69,6 @@ export function JazzProvider({
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
       ssr={ssr}
-      schema={schema}
     >
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}

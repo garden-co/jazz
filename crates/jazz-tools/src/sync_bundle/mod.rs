@@ -1,19 +1,13 @@
 //! Sync-bundle composer and applier.
 //!
-//! A *bundle* is the server's own outbound payloads for a single query — the
-//! catalogue head, the query settlement, and one CRDT [`StoredRowBatch`] per
-//! visible row — frozen into a serialisable envelope. A cold client applies it
-//! to seed its store before any live sync connects, so the rows are present on
-//! the first paint and the later live replay reconciles as a content-addressed
-//! no-op rather than a flash-to-empty.
+//! A *bundle* is the server's outbound payloads for one query, frozen into a
+//! serialisable envelope. A cold client applies it to seed its store before live
+//! sync connects, so the rows are there on first paint and the later live replay
+//! reconciles as a no-op instead of flashing to empty.
 //!
-//! The composer drives a *synthetic client* through the server's ordinary
-//! subscription-delivery path, then harvests that client's outbox. Reusing the
-//! live path means the rows are permission-filtered by the server's own policy
-//! evaluation and byte-faithful to what it would have sent over a socket — no
-//! parallel serialisation logic to drift.
-//!
-//! [`StoredRowBatch`]: crate::row_histories::StoredRowBatch
+//! The composer drives a synthetic client through the server's normal delivery
+//! path and harvests its outbox, so the rows are permission-filtered and
+//! byte-faithful to live sync — no parallel serialisation to drift.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,10 +20,7 @@ use crate::sync_manager::{
     ClientId, Destination, InboxEntry, QueryId, QueryPropagation, ServerId, Source, SyncPayload,
 };
 
-/// Current bundle envelope version, stamped on every composed bundle. The
-/// payload shape is internal; [`SyncBundle::from_bytes`] rejects any version it
-/// does not recognise, so the envelope can evolve without a client mis-applying
-/// bytes it cannot read.
+/// Current bundle envelope version.
 const BUNDLE_VERSION: u8 = 1;
 
 /// Upper bound on compose rounds, so a server that never settles cannot spin
@@ -41,8 +32,7 @@ const MAX_COMPOSE_ROUNDS: usize = 32;
 /// downstream client's queries.
 const SYNTHETIC_QUERY_ID: QueryId = QueryId(1);
 
-/// An opaque, versioned envelope carrying a server's CRDT state for one query,
-/// query-scoped and permission-filtered, ready to seed a cold client's store.
+/// An opaque, versioned envelope carrying a server's CRDT state for one query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBundle {
     // INVARIANT: `version` must stay the first field and be checked before any
@@ -131,11 +121,8 @@ pub fn compose_query_bundle<H: Storage>(
         },
     });
 
-    // Drive the subscription to completion. Against synchronous storage the
-    // server settles a single cold query within a couple of rounds, emitting its
-    // catalogue head, settlement and row payloads before the first round that
-    // produces nothing further — that empty round is the quiescence signal. The
-    // round cap is a runaway backstop, not the expected exit.
+    // Drive the subscription until a round produces nothing — that empty round
+    // means the server has settled. The round cap is just a runaway backstop.
     let mut payloads = Vec::new();
     let mut settled = false;
     for _ in 0..MAX_COMPOSE_ROUNDS {
@@ -167,10 +154,9 @@ pub fn compose_query_bundle<H: Storage>(
         );
     }
 
-    // Tear down the synthetic subscription so the composing server keeps no
-    // phantom state. remove_client alone reaps only SyncManager-owned state; the
-    // QueryManager's server_subscriptions entry is removed by processing an
-    // unsubscription, so a long-lived server does not re-settle it every tick.
+    // Tear down the synthetic subscription so the server keeps no phantom state:
+    // the unsubscription (not remove_client) is what reaps the QueryManager's
+    // server_subscriptions entry, so a long-lived server doesn't re-settle it.
     server.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QueryUnsubscription {
@@ -186,13 +172,11 @@ pub fn compose_query_bundle<H: Storage>(
     }
 }
 
-/// Apply a composed bundle to a cold client, seeding its store.
+/// Apply a bundle's payloads as though they had arrived as sync updates.
 ///
-/// The bundle's payloads are replayed through the client's inbox as if a server
-/// delivered them, so they travel the exact live-sync ingest path: catalogue
-/// and rows land in storage with server provenance (not as pending local
-/// writes), keyed by their original batch ids. A later live connection then
-/// reconciles them as a no-op.
+/// They travel the live-sync ingest path, so catalogue and rows land in storage
+/// with server provenance (not pending local writes), and a later live
+/// connection reconciles them as a no-op.
 pub fn apply_query_bundle<H: Storage>(
     client: &mut QueryManager,
     client_io: &mut H,

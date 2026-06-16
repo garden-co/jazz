@@ -49,17 +49,13 @@ export function applySnapshot({
     return "appId-mismatch";
   }
 
-  // The client trusts a server-rendered snapshot and displays it: seeding is
-  // never gated on the principal. A snapshot with no live principal yet (the
-  // synchronous SSR seed) still seeds, so its rows render on the first paint.
-  // Keeping the snapshot scoped to the right viewer is the server's job —
-  // prefetch with the right Db, and don't serve one principal's render to
-  // another; the rendered HTML already carries that data regardless.
+  // Seeding is never gated on the principal: the client trusts a server-rendered
+  // snapshot, and a seed with no live principal yet still renders on first paint.
+  // Keeping the snapshot scoped to the right viewer is the server's job.
   //
-  // We do still throw when *both* principals are known and disagree: a snapshot
-  // scoped to one principal reaching a confirmed different live principal (the
-  // live-swap, once the client's session resolves) is a misconfiguration worth
-  // surfacing loudly rather than silently swapping in another user's rows.
+  // We do still throw when both principals are known and disagree — a snapshot
+  // for one principal reaching a confirmed different live one is a misconfiguration
+  // worth surfacing rather than silently showing another user's rows.
   if (
     env.principalId !== null &&
     expected.principalId !== null &&
@@ -74,13 +70,12 @@ export function applySnapshot({
     );
   }
 
-  // SSR snapshot seeding currently requires the client to be on the *same*
-  // schema as the server that produced the snapshot. On any schema difference
-  // we discard and fall back to a live fetch — so a client on a different build
-  // than the server gets no first-paint seeding. Cross-version reinterpretation
-  // (apply the client's lenses to the snapshot, delegated to the core, falling
-  // back to live only when the lens chain is unavailable) is future work:
-  // specs/todo/ideas/3_later/ssr-snapshot-cross-version-lensing.md
+  // Seeding requires the client to be on the same schema as the server. On any
+  // difference we discard and let live sync fill the data instead. Cross-version
+  // lensing may come later but is likely to be relatively low-value: a client
+  // ahead of the server is unlikely, so the realistic case is the server ahead
+  // of the client — and then the client has to fetch the newer schema from the
+  // sync server anyway, so there's nothing to gain over just waiting for sync.
   if (
     expected.schemaFingerprint !== undefined &&
     env.schemaFingerprint !== expected.schemaFingerprint
