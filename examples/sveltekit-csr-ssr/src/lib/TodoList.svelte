@@ -6,7 +6,7 @@
   // rows for the SSR render and first paint, then live sync takes over.
   let { snapshot }: { snapshot?: DehydratedSnapshot } = $props();
 
-  const todos = new QuerySubscription(app.todos, () => (snapshot ? { snapshot } : undefined));
+  const todos = new QuerySubscription(app.todos, () => ({ snapshot }));
 </script>
 
 <ul class="mt-4 space-y-1">

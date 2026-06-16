@@ -8,7 +8,7 @@ import { app } from "../schema";
 // seeds the rows for the first render and fills the store from its bundle, so the
 // hand-off to live sync is flash-free.
 export default function TodoList({ snapshot }: { snapshot?: DehydratedSnapshot }) {
-  const todos = useAll(app.todos, snapshot ? { snapshot } : undefined) ?? [];
+  const todos = useAll(app.todos, { snapshot }) ?? [];
   return (
     <ul className="mt-4 space-y-1">
       {todos.length === 0 && <li className="text-sm text-foreground/30 italic">No todos yet.</li>}
