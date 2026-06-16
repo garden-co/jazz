@@ -46,3 +46,13 @@ export function createSeedOrchestrator(
   });
   return manager;
 }
+
+/**
+ * Build an empty, db-less {@link SubscriptionsOrchestrator} for the per-hook
+ * seed phase: the hooks themselves seed it via `useAll(query, { snapshot })`,
+ * and the provider points it at the live db once connected. Its appId is taken
+ * from the snapshot so the keys line up with the seeded entries.
+ */
+export function createDbLessOrchestrator(snapshot: DehydratedSnapshot): SubscriptionsOrchestrator {
+  return new SubscriptionsOrchestrator({ appId: openSnapshot(snapshot).appId }, NOOP_SEED_DB);
+}

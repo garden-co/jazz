@@ -3,7 +3,7 @@ import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import type { UseAllState } from "../subscriptions-orchestrator.js";
-import { useJazzClient } from "./provider.js";
+import { useManager } from "./provider.js";
 
 /** Options for {@link useAll}: ordinary query options plus an optional SSR snapshot. */
 type UseAllOptions = QueryOptions & {
@@ -33,19 +33,27 @@ function useAllBase<T extends { id: string }>(
   options?: UseAllBaseOptions,
 ): T[] | undefined {
   const { suspense = false, snapshot } = options ?? {};
-  const client = useJazzClient();
-  const { manager } = client;
+  // useManager() is seed-aware and never suspends: during the seed phase it is
+  // the read-only orchestrator seeded by the snapshot, so the first paint (on
+  // the server and on the client) renders the seeded rows synchronously instead
+  // of suspending on the live client.
+  const manager = useManager();
 
-  // Apply the co-located snapshot exactly once, synchronously, before the first
-  // key lookup — so the first paint already reads the seeded rows. The ref
-  // guards against React's double-render (StrictMode) re-applying it.
-  const snapshotApplied = useRef(false);
-  if (snapshot && !snapshotApplied.current) {
-    snapshotApplied.current = true;
+  // Apply the co-located snapshot synchronously, before the first makeQueryKey
+  // lookup, so the first paint already reads the seeded rows. Re-apply whenever
+  // the manager changes: the provider transitions from the db-less seed
+  // orchestrator to the live one, and the seed must land on the live
+  // orchestrator too — otherwise it would flash to empty when the live store
+  // connects. (Same-manager re-renders, incl. StrictMode, don't re-apply.)
+  // principalId is null in the seed phase (no live session yet); the seed is
+  // display-only and the live subscription supersedes it.
+  const seededManager = useRef<ReturnType<typeof useManager> | null>(null);
+  if (snapshot && seededManager.current !== manager) {
+    seededManager.current = manager;
     applySnapshot({
       manager,
       snapshot,
-      expected: { principalId: client.session?.user_id ?? null },
+      expected: { principalId: null },
     });
   }
 

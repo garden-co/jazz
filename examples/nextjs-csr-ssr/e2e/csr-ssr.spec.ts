@@ -40,11 +40,11 @@ test.describe("Next.js CSR / SSR todos", () => {
     await page.goto("/");
 
     const clientPane = todoSection(page, "Client-side (React)");
-    const serverPane = todoSection(page, "Server-side (RSC)");
 
     await expect(page.getByRole("heading", { name: "jazz — nextjs CSR / SSR" })).toBeVisible();
-    await expect(clientPane).toContainText("No todos yet.");
-    await expect(serverPane).toContainText("No todos yet.");
+    // No empty-state precondition: the sync server is shared and persistent, so
+    // the panes may already hold rows. The round-trip below asserts on unique,
+    // freshly-added titles instead.
 
     await addTodo(clientPane, clientTitle);
     await expect(clientPane).toContainText(clientTitle);
@@ -58,5 +58,34 @@ test.describe("Next.js CSR / SSR todos", () => {
     await addTodo(reloadedServerPane, serverTitle);
     await expect(reloadedServerPane).toContainText(serverTitle);
     await expect(reloadedClientPane).toContainText(serverTitle, { timeout: 15_000 });
+  });
+
+  test("the prefetch+hydrate pane is server-rendered with its rows — no cold-load flash", async ({
+    page,
+    request,
+  }) => {
+    const title = `prefetched and hydrated ${Date.now()}`;
+    const paneLabel = "Server prefetch + client hydrate";
+
+    // Seed a row so the server prefetch has data, then wait until the
+    // prefetch+hydrate pane reflects it.
+    await page.goto("/");
+    await addTodo(todoSection(page, "Server-side (RSC)"), title);
+    await reloadUntilSectionContains(page, paneLabel, title);
+
+    // The RAW server-rendered HTML (no client JS) must already carry the row in
+    // the prefetch+hydrate pane: the snapshot seeded it on the server, so the
+    // browser's first paint is not empty and won't flash to "No todos yet" when
+    // the live store connects.
+    const html = await (await request.get("/")).text();
+    const paneStart = html.indexOf(paneLabel);
+    expect(paneStart).toBeGreaterThan(-1);
+    const paneHtml = html.slice(paneStart);
+    expect(paneHtml).toContain(title);
+    expect(paneHtml).not.toContain("No todos yet.");
+
+    // After hydration the same row is still shown — SSR first paint matched the
+    // live client, with no flash in between.
+    await expect(todoSection(page, paneLabel)).toContainText(title);
   });
 });
