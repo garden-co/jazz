@@ -7,6 +7,7 @@ const schemaColumns = [
   { name: "title", column_type: { type: "Text" }, nullable: false },
   { name: "done", column_type: { type: "Boolean" }, nullable: false },
   { name: "count", column_type: { type: "Integer" }, nullable: false },
+  { name: "bytes", column_type: { type: "Bytea" }, nullable: false },
   { name: "assignee_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
   { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
 ] satisfies ColumnDescriptor[];
@@ -32,13 +33,25 @@ describe("TableFilterBuilder", () => {
     const booleanOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(booleanOperators).toEqual(["eq"]);
+    expect(booleanOperators).toEqual(["eq", "ne", "in"]);
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
+    const numericOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(numericOperators).toEqual(["eq", "ne", "gt", "gte", "lt", "lte", "in"]);
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "bytes" } });
+    const byteaOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
+      option.getAttribute("value"),
+    );
+    expect(byteaOperators).toEqual(["eq", "ne", "in"]);
 
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
     const refOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(refOperators).toEqual(["eq", "ne", "isNull"]);
+    expect(refOperators).toEqual(["eq", "ne", "in", "isNull"]);
   });
 
   it("does not show unsupported columns", () => {
@@ -56,7 +69,7 @@ describe("TableFilterBuilder", () => {
     const columnNames = Array.from(columnSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(columnNames).toEqual(["id", "title", "done", "count", "assignee_id"]);
+    expect(columnNames).toEqual(["id", "title", "done", "count", "bytes", "assignee_id"]);
   });
 
   it("parses numeric values for numeric operators", () => {

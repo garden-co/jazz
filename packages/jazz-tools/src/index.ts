@@ -114,6 +114,11 @@ export {
   permissionIntrospectionColumns,
 } from "./typed-app.js";
 export { defineMigration, renameTableFrom } from "./migrations.js";
+export {
+  getSupportedWhereOperatorsForColumn,
+  getSupportedWhereOperatorsForSchemaColumn,
+} from "./where-operators.js";
+export type { WhereOperator, WhereOperatorColumn } from "./where-operators.js";
 export type {
   Schema,
   TableDefinition,
