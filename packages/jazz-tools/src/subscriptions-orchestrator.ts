@@ -187,6 +187,8 @@ export class SubscriptionsOrchestrator {
   private session?: Session | null;
   /** Bundles queued before the live db attaches; drained by {@link attachDb}. */
   private readonly pendingBundles: Uint8Array[] = [];
+  /** Whether the live db has attached; once true, late snapshots are ignored. */
+  private attached = false;
 
   constructor(
     private readonly config: { appId: string },
@@ -211,11 +213,17 @@ export class SubscriptionsOrchestrator {
   }
 
   /**
-   * Queue a sync bundle to seed the live store the moment the db attaches.
-   * Pre-attach (server SSR and the client's first paint) there is no live store
-   * to apply it to; {@link attachDb} drains the queue.
+   * Hydrate the live store from a sync bundle. When a live db is already present
+   * (a provider that builds the orchestrator bound to its db), apply it right
+   * away so the store holds the rows before the subscription's first delivery.
+   * In the db-less seed phase (server SSR, first paint before the runtime loads)
+   * there is no store yet, so the bundle is queued for {@link attachDb} to drain.
    */
   queueBundle(bytes: Uint8Array): void {
+    if (this.db.applyQueryBundle) {
+      this.db.applyQueryBundle(bytes);
+      return;
+    }
     this.pendingBundles.push(bytes);
   }
 
@@ -227,6 +235,7 @@ export class SubscriptionsOrchestrator {
    */
   attachDb(db: DbLike): void {
     this.db = db;
+    this.attached = true;
     for (const bytes of this.pendingBundles) {
       this.db.applyQueryBundle?.(bytes);
     }
@@ -234,6 +243,14 @@ export class SubscriptionsOrchestrator {
     for (const entry of this.entries.values()) {
       this.resubscribeEntry(entry);
     }
+  }
+
+  /**
+   * Whether the live db has attached. After attach, a late-mounting hook's
+   * frozen snapshot is ignored — it subscribes to the live store instead.
+   */
+  isAttached(): boolean {
+    return this.attached;
   }
 
   async shutdown(): Promise<void> {
