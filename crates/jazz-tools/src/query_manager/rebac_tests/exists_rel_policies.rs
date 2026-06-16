@@ -2,53 +2,33 @@ use super::*;
 
 #[test]
 fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::new(RowDescriptor::new(vec![
-            ColumnDescriptor::new("user_id", ColumnType::Text),
-            ColumnDescriptor::new("team_id", ColumnType::Text),
-        ])),
-    );
-    schema.insert(
-        TableName::new("team_memberships"),
-        TableSchema::new(RowDescriptor::new(vec![
-            ColumnDescriptor::new("team_id", ColumnType::Text),
-            ColumnDescriptor::new("user_id", ColumnType::Text),
-        ])),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::Exists {
-        table: "admins".into(),
-        condition: Box::new(PolicyExpr::And(vec![
-            PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
-            PolicyExpr::ExistsRel {
-                rel: RelExpr::Filter {
-                    input: Box::new(RelExpr::TableScan {
-                        table: TableName::new("team_memberships"),
-                    }),
-                    predicate: PredicateExpr::And(vec![
-                        PredicateExpr::Cmp {
-                            left: ColumnRef::unscoped("team_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::OuterColumn(ColumnRef::unscoped("team_id")),
-                        },
-                        PredicateExpr::Cmp {
-                            left: ColumnRef::unscoped("user_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
-                        },
-                    ]),
-                },
-            },
-        ])),
+    let projects_policies = permissions(|p| {
+        p.allow_insert()
+            .where_(pe::exists(pe::table("admins").where_(pe::all_of([
+                pe::eq("user_id", pe::session("user_id")),
+                pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
+                    pe::rel::eq_outer("team_id", "team_id"),
+                    pe::rel::eq_session("user_id", "user_id"),
+                ]))),
+            ]))));
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .column("team_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("team_memberships")
+                .column("team_id", ColumnType::Text)
+                .column("user_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -88,35 +68,23 @@ fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_re
 
 #[test]
 fn local_insert_with_exists_rel_policy_denies_non_admin() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -152,33 +120,19 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 
 #[test]
 fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
-            "user_id",
-            ColumnType::Text,
-        )])),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("admins").column("user_id", ColumnType::Text))
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -208,44 +162,26 @@ fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table
 
 #[test]
 fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
-    let mut schema = Schema::new();
-    let admins_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("user_id", ColumnType::Text),
-        ColumnDescriptor::new("revoked_at", ColumnType::Text).nullable(),
-    ]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let projects_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::unscoped("revoked_at"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal(Value::Null),
-                },
-            ]),
-        },
+    let projects_policies = permissions(|p| {
+        p.allow_insert()
+            .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_session("user_id", "user_id"),
+                pe::rel::eq_literal("revoked_at", Value::Null),
+            ]))));
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(projects_descriptor, projects_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .nullable_column("revoked_at", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .policies(projects_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -294,35 +230,23 @@ fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
 
 #[test]
 fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
-    let mut schema = Schema::new();
-    let admins_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("admins"),
-        TableSchema::with_policies(
-            admins_descriptor.clone(),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        ),
-    );
-
-    let protected_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
-    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("admins"),
-            }),
-            predicate: PredicateExpr::Cmp {
-                left: ColumnRef::unscoped("user_id"),
-                op: PredicateCmpOp::Eq,
-                right: ValueRef::SessionRef(vec!["user_id".into()]),
-            },
-        },
+    let protected_policies = permissions(|p| {
+        p.allow_delete().where_(pe::exists(
+            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+        ));
     });
-    schema.insert(
-        TableName::new("protected"),
-        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);

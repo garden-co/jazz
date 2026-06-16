@@ -273,42 +273,32 @@ fn rebac_inherits_filters_select_query_results() {
     use crate::query_manager::query::QueryBuilder;
 
     // Schema with INHERITS policy
-    let mut schema = Schema::new();
+    let folders_table = TableSchema::builder("folders")
+        .column("owner_id", ColumnType::Text)
+        .column("name", ColumnType::Text);
+    let folders_descriptor = folders_table.clone().build().columns;
+    let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session("user_id")));
+    });
 
-    // Folders table
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-    let folders_policies = TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
-    );
-
-    // Documents table with INHERITS
-    let docs_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
+    let docs_table = TableSchema::builder("documents")
+        .column("owner_id", ColumnType::Text)
+        .column("title", ColumnType::Text)
+        .nullable_fk_column("folder_id", "folders");
+    let docs_descriptor = docs_table.clone().build().columns;
 
     // SELECT policy: owner_id = @user_id OR INHERITS SELECT VIA folder_id
-    let docs_policies = TablePolicies::new().with_select(PolicyExpr::Or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::Inherits {
-            operation: Operation::Select,
-            via_column: "folder_id".into(),
-            max_depth: None,
-        },
-    ]));
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(docs_descriptor.clone(), docs_policies),
-    );
+    let docs_policies = permissions(|p| {
+        p.allow_read().where_(pe::any_of([
+            pe::eq("owner_id", pe::session("user_id")),
+            pe::allowed_to_read("folder_id"),
+        ]));
+    });
+    let schema = SchemaBuilder::new()
+        .table(folders_table.policies(folders_policies))
+        .table(docs_table.policies(docs_policies))
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -395,32 +385,23 @@ fn rebac_inherits_filters_select_query_results() {
 fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     use crate::query_manager::query::QueryBuilder;
 
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("folders"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("owner_id", ColumnType::Text),
-            ColumnDescriptor::new("name", ColumnType::Text),
-        ])
-        .into(),
-    );
-
-    let documents_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-    let documents_policies = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "folder_id".into(),
-        max_depth: None,
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("folder_id"));
     });
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(documents_descriptor, documents_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(documents_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -459,29 +440,18 @@ fn inherits_select_denies_when_parent_operation_policy_is_missing() {
 
 #[test]
 fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
-    let mut schema = Schema::new();
-    let folders_descriptor =
-        RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]);
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::new(folders_descriptor.clone()),
-    );
-
-    let documents_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::Inherits {
-        operation: Operation::Insert,
-        via_column: "folder_id".into(),
-        max_depth: None,
+    let documents_policies = permissions(|p| {
+        p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
     });
-    schema.insert(
-        TableName::new("documents"),
-        TableSchema::with_policies(documents_descriptor, documents_policies),
-    );
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("folders").column("title", ColumnType::Text))
+        .table(
+            TableSchema::builder("documents")
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(documents_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm =
@@ -509,33 +479,25 @@ fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_
 
 #[test]
 fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
-    let mut schema = Schema::new();
-    let files_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-    let files_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::InheritsReferencing {
-            operation: Operation::Update,
-            source_table: "todos".into(),
-            via_column: "file_id".into(),
-            max_depth: None,
-        }),
-        PolicyExpr::True,
-    );
-    schema.insert(
-        TableName::new("files"),
-        TableSchema::with_policies(files_descriptor, files_policies),
-    );
-
-    let todos_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("file_id", ColumnType::Uuid)
-            .nullable()
-            .references("files"),
-    ]);
-    schema.insert(TableName::new("todos"), TableSchema::new(todos_descriptor));
+    let files_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
+            .where_new(pe::always());
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("files")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .policies(files_policies),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("file_id", "files"),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm =
@@ -576,26 +538,20 @@ fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permis
 
 #[test]
 fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
-    let mut schema = Schema::new();
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-    let folders_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent_id".into(),
-            max_depth: Some(10),
-        },
-    );
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
-    );
+    let folders_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(folders_policies),
+        )
+        .build();
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
@@ -648,26 +604,20 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
 #[test]
 fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_history_is_removed()
 {
-    let mut schema = Schema::new();
-    let folders_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("owner_id", ColumnType::Text),
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
-            .nullable()
-            .references("folders"),
-    ]);
-    let folders_policies = TablePolicies::new().with_update(
-        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent_id".into(),
-            max_depth: Some(10),
-        },
-    );
-    schema.insert(
-        TableName::new("folders"),
-        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
-    );
+    let folders_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(folders_policies),
+        )
+        .build();
 
     let mut writer_qm = create_query_manager(SyncManager::new(), schema.clone());
     let _branch = get_branch(&writer_qm);
@@ -722,50 +672,36 @@ fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_
 fn rebac_inherits_no_cycle_passes() {
     use crate::query_manager::types::validate_no_inherits_cycles;
 
-    let mut schema = Schema::new();
-
-    // Organizations table (no INHERITS)
-    let org_desc = RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-    let org_policy =
-        TablePolicies::new().with_select(PolicyExpr::eq_session("name", vec!["org".into()]));
-    schema.insert(
-        TableName::new("orgs"),
-        TableSchema::with_policies(org_desc, org_policy),
-    );
-
-    // Teams table - INHERITS from orgs
-    let team_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("org_id", ColumnType::Uuid)
-            .nullable()
-            .references("orgs"),
-    ]);
-    let team_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "org_id".into(),
-        max_depth: None,
+    let org_policy = permissions(|p| {
+        p.allow_read().where_(pe::eq("name", pe::session("org")));
     });
-    schema.insert(
-        TableName::new("teams"),
-        TableSchema::with_policies(team_desc, team_policy),
-    );
 
-    // Projects table - INHERITS from teams
-    let project_desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("team_id", ColumnType::Uuid)
-            .nullable()
-            .references("teams"),
-    ]);
-    let project_policy = TablePolicies::new().with_select(PolicyExpr::Inherits {
-        operation: Operation::Select,
-        via_column: "team_id".into(),
-        max_depth: None,
+    let team_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("org_id"));
     });
-    schema.insert(
-        TableName::new("projects"),
-        TableSchema::with_policies(project_desc, project_policy),
-    );
+
+    let project_policy = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("team_id"));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("orgs")
+                .column("name", ColumnType::Text)
+                .policies(org_policy),
+        )
+        .table(
+            TableSchema::builder("teams")
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("org_id", "orgs")
+                .policies(team_policy),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("team_id", "teams")
+                .policies(project_policy),
+        )
+        .build();
 
     // Should pass - this is a valid chain: projects → teams → orgs
     let result = validate_no_inherits_cycles(&schema);

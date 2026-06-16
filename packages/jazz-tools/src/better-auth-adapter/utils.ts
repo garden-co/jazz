@@ -1,6 +1,10 @@
 import type { CleanedWhere } from "better-auth/adapters";
 import type { QueryBuilder, TableProxy } from "../runtime/db.js";
 import type { WasmSchema } from "../drivers/types.js";
+import {
+  getSupportedWhereOperatorsForSchemaColumn,
+  type WhereOperator,
+} from "../where-operators.js";
 import type { JazzBuiltCondition, JazzSortBy } from "./types.js";
 
 export function assertNativeJoinsDisabled(join?: unknown): void {
@@ -16,56 +20,20 @@ export function assertNativeJoinsDisabled(join?: unknown): void {
 export function isQuerySupported(tableSchema: WasmSchema[string], where?: CleanedWhere[]): boolean {
   const columnByName = new Map(tableSchema.columns.map((column) => [column.name, column] as const));
 
-  const getSupportedOperators = (fieldName: string): ReadonlySet<string> | undefined => {
-    if (fieldName === "id") {
-      return new Set(["eq", "ne"]);
-    }
-
-    const column = columnByName.get(fieldName);
-    if (!column) {
-      return undefined;
-    }
-
-    if (column.references) {
-      return column.nullable ? new Set(["eq", "ne", "isNull"]) : new Set(["eq", "ne"]);
-    }
-
-    switch (column.column_type.type) {
-      case "Text":
-        return new Set(["eq", "ne", "contains"]);
-      case "Boolean":
-        return new Set(["eq"]);
-      case "Integer":
-      case "BigInt":
-      case "Double":
-        return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
-      case "Timestamp":
-        return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
-      case "Bytea":
-        return new Set(["eq", "ne"]);
-      case "Enum":
-        return new Set(["eq", "ne", "in"]);
-      case "Array":
-        return new Set(["eq", "contains"]);
-      case "Json":
-        return new Set(["eq", "ne", "in"]);
-      case "Uuid":
-      case "Row":
-        return undefined;
-    }
-  };
-
   for (const condition of where ?? []) {
     if (condition.connector === "OR") {
       return false;
     }
 
-    const supportedOperators = getSupportedOperators(condition.field);
+    const supportedOperators = getSupportedWhereOperatorsForSchemaColumn(
+      condition.field,
+      columnByName.get(condition.field),
+    );
     if (!supportedOperators) {
       return false;
     }
 
-    if (!supportedOperators.has(condition.operator)) {
+    if (!supportedOperators.includes(condition.operator as WhereOperator)) {
       return false;
     }
 
