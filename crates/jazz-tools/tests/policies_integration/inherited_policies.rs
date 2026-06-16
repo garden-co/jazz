@@ -2317,6 +2317,12 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     server.shutdown().await;
 }
 
+/// Verifies that forward inheritance fails closed when the child row's policy
+/// delegates SELECT to a parent table that has no explicit SELECT policy.
+///
+/// Alice owns the parent folder row by data convention, but because `folders`
+/// does not declare a read policy, `allowedTo.read(folder_id)` must not infer
+/// access from permissive/default behavior.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
@@ -2371,6 +2377,13 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     );
 }
 
+/// Verifies the permissive-local behavior for an INSERT policy that inherits
+/// through a parent FK.
+///
+/// In local permissive mode, the child table has an explicit INSERT policy, but
+/// the parent table has no INSERT policy. This covers the local-only branch
+/// where a missing parent operation policy is treated as allowed while
+/// evaluating `allowedTo.insert(folder_id)`.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
@@ -2404,6 +2417,12 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
         );
 }
 
+/// Verifies the permissive-local behavior for reverse inherited UPDATE access.
+///
+/// The `files` UPDATE policy is delegated through rows in `todos` that
+/// reference the file. `todos` intentionally has no UPDATE policy, so this
+/// covers the local-only branch where missing source-table UPDATE policy is
+/// treated as allowed for `allowedTo.updateReferencing(...)`.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
@@ -2460,6 +2479,12 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
         );
 }
 
+/// Verifies that inherited WITH CHECK constraints evaluate the proposed new
+/// row state and deny updates when the referenced parent is not updateable.
+///
+/// Bob owns the child folder and keeps its `parent_id` pointed at Alice's root
+/// folder, but Bob cannot update that root folder. The child's update must
+/// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {

@@ -13,6 +13,8 @@ async fn query_documents_as_alice(client: &crate::JazzClient) -> HashSet<ObjectI
         .collect()
 }
 
+/// Verifies that SELECT policies comparing a nullable column to a NULL literal
+/// include NULL rows and filter out non-null rows.
 #[tokio::test]
 async fn rebac_select_policy_with_null_literal_filters_query_results() {
     let documents_policies = permissions(|p| {
@@ -55,6 +57,8 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
     );
 }
 
+/// Verifies that SELECT policies using IS NULL behave the same way for nullable
+/// columns, including NULL rows and filtering non-null rows.
 #[tokio::test]
 async fn rebac_select_policy_with_is_null_filters_query_results() {
     let documents_policies = permissions(|p| {

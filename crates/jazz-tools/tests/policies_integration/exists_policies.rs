@@ -72,6 +72,8 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
     .await;
 }
 
+/// Verifies that a permissive local insert which fails a server-side EXISTS
+/// INSERT policy is rejected on sync and does not become visible to peers.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_exists_clause_denies_non_matching_insert() {
@@ -125,6 +127,8 @@ async fn rebac_exists_clause_denies_non_matching_insert() {
     server.shutdown().await;
 }
 
+/// Verifies that UPDATE USING policies with EXISTS are enforced on sync, and
+/// that a rejected optimistic update rolls back to server-authoritative state.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_update_denied_by_using_exists_policy() {
@@ -227,6 +231,8 @@ async fn rebac_update_denied_by_using_exists_policy() {
     server.shutdown().await;
 }
 
+/// Verifies local UPDATE enforcement for an EXISTS-based admin policy: non-admin
+/// sessions are denied and matching admin sessions are allowed.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {

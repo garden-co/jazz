@@ -1,5 +1,7 @@
 use super::*;
 
+/// Verifies that recursive inherited access fails closed when row data forms a
+/// cycle and no reachable ancestor grants the session access.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_recursive_inherits_cycle_does_not_overgrant() {

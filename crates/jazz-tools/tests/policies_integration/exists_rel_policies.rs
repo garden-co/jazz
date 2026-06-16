@@ -2,6 +2,8 @@ use crate::JazzClient;
 
 use super::*;
 
+/// Verifies that enforcing mode propagates into nested EXISTS_REL scans, so a
+/// missing explicit SELECT policy on a nested probed table denies the insert.
 #[tokio::test]
 async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
     let projects_policies = permissions(|p| {
@@ -55,6 +57,8 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
     assert_client_policy_denied(err, "projects", Operation::Insert);
 }
 
+/// Verifies local INSERT enforcement for an EXISTS_REL admin policy: sessions
+/// without a matching admin row are denied and admins are allowed.
 #[tokio::test]
 async fn local_insert_with_exists_rel_policy_denies_non_admin() {
     let projects_policies = permissions(|p| {
@@ -92,6 +96,8 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin() {
         .expect("admin insert should be allowed");
 }
 
+/// Verifies that EXISTS_REL scans require an explicit SELECT policy on the
+/// scanned table under enforcing mode.
 #[tokio::test]
 async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
     let projects_policies = permissions(|p| {
@@ -122,6 +128,8 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
     assert_client_policy_denied(err, "projects", Operation::Insert);
 }
 
+/// Verifies that relation predicates compare NULL literals correctly inside
+/// EXISTS_REL, allowing active rows and denying revoked rows.
 #[tokio::test]
 async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     let projects_policies = permissions(|p| {
@@ -171,6 +179,8 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows()
     assert_client_policy_denied(carol_err, "projects", Operation::Insert);
 }
 
+/// Verifies local DELETE enforcement for an EXISTS_REL admin policy, including
+/// that an already-deleted row cannot be deleted a second time.
 #[tokio::test]
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     let protected_policies = permissions(|p| {

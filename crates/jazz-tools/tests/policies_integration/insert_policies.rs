@@ -13,6 +13,8 @@ async fn enforcing_test_client(schema: Schema) -> JazzClient {
     .expect("connect enforcing local JazzClient")
 }
 
+/// Verifies the happy path for a simple INSERT policy where the inserted row's
+/// owner matches the session user.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_insert_allowed_by_simple_policy() {
@@ -31,6 +33,8 @@ async fn rebac_insert_allowed_by_simple_policy() {
         .expect("insert should be allowed when owner_id matches the session user");
 }
 
+/// Verifies local INSERT denial when a simple owner policy does not match the
+/// session user.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_insert_denied_by_simple_policy() {
@@ -49,6 +53,9 @@ async fn rebac_insert_denied_by_simple_policy() {
         .expect_err("insert should be denied when owner_id does not match the session user");
     assert_client_policy_denied(err, "documents", Operation::Insert);
 }
+
+/// Verifies that permissive local runtimes allow direct writes to tables with
+/// no loaded permission bundle or explicit row policies.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_write_without_policy()
@@ -77,6 +84,8 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
     );
 }
 
+/// Verifies that an enforcing local runtime with an empty loaded permissions
+/// bundle denies writes that lack an explicit INSERT policy.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
@@ -91,6 +100,8 @@ async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_expli
     assert_client_policy_denied(err, "notes", Operation::Insert);
 }
 
+/// Verifies that one local client can evaluate the same schema under different
+/// sessions, showing each user only their own inserted rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn rebac_two_clients_different_sessions() {
@@ -160,6 +171,8 @@ async fn rebac_two_clients_different_sessions() {
     );
 }
 
+/// Verifies that INSERT policies using a NULL literal distinguish explicit NULL
+/// values from non-null values.
 #[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
