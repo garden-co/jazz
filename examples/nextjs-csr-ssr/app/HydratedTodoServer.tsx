@@ -3,9 +3,10 @@ import { app } from "../schema";
 import { db, createServerSnapshot } from "@/lib/jazz-server";
 import HydratedTodoClient from "./HydratedTodoClient";
 
-// Use `JazzContext.forSession(session)` to get a prefetch which runs as the
-// client to pre-seed data scoped for the user. Be *extremely* cautious to
-// avoid caching private data.
+// This prefetches with the full-access `db` because the todos are shared. For
+// per-user data, prefetch with `dbForSession(session)` instead so the snapshot
+// only carries rows that viewer is allowed to read — never serialise private
+// data into the page's HTML.
 export default async function HydratedTodoServer() {
   const builder = createServerSnapshot();
   await builder.prefetch(db, app.todos);

@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import type { WasmSchemaInput } from "../drivers/schema-wire.js";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import {
@@ -38,17 +37,9 @@ export type JazzProviderProps = {
    * suspending on the live client.
    */
   ssr?: boolean;
-  schema?: WasmSchemaInput;
 };
 
-export function JazzProvider({
-  config,
-  fallback,
-  children,
-  onJWTExpired,
-  ssr,
-  schema,
-}: JazzProviderProps) {
+export function JazzProvider({ config, fallback, children, onJWTExpired, ssr }: JazzProviderProps) {
   return (
     <CoreJazzProvider
       config={config}
@@ -56,7 +47,6 @@ export function JazzProvider({
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
       ssr={ssr}
-      schema={schema}
     >
       {children}
     </CoreJazzProvider>

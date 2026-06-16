@@ -20,9 +20,9 @@ export default function HydratedTodoClient({ snapshot }: Props) {
   );
 }
 
-// The snapshot is co-located with its query: `useAll` seeds the rows for the
-// synchronous first paint and hydrates the store from the bundle, so there's no
-// cold-load flash when live sync connects.
+// The snapshot travels with its query: `useAll` seeds the rows for the first
+// render and fills the store from the bundle, so there's no flash when live sync
+// connects.
 function TodoList({ snapshot }: { snapshot: DehydratedSnapshot }) {
   const todos = useAll(app.todos, { snapshot }) ?? [];
   return (

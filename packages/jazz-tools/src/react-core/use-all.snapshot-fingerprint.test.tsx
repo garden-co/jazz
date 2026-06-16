@@ -12,9 +12,9 @@ import type { DehydratedSnapshot } from "../backend/ssr.js";
 
 type Todo = { id: string; title: string };
 
-// Two schemas with distinct fingerprints — the snapshot is sealed under one and
-// the client provider is told the other, modelling a client on a different build
-// than the server that produced the snapshot.
+// Two schemas with different fingerprints: the snapshot is sealed under one and
+// the client's query carries the other, so the client looks like it was built
+// against a different schema than the server.
 const CLIENT_SCHEMA: WasmSchema = {
   todos: {
     columns: [
@@ -33,10 +33,10 @@ const SERVER_SCHEMA: WasmSchema = {
   },
 };
 
-function makeQuery(): QueryBuilder<Todo> {
+function makeQuery(schema: WasmSchema): QueryBuilder<Todo> {
   return {
     _table: "todos",
-    _schema: {},
+    _schema: schema,
     _rowType: {} as Todo,
     _build() {
       return JSON.stringify({ table: "todos", conditions: [], includes: {}, orderBy: [] });
@@ -80,13 +80,12 @@ function TodoView({
   );
 }
 
-// A live client that never resolves holds the provider in its synchronous seed
-// phase, so what renders is exactly what the per-hook snapshot seeded.
+// A live client that never resolves keeps the provider in its seed phase, so
+// what renders is exactly what the snapshot seeded.
 const neverConnects = () => new Promise<never>(() => {});
 
 async function renderSeedPhase(opts: {
   appId: string;
-  clientSchema: WasmSchema;
   snapshot: DehydratedSnapshot;
   query: QueryBuilder<Todo>;
 }): Promise<void> {
@@ -96,7 +95,6 @@ async function renderSeedPhase(opts: {
         config={{ appId: opts.appId, serverUrl: "https://jazz.example.com" }}
         createJazzClient={neverConnects as never}
         ssr
-        schema={opts.clientSchema}
       >
         <TodoView query={opts.query} snapshot={opts.snapshot} />
       </JazzProvider>,
@@ -111,23 +109,13 @@ afterEach(() => {
 });
 
 describe("useAll seed — schema fingerprint guard", () => {
-  it("seeds the snapshot rows when the client schema matches the snapshot fingerprint", async () => {
-    const appId = "app-fp-match";
-    const query = makeQuery();
-    const snapshot = sealRows(appId, query, computeSchemaFingerprint(CLIENT_SCHEMA));
-
-    await renderSeedPhase({ appId, clientSchema: CLIENT_SCHEMA, snapshot, query });
-
-    expect(screen.queryByText("from-snapshot")).not.toBeNull();
-  });
-
-  it("discards the snapshot when the client schema differs from the snapshot fingerprint", async () => {
+  it("discards the snapshot when the query's schema differs from the snapshot fingerprint", async () => {
     const appId = "app-fp-mismatch";
-    const query = makeQuery();
+    const query = makeQuery(CLIENT_SCHEMA);
     const snapshot = sealRows(appId, query, computeSchemaFingerprint(SERVER_SCHEMA));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await renderSeedPhase({ appId, clientSchema: CLIENT_SCHEMA, snapshot, query });
+    await renderSeedPhase({ appId, snapshot, query });
 
     expect(screen.queryByText("from-snapshot")).toBeNull();
     expect(warn.mock.calls.some((c) => String(c[0]).includes("schemaFingerprint mismatch"))).toBe(

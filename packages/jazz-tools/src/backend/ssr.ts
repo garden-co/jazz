@@ -12,11 +12,10 @@ import { sealSnapshot, type RowEntry } from "./snapshot-envelope.js";
 declare const dehydratedSnapshotBrand: unique symbol;
 
 /**
- * Opaque, server-rendered query results. Get one from a snapshot builder's
- * `dehydrate()` and pass it straight to a Jazz provider's `snapshot` prop —
- * it crosses the server→client boundary as a plain JSON value. Treat it as a
- * black box: its internal representation is private and may change between
- * versions.
+ * Opaque, server-rendered query results from a snapshot builder's `dehydrate()`.
+ * Pass it to `useAll(query, { snapshot })` on the client; it crosses the
+ * server→client boundary as plain JSON. Treat it as a black box — the internal
+ * shape is private and may change.
  */
 export type DehydratedSnapshot = {
   readonly [dehydratedSnapshotBrand]: "DehydratedSnapshot";

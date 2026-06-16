@@ -7,11 +7,6 @@ import React, {
   type ReactNode,
 } from "react";
 import type { DehydratedSnapshot } from "../backend/ssr.js";
-import {
-  computeSchemaFingerprint,
-  resolveWasmSchema,
-  type WasmSchemaInput,
-} from "../drivers/schema-wire.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import {
   acquireClient as registryAcquireClient,
@@ -27,8 +22,8 @@ import {
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import { createDbLessOrchestrator } from "../ssr/seed-orchestrator.js";
 
-// The provider needs the auth surface plus the {@link DbLike} surface
-// (subscribeAll / applyQueryBundle) so it can attach the live db to its own
+// What the provider needs from the db: its auth methods, plus the DbLike methods
+// (subscribeAll / applyQueryBundle) it uses to attach the live db to the
 // orchestrator once the client connects.
 type CoreJazzDb = DbLike & {
   getAuthState(): AuthState;
@@ -71,23 +66,16 @@ export type JazzProviderProps = {
    * snapshot data lives at the hook call site, not here.
    */
   ssr?: boolean;
-  schema?: WasmSchemaInput;
 };
 
 type JazzContextValue = {
-  // `client` is null only during the synchronous seed phase, before the live
-  // client has connected. `manager` is a single stable orchestrator (db-less at
-  // first, then the live db attaches to it — identity never changes).
-  // `clientPromise` lets hooks that need the live client suspend until it resolves.
+  // `client` is null only during the seed phase, before the live client
+  // connects. `manager` is one orchestrator that never changes: it starts with no
+  // db, then the live db attaches to it. `clientPromise` lets hooks that need the
+  // live client suspend until it resolves.
   client: CoreJazzClient | null;
   manager: SubscriptionsOrchestrator;
   clientPromise: Promise<CoreJazzClient>;
-  // The client's own schema fingerprint, computed from the provider's `schema`
-  // prop (undefined when none was given). A per-hook seed compares it against
-  // the snapshot's fingerprint and discards on mismatch — a client on a
-  // different build than the server drops the snapshot rather than seeding rows
-  // its schema can't represent.
-  schemaFingerprint?: string;
 };
 
 const JazzContext = createContext<JazzContextValue | null>(null);
@@ -247,25 +235,23 @@ export function JazzClientProvider({
       client,
       manager: client.manager,
       clientPromise: Promise.resolve(clientPromise),
-      schemaFingerprint: expectedSchemaFingerprint,
     }),
-    [client, clientPromise, expectedSchemaFingerprint, authRev],
+    [client, clientPromise, authRev],
   );
 
   return <JazzContext.Provider value={value}>{children}</JazzContext.Provider>;
 }
 
 /**
- * Seed-phase provider for SSR. Renders synchronously — on the server and the
- * client's first render — from a single orchestrator that starts db-less,
- * without suspending on the async live client. The rows come from the per-hook
+ * The provider used when SSR is on. It renders straight away — on the server and
+ * on the client's first render — from one orchestrator that starts with no db,
+ * so it never waits on the async live client. The rows come from each
  * `useAll(query, { snapshot })`, which seeds this orchestrator before its first
- * lookup, so the SSR HTML already contains the data and matches the client's
- * first paint (no hydration re-render). Once the live client connects, its db is
- * *attached* to this same orchestrator — the queued sync bundle hydrates the
- * store and every entry re-subscribes to the live db — so the orchestrator
- * identity is stable across the transition (no swap) and live updates stream in
- * with no flash.
+ * read, so the server HTML already has the data and the client's first render
+ * matches it (no flash on hydration). When the live client connects, its db is
+ * attached to this same orchestrator: the queued sync bundle fills the store and
+ * every query re-subscribes to the live db. It's the same orchestrator
+ * throughout, so there's no swap and live updates just start flowing.
  */
 function SeededJazzClientProvider({
   client: clientPromise,
@@ -273,20 +259,18 @@ function SeededJazzClientProvider({
   appId,
   fallback,
   children,
-  schemaFingerprint,
 }: {
   client: Promise<CoreJazzClient> | CoreJazzClient;
   onJWTExpired?: JwtRefreshFn;
   appId: string;
-  schemaFingerprint?: string;
   fallback?: ReactNode;
   children: ReactNode;
 }) {
-  // One orchestrator for the whole transition: db-less at first, so the per-hook
-  // useAll(query, { snapshot }) seeds it for the synchronous first paint; the
-  // live db attaches to this same instance once connected. The provider never
-  // seeds — co-locating the snapshot with its query is the hook's job now; here
-  // we only need the appId so its keys match the live client's.
+  // One orchestrator for the whole transition. It starts with no db, so each
+  // useAll(query, { snapshot }) can seed it for the first render; the live db
+  // attaches to this same instance once connected. The provider never seeds —
+  // the snapshot travels with its query in the hook. We only need the appId here
+  // so the orchestrator's keys match the live client's.
   const [manager] = useState(() => createDbLessOrchestrator(appId));
 
   useEffect(() => {
@@ -317,16 +301,19 @@ function SeededJazzClientProvider({
     };
   }, [normalizedPromise]);
 
-  // Attach the live db to the seed orchestrator exactly once: set the session
-  // first so re-subscription runs under the right principal, then attachDb
-  // drains the queued bundle into the store and re-points every entry at the
-  // live db. Auth changes thereafter keep the orchestrator's session current.
-  const attachedRef = useRef(false);
+  // Attach the live db to the orchestrator on connect — and re-attach if the
+  // client changes. attachDb sets the session, drains the queued bundle, and
+  // re-subscribes every query against the live db, all in one pass.
   useEffect(() => {
-    if (!liveClient || attachedRef.current) return;
-    attachedRef.current = true;
-    manager.setSession(liveClient.session ?? null);
-    manager.attachDb(liveClient.db);
+    if (!liveClient) return;
+    manager.attachDb(liveClient.db, liveClient.session ?? null);
+  }, [liveClient, manager]);
+
+  // Keep the orchestrator's session in step with the live db's auth. Its own
+  // effect, so it re-subscribes whenever the client changes (and survives a
+  // remount) rather than being lost behind a one-shot guard.
+  useEffect(() => {
+    if (!liveClient) return;
     return liveClient.db.onAuthChanged((state) => {
       manager.setSession(state.session ?? null);
     });
@@ -339,9 +326,8 @@ function SeededJazzClientProvider({
       client: liveClient,
       manager,
       clientPromise: normalizedPromise,
-      schemaFingerprint,
     }),
-    [liveClient, manager, normalizedPromise, schemaFingerprint, authRev],
+    [liveClient, manager, normalizedPromise, authRev],
   );
 
   return (
@@ -364,12 +350,7 @@ export function JazzProvider({
   createJazzClient,
   onJWTExpired,
   ssr,
-  schema,
 }: JazzProviderProps) {
-  const expectedSchemaFingerprint = React.useMemo(
-    () => (schema ? computeSchemaFingerprint(resolveWasmSchema(schema)) : undefined),
-    [schema],
-  );
   // Stable per-provider identity; used as the Set key so the useState
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
@@ -401,7 +382,6 @@ export function JazzProvider({
         client={clientPromise}
         onJWTExpired={onJWTExpired}
         appId={config.appId}
-        schemaFingerprint={expectedSchemaFingerprint}
         fallback={fallback}
       >
         {children}
@@ -415,7 +395,6 @@ export function JazzProvider({
         client={clientPromise}
         onJWTExpired={onJWTExpired}
         expectedAppId={config.appId}
-        expectedSchemaFingerprint={expectedSchemaFingerprint}
       >
         {children}
       </JazzClientProvider>
@@ -437,30 +416,20 @@ export function useJazzClient(): CoreJazzClient {
 }
 
 /**
- * Get the active subscriptions orchestrator: the seeded read-only one during
- * the seed phase, the live one once connected. Never suspends, so reads can
- * render synchronously from the snapshot.
+ * The active subscriptions orchestrator: the seed-phase one before the client
+ * connects, the live one after. Never suspends, so reads can render straight
+ * from the snapshot.
  */
 export function useManager(): SubscriptionsOrchestrator {
   return useJazzContext().manager;
 }
 
 /**
- * The client's own schema fingerprint, if the provider was given a `schema`.
- * A per-hook seed compares it against a snapshot's fingerprint to discard
- * snapshots produced by a divergent build. Undefined when no `schema` was set,
- * in which case the seed runs unchecked (opt-in, as before).
- */
-export function useSchemaFingerprint(): string | undefined {
-  return useJazzContext().schemaFingerprint;
-}
-
-/**
- * Whether we're in the synchronous SSR seed phase — the live client has not
- * connected yet. True only under `<JazzProvider ssr>` before connect (and
- * throughout the server render, where no client ever connects); always false on
- * the CSR path, where the provider suspends until the client resolves. A
- * suspense hook uses this to avoid suspending on a query nothing can resolve yet.
+ * Whether we're in the SSR seed phase: the live client hasn't connected yet.
+ * True only under `<JazzProvider ssr>` before it connects (and for the whole
+ * server render, where no client ever connects); always false in a normal client
+ * app, where the provider waits for the client before rendering. A suspense hook
+ * uses this to avoid waiting on a query that can't be answered yet.
  */
 export function useIsSeedPhase(): boolean {
   return useJazzContext().client === null;

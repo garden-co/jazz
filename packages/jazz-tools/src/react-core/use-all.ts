@@ -1,9 +1,10 @@
 import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
 import type { DehydratedSnapshot } from "../backend/ssr.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import type { UseAllState } from "../subscriptions-orchestrator.js";
-import { useIsSeedPhase, useManager, useSchemaFingerprint } from "./provider.js";
+import { useIsSeedPhase, useManager } from "./provider.js";
 
 /** Options for {@link useAll}: ordinary query options plus an optional SSR snapshot. */
 type UseAllOptions = QueryOptions & {
@@ -26,8 +27,8 @@ type UseAllBaseOptions = {
 // its fallback meanwhile). Distinct from a pending real query, which suspends on
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
-// Stable empty result for a degraded seed-phase suspense read, so consumers
-// don't re-render on identity churn.
+// A shared empty array for a seed-phase suspense read, so the result keeps the
+// same identity and consumers don't re-render for nothing.
 const EMPTY_ROWS: never[] = [];
 
 function useAllBase<T extends { id: string }>(
@@ -36,31 +37,24 @@ function useAllBase<T extends { id: string }>(
   options?: UseAllBaseOptions,
 ): T[] | undefined {
   const { suspense = false, snapshot } = options ?? {};
-  // useManager() is seed-aware and never suspends: during the seed phase it is
-  // the read-only orchestrator seeded by the snapshot, so the first paint (on
-  // the server and on the client) renders the seeded rows synchronously instead
-  // of suspending on the live client.
   const manager = useManager();
-  // The client's own fingerprint (from the provider's `schema` prop): a snapshot
-  // sealed by a server on a different build is discarded rather than seeded.
-  const schemaFingerprint = useSchemaFingerprint();
   const seedPhase = useIsSeedPhase();
 
-  // Apply the co-located snapshot once, synchronously, before the first
-  // makeQueryKey lookup, so the first paint already reads the seeded rows. The
-  // orchestrator is stable across the seed→live transition (the live db attaches
-  // to it rather than the provider swapping orchestrators), so a single
-  // application suffices: the rows seed the cache entry for paint, and the queued
-  // bundle hydrates the store when the db attaches. principalId is null in the
-  // seed phase (no live session yet); the seed is display-only and the live
-  // subscription supersedes it. (StrictMode's double-invoke is guarded by the ref.)
+  // Seed once: the orchestrator is the same one across the seed→live transition
+  // (the live db attaches to it), so a single apply is enough. The seed is only
+  // for the first render; the live query supersedes it.
   const seeded = useRef(false);
-  if (snapshot && !seeded.current) {
+  if (snapshot && query && !seeded.current) {
     seeded.current = true;
     applySnapshot({
       manager,
       snapshot,
-      expected: { principalId: null, schemaFingerprint },
+      // The client's own fingerprint comes from the query's schema: a snapshot
+      // built against a different schema is skipped rather than seeded.
+      expected: {
+        principalId: null,
+        schemaFingerprint: computeSchemaFingerprint(query._schema),
+      },
     });
   }
 
@@ -70,12 +64,10 @@ function useAllBase<T extends { id: string }>(
   // `subscribe` callback below.
   const key = query ? manager.computeKey(query, queryOptions) : null;
 
-  // A suspense hook that ever renders in the seed phase (no live client yet —
-  // the whole server render, and the client's first paint) latches into a
-  // non-suspending mode for its lifetime: on the server nothing can resolve it,
-  // and on the client suspending would block the provider's connect. It returns
-  // empty until data arrives. CSR mounts (live client already present) never
-  // latch, so their suspense is unchanged.
+  // A suspense hook that renders in the seed phase (no live client yet) stops
+  // suspending for good and returns empty until data arrives — the server can't
+  // answer it, and suspending on the client would stall the connect. A normal
+  // client app has the live client from the start, so it never trips this.
   const noSuspend = useRef(false);
   if (suspense && seedPhase) {
     noSuspend.current = true;
@@ -156,20 +148,6 @@ function useAllBase<T extends { id: string }>(
 }
 
 /**
- * Read all matching rows and subscribe to changes that modify the query's results.
- *
- * Loading and error states are handled the React way: `undefined` means the
- * query has not resolved yet, and for error handling use {@link useAllSuspense}
- * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
- * capabilities idiomatically — Svelte's `QuerySubscription` via
- * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
- *
- * @param query - the database query (e.g. `app.todos.where({done: false})`)
- * @param options - query options, optionally including a server-rendered `snapshot`
- *
- * @returns the matching rows, or `undefined` if the query is not yet executed
- */
-/**
  * Split a `useAll` options bag into the snapshot and the remaining query
  * options, preserving `undefined` when no query options are left — so the cache
  * key matches a caller that passed no options at all (the snapshot must never
@@ -186,6 +164,20 @@ function splitSnapshot(options?: UseAllOptions): {
   return { queryOptions: Object.keys(rest).length > 0 ? rest : undefined, snapshot };
 }
 
+/**
+ * Read all matching rows and subscribe to changes that modify the query's results.
+ *
+ * Loading and error states are handled the React way: `undefined` means the
+ * query has not resolved yet, and for error handling use {@link useAllSuspense}
+ * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
+ * capabilities idiomatically — Svelte's `QuerySubscription` via
+ * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
+ *
+ * @param query - the database query (e.g. `app.todos.where({done: false})`)
+ * @param options - query options, optionally including a server-rendered `snapshot`
+ *
+ * @returns the matching rows, or `undefined` if the query is not yet executed
+ */
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: UseAllOptions,
