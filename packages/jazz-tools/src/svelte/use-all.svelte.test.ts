@@ -228,4 +228,28 @@ describe("svelte/QuerySubscription", () => {
 
     cleanup();
   });
+
+  it("reads a fulfilled entry synchronously, before the effect subscribes", async () => {
+    const query = makeQuery("inbox");
+    const seeded = [{ id: "1", title: "seeded" }];
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: seeded },
+      subscribe: mocks.subscribe,
+    } as any);
+
+    let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      ref = new QuerySubscription(query);
+    });
+
+    // Synchronous: the SSR render (no $effect) already has the rows, unsubscribed.
+    expect(ref.current).toEqual(seeded);
+    expect(ref.loading).toBe(false);
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    await settle();
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
 });
