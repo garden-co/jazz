@@ -2,7 +2,8 @@
 
 use jazz_tools::row_input;
 use jazz_tools::{
-    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
+    TableSchema, Value,
 };
 
 fn todo_schema() -> Schema {
@@ -90,4 +91,27 @@ async fn transaction_can_be_rolled_back() {
         client.commit_transaction(batch_id).is_err(),
         "rolled back transaction should reject commit"
     );
+}
+
+#[tokio::test]
+async fn wait_for_batch_errors_for_unattainable_durability_tier() {
+    let client = JazzClient::test_client(todo_schema()).await;
+    let (_, _, batch_id) = client
+        .insert(
+            "todos",
+            row_input!("title" => "local only", "completed" => false),
+        )
+        .expect("insert todo");
+
+    assert!(
+        client
+            .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+            .await
+            .is_err(),
+        "serverless test client cannot reach GlobalServer durability"
+    );
+    client
+        .wait_for_batch(batch_id, DurabilityTier::Local)
+        .await
+        .expect("local durability should be reachable");
 }

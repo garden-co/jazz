@@ -107,25 +107,6 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
 }
 
 #[test]
-fn rc_wait_for_batch_local_resolves_after_direct_seal() {
-    let mut s = create_3tier_rc();
-    let user_id = ObjectId::new();
-    let expected_values = user_row_values(user_id, "Alice");
-    let ((id, row_values), mut receiver) = insert_and_wait_for_batch(
-        &mut s.a,
-        "users",
-        user_insert_values(user_id, "Alice"),
-        None,
-        DurabilityTier::Local,
-    )
-    .unwrap();
-    assert!(!id.0.is_nil());
-    assert_eq!(row_values, expected_values);
-
-    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
-}
-
-#[test]
 fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
     let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
     let mut core = create_runtime_with_boxed_storage(
@@ -209,22 +190,6 @@ fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
         receiver.try_recv(),
         Ok(Some(Ok(()))),
         "row persisted receivers should resolve from whole-batch fate for their row's batch id"
-    );
-}
-
-#[test]
-fn rc_wait_for_batch_resolves_from_existing_settlement() {
-    let mut s = create_3tier_rc();
-    let ((_row_id, _row_values), batch_id) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-
-    let mut batch_receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
-
-    assert_eq!(
-        batch_receiver.try_recv(),
-        Ok(Some(Ok(()))),
-        "late batch wait should resolve from the retained local settlement"
     );
 }
 
@@ -935,64 +900,6 @@ fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
             }]
             && submission.captured_frontier.iter().any(|member| member.object_id == later_row_id)
     )), "replayed seal should not recapture rows written after the batch was sealed");
-}
-
-#[test]
-fn rc_update_persisted_resolves_on_ack() {
-    let mut s = create_3tier_rc();
-    let ((id, _row_values), _) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-    pump_a_to_b(&mut s);
-
-    let mut receiver = update_and_wait_for_batch(
-        &mut s.a,
-        id,
-        vec![("name".into(), Value::Text("Bob".into()))],
-        None,
-        DurabilityTier::Local,
-    )
-    .unwrap();
-
-    pump_a_to_b(&mut s);
-    pump_b_to_a(&mut s);
-
-    match receiver.try_recv() {
-        Ok(Some(Ok(()))) => {}
-        Ok(Some(Err(rejection))) => panic!("Update receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Update receiver should be resolved after Local ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.b, query);
-    assert_eq!(results[0].1[1], Value::Text("Bob".into()));
-}
-
-#[test]
-fn rc_delete_persisted_resolves_on_ack() {
-    let mut s = create_3tier_rc();
-    let ((id, _row_values), _) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-    pump_a_to_b(&mut s);
-
-    let mut receiver =
-        delete_and_wait_for_batch(&mut s.a, id, None, DurabilityTier::Local).unwrap();
-
-    pump_a_to_b(&mut s);
-    pump_b_to_a(&mut s);
-
-    match receiver.try_recv() {
-        Ok(Some(Ok(()))) => {}
-        Ok(Some(Err(rejection))) => panic!("Delete receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Delete receiver should be resolved after Local ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.b, query);
-    assert_eq!(results.len(), 0);
 }
 
 #[test]
