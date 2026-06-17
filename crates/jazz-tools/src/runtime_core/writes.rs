@@ -1115,6 +1115,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .map_err(|err| {
                     RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
                 })?;
+            self.storage
+                .upsert_local_batch_record(&record)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("persist local batch record: {err}"))
+                })?;
         }
         self.local_batch_record_cache.insert(batch_id, record);
         self.schema_manager
