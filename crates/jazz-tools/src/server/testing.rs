@@ -348,6 +348,14 @@ impl TestingServer {
         self.hosted.state.clone()
     }
 
+    /// Temporarily buffer server-to-client sync messages for the given client.
+    pub fn block_messages_to(&self, client_id: ClientId) -> super::BlockedMessagesToClient {
+        self.hosted
+            .state
+            .connection_event_hub
+            .block_messages_to(client_id)
+    }
+
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
     pub async fn set_client_ttl(&self, ttl: Duration) {
         self.hosted.state.set_client_ttl(ttl).await;

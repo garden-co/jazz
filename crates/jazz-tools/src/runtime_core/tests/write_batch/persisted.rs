@@ -698,59 +698,6 @@ fn rc_insert_persisted_resolves_from_batch_fate_without_row_state_changed() {
 }
 
 #[test]
-fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
-    // alice -> worker
-    //   write reaches worker, but the live settlement never comes back
-    //   then alice reconnects and asks for the batch fate explicitly
-    let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
-        &mut s.a,
-        "users",
-        user_insert_values(ObjectId::new(), "Alice"),
-        None,
-        DurabilityTier::EdgeServer,
-    )
-    .unwrap();
-
-    let branch_name = s.a.schema_manager().branch_name();
-    let visible_row =
-        s.a.storage()
-            .load_visible_region_row("users", branch_name.as_str(), row_id)
-            .unwrap()
-            .expect("insert should create one visible row");
-    let batch_id = visible_row.batch_id;
-
-    pump_a_to_b(&mut s);
-
-    assert_eq!(
-        receiver.try_recv(),
-        Ok(None),
-        "without the return settlement, the batch wait should still be pending"
-    );
-
-    s.a.remove_server(s.b_server_for_a);
-    s.a.add_server(s.b_server_for_a);
-
-    pump_3tier(&mut s);
-
-    assert_eq!(
-        receiver.try_recv(),
-        Ok(Some(Ok(()))),
-        "reconnect should reconcile the still-pending batch from durable server truth"
-    );
-
-    assert_eq!(
-        s.a.storage()
-            .load_authoritative_batch_fate(batch_id)
-            .unwrap(),
-        Some(crate::batch_fate::BatchFate::DurableDirect {
-            batch_id,
-            confirmed_tier: DurabilityTier::EdgeServer,
-        })
-    );
-}
-
-#[test]
 fn rc_add_server_requests_pending_batch_fate_reconciliation() {
     let mut s = create_3tier_rc();
     let write_context = WriteContext {

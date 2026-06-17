@@ -559,6 +559,10 @@ impl JazzClient {
 
 #[cfg(feature = "test-utils")]
 impl JazzClient {
+    pub fn client_id(&self) -> Option<ClientId> {
+        self.runtime.transport_client_id()
+    }
+
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
         let context = crate::AppContext::test(schema);
         crate::JazzClient::connect(context)
