@@ -31,7 +31,7 @@ By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a differe
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx">
@@ -46,6 +46,11 @@ By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a differe
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/BranchExample.svelte#branch-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/BranchExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
