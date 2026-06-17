@@ -1000,6 +1000,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("load rejected batch ack: {err}")))?
         {
             self.acknowledged_rejected_batches.insert(batch_id);
+            if self
+                .storage
+                .load_local_batch_record(batch_id)
+                .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+                .is_some()
+            {
+                self.storage
+                    .delete_local_batch_record(batch_id)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("delete local batch record: {err}"))
+                    })?;
+                self.mark_storage_write_pending_flush();
+            }
             return Ok(false);
         }
         if !matches!(
@@ -1017,6 +1030,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| {
                 RuntimeError::WriteError(format!("persist rejected batch ack: {err}"))
             })?;
+        self.storage
+            .delete_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.acknowledged_rejected_batches.insert(batch_id);
         self.mark_storage_write_pending_flush();
         Ok(true)
