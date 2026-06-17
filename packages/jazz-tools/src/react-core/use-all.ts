@@ -41,8 +41,12 @@ function useAllBase<T extends { id: string }>(
   const seedPhase = useIsSeedPhase();
 
   // Seed once: the orchestrator is the same one across the seed→live transition
-  // (the live db attaches to it), so a single apply is enough. The seed is only
-  // for the first render; the live query supersedes it.
+  // (the live db attaches to it and reconciles without churn), so a single apply
+  // is enough and the seeded rows persist through attach rather than being
+  // blanked. principalId is null in the seed phase — there is no live session yet
+  // — so seeding deliberately trusts the server to have scoped the snapshot to the
+  // right viewer; the cross-principal guard only fires once a live principal is
+  // known.
   const seeded = useRef(false);
   if (snapshot && query && !seeded.current) {
     seeded.current = true;
