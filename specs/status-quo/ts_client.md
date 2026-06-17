@@ -99,6 +99,8 @@ The current `Db` API centers around a small set of predictable operations:
 - `beginBatch()`
 - `beginTransaction()`
 
+`one(...)` sets the root query limit to one before sending the query to the runtime, regardless of any limit already present on the query builder.
+
 Simple write calls are one-member direct batches under the hood. They seal immediately and return
 handles that callers can wait on for a specific durability tier.
 
