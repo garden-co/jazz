@@ -79,7 +79,7 @@ Both APIs use the same graph engine.
 
 ### One-shot query
 
-`db.all(...)` and `db.one(...)` compile a query, settle it, return the first full snapshot, and tear the subscription back down.
+`db.all(...)` compiles the query as supplied, settles it, returns the first full snapshot, and tears the subscription back down. `db.one(...)` follows the same path after setting the root query limit to one, then returns the first row from that snapshot or `null`.
 
 ### Live subscription
 

@@ -256,6 +256,28 @@ function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
 }
 
+function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+  return {
+    get _table() {
+      return query._table;
+    },
+    get _schema() {
+      return query._schema;
+    },
+    get _columnTransforms() {
+      return query._columnTransforms;
+    },
+    get _rowType() {
+      return query._rowType;
+    },
+    _build() {
+      const builtQuery = JSON.parse(query._build()) as Record<string, unknown>;
+      builtQuery.limit = 1;
+      return JSON.stringify(builtQuery);
+    },
+  };
+}
+
 function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
   return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
 }
@@ -765,12 +787,12 @@ abstract class DbBatchHandleBase {
   }
 
   /**
-   * Execute a query and return the first matching row, or null.
+   * Execute a query with a limit of one and return the first matching row, or null.
    *
    * Read data is scoped to this batch.
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
-    const results = await this.all(query, options);
+    const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
   }
 }
@@ -2489,14 +2511,14 @@ export class Db {
   }
 
   /**
-   * Execute a query and return the first matching row, or null.
+   * Execute a query with a limit of one and return the first matching row, or null.
    *
    * @param query QueryBuilder instance
    * @param options Optional read durability options
    * @returns First matching typed object, or null if none found
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
-    const results = await this.all(query, options);
+    const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
   }
 
