@@ -245,7 +245,7 @@ export class SubscriptionsOrchestrator {
     }
     this.pendingBundles.length = 0;
     for (const entry of this.entries.values()) {
-      this.resubscribeEntry(entry);
+      this.reattachEntry(entry);
     }
   }
 
@@ -527,6 +527,22 @@ export class SubscriptionsOrchestrator {
       next.reject(error);
     };
     entry.state = { status: "pending", data: undefined, promise: next, error: null };
+  }
+
+  /**
+   * Re-point an entry's subscription at the freshly-attached live db without
+   * resetting its state. Used by {@link attachDb}: queued bundles are drained
+   * into the live store first, so a seeded entry's rows are already present and
+   * the live subscription's first delivery reconciles without churn. Resetting
+   * to `pending` here (as a session change does) would blank the UI for a frame
+   * — the flash this whole seed path exists to avoid.
+   */
+  private reattachEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    if (entry.unsubscribe) {
+      entry.unsubscribe();
+      entry.unsubscribe = undefined;
+    }
+    this.subscribeEntry(entry);
   }
 
   private resubscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
