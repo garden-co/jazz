@@ -863,4 +863,32 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     expect(applied).toEqual([bundle]);
     await manager.shutdown();
   });
+
+  it("SO-U32 attachDb keeps a seeded fulfilled entry without resetting it", async () => {
+    const noop = () => {};
+    type Db = ConstructorParameters<typeof SubscriptionsOrchestrator>[1];
+    const seedDb = { subscribeAll: () => noop } as Db;
+    const manager = new SubscriptionsOrchestrator({ appId: "attach-seeded" }, seedDb);
+
+    // A snapshot-seeded entry is fulfilled during the db-less seed phase.
+    const seeded = [makeTodo("1", "seed")];
+    const key = manager.makeQueryKey(makeQuery(), undefined, seeded);
+    const entry = manager.getCacheEntry<Todo>(key);
+    const onReset = vi.fn();
+    entry.subscribe({ onReset });
+    expect(entry.status).toBe("fulfilled");
+
+    // The bundle is drained into the live store before re-subscription, so the
+    // seeded rows are valid — the entry must not flash back to pending.
+    const liveDb = {
+      subscribeAll: () => noop,
+      applyQueryBundle: () => {},
+    } as Db;
+    manager.attachDb(liveDb);
+
+    expect(entry.status).toBe("fulfilled");
+    expect(onReset).not.toHaveBeenCalled();
+
+    await manager.shutdown();
+  });
 });
