@@ -53,6 +53,12 @@ pub(crate) enum RawLeafUpsertResult {
     NeedSplit,
 }
 
+pub(crate) struct RawLeafSpan<'a> {
+    pub(crate) first_key: &'a [u8],
+    pub(crate) last_key: &'a [u8],
+    pub(crate) next_page_id: Option<PageId>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RawLeafDeleteResult {
     NotFound,
@@ -96,8 +102,7 @@ pub(crate) fn freelist_ids_per_page(page_size: usize) -> Result<usize, BTreeErro
 }
 
 pub(crate) fn page_fits(page: &Page, page_size: usize) -> Result<bool, BTreeError> {
-    let encoded = encode_fields(page)?;
-    Ok(encoded.payload.len() <= page_payload_capacity(page_size)?)
+    Ok(encoded_payload_len(page)? <= page_payload_capacity(page_size)?)
 }
 
 pub(crate) fn encode_page(page: &Page, page_size: usize) -> Result<Vec<u8>, BTreeError> {
@@ -332,26 +337,36 @@ pub(crate) fn raw_leaf_find_value<'a>(
     Ok(None)
 }
 
-/// True when `raw` is a non-empty leaf whose closed key span
-/// [first_key, last_key] contains `key`. In a B+tree that makes it the
-/// unique leaf responsible for `key`, so callers may skip the descent.
+/// True when `raw` is a non-empty leaf whose key span contains `key`. The
+/// rightmost leaf has no successor and owns [first_key, +inf), so keys past
+/// its last entry still belong to it.
 pub(crate) fn raw_leaf_covers_key(
     raw: &[u8],
     expected_page_size: usize,
     key: &[u8],
 ) -> Result<bool, BTreeError> {
+    let Some(span) = raw_leaf_span(raw, expected_page_size)? else {
+        return Ok(false);
+    };
+    Ok(span.first_key <= key && (key <= span.last_key || span.next_page_id.is_none()))
+}
+
+pub(crate) fn raw_leaf_span(
+    raw: &[u8],
+    expected_page_size: usize,
+) -> Result<Option<RawLeafSpan<'_>>, BTreeError> {
     let header = parse_header(raw, expected_page_size, false)?;
     if header.kind != PageKind::Leaf {
-        return Ok(false);
+        return Ok(None);
     }
     let entry_count = header.item_count as usize;
     if entry_count == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let payload = header.payload;
     let slots_bytes = leaf_slots_bytes(entry_count)?;
     if payload.len() < slots_bytes {
-        return Ok(false);
+        return Ok(None);
     }
     let slots = &payload[..slots_bytes];
 
@@ -372,7 +387,11 @@ pub(crate) fn raw_leaf_covers_key(
         ));
     }
 
-    Ok(&payload[first_off..first_end] <= key && key <= &payload[last_off..last_end])
+    Ok(Some(RawLeafSpan {
+        first_key: &payload[first_off..first_end],
+        last_key: &payload[last_off..last_end],
+        next_page_id: header.next_page_id,
+    }))
 }
 
 /// Scan a leaf page for key-value pairs in the range [start, end).
@@ -925,6 +944,60 @@ fn encode_fields(page: &Page) -> Result<EncodedFields, BTreeError> {
             })
         }
     }
+}
+
+/// Encoded payload size of `page`, kept in lockstep with `encode_fields`
+/// so fit checks don't have to build the payload.
+fn encoded_payload_len(page: &Page) -> Result<usize, BTreeError> {
+    let len = match page {
+        Page::Internal { keys, children } => {
+            if children.len() != keys.len() + 1 {
+                return Err(BTreeError::Corrupt(format!(
+                    "internal children/key mismatch: children={}, keys={}",
+                    children.len(),
+                    keys.len()
+                )));
+            }
+            let mut len = INTERNAL_LEFT_CHILD_BYTES
+                .checked_add(keys.len().checked_mul(INTERNAL_SLOT_BYTES).ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal slot bytes overflow".to_string())
+                })?)
+                .ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal data base overflow".to_string())
+                })?;
+            for key in keys {
+                len = len.checked_add(key.len()).ok_or_else(|| {
+                    BTreeError::InvalidOptions("internal payload size overflow".to_string())
+                })?;
+            }
+            len
+        }
+        Page::Leaf { entries, .. } => {
+            let mut len = entries.len().checked_mul(LEAF_SLOT_BYTES).ok_or_else(|| {
+                BTreeError::InvalidOptions("leaf slot bytes overflow".to_string())
+            })?;
+            for (key, value) in entries {
+                let cell_len = match value {
+                    ValueCell::Inline(bytes) => bytes.len().checked_add(5).ok_or_else(|| {
+                        BTreeError::InvalidOptions("inline value too large".to_string())
+                    })?,
+                    ValueCell::Overflow { .. } => 13,
+                };
+                len = len
+                    .checked_add(key.len())
+                    .and_then(|sum| sum.checked_add(cell_len))
+                    .ok_or_else(|| {
+                        BTreeError::InvalidOptions("leaf payload size overflow".to_string())
+                    })?;
+            }
+            len
+        }
+        Page::Overflow { data, .. } => data.len(),
+        Page::Freelist { ids, .. } => ids.len().checked_mul(8).ok_or_else(|| {
+            BTreeError::InvalidOptions("freelist payload size overflow".to_string())
+        })?,
+    };
+    Ok(len)
 }
 
 struct RawPageHeader<'a> {
@@ -1608,6 +1681,48 @@ mod tests {
     }
 
     #[test]
+    fn encoded_payload_len_matches_encode_fields() {
+        let pages = vec![
+            Page::Internal {
+                keys: (0..40)
+                    .map(|i| format!("key{:03}", i).into_bytes())
+                    .collect(),
+                children: (0..41).map(|i| 100 + i as PageId).collect(),
+            },
+            Page::Leaf {
+                entries: (0..30)
+                    .map(|i| {
+                        let value = if i % 4 == 0 {
+                            ValueCell::Overflow {
+                                head_page_id: 500 + i as PageId,
+                                total_len: 9000,
+                            }
+                        } else {
+                            ValueCell::Inline(vec![7u8; 10 + i])
+                        };
+                        (format!("k{:04}", i).into_bytes(), value)
+                    })
+                    .collect(),
+                next: Some(9),
+            },
+            Page::Overflow {
+                data: vec![1u8; 777],
+                next: None,
+            },
+            Page::Freelist {
+                ids: vec![3, 5, 8, 13],
+                next: Some(2),
+            },
+        ];
+        for page in &pages {
+            assert_eq!(
+                encoded_payload_len(page).expect("payload len"),
+                encode_fields(page).expect("encode").payload.len(),
+            );
+        }
+    }
+
+    #[test]
     fn leaf_page_round_trip() {
         let page = Page::Leaf {
             entries: vec![
@@ -1720,6 +1835,40 @@ mod tests {
             raw_leaf_upsert_in_place(&mut raw, 128, b"b", &ValueCell::Inline(vec![2u8; 80]))
                 .expect("upsert");
         assert_eq!(result, RawLeafUpsertResult::NeedSplit);
+    }
+
+    #[test]
+    fn tail_leaf_covers_keys_past_its_last_entry() {
+        let entries = vec![
+            (b"k1".to_vec(), ValueCell::Inline(b"1".to_vec())),
+            (b"k5".to_vec(), ValueCell::Inline(b"5".to_vec())),
+        ];
+        let tail = encode_page(
+            &Page::Leaf {
+                entries: entries.clone(),
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode tail leaf");
+        let chained = encode_page(
+            &Page::Leaf {
+                entries,
+                next: Some(7),
+            },
+            4096,
+        )
+        .expect("encode chained leaf");
+
+        // Inside the span: both cover.
+        assert!(raw_leaf_covers_key(&tail, 4096, b"k3").expect("covers"));
+        assert!(raw_leaf_covers_key(&chained, 4096, b"k3").expect("covers"));
+        // Past the last entry: only the tail owns [first, +inf).
+        assert!(raw_leaf_covers_key(&tail, 4096, b"k9").expect("covers"));
+        assert!(!raw_leaf_covers_key(&chained, 4096, b"k9").expect("covers"));
+        // Before the first entry: neither covers (an earlier leaf may own it).
+        assert!(!raw_leaf_covers_key(&tail, 4096, b"a").expect("covers"));
+        assert!(!raw_leaf_covers_key(&chained, 4096, b"a").expect("covers"));
     }
 
     #[test]
