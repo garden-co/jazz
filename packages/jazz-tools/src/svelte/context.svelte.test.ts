@@ -42,14 +42,30 @@ describe("context with real $state", () => {
     expect(() => getDb()).toThrow("Jazz database is not yet initialised");
   });
 
-  it("getSession returns null initially, then reflects updates", () => {
+  it("getSession returns a live handle whose .current tracks the current session", () => {
     const ctx = initJazzContext();
-    expect(getSession()).toBe(null);
+    const handle = getSession();
+
+    expect(handle.current).toBe(null);
 
     const session = { user_id: "alice", claims: { role: "admin" } };
     ctx.session = session;
 
-    expect(getSession()).toStrictEqual(session);
+    expect(handle.current).toStrictEqual(session);
+  });
+
+  it("getSession handle tracks repeated auth changes without re-calling getSession", () => {
+    const ctx = initJazzContext();
+    const handle = getSession();
+
+    expect(handle.current).toBeNull();
+
+    const alice = { user_id: "alice", claims: { role: "admin" } };
+    ctx.session = alice;
+    expect(handle.current).toStrictEqual(alice);
+
+    ctx.session = null;
+    expect(handle.current).toBeNull();
   });
 
   it("reading back a set value returns the proxy-wrapped equivalent", () => {

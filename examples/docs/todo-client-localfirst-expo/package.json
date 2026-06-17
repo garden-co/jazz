@@ -8,8 +8,9 @@
     "start": "expo start --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "build": "jazz-tools validate && tsc --noEmit",
-    "test": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "build": "jazz-tools validate && pnpm run check",
+    "test": "pnpm run check",
     "prebuild": "expo prebuild --clean",
     "verify:expo:android": "expo prebuild --platform android --clean --no-install --non-interactive",
     "verify:expo:ios": "expo prebuild --platform ios --clean --no-install --non-interactive"

@@ -35,16 +35,14 @@ fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Val
 async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
     client
         .for_session(Session::new(user_id))
-        .create("notes", note_input(title))
-        .await
+        .insert("notes", note_input(title))
         .expect("create note with session-authored provenance")
         .0
 }
 
 async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create("notes", note_input(title))
-        .await
+        .insert("notes", note_input(title))
         .expect("create note without attribution")
         .0
 }
@@ -64,6 +62,7 @@ async fn create_note_with_backend_attribution(
     )
     .expect("build backend attributed schema manager");
     let mut runtime = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
+    runtime.set_buffer_outbox_without_sync_sender(true);
     let client_id = ClientId::new();
     runtime.add_server(ServerId::default());
 
@@ -195,16 +194,12 @@ async fn created_by_policies_scope_crud_to_creators() {
 
     let denied_update = bob
         .for_session(Session::new("bob"))
-        .update(alice_note, vec![("title".to_string(), "bob edit".into())])
-        .await;
+        .update(alice_note, vec![("title".to_string(), "bob edit".into())]);
     assert!(
         denied_update.is_err(),
         "bob should not be able to update alice's row under $createdBy policy"
     );
-    let denied_delete = bob
-        .for_session(Session::new("bob"))
-        .delete(alice_note)
-        .await;
+    let denied_delete = bob.for_session(Session::new("bob")).delete(alice_note);
     assert!(
         denied_delete.is_err(),
         "bob should not be able to delete alice's row under $createdBy policy"
@@ -499,8 +494,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
     // `$updatedBy` handoff on the later update.
     let note_id = alice
         .for_session(Session::new("alice"))
-        .create("notes", row_input!("title" => "draft", "shared" => true))
-        .await
+        .insert("notes", row_input!("title" => "draft", "shared" => true))
         .expect("alice creates shared draft")
         .0;
 
@@ -542,7 +536,6 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
                 ("shared".to_string(), false.into()),
             ],
         )
-        .await
         .expect("bob becomes latest updater");
 
     let alice_rows = wait_for_rows(

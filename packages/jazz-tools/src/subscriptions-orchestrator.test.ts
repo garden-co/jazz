@@ -575,4 +575,111 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it("SO-U25 computeKey is pure and does not register the query definition", async () => {
+    const harness = createUnitHarness("app-so-u25");
+    try {
+      const query = makeQuery();
+      const key = harness.manager.computeKey(query);
+
+      expect(key).toBe(harness.manager.makeQueryKey(query));
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U25b computeKey alone leaves the key unregistered", async () => {
+    const harness = createUnitHarness("app-so-u25b");
+    try {
+      const key = harness.manager.computeKey(makeQuery());
+      expect(() => harness.manager.getCacheEntry<Todo>(key)).toThrow(/Unknown query key/);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U26 peekState reads state without opening a subscription", async () => {
+    const harness = createUnitHarness("app-so-u26");
+    try {
+      const key = harness.manager.makeQueryKey(makeQuery());
+
+      const first = harness.manager.peekState<Todo>(key);
+      const second = harness.manager.peekState<Todo>(key);
+      expect(first.status).toBe("pending");
+      expect(first).toBe(second);
+      expect(harness.calls).toHaveLength(0);
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      harness.emit(0, makeDelta([makeTodo("1")]));
+      expect(harness.manager.peekState<Todo>(key)).toBe(entry.state);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U27 peekState returns a stable fulfilled snapshot when seeded", async () => {
+    const harness = createUnitHarness("app-so-u27");
+    try {
+      const snapshot = [makeTodo("1", "seed")];
+      const key = harness.manager.makeQueryKey(makeQuery(), undefined, snapshot);
+
+      const first = harness.manager.peekState<Todo>(key);
+      const second = harness.manager.peekState<Todo>(key);
+      expect(first.status).toBe("fulfilled");
+      expect(first.status === "fulfilled" ? first.data : undefined).toEqual(snapshot);
+      expect(first).toBe(second);
+      expect(harness.calls).toHaveLength(0);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U28 destroying a seeded entry drops its memoised peekState snapshot", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness("app-so-u28");
+    try {
+      const snapshot = [makeTodo("1", "seed")];
+      const key = harness.manager.makeQueryKey(makeQuery(), undefined, snapshot);
+      expect(harness.manager.peekState<Todo>(key).status).toBe("fulfilled");
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      const unsubscribe = entry.subscribe({});
+      unsubscribe();
+      vi.advanceTimersByTime(30_000);
+
+      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
+    const sessionA: Session = { user_id: "a", claims: { role: "reader" }, authMode: "external" };
+    const sessionB: Session = { user_id: "b", claims: { role: "reader" }, authMode: "external" };
+    const harness = createUnitHarness("app-so-u29", sessionA);
+
+    try {
+      const { entry } = harness.makeEntry();
+      const onfulfilled = vi.fn();
+      const onReset = vi.fn();
+      entry.subscribe({ onfulfilled, onReset });
+
+      harness.emit(0, makeDelta([makeTodo("1", "from-A")]));
+      expect(entry.status).toBe("fulfilled");
+      onfulfilled.mockClear();
+
+      harness.manager.setSession(sessionB);
+
+      expect(entry.status).toBe("pending");
+      expect(onReset).toHaveBeenCalledTimes(1);
+      expect(harness.calls).toHaveLength(2);
+
+      harness.emit(1, makeDelta([makeTodo("2", "from-B")]));
+      expect(entry.status).toBe("fulfilled");
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("2", "from-B")]);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
 });

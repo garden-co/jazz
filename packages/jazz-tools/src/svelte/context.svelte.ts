@@ -45,8 +45,15 @@ export function getDb(): Db {
 }
 
 /**
- * Get the current Jazz {@link Session}, including the user's id, claims and auth mode.
+ * Subscribe to the current Jazz {@link Session}.
+ * The returned handle's `.current` property always reflects the latest session,
+ * updating automatically as the user logs in or out.
  */
-export function getSession(): Session | null {
-  return getJazzContext().session;
+export function getSession(): { readonly current: Session | null } {
+  const ctx = getJazzContext();
+  return {
+    get current() {
+      return ctx.session;
+    },
+  };
 }

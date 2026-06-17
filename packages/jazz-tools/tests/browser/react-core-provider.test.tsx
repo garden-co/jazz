@@ -12,6 +12,7 @@ import {
   type CacheEntryHandle,
   type QueryEntryCallbacks,
   type SubscriptionsOrchestrator,
+  type UseAllState,
 } from "../../src/subscriptions-orchestrator.js";
 import type { AuthState } from "../../src/runtime/auth-state.js";
 import type { Session } from "../../src/runtime/context.js";
@@ -30,6 +31,15 @@ type ControlledEntry<T extends { id: string }> = CacheEntryHandle<T> & {
   resolvePending: (data: T[]) => void;
 };
 
+// Shared identity-stable pending, mirroring the orchestrator's SHARED_PENDING.
+const CONTROLLED_PENDING: UseAllState<any> = {
+  status: "pending",
+  data: undefined,
+  promise: makeDeferred<any>({ status: "pending" }),
+  error: null,
+};
+CONTROLLED_PENDING.promise.catch(() => {});
+
 class ControlledManager {
   private readonly entries = new Map<string, ControlledEntry<any>>();
 
@@ -38,14 +48,19 @@ class ControlledManager {
     entry: ControlledEntry<T>,
     options?: QueryOptions,
   ): void {
-    this.entries.set(this.makeQueryKey(query, options), entry);
+    this.entries.set(this.computeKey(query, options), entry);
   }
 
-  makeQueryKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
+  // Render-safe key; makeQueryKey derives from it, matching the orchestrator.
+  computeKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
     if (!options) {
       return query._build();
     }
     return `${JSON.stringify(options)}:${query._build()}`;
+  }
+
+  makeQueryKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
+    return this.computeKey(query, options);
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -54,6 +69,12 @@ class ControlledManager {
       throw new Error(`Unknown query key "${key}"`);
     }
     return entry as CacheEntryHandle<T>;
+  }
+
+  // Render-safe state read: live entry state if registered, else shared pending.
+  peekState<T extends { id: string }>(key: string): UseAllState<T> {
+    const entry = this.entries.get(key);
+    return (entry ? entry.state : CONTROLLED_PENDING) as UseAllState<T>;
   }
 }
 

@@ -10,6 +10,12 @@ const jsonSchema = z.object({
   age: z.number().optional(),
 });
 
+const jsonSchemaWithConstraints = z.object({
+  string: z.string().min(1).max(10).optional(),
+  integer: z.number().int().min(0).max(10).optional(),
+  datetime: z.iso.datetime().optional(),
+});
+
 export const schema = {
   users: s.table({
     name: s.string(),
@@ -42,6 +48,9 @@ export const schema = {
     nullable: s.string().optional().default(null),
     nullableInteger: s.int().optional().default(null),
     refId: s.ref("todos").optional().default("00000000-0000-0000-0000-000000000000"),
+  }),
+  table_with_constraints: s.table({
+    data: s.json(jsonSchemaWithConstraints),
   }),
 };
 

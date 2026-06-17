@@ -63,7 +63,7 @@ const emit = defineEmits<{
 
 const db = useDb();
 const session = useSession();
-const canEdit = !!session;
+const canEdit = !!session.value;
 
 const dayHeaders = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 

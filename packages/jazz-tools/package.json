@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.50",
+  "version": "2.0.0-alpha.51",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "bin": {
@@ -114,7 +114,7 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
-    "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
+    "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && cp src/worker/jazz-broker-worker.ts dist/worker/jazz-broker-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",

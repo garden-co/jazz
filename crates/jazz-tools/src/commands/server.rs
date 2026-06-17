@@ -54,8 +54,7 @@ pub async fn run(
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    let inspector_link =
-        build_inspector_link(bound_addr.port(), &app_id_string, admin_secret.as_deref());
+    let inspector_link = build_inspector_link(bound_addr.port(), &app_id_string);
 
     if let Some(path) = bound_port_file {
         std::fs::write(&path, bound_addr.port().to_string())
@@ -64,9 +63,25 @@ pub async fn run(
 
     info!("Listening on http://{}", bound_addr);
     info!("Open the inspector: {}", inspector_link);
+    if admin_secret.is_some() {
+        info!("Enter your admin secret in the inspector to publish schemas and policies.");
+    }
 
     let state = built.state.clone();
     let shutdown = state.shutdown.clone();
+    // Report the current inbound WebSocket count as an OTel gauge. Held for the
+    // server's lifetime; dropped when `run` returns. Only active when otel is
+    // compiled in and an OTLP endpoint is configured.
+    #[cfg(feature = "otel")]
+    let _active_ws_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            let shutdown = state.shutdown.clone();
+            jazz_tools::otel::register_active_websockets_gauge(&meter, move || {
+                shutdown.active_websockets() as u64
+            })
+        });
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
@@ -144,14 +159,12 @@ pub async fn run(
     Ok(())
 }
 
-fn build_inspector_link(port: u16, app_id: &str, admin_secret: Option<&str>) -> String {
+fn build_inspector_link(port: u16, app_id: &str) -> String {
     let server_url = format!("http://localhost:{port}");
-    let admin_secret_value = admin_secret.unwrap_or("");
     format!(
-        "{STANDALONE_INSPECTOR_URL}#serverUrl={}&appId={}&adminSecret={}",
+        "{STANDALONE_INSPECTOR_URL}#serverUrl={}&appId={}",
         percent_encode_fragment_value(&server_url),
         percent_encode_fragment_value(app_id),
-        percent_encode_fragment_value(admin_secret_value),
     )
 }
 
@@ -176,11 +189,21 @@ mod tests {
 
     #[test]
     fn inspector_link_percent_encodes_fragment_values() {
-        let link = build_inspector_link(4200, "app:one/two", Some("secret with spaces"));
+        let link = build_inspector_link(4200, "app:one/two");
 
         assert_eq!(
             link,
-            "https://jazz2-inspector.vercel.app/#serverUrl=http%3A%2F%2Flocalhost%3A4200&appId=app%3Aone%2Ftwo&adminSecret=secret%20with%20spaces"
+            "https://jazz2-inspector.vercel.app/#serverUrl=http%3A%2F%2Flocalhost%3A4200&appId=app%3Aone%2Ftwo"
+        );
+    }
+
+    #[test]
+    fn inspector_link_does_not_include_admin_secret() {
+        let link = build_inspector_link(4200, "my-app");
+
+        assert!(
+            !link.contains("adminSecret"),
+            "admin secret must not appear in logged link"
         );
     }
 }

@@ -1,15 +1,18 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::collections::BinaryHeap;
 
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
-    ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
-    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
-    raw_leaf_upsert_in_place, raw_page_kind, validate_page,
+    OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
+    ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
+    raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
+    refresh_page_checksum, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
+use crate::wal::{self, WalFrame, WalFrameRef, WalHeader};
 
 const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
@@ -22,6 +25,13 @@ const ALLOC_NEAR_WINDOW: u64 = 32;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
+
+struct PageWrite<'a> {
+    page_id: PageId,
+    is_blob: bool,
+    is_freelist: bool,
+    raw: Cow<'a, [u8]>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
@@ -93,14 +103,21 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
+    // Pages >= active.total_pages are WAL tail pages, not home locations.
+    // Page ids in wal_pages have newer bytes only in the cache/WAL and must
+    // not be evicted until a checkpoint writes them to their home locations.
+    persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: OpfsSet<PageId>,
     page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: OpfsSet<PageId>,
+    wal_pages: OpfsSet<PageId>,
+    freelist_dirty: bool,
     free_pages: Vec<PageId>,
     free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
+    last_leaf_hint: Option<PageId>,
 }
 
 #[derive(Debug)]
@@ -127,6 +144,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let b = read_slot(&file, SuperblockSlot::B, options.page_size)?;
         let file_len = file.len()?;
 
+        let persisted_pages = file_len / options.page_size as u64;
         let (active_slot, active) = choose_active(a, b).unwrap_or((
             SuperblockSlot::A,
             Superblock::new(options.page_size as u32, 0, 0, 0, 0),
@@ -139,14 +157,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
+            persisted_pages,
             pages: OpfsMap::default(),
             blob_pages: OpfsSet::default(),
             page_access_epoch: OpfsMap::default(),
             access_epoch: 0,
             dirty_pages: OpfsSet::default(),
+            wal_pages: OpfsSet::default(),
+            freelist_dirty: false,
             free_pages: Vec::new(),
             free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
+            last_leaf_hint: None,
         };
 
         if tree.active.generation == 0 {
@@ -163,6 +185,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
+            tree.persisted_pages = 2;
             return Ok(tree);
         }
 
@@ -184,20 +207,24 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
         }
         tree.sanitize_free_pages();
+        // Loading the persisted freelist is not a modification; only replayed
+        // WAL commits or later alloc/free calls should mark it dirty.
+        tree.freelist_dirty = false;
+        tree.replay_wal()?;
 
         Ok(tree)
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::get", key_len = key.len()).entered();
-        let leaf_page_id = match self.find_leaf_page_id(key)? {
+        let leaf_page_id = match self.leaf_for_key(key)? {
             Some(id) => id,
             None => return Ok(None),
         };
 
-        self.ensure_page_loaded(leaf_page_id)?;
-        let raw = self.raw_page_bytes(leaf_page_id)?;
-        let value_cell = raw_leaf_find_value(raw, self.options.page_size, key)?;
+        let page_size = self.options.page_size;
+        let raw = self.ensure_page_loaded(leaf_page_id)?;
+        let value_cell = raw_leaf_find_value(raw, page_size, key)?;
         match value_cell {
             None => Ok(None),
             Some(ValueCellRef::Inline(value)) => Ok(Some(value.to_vec())),
@@ -217,6 +244,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             value_len = value.len()
         )
         .entered();
+        self.last_leaf_hint = None;
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -247,6 +275,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
+        self.last_leaf_hint = None;
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -289,9 +318,11 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(Vec::new());
         }
 
-        let mut out = Vec::new();
-        let mut current = self.find_leaf_page_id(start)?;
+        let page_size = self.options.page_size;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        let mut current = self.leaf_for_key(start)?;
         let mut visited = OpfsSet::default();
+        let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
 
         while let Some(page_id) = current {
             if !visited.insert(page_id) {
@@ -300,34 +331,25 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
-            self.ensure_page_loaded(page_id)?;
             let remaining = limit.saturating_sub(out.len());
-            let raw = self.raw_page_bytes(page_id)?;
-            let mut staged = Vec::new();
-            let next = raw_leaf_scan(
-                raw,
-                self.options.page_size,
-                start,
-                end,
-                remaining,
-                |key, value| {
-                    let staged_value = match value {
-                        ValueCellRef::Inline(value) => StagedValue::Inline(value.to_vec()),
-                        ValueCellRef::Overflow {
-                            head_page_id,
-                            total_len,
-                        } => StagedValue::Overflow {
-                            head_page_id,
-                            total_len: total_len as usize,
-                        },
-                    };
-                    staged.push((key.to_vec(), staged_value));
-                    Ok(())
-                },
-            )?;
-            let staged_entries = staged;
+            let raw = self.ensure_page_loaded(page_id)?;
+            staged.clear();
+            let next = raw_leaf_scan(raw, page_size, start, end, remaining, |key, value| {
+                let staged_value = match value {
+                    ValueCellRef::Inline(value) => StagedValue::Inline(value.to_vec()),
+                    ValueCellRef::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => StagedValue::Overflow {
+                        head_page_id,
+                        total_len: total_len as usize,
+                    },
+                };
+                staged.push((key.to_vec(), staged_value));
+                Ok(())
+            })?;
 
-            for (key, value) in staged_entries {
+            for (key, value) in staged.drain(..) {
                 let value = match value {
                     StagedValue::Inline(value) => value,
                     StagedValue::Overflow {
@@ -354,7 +376,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             total_pages = self.total_pages
         )
         .entered();
-        let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
+        let mut dirty_page_ids: Vec<PageId> =
+            self.dirty_pages.union(&self.wal_pages).copied().collect();
         dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
         self.write_pages_to_disk(&dirty_page_ids, &freelist_pages)?;
@@ -364,12 +387,87 @@ impl<F: SyncFile> OpfsBTree<F> {
             freelist_head_page_id,
             self.total_pages,
         )?;
+        self.truncate_wal_tail()?;
         self.dirty_pages.clear();
+        self.wal_pages.clear();
+        self.freelist_dirty = false;
         self.evict_pages_if_needed(None);
         Ok(())
     }
 
+    pub fn flush_wal(&mut self) -> Result<(), BTreeError> {
+        let _span = tracing::debug_span!(
+            "OpfsBTree::flush_wal",
+            dirty_pages = self.dirty_pages.len(),
+            total_pages = self.total_pages
+        )
+        .entered();
+        let root_page_id = self.root_page_id.unwrap_or(0);
+        if self.dirty_pages.is_empty()
+            && !self.freelist_dirty
+            && root_page_id == self.active.root_page_id
+            && self.total_pages == self.active.total_pages
+        {
+            return Ok(());
+        }
+
+        let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
+        dirty_page_ids.sort_unstable();
+        self.refresh_dirty_page_checksums(&dirty_page_ids)?;
+        let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
+        let generation = self.active.generation.saturating_add(1);
+        let persisted_pages = {
+            let frames = self.collect_pages_for_write(&dirty_page_ids, &freelist_pages)?;
+            if frames.is_empty() {
+                return Ok(());
+            }
+
+            let wal_frames: Vec<WalFrameRef<'_>> = frames
+                .iter()
+                .map(|frame| WalFrameRef {
+                    page_id: frame.page_id,
+                    is_blob: frame.is_blob,
+                    is_freelist: frame.is_freelist,
+                    raw: frame.raw.as_ref(),
+                })
+                .collect();
+            let start_page_id = self.persisted_pages.max(2);
+            let pages_written = wal::append_commit(
+                &self.file,
+                self.options.page_size,
+                start_page_id,
+                WalHeader::new(
+                    generation,
+                    root_page_id,
+                    freelist_head_page_id,
+                    self.total_pages,
+                ),
+                &wal_frames,
+            )?;
+            start_page_id
+                .checked_add(pages_written)
+                .ok_or_else(|| BTreeError::Io("WAL persisted pages overflow".to_string()))?
+        };
+        self.persisted_pages = persisted_pages;
+        self.file.flush()?;
+
+        self.wal_pages.extend(dirty_page_ids);
+        self.dirty_pages.clear();
+        self.active = Superblock::new(
+            self.options.page_size as u32,
+            generation,
+            root_page_id,
+            freelist_head_page_id,
+            self.total_pages,
+        );
+        self.freelist_dirty = false;
+        Ok(())
+    }
+
     pub fn checkpoint_state(&self) -> CheckpointState {
+        // Reports the latest durable logical state: checkpoint metadata plus
+        // any replayed or newly flushed WAL commits. `active_slot` still names
+        // the checkpoint superblock slot; WAL commits do not rotate slots.
         CheckpointState {
             active_slot: slot_char(self.active_slot),
             generation: self.active.generation,
@@ -389,14 +487,14 @@ impl<F: SyncFile> OpfsBTree<F> {
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
-        let kind = {
-            let raw = self.raw_page_bytes(page_id)?;
-            raw_page_kind(raw, self.options.page_size)?
+        let page_size = self.options.page_size;
+        let step = {
+            let raw = self.ensure_page_loaded(page_id)?;
+            raw_descend_step(raw, page_size, key)?
         };
 
-        match kind {
-            PageKind::Leaf => {
+        match step {
+            RawDescendStep::Leaf => {
                 let (new_value, reused_overflow_head) =
                     if value.len() <= self.options.overflow_threshold {
                         (ValueCell::Inline(value.to_vec()), None)
@@ -497,11 +595,18 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            PageKind::Internal => {
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
+            RawDescendStep::Child(child_page_id) => {
+                let split = self.insert_recursive(child_page_id, key, value)?;
+                let Some(split) = split else {
+                    return Ok(None);
+                };
+
+                // Split path: recursion may have evicted this clean parent, so
+                // reload before decoding for the structural update.
+                let page = {
+                    let raw = self.ensure_page_loaded(page_id)?;
+                    decode_page(raw, page_size)?
+                };
                 let Page::Internal {
                     mut keys,
                     mut children,
@@ -513,17 +618,6 @@ impl<F: SyncFile> OpfsBTree<F> {
                     )));
                 };
                 let child_idx = child_index(&keys, key);
-                let child_page_id = *children.get(child_idx).ok_or_else(|| {
-                    BTreeError::Corrupt(format!(
-                        "internal page {} missing child {}",
-                        page_id, child_idx
-                    ))
-                })?;
-
-                let split = self.insert_recursive(child_page_id, key, value)?;
-                let Some(split) = split else {
-                    return Ok(None);
-                };
 
                 keys.insert(child_idx, split.separator);
                 children.insert(child_idx + 1, split.right_page_id);
@@ -555,26 +649,22 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
-                "insert reached overflow page {}",
-                page_id
-            ))),
-            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
-                "insert reached freelist page {}",
-                page_id
+            RawDescendStep::Other(kind) => Err(BTreeError::Corrupt(format!(
+                "insert reached {:?} page {}",
+                kind, page_id
             ))),
         }
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
-        let kind = {
-            let raw = self.raw_page_bytes(page_id)?;
-            raw_page_kind(raw, self.options.page_size)?
+        let page_size = self.options.page_size;
+        let step = {
+            let raw = self.ensure_page_loaded(page_id)?;
+            raw_descend_step(raw, page_size, key)?
         };
 
-        match kind {
-            PageKind::Leaf => {
+        match step {
+            RawDescendStep::Leaf => {
                 let deleted = {
                     let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
                         BTreeError::Corrupt(format!("page {} missing during delete", page_id))
@@ -595,33 +685,10 @@ impl<F: SyncFile> OpfsBTree<F> {
                     }
                 }
             }
-            PageKind::Internal => {
-                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during delete", page_id))
-                })?;
-                let page = decode_page(&page_raw, self.options.page_size)?;
-                let Page::Internal { keys, children } = page else {
-                    return Err(BTreeError::Corrupt(format!(
-                        "expected internal page {}, found non-internal during delete",
-                        page_id
-                    )));
-                };
-                let child_idx = child_index(&keys, key);
-                let child_page_id = *children.get(child_idx).ok_or_else(|| {
-                    BTreeError::Corrupt(format!(
-                        "internal page {} missing child {}",
-                        page_id, child_idx
-                    ))
-                })?;
-                self.delete_recursive(child_page_id, key)
-            }
-            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
-                "delete reached overflow page {}",
-                page_id
-            ))),
-            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
-                "delete reached freelist page {}",
-                page_id
+            RawDescendStep::Child(child_page_id) => self.delete_recursive(child_page_id, key),
+            RawDescendStep::Other(kind) => Err(BTreeError::Corrupt(format!(
+                "delete reached {:?} page {}",
+                kind, page_id
             ))),
         }
     }
@@ -936,47 +1003,54 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => return Ok(None),
         };
 
+        let page_size = self.options.page_size;
         loop {
-            self.ensure_page_loaded(current)?;
-            let raw_kind = {
-                let raw = self.raw_page_bytes(current)?;
-                raw_page_kind(raw, self.options.page_size)?
-            };
-            match raw_kind {
-                PageKind::Leaf => return Ok(Some(current)),
-                PageKind::Internal => {
-                    let raw = self.raw_page_bytes(current)?;
-                    current = raw_internal_child_for_key(raw, self.options.page_size, key)?;
-                }
-                PageKind::Overflow => {
+            let raw = self.ensure_page_loaded(current)?;
+            match raw_descend_step(raw, page_size, key)? {
+                RawDescendStep::Leaf => return Ok(Some(current)),
+                RawDescendStep::Child(child) => current = child,
+                RawDescendStep::Other(kind) => {
                     return Err(BTreeError::Corrupt(format!(
-                        "unexpected overflow page {} in tree path",
-                        current
-                    )));
-                }
-                PageKind::Freelist => {
-                    return Err(BTreeError::Corrupt(format!(
-                        "unexpected freelist page {} in tree path",
-                        current
+                        "unexpected {:?} page {} in tree path",
+                        kind, current
                     )));
                 }
             }
         }
     }
 
-    fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+    /// Resolves the leaf for `key`, trying the last-used leaf before paying
+    /// for a full root-to-leaf descent. Safe because `raw_leaf_covers_key`
+    /// re-checks the page's current bytes on every use.
+    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        if let Some(page_id) = self.last_leaf_hint {
+            let covers = match self.pages.get(&page_id) {
+                Some(raw) => raw_leaf_covers_key(raw, self.options.page_size, key)?,
+                None => false,
+            };
+            if covers {
+                self.touch_page(page_id);
+                return Ok(Some(page_id));
+            }
+        }
+        let leaf = self.find_leaf_page_id(key)?;
+        self.last_leaf_hint = leaf;
+        Ok(leaf)
+    }
+
+    fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
         if self.pages.contains_key(&page_id) {
             self.touch_page(page_id);
-            return Ok(());
+        } else {
+            self.read_page_run_from_disk(page_id)?;
         }
-        self.read_page_run_from_disk(page_id)?;
-        if !self.pages.contains_key(&page_id) {
-            return Err(BTreeError::Corrupt(format!(
+        match self.pages.get(&page_id) {
+            Some(raw) => Ok(raw),
+            None => Err(BTreeError::Corrupt(format!(
                 "page {} missing after disk load",
                 page_id
-            )));
+            ))),
         }
-        Ok(())
     }
 
     fn page_kind(&self, page_id: PageId) -> Result<PageKind, BTreeError> {
@@ -1049,8 +1123,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             )));
         }
 
-        let file_pages = self.file.len()? / self.options.page_size as u64;
-        let readable_pages = self.total_pages.min(file_pages);
+        let readable_pages = self.total_pages.min(self.persisted_pages);
         if page_id >= readable_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for persisted pages {}",
@@ -1096,11 +1169,15 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    // Checkpoint path: copy the latest dirty/WAL-pinned page bytes back to
+    // their home locations, so the checkpointed region becomes current.
     fn write_pages_to_disk(
         &mut self,
         dirty_page_ids: &[PageId],
         freelist_pages: &[(PageId, Page)],
     ) -> Result<(), BTreeError> {
+        self.refresh_dirty_page_checksums(dirty_page_ids)?;
+
         let mut max_page_id = 1u64;
         if let Some(max_live) = self.pages.keys().max().copied() {
             max_page_id = max_page_id.max(max_live);
@@ -1118,54 +1195,24 @@ impl<F: SyncFile> OpfsBTree<F> {
             .total_pages
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("file size overflow".to_string()))?;
-        if self.file.len()? < required_len {
+        if self.persisted_pages < self.total_pages {
             self.file.truncate(required_len)?;
+            self.persisted_pages = self.total_pages;
         }
 
-        let mut encoded_pages: Vec<(PageId, Vec<u8>)> =
-            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
-        for page_id in dirty_page_ids {
-            if let Some(raw) = self.pages.get(page_id) {
-                self.validate_writable_page_id(*page_id)?;
-                if !self.blob_pages.contains(page_id) {
-                    let _ = validate_page(raw, self.options.page_size)?;
-                } else if raw.len() != self.options.page_size {
-                    return Err(BTreeError::Corrupt(format!(
-                        "blob page {} has invalid length {}",
-                        page_id,
-                        raw.len()
-                    )));
-                }
-                encoded_pages.push((*page_id, raw.clone()));
-            }
-        }
-        for (page_id, page) in freelist_pages {
-            self.validate_writable_page_id(*page_id)?;
-            encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
-        }
-
-        if encoded_pages.is_empty() {
+        let checkpoint_pages = self.collect_pages_for_write(dirty_page_ids, freelist_pages)?;
+        if checkpoint_pages.is_empty() {
             return Ok(());
-        }
-
-        encoded_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
-        for pair in encoded_pages.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                return Err(BTreeError::Corrupt(format!(
-                    "duplicate checkpoint page {}",
-                    pair[0].0
-                )));
-            }
         }
 
         let page_size = self.options.page_size;
         let mut idx = 0usize;
-        while idx < encoded_pages.len() {
-            let start_page_id = encoded_pages[idx].0;
+        while idx < checkpoint_pages.len() {
+            let start_page_id = checkpoint_pages[idx].page_id;
             let mut end = idx + 1;
-            while end < encoded_pages.len() {
-                let prev_page_id = encoded_pages[end - 1].0;
-                if prev_page_id.checked_add(1) != Some(encoded_pages[end].0) {
+            while end < checkpoint_pages.len() {
+                let prev_page_id = checkpoint_pages[end - 1].page_id;
+                if prev_page_id.checked_add(1) != Some(checkpoint_pages[end].page_id) {
                     break;
                 }
                 end += 1;
@@ -1176,8 +1223,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .checked_mul(page_size)
                 .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
             let mut run = Vec::with_capacity(run_capacity);
-            for (_, raw) in &encoded_pages[idx..end] {
-                run.extend_from_slice(raw);
+            for write in &checkpoint_pages[idx..end] {
+                run.extend_from_slice(&write.raw);
             }
 
             let offset = start_page_id.checked_mul(page_size as u64).ok_or_else(|| {
@@ -1186,6 +1233,193 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.file.write_all_at(offset, &run)?;
 
             idx = end;
+        }
+
+        Ok(())
+    }
+
+    fn refresh_dirty_page_checksums(&mut self, page_ids: &[PageId]) -> Result<(), BTreeError> {
+        for page_id in page_ids {
+            // Only pages mutated since the last flush can carry a deferred
+            // checksum; WAL-pinned pages in a checkpoint batch were already
+            // refreshed by the flush that wrote them.
+            if !self.dirty_pages.contains(page_id) || self.blob_pages.contains(page_id) {
+                continue;
+            }
+            if let Some(raw) = self.pages.get_mut(page_id) {
+                refresh_page_checksum(raw, self.options.page_size)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_pages_for_write<'a>(
+        &'a self,
+        dirty_page_ids: &[PageId],
+        freelist_pages: &'a [(PageId, Page)],
+    ) -> Result<Vec<PageWrite<'a>>, BTreeError> {
+        let mut writes: Vec<PageWrite<'a>> =
+            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
+        for page_id in dirty_page_ids {
+            if let Some(raw) = self.pages.get(page_id) {
+                self.validate_writable_page_id(*page_id)?;
+                let is_blob = self.blob_pages.contains(page_id);
+                if is_blob {
+                    if raw.len() != self.options.page_size {
+                        return Err(BTreeError::Corrupt(format!(
+                            "blob page {} has invalid length {}",
+                            page_id,
+                            raw.len()
+                        )));
+                    }
+                } else {
+                    let _ = validate_page(raw, self.options.page_size)?;
+                }
+                writes.push(PageWrite {
+                    page_id: *page_id,
+                    is_blob,
+                    is_freelist: false,
+                    raw: Cow::Borrowed(raw.as_slice()),
+                });
+            }
+        }
+        for (page_id, page) in freelist_pages {
+            self.validate_writable_page_id(*page_id)?;
+            writes.push(PageWrite {
+                page_id: *page_id,
+                is_blob: false,
+                is_freelist: true,
+                raw: Cow::Owned(encode_page(page, self.options.page_size)?),
+            });
+        }
+
+        writes.sort_unstable_by_key(|write| write.page_id);
+        for pair in writes.windows(2) {
+            if pair[0].page_id == pair[1].page_id {
+                return Err(BTreeError::Corrupt(format!(
+                    "duplicate page {} in write batch",
+                    pair[0].page_id
+                )));
+            }
+        }
+        Ok(writes)
+    }
+
+    fn truncate_wal_tail(&mut self) -> Result<(), BTreeError> {
+        if self.persisted_pages <= self.total_pages {
+            return Ok(());
+        }
+        let required_len = self
+            .total_pages
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("checkpoint truncate length overflow".to_string()))?;
+        self.file.truncate(required_len)?;
+        self.file.flush()?;
+        self.persisted_pages = self.total_pages;
+        Ok(())
+    }
+
+    fn replay_wal(&mut self) -> Result<(), BTreeError> {
+        let mut cursor = self.active.total_pages.max(2);
+        while cursor < self.persisted_pages {
+            let Some((header, frames, next_cursor)) = wal::read_commit(
+                &self.file,
+                self.options.page_size,
+                cursor,
+                self.persisted_pages,
+            )?
+            else {
+                self.persisted_pages = cursor;
+                break;
+            };
+            self.apply_wal_commit(header, frames)?;
+            cursor = next_cursor;
+        }
+        Ok(())
+    }
+
+    fn apply_wal_commit(
+        &mut self,
+        header: WalHeader,
+        frames: Vec<WalFrame>,
+    ) -> Result<(), BTreeError> {
+        self.last_leaf_hint = None;
+        if header.total_pages < 2 {
+            return Err(BTreeError::Corrupt(
+                "WAL total_pages must be >= 2".to_string(),
+            ));
+        }
+        self.total_pages = header.total_pages;
+        self.root_page_id = (header.root_page_id != 0).then_some(header.root_page_id);
+        self.free_pages.clear();
+        self.free_set.clear();
+        self.freelist_meta_pages.clear();
+
+        for frame in frames {
+            self.validate_writable_page_id(frame.page_id)?;
+            if frame.raw.len() != self.options.page_size {
+                return Err(BTreeError::Corrupt(format!(
+                    "WAL frame page {} has invalid length {}",
+                    frame.page_id,
+                    frame.raw.len()
+                )));
+            }
+            if frame.is_blob {
+                self.blob_pages.insert(frame.page_id);
+            } else {
+                let _ = validate_page(&frame.raw, self.options.page_size)?;
+                self.blob_pages.remove(&frame.page_id);
+            }
+            self.pages.insert(frame.page_id, frame.raw);
+            if frame.is_freelist {
+                self.dirty_pages.remove(&frame.page_id);
+                self.wal_pages.remove(&frame.page_id);
+            } else {
+                self.wal_pages.insert(frame.page_id);
+            }
+            self.touch_page(frame.page_id);
+        }
+
+        if header.freelist_head_page_id != 0 {
+            self.load_freelist_from_cached_pages(header.freelist_head_page_id)?;
+        }
+        self.sanitize_free_pages();
+        self.active = Superblock::new(
+            self.options.page_size as u32,
+            header.generation,
+            header.root_page_id,
+            header.freelist_head_page_id,
+            header.total_pages,
+        );
+        self.freelist_dirty = false;
+        // Replay inserts frames into the cache like any other load path, so it
+        // owes the same eviction check as the other insertion sites. This runs
+        // after the freelist load because freelist frames are clean and
+        // evictable the moment they are applied.
+        self.evict_pages_if_needed(None);
+        Ok(())
+    }
+
+    fn load_freelist_from_cached_pages(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
+        let mut current = head_page_id;
+        let mut seen = OpfsSet::default();
+
+        while current != 0 {
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "freelist pages contain a cycle".to_string(),
+                ));
+            }
+
+            let raw = self.pages.get(&current).ok_or_else(|| {
+                BTreeError::Corrupt(format!("WAL freelist page {} missing", current))
+            })?;
+            let (ids, next) = raw_freelist_page(raw, self.options.page_size)?;
+            self.freelist_meta_pages.push(current);
+            for id in ids {
+                self.add_free_page(id);
+            }
+            current = next.unwrap_or(0);
         }
 
         Ok(())
@@ -1211,6 +1445,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         let raw = encode_page(&page, self.options.page_size)?;
         self.pages.insert(page_id, raw);
         self.mark_dirty_loaded_page(page_id);
+        self.evict_pages_if_needed(Some(page_id));
         Ok(())
     }
 
@@ -1218,16 +1453,22 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.pages.insert(page_id, raw);
         self.blob_pages.insert(page_id);
         self.mark_dirty_loaded_page(page_id);
-    }
-
-    fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
-        self.dirty_pages.insert(page_id);
-        self.touch_page(page_id);
         self.evict_pages_if_needed(Some(page_id));
     }
 
+    // Marking an already-cached page dirty cannot grow the cache, so it must
+    // not trigger an eviction scan; only the insertion paths do that.
+    fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
+        self.dirty_pages.insert(page_id);
+        self.touch_page(page_id);
+    }
+
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
+        if self.last_leaf_hint == Some(page_id) {
+            self.last_leaf_hint = None;
+        }
         self.dirty_pages.remove(&page_id);
+        self.wal_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
         self.blob_pages.remove(&page_id);
         self.pages.remove(&page_id)
@@ -1320,7 +1561,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn alloc_page(&mut self) -> PageId {
         while let Some(page_id) = self.free_pages.pop() {
-            if self.free_set.remove(&page_id) {
+            if self.claim_free_page(page_id) {
                 tracing::trace!(page_id, reused = true, "alloc_page");
                 return page_id;
             }
@@ -1364,7 +1605,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     let page_id = run_start.checked_add(i as u64).ok_or_else(|| {
                         BTreeError::Corrupt("extent free-run page id overflow".to_string())
                     })?;
-                    self.free_set.remove(&page_id);
+                    self.claim_free_page(page_id);
                 }
                 tracing::trace!(
                     head_page_id = run_start,
@@ -1395,13 +1636,13 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn alloc_page_near(&mut self, preferred: PageId) -> PageId {
         for delta in 1..=ALLOC_NEAR_WINDOW {
             if let Some(hi) = preferred.checked_add(delta)
-                && self.free_set.remove(&hi)
+                && self.claim_free_page(hi)
             {
                 return hi;
             }
             if let Some(lo) = preferred.checked_sub(delta)
                 && lo >= 2
-                && self.free_set.remove(&lo)
+                && self.claim_free_page(lo)
             {
                 return lo;
             }
@@ -1422,6 +1663,16 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         if self.free_set.insert(page_id) {
             self.free_pages.push(page_id);
+            self.freelist_dirty = true;
+        }
+    }
+
+    fn claim_free_page(&mut self, page_id: PageId) -> bool {
+        if self.free_set.remove(&page_id) {
+            self.freelist_dirty = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1448,14 +1699,23 @@ impl<F: SyncFile> OpfsBTree<F> {
         over_budget_allowance: usize,
     ) {
         let max_cached_pages = self.max_cached_pages();
-        let trigger = max_cached_pages.saturating_add(over_budget_allowance);
+        // Dirty and WAL-pinned pages cannot be evicted; they raise both the
+        // floor the scan can reach and the level at which it re-arms. Without
+        // this, a cache pinned above the trigger rescans on every call. The
+        // sum overcounts pages in both sets, which only makes the resting
+        // level conservative; those pages are unevictable either way.
+        let pinned = self.dirty_pages.len() + self.wal_pages.len();
+        let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
+        let resting_pages = steady_cached_pages.max(pinned.saturating_add(max_cached_pages / 8));
+        let trigger = max_cached_pages
+            .max(resting_pages.saturating_add(max_cached_pages / 4))
+            .saturating_add(over_budget_allowance);
         if self.pages.len() <= trigger {
             return;
         }
 
         let root_page_id = self.root_page_id;
-        let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
-        let target = self.pages.len().saturating_sub(steady_cached_pages);
+        let target = self.pages.len().saturating_sub(resting_pages);
         if target == 0 {
             return;
         }
@@ -1469,6 +1729,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             if Some(*page_id) == protected_page
                 || Some(*page_id) == root_page_id
                 || self.dirty_pages.contains(page_id)
+                || self.wal_pages.contains(page_id)
             {
                 continue;
             }
@@ -1529,7 +1790,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         );
 
         let target_slot = self.active_slot.inactive();
-        write_slot(&self.file, target_slot, self.options.page_size, next)?;
+        write_slot_unchecked(&self.file, target_slot, self.options.page_size, next)?;
         self.file.flush()?;
 
         self.active_slot = target_slot;
@@ -1723,6 +1984,15 @@ fn write_slot<F: SyncFile>(
         file.truncate(required_file_len)?;
     }
 
+    write_slot_unchecked(file, slot, page_size, sb)
+}
+
+fn write_slot_unchecked<F: SyncFile>(
+    file: &F,
+    slot: SuperblockSlot,
+    page_size: usize,
+    sb: Superblock,
+) -> Result<(), BTreeError> {
     let mut page = vec![0u8; page_size];
     sb.encode_into_page(&mut page)?;
     file.write_all_at(slot.byte_offset(page_size), &page)?;
@@ -1844,6 +2114,60 @@ mod tests {
         let offset = slot.byte_offset(page_size) + 8;
         file.write_all_at(offset, &[0xFF, 0x00, 0xAA, 0x55])
             .expect("corrupt slot bytes");
+    }
+
+    #[test]
+    fn interleaved_ops_match_btreemap_model() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open");
+        let mut model = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+
+        // Deterministic LCG so failures reproduce.
+        let mut rng_state = 0x12345678u64;
+        let mut rng = move || {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng_state >> 33) as usize
+        };
+
+        for op in 0..5_000 {
+            let k = format!("key/{:06}", rng() % 800).into_bytes();
+            match rng() % 10 {
+                0..=4 => {
+                    let v = format!("value-{}", op).into_bytes();
+                    tree.put(&k, &v).expect("put");
+                    model.insert(k, v);
+                }
+                5 => {
+                    tree.delete(&k).expect("delete");
+                    model.remove(&k);
+                }
+                6..=8 => {
+                    assert_eq!(
+                        tree.get(&k).expect("get"),
+                        model.get(&k).cloned(),
+                        "op {}",
+                        op
+                    );
+                }
+                _ => {
+                    let hi = format!("key/{:06}", rng() % 800).into_bytes();
+                    let (start, end) = if k <= hi {
+                        (k.clone(), hi)
+                    } else {
+                        (hi, k.clone())
+                    };
+                    let got = tree.range(&start, &end, 50).expect("range");
+                    let want: Vec<(Vec<u8>, Vec<u8>)> = model
+                        .range(start..end)
+                        .take(50)
+                        .map(|(a, b)| (a.clone(), b.clone()))
+                        .collect();
+                    assert_eq!(got, want, "op {}", op);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2093,6 +2417,49 @@ mod tests {
         assert!(state.generation >= 2);
         assert!(state.root_page_id >= 2);
         assert!(state.total_pages > 2);
+    }
+
+    #[test]
+    fn in_place_mutations_survive_flush_and_reopen() {
+        for checkpoint in [true, false] {
+            let file = MemoryFile::new();
+            {
+                let mut tree = OpfsBTree::open(file.clone(), tiny_cache_options()).expect("open");
+                for i in 0..500u32 {
+                    tree.put(
+                        format!("k{:05}", i).as_bytes(),
+                        format!("v-{}", i).as_bytes(),
+                    )
+                    .expect("put");
+                }
+                tree.flush_wal().expect("first flush");
+
+                for i in 0..500u32 {
+                    tree.put(
+                        format!("k{:05}", i).as_bytes(),
+                        format!("w-{}", i).as_bytes(),
+                    )
+                    .expect("overwrite");
+                }
+                tree.delete(b"k00000").expect("delete");
+                tree.flush_wal().expect("second flush");
+                if checkpoint {
+                    tree.checkpoint().expect("checkpoint");
+                }
+            }
+
+            let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("reopen");
+            assert_eq!(tree.get(b"k00000").expect("get deleted"), None);
+            for i in 1..500u32 {
+                assert_eq!(
+                    tree.get(format!("k{:05}", i).as_bytes()).expect("get"),
+                    Some(format!("w-{}", i).into_bytes()),
+                    "key {} (checkpoint={})",
+                    i,
+                    checkpoint
+                );
+            }
+        }
     }
 
     #[test]
@@ -2380,6 +2747,59 @@ mod tests {
                 page_id
             );
         }
+    }
+
+    #[test]
+    fn eviction_with_pinned_cache_keeps_warm_evictable_pages() {
+        let file = MemoryFile::new();
+        let options = BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 64,
+            overflow_threshold: 128,
+            pin_internal_pages: false,
+            read_coalesce_pages: 1,
+        };
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+        let max_cached = tree.max_cached_pages();
+        let page_size = tree.options.page_size;
+
+        let pinned = max_cached * 2;
+        for idx in 0..pinned {
+            let page_id = 10_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.dirty_pages.insert(page_id);
+            tree.touch_page(page_id);
+        }
+
+        let warm = max_cached / 8;
+        for idx in 0..warm {
+            let page_id = 20_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.touch_page(page_id);
+        }
+        tree.evict_pages_if_needed(None);
+        assert_eq!(
+            tree.pages.len(),
+            pinned + warm,
+            "eviction must not wipe warm pages while the cache is pinned over budget"
+        );
+
+        let burst = max_cached / 4 + max_cached / 8;
+        for idx in 0..burst {
+            let page_id = 30_000 + idx as u64;
+            tree.pages.insert(page_id, vec![0u8; page_size]);
+            tree.touch_page(page_id);
+        }
+        tree.evict_pages_if_needed(None);
+        assert_eq!(
+            tree.pages.len(),
+            pinned + max_cached / 8,
+            "eviction should trim to the pinned-aware resting level"
+        );
+        let surviving_dirty = (0..pinned)
+            .filter(|idx| tree.pages.contains_key(&(10_000 + *idx as u64)))
+            .count();
+        assert_eq!(surviving_dirty, pinned, "dirty pages must never be evicted");
     }
 
     #[test]

@@ -31,9 +31,9 @@ const props = defineProps<{
 
 const db = useDb();
 const session = useSession();
-const canEdit = !!session;
+const canEdit = !!session.value;
 
-const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
+const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
 const logoUrl = ref<string | null>(null);
 
 watch(
