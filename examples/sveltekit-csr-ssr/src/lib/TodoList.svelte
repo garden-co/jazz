@@ -6,7 +6,11 @@
   // rows for the SSR render and first paint, then live sync takes over.
   let { snapshot }: { snapshot?: DehydratedSnapshot } = $props();
 
-  const todos = new QuerySubscription(app.todos, () => ({ snapshot }));
+  // `snapshot` is one-shot: it seeds the store once at construction and is never
+  // reactive, so reading the initial value here is intended, not a missed closure.
+  // (Later updates arrive via live sync, not by swapping the snapshot.)
+  // svelte-ignore state_referenced_locally
+  const todos = new QuerySubscription(app.todos, { snapshot });
 </script>
 
 <ul class="mt-4 space-y-1">

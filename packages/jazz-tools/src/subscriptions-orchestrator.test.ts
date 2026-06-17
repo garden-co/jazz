@@ -730,7 +730,6 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-
   it("SO-U26 peekState reads state without opening a subscription", async () => {
     const harness = createUnitHarness("app-so-u26");
     try {
