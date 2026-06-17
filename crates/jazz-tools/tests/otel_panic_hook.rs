@@ -1,6 +1,14 @@
 #![cfg(feature = "otel-core")]
 
 //! Integration coverage for the OTLP panic hook (`otel::install_panic_hook`).
+//!
+//! This is an integration test (its own test binary / process) on purpose, not
+//! a lib unit test: the hook is installed via `std::panic::set_hook`, which is
+//! process-global. Lib unit tests run in parallel within a single process, so
+//! mutating the global panic hook there could route another test's panic
+//! through this one's hook. Isolating it in its own process keeps that global
+//! mutation from influencing unrelated tests — even though it also saves and
+//! restores the prior hook below.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
