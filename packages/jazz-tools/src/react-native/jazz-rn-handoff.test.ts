@@ -4,8 +4,6 @@ import type { WasmSchema } from "../drivers/types.js";
 function makeFakeRnBinding() {
   return {
     onBatchedTickNeeded: vi.fn(),
-    addClient: vi.fn(),
-    addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
     connect: vi.fn(),
@@ -16,14 +14,9 @@ function makeFakeRnBinding() {
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "fake-hash"),
     insert: vi.fn(),
-    onSyncMessageReceived: vi.fn(),
-    onSyncMessageReceivedFromClient: vi.fn(),
     query: vi.fn(),
-    removeServer: vi.fn(),
-    setClientRole: vi.fn(),
     createSubscription: vi.fn(),
     executeSubscription: vi.fn(),
-    subscribe: vi.fn(),
     unsubscribe: vi.fn(),
     update: vi.fn(),
   };

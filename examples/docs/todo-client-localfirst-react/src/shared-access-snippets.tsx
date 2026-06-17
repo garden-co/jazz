@@ -83,12 +83,14 @@ export function SharedWithMe() {
 
   return (
     <ul>
-      {shares.map((share) => (
-        <li key={share.id}>
-          {share.todo.title}
-          {share.can_edit ? " (can edit)" : " (read-only)"}
-        </li>
-      ))}
+      {shares.map((share) =>
+        share.todo ? (
+          <li key={share.id}>
+            {share.todo.title}
+            {share.can_edit ? " (can edit)" : " (read-only)"}
+          </li>
+        ) : null,
+      )}
     </ul>
   );
 }

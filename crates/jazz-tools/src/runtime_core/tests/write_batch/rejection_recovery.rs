@@ -1,5 +1,15 @@
 use super::*;
 
+/// Attach an upstream server and drain the handshake traffic so the runtime's
+/// settlement target is `GlobalServer` for the rest of the test.
+fn attach_server_and_drain<S: Storage>(core: &mut RuntimeCore<S, NoopScheduler>) -> ServerId {
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+    server_id
+}
+
 fn users_delete_denied_authorization_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -42,6 +52,7 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         "direct-reject-replay-test",
         Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
     );
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -326,7 +337,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
 
     s.b.storage_mut()
         .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
@@ -656,7 +667,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    alice.seal_batch(batch_id).unwrap();
+    alice.commit_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     let worker_outbox = worker.sync_sender().take();
@@ -880,7 +891,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    alice.seal_batch(batch_id).unwrap();
+    alice.commit_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     for entry in worker.sync_sender().take() {
@@ -997,7 +1008,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
 //     assert_eq!(history_rows.len(), 1);
 //     let batch_id = history_rows[0].batch_id;
 
-//     alice.seal_batch(batch_id).unwrap();
+//     alice.commit_batch(batch_id).unwrap();
 //     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
 //     for entry in worker.sync_sender().take() {
@@ -1160,6 +1171,7 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
         users_delete_denied_authorization_schema(),
         "direct-reject-replay-record-test",
     );
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1231,7 +1243,7 @@ fn rc_transactional_rejected_replay_record_keeps_sealed_submission_mode() {
         .unwrap();
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     core.storage_mut()
         .delete_local_batch_record(batch_id)
@@ -1269,6 +1281,7 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
         users_delete_denied_authorization_schema(),
         "direct-pending-worker-sync-record-test",
     );
+    attach_server_and_drain(&mut core);
 
     let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
         &mut core,
@@ -1306,7 +1319,7 @@ fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
 }
 
 #[test]
-fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
+fn rc_worker_sync_records_skip_local_only_fates_at_settlement_target() {
     let mut core = create_runtime_with_schema(
         users_delete_denied_authorization_schema(),
         "direct-pending-fate-worker-sync-record-test",
@@ -1321,16 +1334,10 @@ fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
         .unwrap();
 
     let records = core.local_batch_records_for_worker_sync().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].batch_id, batch_id);
-    assert!(records[0].members.is_empty());
-    assert!(matches!(
-        records[0].latest_fate,
-        Some(crate::batch_fate::BatchFate::DurableDirect {
-            confirmed_tier: DurabilityTier::Local,
-            ..
-        })
-    ));
+    assert!(
+        records.is_empty(),
+        "a local-only fate reaches the settlement target and should not be replayed"
+    );
 }
 
 #[test]
@@ -1369,10 +1376,8 @@ fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
 
     let records = worker.local_batch_records_for_worker_sync().unwrap();
     assert!(
-        records
-            .iter()
-            .any(|record| record.batch_id == batch_id && record.members.len() == 1),
-        "worker should retain memberful batch record after local replay; records={records:?}"
+        records.is_empty(),
+        "serverless worker settles local replay at Local and should not retain worker-sync records; records={records:?}"
     );
     assert!(
         worker

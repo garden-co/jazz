@@ -268,6 +268,30 @@ fn exists_join_policy_schema() -> Schema {
         .build()
 }
 
+fn joined_table_select_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("join_users")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("join_posts")
+                .column("owner_name", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
+                ),
+        )
+        .build()
+}
+
 fn exists_hop_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
@@ -345,8 +369,7 @@ fn exists_update_policy_schema() -> Schema {
 
 async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .create("documents", row_input!("title" => title.to_string()))
-        .await
+        .insert("documents", row_input!("title" => title.to_string()))
         .expect("create title document")
         .0
 }
@@ -358,7 +381,7 @@ async fn create_chat(
     is_public: bool,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             "chats",
             row_input!(
                 "name" => name.to_string(),
@@ -366,29 +389,43 @@ async fn create_chat(
                 "is_public" => is_public,
             ),
         )
-        .await
         .expect("create chat")
         .0
 }
 
 async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group_slug: &str) {
     client
-        .create(
+        .insert(
             "document_grants",
             row_input!("document_id" => document_id, "group_slug" => group_slug.to_string()),
         )
-        .await
         .expect("create document grant");
 }
 
 async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug: &str) {
     client
-        .create(
+        .insert(
             "group_memberships",
             row_input!("user_id" => user_id.to_string(), "group_slug" => group_slug.to_string()),
         )
-        .await
         .expect("create group membership");
+}
+
+async fn create_join_policy_user(client: &JazzClient, name: &str) -> ObjectId {
+    client
+        .insert("join_users", row_input!("name" => name.to_string()))
+        .expect("create join policy user")
+        .0
+}
+
+async fn create_join_policy_post(client: &JazzClient, owner_name: &str, title: &str) -> ObjectId {
+    client
+        .insert(
+            "join_posts",
+            row_input!("owner_name" => owner_name.to_string(), "title" => title.to_string()),
+        )
+        .expect("create join policy post")
+        .0
 }
 
 /// Verifies that correlated `EXISTS` policies bind outer-row references
@@ -449,11 +486,10 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     dave_log.clear();
 
     let share_id = admin
-        .create(
+        .insert(
             "document_shares",
             row_input!("document_id" => doc_id, "user_id" => "bob"),
         )
-        .await
         .expect("create document share")
         .0;
     wait_for_subscription_update(
@@ -475,7 +511,6 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
 
     admin
         .update(share_id, row_changes([("user_id", "dave".into())]))
-        .await
         .expect("update document share user");
     wait_for_subscription_update(
         &mut bob_stream,
@@ -494,7 +529,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     )
     .await;
 
-    admin.delete(share_id).await.expect("delete share row");
+    admin.delete(share_id).expect("delete share row");
     wait_for_subscription_update(
         &mut dave_stream,
         &mut dave_log,
@@ -586,6 +621,67 @@ async fn exists_rel_join_grants_and_denies_correctly() {
     server.shutdown().await;
 }
 
+/// Verifies that join queries apply `SELECT` policies to rows from joined
+/// tables, not only to the base table.
+#[tokio::test]
+async fn join_query_applies_policy_filter_on_joined_table() {
+    let schema = joined_table_select_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "join_users", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "join_users", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "join_users", READY_TIMEOUT).await;
+
+    let alice_user = create_join_policy_user(&admin, "alice").await;
+    let bob_user = create_join_policy_user(&admin, "bob").await;
+    create_join_policy_post(&admin, "alice", "Alice post").await;
+    create_join_policy_post(&admin, "bob", "Bob post").await;
+
+    let query = QueryBuilder::new("join_users")
+        .join("join_posts")
+        .on("join_users.name", "join_posts.owner_name")
+        .build();
+
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees joined row allowed by joined-table policy",
+        |rows| (rows.len() == 1 && rows[0].0 == alice_user).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![
+            Value::Text("alice".to_string()),
+            Value::Text("alice".to_string()),
+            Value::Text("Alice post".to_string()),
+        ]
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob,
+        query,
+        "bob sees joined row allowed by joined-table policy",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_user).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        vec![
+            Value::Text("bob".to_string()),
+            Value::Text("bob".to_string()),
+            Value::Text("Bob post".to_string()),
+        ]
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// Verifies that the canonical hop-shaped `policy.exists(relation)` relation
 /// works end to end for reads.
 ///
@@ -657,11 +753,10 @@ async fn exists_rel_hop_grants_and_denies_correctly() {
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     async fn create_folder(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
         client
-            .create(
+            .insert(
                 "folders",
                 row_input!("owner_id" => owner_id.to_string(), "name" => name.to_string()),
             )
-            .await
             .expect("create folder")
             .0
     }
@@ -674,7 +769,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         folder_id: Option<ObjectId>,
     ) -> ObjectId {
         client
-            .create(
+            .insert(
                 "documents",
                 row_input!(
                     "team_slug" => team_slug.to_string(),
@@ -683,18 +778,16 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
                     "folder_id" => folder_id,
                 ),
             )
-            .await
             .expect("create complex document")
             .0
     }
 
     async fn create_document_flag(client: &JazzClient, document_id: ObjectId, flag: &str) {
         client
-            .create(
+            .insert(
                 "document_flags",
                 row_input!("document_id" => document_id, "flag" => flag.to_string()),
             )
-            .await
             .expect("create document flag");
     }
 
@@ -847,12 +940,11 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
+    let batch_id = alice
+        .update(chat_id, row_changes([("name", "Project Room".into())]))
+        .expect("chat name update should satisfy same-table EXISTS with_check");
     alice
-        .update_persisted(
-            chat_id,
-            row_changes([("name", "Project Room".into())]),
-            DurabilityTier::EdgeServer,
-        )
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("chat name update should satisfy same-table EXISTS with_check");
 
@@ -870,13 +962,15 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     )
     .await;
 
-    let protected_update = alice
-        .update_persisted(
-            chat_id,
-            row_changes([("is_public", true.into())]),
-            DurabilityTier::EdgeServer,
-        )
-        .await;
+    let batch_id = alice.update(chat_id, row_changes([("is_public", true.into())]));
+    let protected_update = match batch_id {
+        Ok(batch_id) => {
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+        }
+        Err(err) => Err(err),
+    };
     assert!(
         protected_update.is_err(),
         "is_public change should be rejected by same-table EXISTS with_check"
@@ -941,11 +1035,10 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
 
     let doc_id = create_title_document(&admin, "Original").await;
     admin
-        .create(
+        .insert(
             "document_editors",
             row_input!("document_id" => doc_id, "user_id" => "alice"),
         )
-        .await
         .expect("create document editor");
     wait_for_subscription_update(
         &mut observer_stream,
@@ -969,7 +1062,6 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     .await;
 
     bob.update(doc_id, row_changes([("title", "Hacked".into())]))
-        .await
         .expect("optimistic local exists update");
 
     let rows_after_update = observer

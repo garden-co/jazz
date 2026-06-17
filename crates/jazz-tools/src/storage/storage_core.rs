@@ -99,6 +99,16 @@ pub(super) fn raw_table_scan_range_keys_core(
         .collect())
 }
 
+pub(super) fn history_row_storage_key(row: &HistoryRowBytes<'_>) -> String {
+    let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
+    raw_table_entry_key(row.row_raw_table, &key)
+}
+
+pub(super) fn visible_row_storage_key(row: &VisibleRowBytes<'_>) -> String {
+    let key = visible_row_raw_table_key(row.branch, row.row_id);
+    raw_table_entry_key(row.row_raw_table, &key)
+}
+
 #[allow(dead_code)]
 pub(super) fn append_history_region_row_bytes_core(
     _table: &str,
@@ -106,8 +116,7 @@ pub(super) fn append_history_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
-        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
+        set(&history_row_storage_key(row), row.bytes)?;
     }
     Ok(())
 }
@@ -119,8 +128,7 @@ pub(super) fn upsert_visible_region_row_bytes_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = visible_row_raw_table_key(row.branch, row.row_id);
-        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
+        set(&visible_row_storage_key(row), row.bytes)?;
     }
     Ok(())
 }

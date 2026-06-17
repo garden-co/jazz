@@ -56,7 +56,7 @@ const CREATOR_CONDITION = {
   },
 } satisfies PolicyExpr;
 
-interface SessionRefValue {
+export interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
   readonly path: string[];
 }
@@ -78,7 +78,7 @@ interface RecursiveDepthOptions {
   maxDepth?: number;
 }
 
-interface RowRefValue {
+export interface RowRefValue {
   readonly __jazzPermissionKind: "row-ref";
   readonly column: string;
 }

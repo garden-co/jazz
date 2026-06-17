@@ -114,6 +114,36 @@ fn delete_already_deleted_row_fails() {
 }
 
 #[test]
+fn update_deleted_row_fails() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    qm.delete(&mut storage, handle.row_id).unwrap();
+
+    let result = qm.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alice Updated".into()), Value::Integer(200)],
+    );
+
+    match result {
+        Err(QueryError::RowAlreadyDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowAlreadyDeleted for deleted row update, got {other:?}"),
+    }
+    assert!(qm.row_is_deleted(&storage, "users", handle.row_id));
+    assert!(!qm.row_is_indexed(&storage, "users", handle.row_id));
+}
+
+#[test]
 fn soft_delete_with_concurrent_tips_merges_preserved_content() {
     // Test that soft deleting an object with two concurrent tips results
     // in a soft delete commit with merged content from both field updates.
@@ -223,7 +253,7 @@ fn soft_delete_with_concurrent_tips_merges_preserved_content() {
 }
 
 #[test]
-fn undelete_adds_to_id_index() {
+fn restore_adds_to_id_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -243,8 +273,8 @@ fn undelete_adds_to_id_index() {
     // Verify row is not in _id index
     assert!(!qm.row_is_indexed(&storage, "users", handle.row_id));
 
-    // Undelete with new values
-    qm.undelete(
+    // Restore with new values
+    qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice Restored".into()), Value::Integer(150)],
@@ -256,7 +286,7 @@ fn undelete_adds_to_id_index() {
 }
 
 #[test]
-fn undelete_removes_from_id_deleted_index() {
+fn restore_removes_from_id_deleted_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -274,8 +304,8 @@ fn undelete_removes_from_id_deleted_index() {
     qm.delete(&mut storage, handle.row_id).unwrap();
     assert!(qm.row_is_deleted(&storage, "users", handle.row_id));
 
-    // Undelete
-    qm.undelete(
+    // Restore
+    qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
@@ -287,7 +317,7 @@ fn undelete_removes_from_id_deleted_index() {
 }
 
 #[test]
-fn undelete_row_appears_in_query_results() {
+fn restore_row_appears_in_query_results() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -309,8 +339,8 @@ fn undelete_row_appears_in_query_results() {
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 0);
 
-    // Undelete with new values
-    qm.undelete(
+    // Restore with new values
+    qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice Restored".into()), Value::Integer(200)],
@@ -326,7 +356,7 @@ fn undelete_row_appears_in_query_results() {
 }
 
 #[test]
-fn undelete_nondeleted_row_fails() {
+fn restore_nondeleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -340,8 +370,8 @@ fn undelete_nondeleted_row_fails() {
         )
         .unwrap();
 
-    // Try to undelete a non-deleted row - should fail
-    let result = qm.undelete(
+    // Try to restore a non-deleted row - should fail
+    let result = qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
@@ -449,7 +479,7 @@ fn soft_then_hard_delete_removes_from_id_deleted() {
 }
 
 #[test]
-fn undelete_hard_deleted_row_fails() {
+fn restore_hard_deleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -466,8 +496,8 @@ fn undelete_hard_deleted_row_fails() {
     // Hard delete
     qm.hard_delete(&mut storage, handle.row_id).unwrap();
 
-    // Try to undelete - should fail
-    let result = qm.undelete(
+    // Try to restore - should fail
+    let result = qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
@@ -479,7 +509,7 @@ fn undelete_hard_deleted_row_fails() {
 }
 
 #[test]
-fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
+fn restore_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
     let _branch = get_branch(&writer_qm);
@@ -496,7 +526,7 @@ fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
     let mut reader_qm = QueryManager::new(SyncManager::new());
     reader_qm.set_current_schema(schema, "dev", "main");
 
-    let result = reader_qm.undelete(
+    let result = reader_qm.restore(
         &mut storage,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
@@ -508,7 +538,7 @@ fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
 }
 
 #[test]
-fn undelete_syncs_row_batch_created_to_server() {
+fn restore_syncs_row_batch_created_to_server() {
     use crate::sync_manager::{Destination, ServerId, SyncPayload};
 
     let sync_manager = SyncManager::new();
@@ -530,8 +560,8 @@ fn undelete_syncs_row_batch_created_to_server() {
     qm.delete(&mut storage, handle.row_id).unwrap();
     let _ = qm.sync_manager_mut().take_outbox();
 
-    let undeleted = qm
-        .undelete(
+    let restored = qm
+        .restore(
             &mut storage,
             handle.row_id,
             &[Value::Text("Alice".into()), Value::Integer(100)],
@@ -542,17 +572,17 @@ fn undelete_syncs_row_batch_created_to_server() {
     let forwarded = outbox
         .iter()
         .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
-        .expect("undelete should forward the restored row upstream");
+        .expect("restore should forward the restored row upstream");
 
     match &forwarded.payload {
         SyncPayload::RowBatchCreated { row, .. } => {
             assert_eq!(row.row_id, handle.row_id);
-            assert_eq!(row.batch_id(), undeleted.batch_id);
+            assert_eq!(row.batch_id(), restored.batch_id);
             assert!(!row.is_deleted);
             assert!(!row.is_soft_deleted());
             assert!(!row.is_hard_deleted());
         }
-        other => panic!("undelete should sync as RowBatchCreated, got {other:?}"),
+        other => panic!("restore should sync as RowBatchCreated, got {other:?}"),
     }
 }
 

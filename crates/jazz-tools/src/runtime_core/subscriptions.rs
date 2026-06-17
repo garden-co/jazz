@@ -277,22 +277,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    /// Subscribe with explicit schema context (for server use).
-    pub fn subscribe_with_schema_context(
-        &mut self,
-        query: Query,
-        schema_context: &crate::schema_manager::QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
-        let query_sub_id = self
-            .schema_manager
-            .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
-
-        self.immediate_tick();
-        Ok(crate::sync_manager::QueryId(query_sub_id.0))
-    }
-
     // =========================================================================
     // Queries
     // =========================================================================
@@ -317,7 +301,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.query_with_overlay_rows(query, session, durability, propagation, HashMap::new())
     }
 
-    pub fn query_with_local_overlay(
+    pub fn query_with_local_batch(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        batch_id: Option<BatchId>,
+    ) -> Result<QueryFuture, RuntimeError> {
+        let Some(batch_id) = batch_id else {
+            return Ok(self.query_with_propagation(query, session, durability, propagation));
+        };
+
+        self.ensure_batch_is_open(batch_id)?;
+
+        match self.batch_query_overlay(batch_id)? {
+            Some(overlay) => {
+                Ok(self.query_with_local_overlay(query, session, durability, propagation, overlay))
+            }
+            None => Ok(self.query_with_propagation(query, session, durability, propagation)),
+        }
+    }
+
+    pub(crate) fn query_with_local_overlay(
         &mut self,
         query: Query,
         session: Option<Session>,

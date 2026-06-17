@@ -12,7 +12,7 @@
 //!
 //!   1. open runtime, register clients
 //!   2. attach outbox target (worker side)
-//!   3. bootstrap catalogue (`addServer` / `removeServer` while flag is set)
+//!   3. bootstrap catalogue (internal server attach/detach while flag is set)
 //!   4. connect upstream (install Rust transport handle)
 //!   5. drain pending pre-init messages (sync, peer-sync, control)
 //!   6. sync retained local batch records + queue rejected-batch replay
@@ -41,7 +41,7 @@
 #![cfg(target_arch = "wasm32")]
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -49,7 +49,7 @@ use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde_bytes::ByteBuf;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{DedicatedWorkerGlobalScope, MessageEvent, MessagePort};
 
 use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
@@ -65,6 +65,9 @@ thread_local! {
     static HOST: RefCell<Option<WorkerHost>> = const { RefCell::new(None) };
     static RUNTIME: RefCell<Option<Rc<WasmRuntime>>> = const { RefCell::new(None) };
     static PEER_ROUTING: RefCell<PeerRouting> = RefCell::new(PeerRouting::default());
+    /// Broker leadership this worker serves (from init). `None` outside
+    /// broker mode; when set, stale follower-port attaches are rejected.
+    static HOST_LEADERSHIP_ID: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +81,9 @@ struct PeerRouting {
     main_client_id: Option<String>,
     peer_client_by_peer_id: HashMap<String, String>,
     peer_id_by_client: HashMap<String, String>,
-    peer_terms: HashMap<String, u32>,
+    peer_leadership_ids: HashMap<String, u32>,
+    peer_targets: HashMap<String, JsValue>,
+    peer_port_message_closures: HashMap<String, Closure<dyn FnMut(MessageEvent)>>,
 }
 
 impl Default for PeerRouting {
@@ -87,7 +92,9 @@ impl Default for PeerRouting {
             main_client_id: None,
             peer_client_by_peer_id: HashMap::new(),
             peer_id_by_client: HashMap::new(),
-            peer_terms: HashMap::new(),
+            peer_leadership_ids: HashMap::new(),
+            peer_targets: HashMap::new(),
+            peer_port_message_closures: HashMap::new(),
         }
     }
 }
@@ -167,6 +174,9 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     let global = global_worker_scope();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let data = event.data();
+        if handle_follower_port_control(&data) {
+            return;
+        }
         match parse_main_to_worker(&data) {
             Ok(msg) => handle_main_message(msg),
             Err(e) => post_to_main(&WorkerToMainWire::Error {
@@ -220,6 +230,8 @@ fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
 async fn run_init(init: InitPayload) -> Result<(), String> {
     let f = &init.fields;
 
+    HOST_LEADERSHIP_ID.with(|cell| cell.set(f.leadership_id));
+
     // 1. Open runtime.
     let runtime = match WasmRuntime::open_persistent(
         &f.schema_json,
@@ -262,9 +274,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     let auth_cb = Closure::<dyn FnMut(JsValue)>::new(|reason: JsValue| {
         let raw = reason.as_string().unwrap_or_default();
         post_to_main(&WorkerToMainWire::UpstreamDisconnected);
-        post_to_main(&WorkerToMainWire::AuthFailed {
-            reason: map_auth_reason(&raw).to_string(),
-        });
+        post_auth_failed(map_auth_reason(&raw).to_string());
     })
     .into_js_value();
     runtime.on_auth_failure(auth_cb.unchecked_into());
@@ -298,7 +308,7 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //     payloads so the main runtime owns delivery and acknowledgement.
     replay_startup_mutation_errors(&runtime_rc);
 
-    // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
+    // 5. Bootstrap catalogue (internal server attach/detach forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
     //    Must run BEFORE upstream connect — once a transport handle is
     //    installed, server-bound outbox traffic routes there and bypasses
@@ -431,13 +441,78 @@ fn ensure_peer_client(runtime: &Rc<WasmRuntime>, peer_id: &str) -> Result<String
 }
 
 fn close_peer(peer_id: &str) {
-    PEER_ROUTING.with(|cell| {
+    let closed_leadership_id = PEER_ROUTING.with(|cell| {
         let mut guard = cell.borrow_mut();
         if let Some(client) = guard.peer_client_by_peer_id.remove(peer_id) {
             guard.peer_id_by_client.remove(&client);
         }
-        guard.peer_terms.remove(peer_id);
+        let leadership_id = guard.peer_leadership_ids.remove(peer_id);
+        let had_target = if let Some(target) = guard.peer_targets.remove(peer_id) {
+            close_message_target(&target);
+            true
+        } else {
+            false
+        };
+        guard.peer_port_message_closures.remove(peer_id);
+        if had_target {
+            leadership_id
+        } else {
+            None
+        }
     });
+    if let Some(leadership_id) = closed_leadership_id {
+        post_follower_port_closed(peer_id, leadership_id);
+    }
+}
+
+fn attach_follower_port(peer_id: String, leadership_id: u32, port: MessagePort) {
+    if let Some(own) = HOST_LEADERSHIP_ID.with(|cell| cell.get()) {
+        if leadership_id != own {
+            tracing::warn!(
+                "rejecting stale follower-port attach for {peer_id}: leadership {leadership_id} != {own}"
+            );
+            port.close();
+            post_follower_port_closed(&peer_id, leadership_id);
+            return;
+        }
+    }
+    let Some(runtime) = RUNTIME.with(|cell| cell.borrow().clone()) else {
+        port.close();
+        post_follower_port_closed(&peer_id, leadership_id);
+        return;
+    };
+    if ensure_peer_client(&runtime, &peer_id).is_err() {
+        port.close();
+        post_follower_port_closed(&peer_id, leadership_id);
+        return;
+    }
+
+    let port_target: JsValue = port.clone().into();
+    let peer_for_message = peer_id.clone();
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let data = event.data();
+        match parse_main_to_worker(&data) {
+            Ok(message) => process_follower_port_message(&peer_for_message, message),
+            Err(error) => tracing::warn!("malformed follower port message: {error}"),
+        }
+    });
+    port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    port.start();
+
+    PEER_ROUTING.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        guard
+            .peer_leadership_ids
+            .insert(peer_id.clone(), leadership_id);
+        if let Some(previous_target) = guard.peer_targets.insert(peer_id.clone(), port_target) {
+            close_message_target(&previous_target);
+        }
+        guard
+            .peer_port_message_closures
+            .insert(peer_id.clone(), on_message);
+    });
+
+    post_follower_port_attached(&peer_id, leadership_id);
 }
 
 // =============================================================================
@@ -454,10 +529,17 @@ fn make_peer_routing_lookup() -> Function {
             let Some(peer_id) = guard.peer_id_by_client.get(&client) else {
                 return JsValue::NULL;
             };
-            let term = guard.peer_terms.get(peer_id).copied().unwrap_or(0);
+            let leadership_id = guard.peer_leadership_ids.get(peer_id).copied().unwrap_or(0);
             let obj = Object::new();
             let _ = Reflect::set(&obj, &"peerId".into(), &JsValue::from_str(peer_id));
-            let _ = Reflect::set(&obj, &"term".into(), &JsValue::from_f64(term as f64));
+            let _ = Reflect::set(
+                &obj,
+                &"leadershipId".into(),
+                &JsValue::from_f64(leadership_id as f64),
+            );
+            if let Some(target) = guard.peer_targets.get(peer_id) {
+                let _ = Reflect::set(&obj, &"target".into(), target);
+            }
             obj.into()
         })
     })
@@ -567,10 +649,8 @@ fn process_main_message(msg: MainToWorkerMessage) {
             };
             for payload in payloads {
                 let arr = Uint8Array::from(payload.as_ref());
-                if let Err(err) =
-                    rt.on_sync_message_received_from_client(&main_client_id, arr.into())
-                {
-                    tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
+                if let Err(err) = rt.receive_sync_message_from_client(&main_client_id, arr.into()) {
+                    tracing::warn!("receive sync message from main client: {err:?}");
                 }
             }
             rt.batched_tick();
@@ -582,20 +662,20 @@ fn process_main_message(msg: MainToWorkerMessage) {
         }
         MainToWorkerWire::PeerSync {
             peer_id,
-            term,
+            leadership_id,
             payloads,
         } => {
             let Some(rt) = runtime.as_ref() else { return };
             match ensure_peer_client(rt, &peer_id) {
                 Ok(client) => {
                     PEER_ROUTING.with(|cell| {
-                        cell.borrow_mut().peer_terms.insert(peer_id.clone(), term);
+                        cell.borrow_mut()
+                            .peer_leadership_ids
+                            .insert(peer_id.clone(), leadership_id);
                     });
                     for payload in payloads {
                         let arr = Uint8Array::from(payload.as_ref());
-                        if let Err(err) =
-                            rt.on_sync_message_received_from_client(&client, arr.into())
-                        {
+                        if let Err(err) = rt.receive_sync_message_from_client(&client, arr.into()) {
                             tracing::warn!("peer-sync route: {err:?}");
                         }
                     }
@@ -679,6 +759,47 @@ fn process_main_message(msg: MainToWorkerMessage) {
     }
 }
 
+fn process_follower_port_message(peer_id: &str, msg: MainToWorkerMessage) {
+    let runtime = RUNTIME.with(|cell| cell.borrow().clone());
+    let Some(rt) = runtime.as_ref() else { return };
+
+    match msg {
+        MainToWorkerMessage::Wire(MainToWorkerWire::Sync { payloads }) => {
+            route_peer_payloads(rt, peer_id, payloads);
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::PeerSync { payloads, .. }) => {
+            route_peer_payloads(rt, peer_id, payloads);
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::PeerClose { .. }) => close_peer(peer_id),
+        MainToWorkerMessage::Wire(MainToWorkerWire::UpdateAuth { jwt_token }) => {
+            update_auth(jwt_token, runtime.as_ref());
+        }
+        MainToWorkerMessage::Wire(MainToWorkerWire::AcknowledgeRejectedBatch { batch_id }) => {
+            if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
+                tracing::warn!("acknowledge rejected batch from follower port: {err:?}");
+            }
+        }
+        MainToWorkerMessage::Init(_)
+        | MainToWorkerMessage::Unknown(_)
+        | MainToWorkerMessage::Wire(_) => {}
+    }
+}
+
+fn route_peer_payloads(runtime: &Rc<WasmRuntime>, peer_id: &str, payloads: Vec<ByteBuf>) {
+    match ensure_peer_client(runtime, peer_id) {
+        Ok(client) => {
+            for payload in payloads {
+                if let Err(err) = runtime.receive_sync_message_from_client_bytes(&client, &payload)
+                {
+                    tracing::warn!("follower-port route: {err:?}");
+                }
+            }
+            runtime.batched_tick();
+        }
+        Err(err) => tracing::warn!("ensure follower port peer client: {err}"),
+    }
+}
+
 fn build_reconnect_auth() -> (Option<String>, String) {
     HOST.with(|cell| {
         let guard = cell.borrow();
@@ -716,6 +837,18 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
                     });
                 }
             }
+            // On `pagehide` the page is navigating away and this worker is about
+            // to be terminated. The `ws_stream_wasm` transport is abandoned
+            // mid-flight and the dying WASM heap traps. Mark the worker scope so
+            // the bootstrap's `error` listener swallows that inert trap instead
+            // of letting it reach the console.
+            if matches!(event, WorkerLifecycleEvent::Pagehide) {
+                let _ = Reflect::set(
+                    &js_sys::global(),
+                    &JsValue::from_str("__jazzWorkerTearingDown"),
+                    &JsValue::TRUE,
+                );
+            }
         }
         _ => {}
     }
@@ -749,9 +882,7 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     let json = serde_json::to_string(&auth).unwrap_or_else(|_| "{}".to_string());
     if let Err(err) = rt.update_auth(json) {
         tracing::error!("runtime.updateAuth failed: {err:?}");
-        post_to_main(&WorkerToMainWire::AuthFailed {
-            reason: "invalid".to_string(),
-        });
+        post_auth_failed("invalid".to_string());
     }
 }
 
@@ -803,7 +934,12 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         let mut g = cell.borrow_mut();
         g.peer_client_by_peer_id.clear();
         g.peer_id_by_client.clear();
-        g.peer_terms.clear();
+        g.peer_leadership_ids.clear();
+        for target in g.peer_targets.values() {
+            close_message_target(target);
+        }
+        g.peer_targets.clear();
+        g.peer_port_message_closures.clear();
         g.main_client_id = None;
     });
 
@@ -836,6 +972,128 @@ fn post_to_main(msg: &WorkerToMainWire) {
     };
     let global = global_worker_scope();
     let _ = global.post_message_with_transfer(&value, transfer.as_ref());
+}
+
+fn post_to_follower_ports(msg: &WorkerToMainWire) {
+    PEER_ROUTING.with(|cell| {
+        for target in cell.borrow().peer_targets.values() {
+            let Some(port) = target.dyn_ref::<MessagePort>() else {
+                continue;
+            };
+            let Ok((value, transfer)) = worker_to_main_post(msg) else {
+                continue;
+            };
+            let _ = port.post_message_with_transferable(&value, transfer.as_ref());
+        }
+    });
+}
+
+fn post_auth_failed(reason: String) {
+    let msg = WorkerToMainWire::AuthFailed { reason };
+    post_to_main(&msg);
+    post_to_follower_ports(&msg);
+}
+
+fn post_follower_port_attached(peer_id: &str, leadership_id: u32) {
+    let message = Object::new();
+    let _ = Reflect::set(
+        &message,
+        &"type".into(),
+        &JsValue::from_str("follower-port-attached"),
+    );
+    let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+    let _ = Reflect::set(
+        &message,
+        &"leadershipId".into(),
+        &JsValue::from_f64(leadership_id as f64),
+    );
+    let global = global_worker_scope();
+    let _ = global.post_message(&message);
+}
+
+fn post_follower_port_closed(peer_id: &str, leadership_id: u32) {
+    let message = Object::new();
+    let _ = Reflect::set(
+        &message,
+        &"type".into(),
+        &JsValue::from_str("follower-port-closed"),
+    );
+    let _ = Reflect::set(&message, &"peerId".into(), &JsValue::from_str(peer_id));
+    let _ = Reflect::set(
+        &message,
+        &"leadershipId".into(),
+        &JsValue::from_f64(leadership_id as f64),
+    );
+    let global = global_worker_scope();
+    let _ = global.post_message(&message);
+}
+
+fn handle_follower_port_control(value: &JsValue) -> bool {
+    let Some(type_str) = Reflect::get(value, &"type".into())
+        .ok()
+        .and_then(|v| v.as_string())
+    else {
+        return false;
+    };
+
+    match type_str.as_str() {
+        "attach-follower-port" => {
+            let Some(peer_id) = Reflect::get(value, &"peerId".into())
+                .ok()
+                .and_then(|v| v.as_string())
+            else {
+                return true;
+            };
+            let leadership_id = Reflect::get(value, &"leadershipId".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as u32;
+            let Some(port) = Reflect::get(value, &"port".into())
+                .ok()
+                .and_then(|v| v.dyn_into::<MessagePort>().ok())
+            else {
+                return true;
+            };
+            attach_follower_port(peer_id, leadership_id, port);
+            true
+        }
+        "detach-follower-port" => {
+            if let Some(peer_id) = Reflect::get(value, &"peerId".into())
+                .ok()
+                .and_then(|v| v.as_string())
+            {
+                let leadership_id = Reflect::get(value, &"leadershipId".into())
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as u32;
+                let matches_leadership = PEER_ROUTING.with(|cell| {
+                    cell.borrow()
+                        .peer_leadership_ids
+                        .get(&peer_id)
+                        .is_some_and(|current| *current == leadership_id)
+                });
+                if matches_leadership {
+                    close_peer(&peer_id);
+                }
+            }
+            true
+        }
+        "worker-lock-lost" => {
+            handle_main_message(MainToWorkerMessage::Wire(MainToWorkerWire::Shutdown));
+            true
+        }
+        _ => false,
+    }
+}
+
+fn close_message_target(target: &JsValue) {
+    let Ok(close_fn) = Reflect::get(target, &"close".into()) else {
+        return;
+    };
+    let Ok(close_fn) = close_fn.dyn_into::<Function>() else {
+        return;
+    };
+    let _ = close_fn.call0(target);
 }
 
 /// Serialise a JS-shaped `JsValue` to JSON. Returns `"null"` on failure.

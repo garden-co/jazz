@@ -22,10 +22,13 @@ use crate::storage::RocksDBStorage;
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
+use crate::transport_manager::TransportRetryConfig;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -496,12 +499,18 @@ fn start_upstream_sync(
         "starting edge upstream sync"
     );
 
-    runtime.connect(
+    let retry_config = TransportRetryConfig {
+        connect_attempt_timeout: Some(EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT),
+        auth_handshake_timeout: Some(EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT),
+    };
+
+    runtime.connect_with_retry_config(
         upstream_ws_url.clone(),
         crate::transport_manager::AuthConfig {
             admin_secret: Some(admin_secret),
             ..Default::default()
         },
+        retry_config,
     );
 
     let wait_runtime = (*runtime).clone();

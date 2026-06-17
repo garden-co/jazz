@@ -17,8 +17,8 @@ use blake3::Hasher;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
-use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::{Session, WriteContext};
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
     Value,
@@ -31,7 +31,7 @@ use crate::sync_manager::{ConnectionSchemaDiagnostics, SyncManager};
 use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
-use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
+use super::context::{SchemaContext, SchemaError};
 use super::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
     decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
@@ -1356,13 +1356,16 @@ impl SchemaManager {
             parent_bundle_object_id,
             bundle_object_id,
         };
-        self.query_manager.require_authorization_schema();
         if let Some(current_head) = self.current_permissions_head
             && current_head.version > head.version
         {
             return Ok(());
         }
         self.current_permissions_head = Some(head);
+        // Defer flipping row_policy_mode to Enforcing until apply succeeds —
+        // apply_permissions_head calls set_authorization_schema which sets it.
+        // Flipping earlier denies writes against tables whose explicit policy
+        // lives in the not-yet-arrived bundle.
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;
         } else {
@@ -1564,84 +1567,6 @@ impl SchemaManager {
         QueryBuilder::new(table)
     }
 
-    /// Subscribe to a query with explicit schema context (for server use).
-    ///
-    /// Servers don't have a fixed "current" schema - they serve multiple clients
-    /// with different schema versions. This method allows subscribing to a query
-    /// using the client's schema as the "current" for that subscription.
-    ///
-    /// The schema must be in `known_schemas` (received via catalogue sync).
-    /// Returns `UnknownSchema` error if the schema is not known.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to subscribe to
-    /// * `ctx` - Schema context from the client (env, schema_hash, user_branch)
-    /// * `session` - Optional session for policy evaluation
-    pub fn subscribe_with_schema_context(
-        &mut self,
-        query: Query,
-        ctx: &QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::query_manager::QuerySubscriptionId, QueryError> {
-        // Look up the target schema in known_schemas
-        let target_schema = self
-            .known_schemas
-            .get(&ctx.schema_hash)
-            .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
-            .clone();
-
-        // Build a SchemaContext with target as current
-        let mut temp_context =
-            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
-
-        // Copy lenses from our main context for multi-schema queries
-        for ((_source, _target), lens) in &self.context.lenses {
-            temp_context.register_lens(lens.clone());
-        }
-
-        // Add other known schemas as potential live schemas
-        for (hash, schema) in self.known_schemas.iter() {
-            if *hash != ctx.schema_hash {
-                // Add to pending - will activate if lens path exists to target
-                temp_context.add_pending_schema(schema.clone());
-            }
-        }
-
-        // Try to activate any pending schemas that now have lens paths
-        temp_context.try_activate_pending();
-
-        // Ensure the client's branch is registered for indexing (server-mode)
-        let client_branch =
-            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
-        self.query_manager
-            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
-
-        // Ensure indices exist for all branches in the temp context
-        for branch_name in temp_context.all_branch_names() {
-            let branch_str = branch_name.as_str();
-            if let Some(composed) = ComposedBranchName::parse(&branch_name)
-                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
-            {
-                for (table_name, table_schema) in schema {
-                    self.query_manager.ensure_indices_for_branch(
-                        table_name.as_str(),
-                        branch_str,
-                        table_schema,
-                    );
-                }
-            }
-        }
-
-        // Subscribe using the temporary context
-        self.query_manager.subscribe_with_explicit_context(
-            query,
-            &target_schema,
-            &temp_context,
-            session,
-        )
-    }
-
     /// Insert a row into the current schema's branch.
     /// Omitted fields are filled from schema defaults or nullable nulls.
     pub fn insert<H: Storage>(
@@ -1759,36 +1684,58 @@ impl SchemaManager {
             .into_iter()
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
-        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
-            write_context
-                .and_then(WriteContext::batch_id)
-                .and_then(|batch_id| {
-                    self.query_manager
-                        .load_latest_transactional_staged_row_on_branch(
-                            storage,
-                            object_id,
-                            &target_branch,
-                            batch_id,
+        let (
+            table,
+            source_branch,
+            old_current_data,
+            _source_commit_id,
+            old_current_provenance,
+            current_row_is_deleted,
+        ) = write_context
+            .and_then(WriteContext::batch_id)
+            .and_then(|batch_id| {
+                self.query_manager
+                    .load_latest_transactional_staged_row_on_branch(
+                        storage,
+                        object_id,
+                        &target_branch,
+                        batch_id,
+                    )
+                    .map(|(table, row)| {
+                        (
+                            table,
+                            target_branch.clone(),
+                            row.data.to_vec(),
+                            row.batch_id(),
+                            row.row_provenance(),
+                            row.is_soft_deleted() || row.is_hard_deleted(),
                         )
-                        .map(|(table, row)| {
-                            (
-                                table,
-                                target_branch.clone(),
-                                row.data.to_vec(),
-                                row.batch_id(),
-                                row.row_provenance(),
-                            )
-                        })
-                })
-                .or_else(|| {
-                    self.query_manager.load_row_for_schema_update_in_context(
+                    })
+            })
+            .or_else(|| {
+                self.query_manager
+                    .load_row_for_schema_update_in_context(
                         storage,
                         object_id,
                         &branches,
                         &target_context,
                     )
-                })
-                .ok_or(QueryError::ObjectNotFound(object_id))?;
+                    .map(|(table, source_branch, data, batch_id, provenance)| {
+                        (table, source_branch, data, batch_id, provenance, false)
+                    })
+            })
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if current_row_is_deleted
+            || self.query_manager().row_is_deleted_on_branch(
+                storage,
+                &table,
+                &source_branch,
+                object_id,
+            )
+        {
+            return Err(QueryError::RowAlreadyDeleted(object_id));
+        }
 
         let table_name = TableName::new(&table);
         let descriptor = target_schema
@@ -1897,6 +1844,54 @@ impl SchemaManager {
                 write_context,
                 false,
             )
+    }
+
+    /// Restore a soft-deleted row, performing copy-on-write when targeting a
+    /// specific schema branch.
+    pub fn restore<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let _ = self.ensure_current_schema_persisted(storage);
+        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let actual_table = self
+            .query_manager
+            .load_row_table_name(storage, object_id)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        if actual_table != table {
+            return Err(QueryError::EncodingError(format!(
+                "object {object_id} belongs to table {actual_table}, cannot restore into {table}"
+            )));
+        }
+
+        let table_name = TableName::new(table);
+        let context = &self.context;
+        let insert_alignment_cache = &mut self.insert_alignment_cache;
+        let query_manager = &mut self.query_manager;
+        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?;
+        let plan = Self::insert_alignment_plan_for_schema(
+            insert_alignment_cache,
+            target_hash,
+            table_name,
+            target_schema,
+        )?;
+        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
+
+        query_manager.restore_on_branch_with_schema_and_write_context(
+            storage,
+            table,
+            &target_branch,
+            object_id,
+            &aligned_values,
+            target_schema,
+            write_context,
+        )
     }
 
     /// Process pending operations (drives SyncManager).
@@ -2587,6 +2582,111 @@ mod tests {
                 .get(&bundle_object_id)
                 .map(|state| state.permissions.clone()),
             Some(permissions)
+        );
+    }
+
+    #[test]
+    fn permissions_head_without_bundle_does_not_deny_local_writes() {
+        use crate::query_manager::session::{Session, WriteContext};
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        // `users` has a select policy but no insert policy. Pre-bundle the gap
+        // is permissive so the insert below succeeds; post-bundle the missing
+        // insert policy must deny it under Enforcing mode.
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let bundle = PermissionsBundleState {
+            schema_hash,
+            version: 1,
+            parent_bundle_object_id: None,
+            permissions: permissions.clone(),
+        };
+        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
+
+        manager
+            .process_catalogue_update(
+                manager.permissions_head_object_id(),
+                &manager.permissions_head_metadata(),
+                &encode_permissions_head(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    bundle_object_id,
+                ),
+            )
+            .expect("head should process");
+
+        assert!(
+            manager.pending_permissions_head.is_some(),
+            "bundle should be pending while only the head has arrived",
+        );
+
+        let write_context = WriteContext::from_session(Session::new("test-user"));
+        let pre_bundle_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(ObjectId::new())),
+            ("name".to_string(), Value::Text("Alice".into())),
+            ("email".to_string(), Value::Text("alice@example.com".into())),
+        ]);
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                pre_bundle_values,
+                None,
+                Some(&write_context),
+            )
+            .expect(
+                "writes in the head-before-bundle gap should not be denied by a missing policy",
+            );
+
+        manager
+            .process_catalogue_update(
+                bundle_object_id,
+                &manager.permissions_bundle_metadata(),
+                &encode_permissions_bundle(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    &permissions,
+                ),
+            )
+            .expect("bundle should process");
+
+        assert!(
+            manager.pending_permissions_head.is_none(),
+            "pending head should clear once the bundle has been applied",
+        );
+
+        let post_bundle_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(ObjectId::new())),
+            ("name".to_string(), Value::Text("Bob".into())),
+            ("email".to_string(), Value::Text("bob@example.com".into())),
+        ]);
+
+        let post_bundle_result = manager.insert(
+            &mut storage,
+            "users",
+            post_bundle_values,
+            None,
+            Some(&write_context),
+        );
+
+        assert!(
+            matches!(
+                post_bundle_result,
+                Err(crate::query_manager::manager::QueryError::PolicyDenied { .. }),
+            ),
+            "after bundle applies, Enforcing mode must deny a write that lacks an explicit \
+             insert policy; got {post_bundle_result:?}",
         );
     }
 

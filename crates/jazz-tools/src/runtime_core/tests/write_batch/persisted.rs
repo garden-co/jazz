@@ -28,7 +28,6 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
     let update_batch_id =
         s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
             .unwrap();
-    s.a.seal_batch(update_batch_id).unwrap();
 
     assert_eq!(
         s.a.storage()
@@ -81,7 +80,6 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
     s.a.immediate_tick();
 
     let delete_batch_id = s.a.delete(id, None).unwrap();
-    s.a.seal_batch(delete_batch_id).unwrap();
 
     assert_eq!(
         s.a.storage()
@@ -817,7 +815,7 @@ fn rc_add_server_requests_pending_batch_fate_reconciliation() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
     s.a.add_server(s.b_server_for_a);
     s.a.batched_tick();
 
@@ -875,7 +873,7 @@ fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
     let batch_id = history_rows[0].batch_id;
     let branch_name = crate::object::BranchName::new(history_rows[0].branch.as_str());
     let row_digest = history_rows[0].content_digest();
-    s.a.seal_batch(batch_id).unwrap();
+    s.a.commit_batch(batch_id).unwrap();
 
     let sealed_submission =
         s.a.storage()

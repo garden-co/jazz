@@ -14,28 +14,23 @@ use futures::future::FutureExt;
 use serde::Deserialize;
 
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
-    current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
-    generate_id as generate_binding_id, parse_batch_id_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_batch_fate, serialize_mutation_error_event, subscription_delta_to_json,
+    parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
+    parse_external_object_id, parse_query_input, parse_read_durability_options,
+    parse_session_input, parse_write_context_input, serialize_mutation_error_event,
+    subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
 use jazz_tools::runtime_core::{
     MutationErrorCallback as CoreMutationErrorCallback, ReadDurabilityOptions, RuntimeCore,
     Scheduler, SubscriptionDelta, SubscriptionHandle,
 };
 use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
-    SyncPayload,
-};
+use jazz_tools::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
 
 // ============================================================================
 // Errors
@@ -225,11 +220,9 @@ fn parse_subscription_inputs(
 
 fn make_subscription_callback(
     callback: Box<dyn SubscriptionCallback>,
-    declared_schema: Option<Schema>,
-    table: Option<TableName>,
 ) -> impl Fn(SubscriptionDelta) + Send + 'static {
     move |delta: SubscriptionDelta| {
-        let payload = subscription_delta_to_json(&delta, declared_schema.as_ref(), table.as_ref());
+        let payload = subscription_delta_to_json(&delta);
         if let Ok(json) = serde_json::to_string(&payload) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 callback.on_update(json);
@@ -383,9 +376,6 @@ fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Arc<Mutex<RnCoreType>>,
-    upstream_server_id: Mutex<Option<ServerId>>,
-    declared_schema: Schema,
-    subscription_queries: Mutex<HashMap<u64, Query>>,
 }
 
 #[uniffi::export]
@@ -401,7 +391,6 @@ impl RnRuntime {
     ) -> Result<Arc<Self>, JazzRnError> {
         with_panic_boundary("new", || {
             let schema: Schema = serde_json::from_str(&schema_json).map_err(json_err)?;
-            let declared_schema = schema.clone();
 
             let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
 
@@ -464,12 +453,7 @@ impl RnRuntime {
                 core_guard.scheduler().set_core_ref(Arc::downgrade(&core));
             }
 
-            Ok(Arc::new(Self {
-                core,
-                upstream_server_id: Mutex::new(None),
-                declared_schema,
-                subscription_queries: Mutex::new(HashMap::new()),
-            }))
+            Ok(Arc::new(Self { core }))
         })
     }
 
@@ -512,43 +496,10 @@ impl RnRuntime {
         &self,
         table: String,
         values_json: String,
-        object_id: Option<String>,
-    ) -> Result<String, JazzRnError> {
-        with_panic_boundary("insert", || {
-            let named_values = convert_insert_values(&values_json)?;
-            let object_id = parse_external_object_id(object_id.as_deref())
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let ((id, row_values), batch_id) = core
-                .insert_with_id(&table, named_values, object_id, None)
-                .map_err(runtime_err)?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
-            serde_json::to_string(&serde_json::json!({
-                "id": id.uuid().to_string(),
-                "values": row_values,
-                "batchId": batch_id.to_string(),
-            }))
-            .map_err(|e| JazzRnError::Internal {
-                message: format!("insert serialization failed: {e}"),
-            })
-        })
-    }
-
-    pub fn insert_with_session(
-        &self,
-        table: String,
-        values_json: String,
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("insert_with_session", || {
+        with_panic_boundary("insert", || {
             let named_values = convert_insert_values(&values_json)?;
             let write_context = parse_write_context(write_context_json)?;
             let object_id = parse_external_object_id(object_id.as_deref())
@@ -559,12 +510,6 @@ impl RnRuntime {
             let ((id, row_values), batch_id) = core
                 .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
@@ -576,33 +521,44 @@ impl RnRuntime {
         })
     }
 
-    pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
-        with_panic_boundary("update", || {
+    pub fn restore(
+        &self,
+        table: String,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("restore", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
             })?;
             let oid = ObjectId::from_uuid(uuid);
-            let updates = convert_updates(&values_json)?;
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let batch_id = core.update(oid, updates, None).map_err(runtime_err)?;
+            let ((id, row_values), batch_id) = core
+                .restore(&table, oid, named_values, write_context.as_ref())
+                .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
+                "id": id.uuid().to_string(),
+                "values": row_values,
                 "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
-                message: format!("update serialization failed: {e}"),
+                message: format!("restore serialization failed: {e}"),
             })
         })
     }
 
-    pub fn update_with_session(
+    pub fn update(
         &self,
         object_id: String,
         values_json: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("update_with_session", || {
+        with_panic_boundary("update", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
             })?;
@@ -624,33 +580,64 @@ impl RnRuntime {
         })
     }
 
-    #[uniffi::method(name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> Result<String, JazzRnError> {
-        with_panic_boundary("delete", || {
+    pub fn upsert(
+        &self,
+        table: String,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("upsert", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
             })?;
             let oid = ObjectId::from_uuid(uuid);
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let batch_id = core.delete(oid, None).map_err(runtime_err)?;
+            let batch_id = core
+                .upsert(&table, oid, named_values, write_context.as_ref())
+                .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
                 "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
-                message: format!("delete serialization failed: {e}"),
+                message: format!("upsert serialization failed: {e}"),
             })
         })
     }
 
-    #[uniffi::method(name = "deleteWithSession")]
-    pub fn delete_with_session(
+    pub fn begin_batch(&self, batch_mode: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("begin_batch", || {
+            let batch_mode = parse_batch_mode_input(&batch_mode)
+                .map_err(|message| JazzRnError::InvalidJson { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            Ok(core.begin_batch(batch_mode).to_string())
+        })
+    }
+
+    pub fn rollback_batch(&self, batch_id: String) -> Result<bool, JazzRnError> {
+        with_panic_boundary("rollback_batch", || {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.rollback_batch(batch_id).map_err(runtime_err)
+        })
+    }
+
+    #[uniffi::method(name = "delete")]
+    pub fn delete_row(
         &self,
         object_id: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("delete_with_session", || {
+        with_panic_boundary("delete", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
             })?;
@@ -717,34 +704,29 @@ impl RnRuntime {
         query_json: String,
         session_json: Option<String>,
         tier: Option<String>,
+        options_json: Option<String>,
     ) -> Result<String, JazzRnError> {
         with_async_panic_boundary("query", || async move {
             let query = parse_query(&query_json)?;
-            let query_for_alignment = query.clone();
             let session = parse_session(session_json)?;
-            let tier = tier.as_deref().map(parse_tier).transpose()?;
+            let (durability, propagation, transaction_batch_id) =
+                parse_read_durability_options(tier.as_deref(), options_json.as_deref())
+                    .map_err(|message| JazzRnError::InvalidJson { message })?;
 
-            let (fut, runtime_schema) = {
+            let fut = {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                (
-                    core.query_with_propagation(
-                        query,
-                        session,
-                        default_read_durability_options(tier),
-                        QueryPropagation::Full,
-                    ),
-                    core.current_schema().clone(),
+                core.query_with_local_batch(
+                    query,
+                    session,
+                    durability,
+                    propagation,
+                    transaction_batch_id,
                 )
+                .map_err(runtime_err)?
             };
             let results = fut.await.map_err(runtime_err)?;
-            let results = align_query_rows_to_declared_schema(
-                &self.declared_schema,
-                &runtime_schema,
-                &query_for_alignment,
-                results,
-            );
 
             let rows_json: Vec<serde_json::Value> = results
                 .into_iter()
@@ -765,55 +747,8 @@ impl RnRuntime {
     // Subscriptions
     // =========================================================================
 
-    pub fn subscribe(
-        &self,
-        query_json: String,
-        callback: Box<dyn SubscriptionCallback>,
-        session_json: Option<String>,
-        tier: Option<String>,
-    ) -> Result<u64, JazzRnError> {
-        with_panic_boundary("subscribe", || {
-            let (query, session, durability) =
-                parse_subscription_inputs(&query_json, session_json, tier)?;
-            let alignment_table = if query_rows_can_be_schema_aligned(&query) {
-                Some(query.table)
-            } else {
-                None
-            };
-            let callback = make_subscription_callback(
-                callback,
-                alignment_table
-                    .as_ref()
-                    .map(|_| self.declared_schema.clone()),
-                alignment_table,
-            );
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-
-            let handle = core
-                .subscribe_with_durability_and_propagation(
-                    query,
-                    callback,
-                    session,
-                    durability,
-                    QueryPropagation::Full,
-                )
-                .map_err(runtime_err)?;
-
-            Ok(handle.0)
-        })
-    }
-
     pub fn unsubscribe(&self, handle: u64) -> Result<(), JazzRnError> {
         with_panic_boundary("unsubscribe", || {
-            self.subscription_queries
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .remove(&handle);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
@@ -832,7 +767,6 @@ impl RnRuntime {
         with_panic_boundary("create_subscription", || {
             let (query, session, durability) =
                 parse_subscription_inputs(&query_json, session_json, tier)?;
-            let query_for_alignment = query.clone();
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
@@ -840,16 +774,6 @@ impl RnRuntime {
 
             let handle =
                 core.create_subscription(query, session, durability, QueryPropagation::Full);
-            drop(core);
-
-            if query_rows_can_be_schema_aligned(&query_for_alignment) {
-                self.subscription_queries
-                    .lock()
-                    .map_err(|_| JazzRnError::Internal {
-                        message: "lock poisoned".into(),
-                    })?
-                    .insert(handle.0, query_for_alignment);
-            }
 
             Ok(handle.0)
         })
@@ -862,162 +786,14 @@ impl RnRuntime {
         callback: Box<dyn SubscriptionCallback>,
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("execute_subscription", || {
-            let alignment_table = self
-                .subscription_queries
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "lock poisoned".into(),
-                })?
-                .get(&handle)
-                .map(|query| query.table);
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let callback = make_subscription_callback(
-                callback,
-                alignment_table
-                    .as_ref()
-                    .map(|_| self.declared_schema.clone()),
-                alignment_table,
-            );
+            let callback = make_subscription_callback(callback);
 
             core.execute_subscription(SubscriptionHandle(handle), callback)
                 .map_err(runtime_err)?;
 
-            Ok(())
-        })
-    }
-
-    // =========================================================================
-    // Sync
-    // =========================================================================
-
-    pub fn on_sync_message_received(&self, message_json: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_received", || {
-            let payload: SyncPayload = serde_json::from_str(&message_json).map_err(json_err)?;
-            let entry = InboxEntry {
-                source: Source::Server(ServerId::new()),
-                payload,
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.park_sync_message(entry);
-            Ok(())
-        })
-    }
-
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: String,
-        message_json: String,
-    ) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_received_from_client", || {
-            let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
-                message: e.to_string(),
-            })?;
-            let cid = ClientId(uuid);
-            let payload: SyncPayload = serde_json::from_str(&message_json).map_err(json_err)?;
-
-            let entry = InboxEntry {
-                source: Source::Client(cid),
-                payload,
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.park_sync_message(entry);
-            Ok(())
-        })
-    }
-
-    pub fn add_server(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("add_server", || {
-            let server_id = {
-                let mut slot =
-                    self.upstream_server_id
-                        .lock()
-                        .map_err(|_| JazzRnError::Internal {
-                            message: "lock poisoned".into(),
-                        })?;
-                if let Some(server_id) = *slot {
-                    server_id
-                } else {
-                    let server_id = ServerId::new();
-                    *slot = Some(server_id);
-                    server_id
-                }
-            };
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.remove_server(server_id);
-            core.add_server(server_id);
-            Ok(())
-        })
-    }
-
-    pub fn remove_server(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("remove_server", || {
-            let server_id = {
-                let slot = self
-                    .upstream_server_id
-                    .lock()
-                    .map_err(|_| JazzRnError::Internal {
-                        message: "lock poisoned".into(),
-                    })?;
-                *slot
-            };
-            let Some(server_id) = server_id else {
-                return Ok(());
-            };
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.remove_server(server_id);
-            Ok(())
-        })
-    }
-
-    pub fn add_client(&self) -> Result<String, JazzRnError> {
-        with_panic_boundary("add_client", || {
-            let client_id = ClientId::new();
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.add_client(client_id, None);
-            Ok(client_id.0.to_string())
-        })
-    }
-
-    pub fn set_client_role(&self, client_id: String, role: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("set_client_role", || {
-            use jazz_tools::sync_manager::ClientRole;
-
-            let uuid = uuid::Uuid::parse_str(&client_id).map_err(|e| JazzRnError::InvalidUuid {
-                message: e.to_string(),
-            })?;
-            let cid = ClientId(uuid);
-
-            let client_role = match role.as_str() {
-                "user" => ClientRole::User,
-                "admin" => ClientRole::Admin,
-                "peer" => ClientRole::Peer,
-                _ => {
-                    return Err(JazzRnError::Runtime {
-                        message: format!(
-                            "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                            role
-                        ),
-                    });
-                }
-            };
-
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.set_client_role_by_name(cid, client_role);
             Ok(())
         })
     }
@@ -1033,35 +809,6 @@ impl RnRuntime {
             })?;
             let schema = core.current_schema();
             Ok(SchemaHash::compute(schema).to_string())
-        })
-    }
-
-    pub fn flush(&self) -> Result<(), JazzRnError> {
-        with_panic_boundary("flush", || {
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.flush_storage().map_err(runtime_err)?;
-            Ok(())
-        })
-    }
-
-    pub fn load_batch_fate(&self, batch_id: String) -> Result<Option<String>, JazzRnError> {
-        with_panic_boundary("load_batch_fate", || {
-            let batch_id = parse_batch_id_input(&batch_id)
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            let fate = core.batch_fate(batch_id).map_err(runtime_err)?;
-            fate.map(|fate| {
-                serde_json::to_string(&serialize_batch_fate(&fate)).map_err(|error| {
-                    JazzRnError::Internal {
-                        message: format!("load_batch_fate serialization failed: {error}"),
-                    }
-                })
-            })
-            .transpose()
         })
     }
 
@@ -1089,14 +836,14 @@ impl RnRuntime {
         })
     }
 
-    pub fn seal_batch(&self, batch_id: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("seal_batch", || {
+    pub fn commit_batch(&self, batch_id: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("commit_batch", || {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.seal_batch(batch_id).map_err(runtime_err)
+            core.commit_batch(batch_id).map_err(runtime_err)
         })
     }
 
@@ -1158,8 +905,14 @@ impl RnRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     pub fn disconnect(&self) {
         if let Ok(mut core) = self.core.lock() {
-            if let Some(handle) = core.transport() {
+            let server_id = if let Some(handle) = core.transport() {
                 handle.disconnect();
+                Some(handle.server_id)
+            } else {
+                None
+            };
+            if let Some(server_id) = server_id {
+                core.remove_server(server_id);
             }
             core.clear_transport();
         }
@@ -1215,118 +968,9 @@ impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use jazz_tools::binding_support::{
-        align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        query_rows_can_be_schema_aligned,
-    };
-    use jazz_tools::object::ObjectId;
-    use jazz_tools::query_manager::query::Query;
-    use jazz_tools::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
-        Value,
-    };
-
-    fn declared_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("title", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("description", ColumnType::Text),
-            )
-            .build()
-    }
-
-    fn runtime_todo_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("description", ColumnType::Text)
-                    .column("done", ColumnType::Boolean)
-                    .column("title", ColumnType::Text),
-            )
-            .build()
-    }
-
-    #[test]
-    fn query_rows_are_reordered_back_to_declared_schema() {
-        let rows = vec![(
-            ObjectId::new(),
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(false),
-                Value::Text("buy milk".to_string()),
-            ],
-        )];
-        let query = Query::new("todos");
-
-        let aligned = align_query_rows_to_declared_schema(
-            &declared_todo_schema(),
-            &runtime_todo_schema(),
-            &query,
-            rows,
-        );
-
-        assert_eq!(
-            aligned[0].1,
-            vec![
-                Value::Text("buy milk".to_string()),
-                Value::Boolean(false),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn descriptor_values_are_reordered_back_to_declared_schema() {
-        let runtime_descriptor = RowDescriptor::new(vec![
-            ColumnDescriptor::new("description", ColumnType::Text),
-            ColumnDescriptor::new("done", ColumnType::Boolean),
-            ColumnDescriptor::new("title", ColumnType::Text),
-        ]);
-
-        let aligned = align_values_to_declared_schema(
-            &declared_todo_schema(),
-            &TableName::new("todos"),
-            &runtime_descriptor,
-            vec![
-                Value::Text("note".to_string()),
-                Value::Boolean(true),
-                Value::Text("ship fix".to_string()),
-            ],
-        );
-
-        assert_eq!(
-            aligned,
-            vec![
-                Value::Text("ship fix".to_string()),
-                Value::Boolean(true),
-                Value::Text("note".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn simple_queries_are_schema_alignable() {
-        assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
-    }
-}
-
 // ============================================================================
 // Module-level utilities
 // ============================================================================
-
-#[uniffi::export]
-pub fn generate_id() -> String {
-    generate_binding_id()
-}
-
-#[uniffi::export]
-pub fn current_timestamp_ms() -> i64 {
-    binding_current_timestamp_ms()
-}
 
 /// Mint a local-first JWT from a base64url-encoded 32-byte seed.
 ///

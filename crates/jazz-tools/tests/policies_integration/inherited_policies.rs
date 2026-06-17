@@ -6,7 +6,9 @@ use super::support::{
     has_any_change, has_removed, has_row, lacks_row, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
+use super::{assert_client_policy_denied, pe, permissions};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr, PolicyValue};
+use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnDescriptor, RowDescriptor, Schema, TableName, TablePolicies, TableSchemaBuilder,
 };
@@ -292,8 +294,7 @@ async fn create_folder(
     archived: bool,
 ) -> ObjectId {
     client
-        .create(table_name, folder_input(title, owners, archived))
-        .await
+        .insert(table_name, folder_input(title, owners, archived))
         .expect("create folder")
         .0
 }
@@ -307,11 +308,10 @@ async fn create_folder_document(
     folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             folder_document_input(owner_id, title, archived, folder_id),
         )
-        .await
         .expect("create folder document")
         .0
 }
@@ -326,7 +326,7 @@ async fn create_multi_folder_document(
     secondary_folder_id: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create(
+        .insert(
             table_name,
             multi_folder_document_input(
                 owner_id,
@@ -336,15 +336,13 @@ async fn create_multi_folder_document(
                 secondary_folder_id,
             ),
         )
-        .await
         .expect("create multi-folder document")
         .0
 }
 
 async fn create_file(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
     client
-        .create("files", file_input(owner_id, name))
-        .await
+        .insert("files", file_input(owner_id, name))
         .expect("create file")
         .0
 }
@@ -356,8 +354,7 @@ async fn create_scalar_ref_todo(
     image: Option<ObjectId>,
 ) -> ObjectId {
     client
-        .create("todos", todo_scalar_ref_input(owner_id, title, image))
-        .await
+        .insert("todos", todo_scalar_ref_input(owner_id, title, image))
         .expect("create scalar-ref todo")
         .0
 }
@@ -369,14 +366,13 @@ async fn create_array_ref_todo(
     images: &[ObjectId],
 ) -> ObjectId {
     client
-        .create("todos", todo_array_ref_input(owner_id, title, images))
-        .await
+        .insert("todos", todo_array_ref_input(owner_id, title, images))
         .expect("create array-ref todo")
         .0
 }
 
 async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).await.expect("update row");
+    client.update(row_id, changes).expect("update row");
 }
 
 // -- Tests --
@@ -618,7 +614,6 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
 
     alice_writer
         .delete(folder_id)
-        .await
         .expect("delete inherited parent folder");
     let bob = TestingClient::builder()
         .with_server(&server)
@@ -1166,7 +1161,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 
     alice
         .delete(doc_id)
-        .await
         .expect("folder owner deletes folder-backed document");
 
     let rows_after_doc_delete = wait_for_query(
@@ -1194,7 +1188,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 
     alice
         .delete(folder_id)
-        .await
         .expect("folder owner deletes folder");
 
     let rows_after_folder_delete = wait_for_query(
@@ -1323,7 +1316,6 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     }));
 
     bob.delete(bob_doc_id)
-        .await
         .expect("document owner deletes owned folder-backed document");
 
     let rows_after_owned_delete = wait_for_rows(
@@ -1353,7 +1345,6 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     );
 
     bob.delete(charlie_doc_id)
-        .await
         .expect("optimistic local delete for unauthorized attempt");
 
     let rows_after_unauthorized_delete = wait_for_query(
@@ -1783,10 +1774,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     ));
 
     log.clear();
-    alice
-        .delete(todo_id)
-        .await
-        .expect("delete referencing todo");
+    alice.delete(todo_id).expect("delete referencing todo");
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -1983,25 +1971,23 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
 
     let folder_id = create_folder(&admin, "folders", "Shared Folder", &["alice"], false).await;
     let file_id = admin
-        .create(
+        .insert(
             "files",
             row_input!(
                 "title" => "Spec.pdf",
                 "folder_id" => Value::Uuid(folder_id)
             ),
         )
-        .await
         .expect("create file")
         .0;
     let part_id = admin
-        .create(
+        .insert(
             "file_parts",
             row_input!(
                 "title" => "Page 1",
                 "file_id" => Value::Uuid(file_id)
             ),
         )
-        .await
         .expect("create file part")
         .0;
 
@@ -2329,4 +2315,218 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     bob.shutdown().await.expect("shutdown bob");
     bob_fresh.shutdown().await.expect("shutdown bob_fresh");
     server.shutdown().await;
+}
+
+/// Verifies that forward inheritance fails closed when the child row's policy
+/// delegates SELECT to a parent table that has no explicit SELECT policy.
+///
+/// Alice owns the parent folder row by data convention, but because `folders`
+/// does not declare a read policy, `allowedTo.read(folder_id)` must not infer
+/// access from permissive/default behavior.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
+    let documents_policies = permissions(|p| {
+        p.allow_read().where_(pe::allowed_to_read("folder_id"));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(documents_policies),
+        )
+        .build();
+    let client = JazzClient::test_client(schema).await;
+
+    let folder = client
+        .insert(
+            "folders",
+            crate::row_input!("owner_id" => "alice", "name" => "Shared"),
+        )
+        .expect("folder insert should succeed");
+    client
+        .insert(
+            "documents",
+            crate::row_input!(
+                "owner_id" => "bob",
+                "title" => "Inherited doc",
+                "folder_id" => folder.0
+            ),
+        )
+        .expect("document insert should succeed");
+
+    let rows = client
+        .for_session(Session::new("alice"))
+        .query(
+            QueryBuilder::new("documents").select(&["title"]).build(),
+            None,
+        )
+        .await
+        .expect("query documents as alice");
+
+    assert!(
+        rows.is_empty(),
+        "child rows should be denied when INHERITS reaches a parent table with no explicit SELECT policy"
+    );
+}
+
+/// Verifies the permissive-local behavior for an INSERT policy that inherits
+/// through a parent FK.
+///
+/// In local permissive mode, the child table has an explicit INSERT policy, but
+/// the parent table has no INSERT policy. This covers the local-only branch
+/// where a missing parent operation policy is treated as allowed while
+/// evaluating `allowedTo.insert(folder_id)`.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
+    let documents_policies = permissions(|p| {
+        p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
+    });
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("folders").column("title", ColumnType::Text))
+        .table(
+            TableSchema::builder("documents")
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("folder_id", "folders")
+                .policies(documents_policies),
+        )
+        .build();
+
+    let client = JazzClient::permissive_test_client(schema).await;
+
+    let folder = client
+        .insert("folders", crate::row_input!("title" => "alice folder"))
+        .expect("seed folder row");
+
+    client
+        .for_session(Session::new("alice"))
+        .insert(
+            "documents",
+            crate::row_input!("title" => "draft doc", "folder_id" => folder.0),
+        )
+        .expect(
+            "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
+        );
+}
+
+/// Verifies the permissive-local behavior for reverse inherited UPDATE access.
+///
+/// The `files` UPDATE policy is delegated through rows in `todos` that
+/// reference the file. `todos` intentionally has no UPDATE policy, so this
+/// covers the local-only branch where missing source-table UPDATE policy is
+/// treated as allowed for `allowedTo.updateReferencing(...)`.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
+    let files_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
+            .where_new(pe::always());
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("files")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .policies(files_policies),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .nullable_fk_column("file_id", "files"),
+        )
+        .build();
+
+    let client = JazzClient::permissive_test_client(schema).await;
+
+    let file = client
+        .insert(
+            "files",
+            crate::row_input!("owner_id" => "bob", "name" => "shared-file"),
+        )
+        .expect("seed file row");
+    client
+        .insert(
+            "todos",
+            crate::row_input!(
+                "owner_id" => "alice",
+                "title" => "todo referencing file",
+                "file_id" => file.0,
+            ),
+        )
+        .expect("seed referencing todo row");
+
+    client
+        .for_session(Session::new("alice"))
+        .update(
+            file.0,
+            vec![
+                ("owner_id".into(), Value::Text("bob".into())),
+                ("name".into(), Value::Text("updated by alice".into())),
+            ],
+        )
+        .expect(
+            "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
+        );
+}
+
+/// Verifies that inherited WITH CHECK constraints evaluate the proposed new
+/// row state and deny updates when the referenced parent is not updateable.
+///
+/// Bob owns the child folder and keeps its `parent_id` pointed at Alice's root
+/// folder, but Bob cannot update that root folder. The child's update must
+/// therefore fail the inherited `allowedTo.update(parent_id)` check.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+    let folders_policies = permissions(|p| {
+        p.allow_update()
+            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("folders")
+                .column("owner_id", ColumnType::Text)
+                .column("name", ColumnType::Text)
+                .nullable_fk_column("parent_id", "folders")
+                .policies(folders_policies),
+        )
+        .build();
+    let client = JazzClient::test_client(schema).await;
+
+    let root = client
+        .insert(
+            "folders",
+            crate::row_input!("owner_id" => "alice", "name" => "Root", "parent_id" => Value::Null),
+        )
+        .expect("create root");
+    let child = client
+        .insert(
+            "folders",
+            crate::row_input!("owner_id" => "bob", "name" => "Child", "parent_id" => root.0),
+        )
+        .expect("create child");
+
+    let update_err = client
+        .for_session(Session::new("bob"))
+        .update(
+            child.0,
+            vec![
+                ("owner_id".into(), Value::Text("bob".into())),
+                ("name".into(), Value::Text("Child renamed".into())),
+                ("parent_id".into(), Value::Uuid(root.0)),
+            ],
+        )
+        .expect_err("update should fail inherited WITH CHECK");
+    assert_client_policy_denied(update_err, "folders", Operation::Update);
 }

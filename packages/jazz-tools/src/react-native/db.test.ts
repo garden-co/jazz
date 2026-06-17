@@ -47,7 +47,7 @@ function makeClientStub() {
     connectTransport: ReturnType<typeof vi.fn>;
     onMutationError: ReturnType<typeof vi.fn>;
   };
-  const create = vi.fn(() => {
+  const insert = vi.fn(() => {
     const row: DirectInsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
@@ -56,7 +56,7 @@ function makeClientStub() {
     return new WriteResult(row, row.batchId, client);
   });
   client = {
-    create,
+    insert,
     shutdown,
     updateAuthToken,
     updateCookieSession,
@@ -66,7 +66,7 @@ function makeClientStub() {
   } as unknown as typeof client;
   return {
     client,
-    create,
+    insert,
     shutdown,
     updateAuthToken,
     updateCookieSession,
@@ -193,8 +193,8 @@ describe("react-native Db", () => {
     db.insert(todosAppClone.todos, { title: "Buy milk" });
     db.insert(projectsApp.projects, { title: "Buy milk" });
 
-    expect(clientA.create).toHaveBeenCalledTimes(2);
-    expect(clientB.create).toHaveBeenCalledTimes(1);
+    expect(clientA.insert).toHaveBeenCalledTimes(2);
+    expect(clientB.insert).toHaveBeenCalledTimes(1);
     expect(createJazzRnRuntimeMock).toHaveBeenCalledTimes(2);
     expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(2);
   });
@@ -230,7 +230,7 @@ describe("react-native Db", () => {
     expect(clientB.shutdown).toHaveBeenCalledTimes(1);
 
     db.insert(todosApp.todos, { title: "Buy milk" });
-    expect(clientAfterShutdown.create).toHaveBeenCalledTimes(1);
+    expect(clientAfterShutdown.insert).toHaveBeenCalledTimes(1);
     expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(3);
   });
 

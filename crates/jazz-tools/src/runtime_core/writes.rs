@@ -9,6 +9,154 @@ use crate::row_histories::{BatchId, RowState, patch_row_batch_state};
 use crate::storage::StorageError;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    pub fn begin_batch(&mut self, batch_mode: BatchMode) -> BatchId {
+        let context = RuntimeBatchContext {
+            batch_mode,
+            batch_id: BatchId::new(),
+            target_branch_name: self.schema_manager.branch_name(),
+        };
+        let batch_id = context.batch_id;
+        self.batch_contexts.insert(batch_id, context);
+        batch_id
+    }
+
+    fn batch_handle_kind(batch_mode: BatchMode) -> &'static str {
+        match batch_mode {
+            BatchMode::Direct => "batch",
+            BatchMode::Transactional => "transaction",
+        }
+    }
+
+    fn committed_batch_error(batch_id: BatchId, batch_mode: BatchMode) -> RuntimeError {
+        let kind = Self::batch_handle_kind(batch_mode);
+        RuntimeError::WriteError(format!("{kind} {batch_id} is already committed"))
+    }
+
+    fn unavailable_batch_error(batch_id: BatchId) -> RuntimeError {
+        RuntimeError::WriteError(format!(
+            "batch {batch_id} has already been completed or was never opened"
+        ))
+    }
+
+    fn load_runtime_batch_record(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
+            return Ok(Some(record.clone()));
+        }
+
+        self.storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))
+    }
+
+    pub(crate) fn ensure_batch_is_open(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
+        if self.batch_contexts.contains_key(&batch_id) {
+            return Ok(());
+        }
+
+        if let Some(record) = self.load_runtime_batch_record(batch_id)? {
+            if record.sealed {
+                return Err(Self::committed_batch_error(batch_id, record.mode));
+            }
+
+            return Ok(());
+        }
+
+        if self.durability.accepted_batch_tier(batch_id).is_some() {
+            return Err(Self::committed_batch_error(batch_id, BatchMode::Direct));
+        }
+
+        Err(Self::unavailable_batch_error(batch_id))
+    }
+
+    fn finish_batch(&mut self, batch_id: BatchId) {
+        self.batch_contexts.remove(&batch_id);
+    }
+
+    fn resolve_batch_write_context(
+        &self,
+        write_context: Option<&WriteContext>,
+    ) -> Result<Option<WriteContext>, RuntimeError> {
+        let Some(write_context) = write_context else {
+            return Ok(None);
+        };
+        let Some(batch_id) = write_context.batch_id() else {
+            return Ok(Some(write_context.clone()));
+        };
+        let Some(batch_context) = self.batch_contexts.get(&batch_id) else {
+            if write_context.batch_mode.is_none() && write_context.target_branch_name.is_none() {
+                if let Some(record) = self.load_runtime_batch_record(batch_id)? {
+                    if record.sealed {
+                        return Err(Self::committed_batch_error(batch_id, record.mode));
+                    }
+                    return Ok(Some(write_context.clone()));
+                }
+
+                return Err(Self::unavailable_batch_error(batch_id));
+            }
+            return Ok(Some(write_context.clone()));
+        };
+
+        let mut resolved = write_context.clone();
+        if resolved.batch_mode.is_none() {
+            resolved.batch_mode = Some(batch_context.batch_mode);
+        }
+        if resolved.target_branch_name.is_none() {
+            resolved.target_branch_name =
+                Some(batch_context.target_branch_name.as_str().to_string());
+        }
+        Ok(Some(resolved))
+    }
+
+    pub(crate) fn batch_query_overlay(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<QueryLocalOverlay>, RuntimeError> {
+        let record = if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
+            Some(record.clone())
+        } else {
+            self.storage
+                .load_local_batch_record(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("load local batch record: {err}"))
+                })?
+        };
+
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let Some(first_member) = record.members.first() else {
+            return Ok(None);
+        };
+
+        let branch_name = first_member.branch_name;
+        if record
+            .members
+            .iter()
+            .any(|member| member.branch_name != branch_name)
+        {
+            return Err(RuntimeError::WriteError(format!(
+                "batch {batch_id:?} spans multiple target branches"
+            )));
+        }
+
+        let mut row_ids: Vec<_> = record
+            .members
+            .iter()
+            .map(|member| member.object_id)
+            .collect();
+        row_ids.sort();
+        row_ids.dedup();
+
+        Ok(Some(QueryLocalOverlay {
+            batch_id,
+            branch_name,
+            row_ids,
+        }))
+    }
+
     fn local_write_confirmed_tier(&self) -> Option<DurabilityTier> {
         if !self.synthesize_direct_write_fate {
             return None;
@@ -23,12 +171,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )
     }
 
+    /// The strongest durability tier some configured producer can still
+    /// confirm for this runtime's batches: with any producer available that
+    /// is exactly the settlement target; a non-durable client with no
+    /// upstream has no producer at all.
+    fn max_attainable_wait_tier(&self) -> Option<DurabilityTier> {
+        let sync_manager = self.schema_manager.query_manager().sync_manager();
+        let has_producer = sync_manager.has_servers_or_pending_servers()
+            || self.synthesize_direct_write_fate
+            || sync_manager.max_local_durability_tier().is_some();
+        has_producer.then(|| sync_manager.settlement_target())
+    }
+
     fn completed_batch_wait_receiver(
         outcome: PersistedWriteAck,
     ) -> oneshot::Receiver<PersistedWriteAck> {
         let (sender, receiver) = oneshot::channel();
         let _ = sender.send(outcome);
         receiver
+    }
+
+    fn complete_empty_batch(&mut self, batch_id: BatchId) {
+        self.durability
+            .record_batch_ack(batch_id, DurabilityTier::GlobalServer);
     }
 
     fn batch_wait_outcome(
@@ -95,6 +260,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let Some(batch_id) = write_context.batch_id() else {
             return Ok(());
         };
+
+        if self.durability.accepted_batch_tier(batch_id).is_some() {
+            return Err(RuntimeError::WriteError(format!(
+                "batch {batch_id:?} is already sealed"
+            )));
+        }
 
         if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
             if record.mode != mode {
@@ -407,6 +578,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
+        let write_context = self.resolve_batch_write_context(write_context)?;
+        let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
@@ -420,7 +593,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(row_id, batch_id, batch_mode)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
+            self.commit_batch(batch_id)?;
         }
         debug!(object_id = %row_id, "inserted");
         self.mark_storage_write_pending_flush();
@@ -436,6 +609,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
+        let write_context = self.resolve_batch_write_context(write_context)?;
+        let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
@@ -446,7 +621,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(object_id, batch_id, batch_mode)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
+            self.commit_batch(batch_id)?;
         }
 
         self.mark_storage_write_pending_flush();
@@ -454,8 +629,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(batch_id)
     }
 
-    /// Compatibility shim for callers that expect explicit-id upserts.
-    pub fn upsert_with_id(
+    pub fn upsert(
         &mut self,
         table: &str,
         object_id: ObjectId,
@@ -463,6 +637,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("upsert", table, %object_id).entered();
+        let write_context = self.resolve_batch_write_context(write_context)?;
+        let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
@@ -474,7 +650,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.track_local_batch(object_id, batch_id, batch_mode)?;
 
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
+            self.commit_batch(batch_id)?;
         }
 
         self.mark_storage_write_pending_flush();
@@ -489,6 +665,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
+        let write_context = self.resolve_batch_write_context(write_context)?;
+        let write_context = write_context.as_ref();
         self.ensure_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
@@ -500,12 +678,44 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(object_id, batch_id, batch_mode)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.seal_batch(batch_id)?;
+            self.commit_batch(batch_id)?;
         }
         debug!("deleted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(batch_id)
+    }
+
+    /// Restore a soft-deleted row.
+    pub fn restore(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<DirectInsertResult, RuntimeError> {
+        let _span = debug_span!("restore", table, %object_id).entered();
+        let write_context = self.resolve_batch_write_context(write_context)?;
+        let write_context = write_context.as_ref();
+        self.ensure_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .restore(&mut self.storage, table, object_id, values, write_context)
+            .map_err(crate::runtime_core::write_error_from_query)?;
+        let row_id = result.row_id;
+        let row_values = result.row_values;
+        let batch_id = result.batch_id;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode)?;
+        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
+            self.commit_batch(batch_id)?;
+        }
+        debug!(object_id = %row_id, "restored");
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(((row_id, row_values), batch_id))
     }
 
     /// Load one replayable local batch record by logical batch id.
@@ -597,17 +807,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(crate) fn sealed_batch_still_needs_edge_reconciliation(fate: Option<&BatchFate>) -> bool {
-        match fate {
-            Some(BatchFate::Rejected { .. } | BatchFate::Missing { .. }) => false,
-            Some(BatchFate::DurableDirect { confirmed_tier, .. })
-            | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
-                *confirmed_tier < DurabilityTier::EdgeServer
-            }
-            None => true,
-        }
-    }
-
     /// Load retained local batch records plus sealed submissions that still
     /// need edge reconciliation. Browser workers send this set to the main
     /// runtime during startup so local queries know when they must wait for the
@@ -633,7 +832,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .storage
                 .load_authoritative_batch_fate(submission.batch_id)
                 .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))?;
-            if !Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref()) {
+            if !self.batch_needs_settlement(fate.as_ref()) {
                 continue;
             }
             if let Some(record) =
@@ -655,7 +854,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if retained_batch_ids.contains(&fate.batch_id()) {
                 continue;
             }
-            if !Self::sealed_batch_still_needs_edge_reconciliation(Some(&fate)) {
+            if !self.batch_needs_settlement(Some(&fate)) {
                 continue;
             }
             let local_rows = self.local_batch_rows(fate.batch_id());
@@ -707,12 +906,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(Self::completed_batch_wait_receiver(outcome));
         }
 
+        if self.durability.is_batch_accepted_at(batch_id, tier) {
+            return Ok(Self::completed_batch_wait_receiver(Ok(())));
+        }
+
         let record = self.local_batch_record_for_wait(batch_id)?;
         if let Some(outcome) = Self::batch_wait_outcome(record.latest_fate.as_ref(), tier) {
             if outcome.is_err() {
                 self.durability.take_mutation_error_event(batch_id);
             }
             return Ok(Self::completed_batch_wait_receiver(outcome));
+        }
+
+        let attainable = self.max_attainable_wait_tier();
+        if attainable.is_none_or(|max_tier| tier > max_tier) {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot wait for durability tier {tier:?}: no configured server or local \
+                 durability tier can produce it (max attainable: {attainable:?})"
+            )));
         }
 
         Ok(self.register_batch_waiter(batch_id, tier))
@@ -821,7 +1032,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.storage.is_rejected_batch_fate_acknowledged(batch_id)
     }
 
-    pub fn discard_local_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+    pub fn rollback_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+        self.ensure_batch_is_open(batch_id)?;
         self.local_batch_record_cache.remove(&batch_id);
         let had_record = self
             .storage
@@ -833,12 +1045,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.durability.forget_batch(batch_id);
+        self.finish_batch(batch_id);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(had_record)
     }
 
-    pub fn seal_batch(&mut self, batch_id: BatchId) -> Result<(), RuntimeError> {
+    pub fn commit_batch(&mut self, batch_id: BatchId) -> Result<(), RuntimeError> {
+        self.ensure_batch_is_open(batch_id)?;
         let mut record = if let Some(record) = self.local_batch_record_cache.remove(&batch_id) {
             record
         } else {
@@ -849,21 +1063,35 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     RuntimeError::WriteError(format!("load local batch record: {err}"))
                 })?
             else {
-                return Err(RuntimeError::WriteError(format!(
-                    "missing local batch record for {batch_id:?}"
-                )));
+                self.complete_empty_batch(batch_id);
+                self.finish_batch(batch_id);
+                return Ok(());
             };
             record
         };
 
+        if record.members.is_empty() {
+            self.complete_empty_batch(batch_id);
+            self.storage
+                .delete_local_batch_record(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("delete empty local batch record: {err}"))
+                })?;
+            self.mark_storage_write_pending_flush();
+            self.finish_batch(batch_id);
+            return Ok(());
+        }
+
         if record.sealed {
             self.local_batch_record_cache.insert(batch_id, record);
+            self.finish_batch(batch_id);
             return Ok(());
         }
 
         let submission = self.sealed_batch_submission(&record)?;
 
         record.mark_sealed(submission.clone());
+        let mut settled_at_commit = false;
         if record.mode == BatchMode::Direct {
             if let Some(confirmed_tier) = self.local_write_confirmed_tier() {
                 let settlement = BatchFate::DurableDirect {
@@ -876,19 +1104,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .map_err(|err| {
                         RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
+                settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
+                self.durability.record_batch_ack(batch_id, confirmed_tier);
             }
             self.publish_direct_batch_rows(&record)?;
         }
-        self.storage
-            .upsert_sealed_batch_submission(&submission)
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
-            })?;
+        if !settled_at_commit {
+            self.storage
+                .upsert_sealed_batch_submission(&submission)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
+                })?;
+        }
         self.local_batch_record_cache.insert(batch_id, record);
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
             .seal_batch_to_servers(submission);
+        self.finish_batch(batch_id);
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(())

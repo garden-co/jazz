@@ -1,6 +1,5 @@
 export {
   type CreateOptions,
-  DirectBatch,
   JazzClient,
   type AuthConfig,
   type BatchMode,
@@ -9,9 +8,6 @@ export {
   type LocalUpdatesMode,
   type MutationErrorEvent,
   PersistedWriteRejectedError,
-  Transaction,
-  type BatchScope,
-  type TransactionScope,
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -21,6 +17,7 @@ export {
   type RequestLike,
   type Row,
   type Runtime,
+  type RestoreOptions,
   type SubscriptionCallback,
   type UpdateOptions,
   type UpsertOptions,
@@ -37,8 +34,8 @@ export {
   type LogoutOptions,
   DbDirectBatch,
   DbTransaction,
-  type DbBatchScope,
-  type DbTransactionScope,
+  type BatchScope,
+  type TransactionScope,
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,
@@ -46,6 +43,11 @@ export {
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
+export {
+  INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
+  IncompatibleBrowserBrokerConfigurationError,
+  type IncompatibleBrowserBrokerConfigurationHandler,
+} from "./browser-broker-errors.js";
 export {
   fetchStoredPermissions,
   fetchSchemaHashes,
@@ -64,7 +66,7 @@ export {
 } from "./introspection-fetch.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
-export { toInsertRecord, toValue, toUpdateRecord } from "./value-converter.js";
+export { toValue, toWriteRecord } from "./value-converter.js";
 export {
   DEFAULT_FILE_CHUNK_SIZE_BYTES,
   MAX_FILE_PART_BYTES,
@@ -77,7 +79,7 @@ export {
 } from "./file-storage.js";
 export {
   SubscriptionManager,
-  type RowChangeKind,
+  RowChangeKind,
   type RowDelta,
   type SubscriptionDelta,
 } from "./subscription-manager.js";

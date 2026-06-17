@@ -215,31 +215,37 @@ pub(crate) fn raw_page_kind(raw: &[u8], expected_page_size: usize) -> Result<Pag
     Ok(header.kind)
 }
 
-pub(crate) fn raw_internal_child_for_key(
-    raw: &[u8],
-    expected_page_size: usize,
+// Hot path: bounds for the whole slot directory are validated once up front
+// so each binary-search probe is two direct loads plus one key bounds check.
+fn internal_child_for_key_parsed(
+    payload: &[u8],
+    key_count: usize,
     key: &[u8],
 ) -> Result<PageId, BTreeError> {
-    let header = parse_header(raw, expected_page_size, false)?;
-    if header.kind != PageKind::Internal {
-        return Err(BTreeError::Corrupt("expected internal page".to_string()));
-    }
-
-    let key_count = header.item_count as usize;
     let slots_bytes = internal_slots_bytes(key_count)?;
-    if header.payload.len() < slots_bytes {
+    if payload.len() < slots_bytes {
         return Err(BTreeError::Corrupt(
             "internal page payload shorter than slot directory".to_string(),
         ));
     }
+    let slots = &payload[INTERNAL_LEFT_CHILD_BYTES..slots_bytes];
 
     let mut lo = 0usize;
     let mut hi = key_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (key_off, key_len, _) = internal_slot(header.payload, key_count, mid)?;
-        let current_key = slice_payload(header.payload, key_off, key_len, "internal key")?;
-        if current_key <= key {
+        let base = mid * INTERNAL_SLOT_BYTES;
+        let key_off = read_le_u32(slots, base) as usize;
+        let key_len = read_le_u32(slots, base + 4) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("internal key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "internal key exceeds payload bounds".to_string(),
+            ));
+        }
+        if &payload[key_off..key_end] <= key {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -247,11 +253,34 @@ pub(crate) fn raw_internal_child_for_key(
     }
 
     if lo == 0 {
-        return read_u64_at(header.payload, 0, "internal left child");
+        return read_u64_at(payload, 0, "internal left child");
     }
+    Ok(read_le_u64(slots, (lo - 1) * INTERNAL_SLOT_BYTES + 8))
+}
 
-    let (_, _, right_child) = internal_slot(header.payload, key_count, lo - 1)?;
-    Ok(right_child)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawDescendStep {
+    Leaf,
+    Child(PageId),
+    Other(PageKind),
+}
+
+/// One tree-descent step on a raw page: parses the header once and, for
+/// internal pages, finds the child for `key` in the same pass.
+pub(crate) fn raw_descend_step(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<RawDescendStep, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    match header.kind {
+        PageKind::Leaf => Ok(RawDescendStep::Leaf),
+        PageKind::Internal => {
+            internal_child_for_key_parsed(header.payload, header.item_count as usize, key)
+                .map(RawDescendStep::Child)
+        }
+        kind => Ok(RawDescendStep::Other(kind)),
+    }
 }
 
 pub(crate) fn raw_leaf_find_value<'a>(
@@ -264,32 +293,86 @@ pub(crate) fn raw_leaf_find_value<'a>(
         return Err(BTreeError::Corrupt("expected leaf page".to_string()));
     }
 
+    let payload = header.payload;
     let entry_count = header.item_count as usize;
     let slots_bytes = leaf_slots_bytes(entry_count)?;
-    if header.payload.len() < slots_bytes {
+    if payload.len() < slots_bytes {
         return Err(BTreeError::Corrupt(
             "leaf page payload shorter than slot directory".to_string(),
         ));
     }
+    let slots = &payload[..slots_bytes];
 
     let mut lo = 0usize;
     let mut hi = entry_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (key_off, key_len, _) = leaf_slot(header.payload, entry_count, mid)?;
-        let current_key = slice_payload(header.payload, key_off, key_len, "leaf key")?;
-        match current_key.cmp(key) {
+        let base = mid * LEAF_SLOT_BYTES;
+        let key_off = read_le_u32(slots, base) as usize;
+        let key_len = read_le_u32(slots, base + 4) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        match payload[key_off..key_end].cmp(key) {
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
             std::cmp::Ordering::Equal => {
-                let (_, _, value_off) = leaf_slot(header.payload, entry_count, mid)?;
-                let value = parse_leaf_value_cell_at(header.payload, value_off)?;
+                let value_off = read_le_u32(slots, base + 8) as usize;
+                let value = parse_leaf_value_cell_at(payload, value_off)?;
                 return Ok(Some(value));
             }
         }
     }
 
     Ok(None)
+}
+
+/// True when `raw` is a non-empty leaf whose closed key span
+/// [first_key, last_key] contains `key`. In a B+tree that makes it the
+/// unique leaf responsible for `key`, so callers may skip the descent.
+pub(crate) fn raw_leaf_covers_key(
+    raw: &[u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<bool, BTreeError> {
+    let header = parse_header(raw, expected_page_size, false)?;
+    if header.kind != PageKind::Leaf {
+        return Ok(false);
+    }
+    let entry_count = header.item_count as usize;
+    if entry_count == 0 {
+        return Ok(false);
+    }
+    let payload = header.payload;
+    let slots_bytes = leaf_slots_bytes(entry_count)?;
+    if payload.len() < slots_bytes {
+        return Ok(false);
+    }
+    let slots = &payload[..slots_bytes];
+
+    let first_off = read_le_u32(slots, 0) as usize;
+    let first_len = read_le_u32(slots, 4) as usize;
+    let last_base = (entry_count - 1) * LEAF_SLOT_BYTES;
+    let last_off = read_le_u32(slots, last_base) as usize;
+    let last_len = read_le_u32(slots, last_base + 4) as usize;
+    let first_end = first_off
+        .checked_add(first_len)
+        .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+    let last_end = last_off
+        .checked_add(last_len)
+        .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+    if first_end > payload.len() || last_end > payload.len() {
+        return Err(BTreeError::Corrupt(
+            "leaf key exceeds payload bounds".to_string(),
+        ));
+    }
+
+    Ok(&payload[first_off..first_end] <= key && key <= &payload[last_off..last_end])
 }
 
 /// Scan a leaf page for key-value pairs in the range [start, end).
@@ -1153,7 +1236,23 @@ fn finish_leaf_mutation(
     }
 
     raw[16..20].copy_from_slice(&item_count.to_le_bytes());
+    // Checksum is deferred: in-place mutations zero it, and the flush and
+    // checkpoint paths recompute it once per dirty page before any write.
     raw[20..24].copy_from_slice(&0u32.to_le_bytes());
+    Ok(())
+}
+
+pub(crate) fn refresh_page_checksum(
+    raw: &mut [u8],
+    expected_page_size: usize,
+) -> Result<(), BTreeError> {
+    if raw.len() != expected_page_size {
+        return Err(BTreeError::Corrupt(format!(
+            "page length mismatch: found {}, expected {}",
+            raw.len(),
+            expected_page_size
+        )));
+    }
     let checksum = page_checksum(raw);
     raw[20..24].copy_from_slice(&checksum.to_le_bytes());
     Ok(())
@@ -1430,6 +1529,82 @@ mod tests {
             4096,
         )
         .expect("encode sample leaf")
+    }
+
+    #[test]
+    fn raw_descend_step_child_matches_partition_point_reference() {
+        let keys: Vec<Vec<u8>> = (0..101)
+            .map(|i| format!("key{:04}", i * 2).into_bytes())
+            .collect();
+        let children: Vec<PageId> = (0..102).map(|i| 1000 + i as PageId).collect();
+        let raw = encode_page(
+            &Page::Internal {
+                keys: keys.clone(),
+                children: children.clone(),
+            },
+            4096,
+        )
+        .expect("encode internal page");
+
+        // children[i] receives probes that sort before keys[i] and at-or-after
+        // keys[i-1]; equal keys route right, matching `current_key <= key`.
+        let reference_child = |probe: &[u8]| {
+            let idx = keys.partition_point(|k| k.as_slice() <= probe);
+            children[idx]
+        };
+
+        let mut probes: Vec<Vec<u8>> = vec![b"".to_vec(), b"zzzz".to_vec()];
+        for i in 0..203 {
+            probes.push(format!("key{:04}", i).into_bytes());
+        }
+        for probe in probes {
+            let got = match raw_descend_step(&raw, 4096, &probe).expect("descend step") {
+                RawDescendStep::Child(child) => child,
+                other => panic!("expected child for internal page, got {:?}", other),
+            };
+            assert_eq!(
+                got,
+                reference_child(&probe),
+                "probe {}",
+                String::from_utf8_lossy(&probe)
+            );
+        }
+    }
+
+    #[test]
+    fn raw_leaf_find_value_matches_entry_list_reference() {
+        let entries: Vec<(Vec<u8>, ValueCell)> = (0..50)
+            .map(|i| {
+                (
+                    format!("key{:04}", i * 2).into_bytes(),
+                    ValueCell::Inline(format!("value{}", i).into_bytes()),
+                )
+            })
+            .collect();
+        let raw = encode_page(
+            &Page::Leaf {
+                entries: entries.clone(),
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode leaf page");
+
+        for i in 0..101 {
+            let probe = format!("key{:04}", i).into_bytes();
+            let got = raw_leaf_find_value(&raw, 4096, &probe).expect("find value");
+            let expected = entries.iter().find(|(k, _)| *k == probe).map(|(_, v)| v);
+            match (got, expected) {
+                (Some(ValueCellRef::Inline(value)), Some(ValueCell::Inline(want))) => {
+                    assert_eq!(value, want.as_slice(), "probe key{:04}", i)
+                }
+                (None, None) => {}
+                (got, expected) => panic!(
+                    "mismatch for key{:04}: got {:?}, expected {:?}",
+                    i, got, expected
+                ),
+            }
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub mod test_support;
 pub mod wire_types;
 
@@ -48,19 +48,21 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(feature = "client")]
-pub use client::{JazzClient, SessionClient};
+pub use client::JazzClient;
 
 #[cfg(feature = "client")]
 pub use object::ObjectId;
 #[cfg(feature = "client")]
 pub use query_manager::query::{Query, QueryBuilder};
 #[cfg(feature = "client")]
-pub use query_manager::session::Session;
+pub use query_manager::session::{Session, WriteContext};
 #[cfg(feature = "client")]
 pub use query_manager::types::{
     ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
     Value,
 };
+#[cfg(feature = "client")]
+pub use row_histories::BatchId;
 #[cfg(feature = "client")]
 pub use schema_manager::AppId;
 #[cfg(feature = "client")]
@@ -101,6 +103,24 @@ pub struct AppContext {
     /// Optional sync message tracer for test observability.
     /// Set via `TestingClient::with_tracer()` — `None` in production.
     pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
+}
+
+#[cfg(feature = "test-utils")]
+impl AppContext {
+    pub fn test(schema: Schema) -> AppContext {
+        AppContext {
+            app_id: crate::AppId::random(),
+            client_id: None,
+            schema,
+            server_url: String::new(),
+            data_dir: std::env::temp_dir(),
+            storage: crate::ClientStorage::Memory,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+            sync_tracer: None,
+        }
+    }
 }
 
 /// Local storage backend for a client application.

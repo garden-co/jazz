@@ -354,7 +354,7 @@ impl QueryManager {
         mutations
     }
 
-    pub(super) fn index_mutations_for_undelete_on_branch<'a>(
+    pub(super) fn index_mutations_for_restore_on_branch<'a>(
         table: &'a str,
         branch: &'a str,
         object_id: ObjectId,
@@ -502,8 +502,8 @@ impl QueryManager {
             .map_err(Self::map_index_storage_error)
     }
 
-    /// Update indices for undelete on a specific branch.
-    pub(super) fn update_indices_for_undelete_on_branch(
+    /// Update indices for restore on a specific branch.
+    pub(super) fn update_indices_for_restore_on_branch(
         storage: &mut dyn Storage,
         table: &str,
         branch: &str,
@@ -512,7 +512,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), QueryError> {
-        let mutations = Self::index_mutations_for_undelete_on_branch(
+        let mutations = Self::index_mutations_for_restore_on_branch(
             table,
             branch,
             object_id,
@@ -608,7 +608,7 @@ impl QueryManager {
 
         let table_name = TableName::new(table);
         if let Some(table_schema) = self.schema.get(&table_name)
-            && let Err(error) = Self::update_indices_for_undelete_on_branch(
+            && let Err(error) = Self::update_indices_for_restore_on_branch(
                 storage,
                 table,
                 branch,

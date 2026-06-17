@@ -453,6 +453,35 @@ fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed(
 }
 
 #[test]
+fn test_clear_sync_sender_keeps_server_outbox_when_buffering_is_enabled() {
+    let mut core = create_test_runtime();
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.sync_sender().take();
+
+    core.clear_sync_sender();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "buffered@test.local"),
+        None,
+    )
+    .unwrap();
+    core.batched_tick();
+
+    let outbox = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    assert!(
+        outbox
+            .iter()
+            .any(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id)),
+        "clearing the sender should leave server-bound outbox entries intact for reconnect"
+    );
+}
+
+#[test]
 fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
     let schema = test_schema();
     let app_id = AppId::from_name("test-app");

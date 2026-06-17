@@ -44,10 +44,16 @@ export function mockMutation(batchId = "batch-id"): DirectMutationResult {
 }
 
 export const runtimeBatchRecordStubs = {
-  loadBatchFate: () => null,
-  sealBatch: () => {},
+  beginBatch: (batchMode: "direct" | "transactional") => `batch-${batchMode}`,
+  upsert: () => mockMutation("upsert-batch-id"),
+  commitBatch: () => {},
   waitForBatch: async () => {},
+  rollbackBatch: () => false,
   onMutationError: () => {},
+  connect: () => {},
+  disconnect: () => {},
+  updateAuth: () => {},
+  onAuthFailure: () => {},
 };
 
 export function makeClient() {
@@ -66,6 +72,11 @@ export function makeClient() {
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
       batchId: "plain-insert-batch",
+    }),
+    restore: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-restore-batch",
     }),
     update: () => ({
       batchId: "batch-id",
@@ -87,7 +98,6 @@ export function makeClient() {
       ]);
       return [];
     },
-    subscribe: () => nextHandle++,
     createSubscription: (
       queryJson: string,
       sessionJson?: string | null,
@@ -108,10 +118,6 @@ export function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    onSyncMessageReceived: () => {},
-    addServer: () => {},
-    removeServer: () => {},
-    addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };
@@ -148,6 +154,11 @@ export function makeClientWithContext(context: AppContext): JazzClient {
       values: [],
       batchId: "plain-insert-batch",
     }),
+    restore: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-restore-batch",
+    }),
     update: () => ({
       batchId: "batch-id",
     }),
@@ -155,14 +166,9 @@ export function makeClientWithContext(context: AppContext): JazzClient {
       batchId: "batch-id",
     }),
     query: async () => [],
-    subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    onSyncMessageReceived: () => {},
-    addServer: () => {},
-    removeServer: () => {},
-    addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };

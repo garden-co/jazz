@@ -214,4 +214,18 @@ describe("svelte/QuerySubscription", () => {
 
     cleanup();
   });
+
+  it("starts with current undefined regardless of options.tier", () => {
+    let withoutTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    let withTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      withoutTier = new QuerySubscription(makeQuery());
+      withTier = new QuerySubscription(makeQuery(), { tier: "edge" as const });
+    });
+
+    expect(withoutTier.current).toBeUndefined();
+    expect(withTier.current).toBeUndefined();
+
+    cleanup();
+  });
 });

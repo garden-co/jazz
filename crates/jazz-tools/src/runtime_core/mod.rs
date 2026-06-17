@@ -36,6 +36,7 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
+use crate::batch_fate::BatchMode;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
@@ -72,10 +73,17 @@ pub type RejectedBatchAcknowledgedCallback =
     std::sync::Arc<dyn Fn(BatchId) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueryLocalOverlay {
-    pub batch_id: BatchId,
-    pub branch_name: BranchName,
-    pub row_ids: Vec<ObjectId>,
+pub(crate) struct QueryLocalOverlay {
+    pub(crate) batch_id: BatchId,
+    pub(crate) branch_name: BranchName,
+    pub(crate) row_ids: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeBatchContext {
+    pub(crate) batch_mode: BatchMode,
+    pub(crate) batch_id: BatchId,
+    pub(crate) target_branch_name: BranchName,
 }
 
 // ============================================================================
@@ -327,6 +335,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     pub(crate) sync_sender: Option<Box<dyn SyncSender>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
+    /// When true, server-bound outbox entries are retained while no transport
+    /// or fallback sync sender is installed. Browser broker tab runtimes enable
+    /// this so writes made during leader election/reconnect remain awaitable.
+    buffer_outbox_without_sync_sender: bool,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -359,10 +371,14 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// member per write, so reloading the record from storage on every insert
     /// means repeatedly decoding the full accumulated member array.
     /// Note: local_batch_record_cache is not authoritative after a batch has been sealed.
-    /// seal_batch writes the record to storage and also leaves a copy in the cache;
+    /// commit_batch writes the record to storage and also leaves a copy in the cache;
     /// later incoming batch fate is applied to storage in apply_received_batch_fate,
     /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
+
+    /// Active in-memory context for JS batch/transaction handles. Handles do
+    /// not survive process restarts, so this intentionally stays runtime-local.
+    batch_contexts: HashMap<BatchId, RuntimeBatchContext>,
 
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
@@ -457,6 +473,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             transport: None,
             transport_catalogue_state_hash_dirty: false,
             sync_sender: None,
+            buffer_outbox_without_sync_sender: true,
             parked_sync_messages: Vec::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
@@ -473,6 +490,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             rejected_batch_acknowledged_callback: None,
             acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
+            batch_contexts: HashMap::new(),
             tier_label: "unknown",
             synthesize_direct_write_fate: true,
             sync_tracer: None,
@@ -766,11 +784,35 @@ where
     W: crate::transport_manager::StreamAdapter + 'static,
     T: crate::transport_manager::TickNotifier + 'static,
 {
+    install_transport_with_retry_config(
+        core,
+        url,
+        auth,
+        tick,
+        crate::transport_manager::TransportRetryConfig::default(),
+    )
+}
+
+#[cfg(feature = "transport")]
+pub fn install_transport_with_retry_config<S, Sch, W, T>(
+    core: &mut RuntimeCore<S, Sch>,
+    url: String,
+    auth: crate::transport_manager::AuthConfig,
+    tick: T,
+    retry_config: crate::transport_manager::TransportRetryConfig,
+) -> crate::transport_manager::TransportManager<W, T>
+where
+    S: crate::storage::Storage,
+    Sch: Scheduler,
+    W: crate::transport_manager::StreamAdapter + 'static,
+    T: crate::transport_manager::TickNotifier + 'static,
+{
     debug_assert!(
         core.transport().is_none(),
         "install_transport called while a transport is already installed; call clear_transport / disconnect first"
     );
-    let (handle, manager) = crate::transport_manager::create::<W, T>(url, auth, tick);
+    let (handle, manager) =
+        crate::transport_manager::create_with_retry_config::<W, T>(url, auth, tick, retry_config);
     handle.set_catalogue_state_hash(Some(core.schema_manager().catalogue_state_hash()));
     handle.set_declared_schema_hash(
         core.schema_manager()
@@ -826,6 +868,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
+    }
+
+    /// Remove the fallback sync sender without draining or acknowledging the
+    /// current outbox. Subsequent ticks retain server-bound messages until a
+    /// transport or replacement sender is installed.
+    pub fn clear_sync_sender(&mut self) {
+        self.sync_sender = None;
+    }
+
+    pub fn set_buffer_outbox_without_sync_sender(&mut self, enabled: bool) {
+        self.buffer_outbox_without_sync_sender = enabled;
     }
 
     #[cfg(test)]

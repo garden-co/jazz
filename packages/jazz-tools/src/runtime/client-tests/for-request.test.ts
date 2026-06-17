@@ -176,15 +176,16 @@ describe("JazzClient runtime helpers", () => {
 
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
-      insertWithSession: (_table, _values, contextJson) => {
+      insert: (_table, _values, contextJson) => {
+        writeContextJson = contextJson;
+        return mockRow("00000000-0000-0000-0000-000000000001");
+      },
+      restore: (_table, _objectId, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
       update: () => mockMutation(),
-      updateWithSession: () => mockMutation(),
       delete: () => mockMutation(),
-      deleteWithSession: () => mockMutation(),
       query: async (
         queryJson: string,
         sessionJson?: string | null,
@@ -199,14 +200,9 @@ describe("JazzClient runtime helpers", () => {
         ]);
         return [];
       },
-      subscribe: () => 0,
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      onSyncMessageReceived: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "00000000-0000-0000-0000-000000000001",
       getSchema: () => ({}),
       getSchemaHash: () => "schema-hash",
     };
@@ -229,19 +225,29 @@ describe("JazzClient runtime helpers", () => {
       "edge",
     );
 
-    const tx = client.beginTransaction();
-    tx.create("todos", { done: { type: "Boolean", value: false } });
-    await tx.query('{"table":"todos"}');
+    const batchId = client.beginBatch("transactional");
+    client.insertInternal(
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      undefined,
+      undefined,
+      undefined,
+      batchId,
+    );
+    await client.query(
+      '{"table":"todos"}',
+      {
+        localUpdates: "deferred",
+        transactionBatchId: batchId,
+      },
+      undefined,
+    );
 
     const writeContext = JSON.parse(writeContextJson ?? "{}");
     expect(queryCalls[0]![3]).toBe(
       JSON.stringify({
         local_updates: "deferred",
-        transaction_overlay: {
-          batch_id: writeContext.batch_id,
-          branch_name: writeContext.target_branch_name,
-          row_ids: ["00000000-0000-0000-0000-000000000001"],
-        },
+        transaction_batch_id: writeContext.batch_id,
       }),
     );
   });
