@@ -33,7 +33,7 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx" meta='title="App.tsx"'>
@@ -52,6 +52,13 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
     </include>
     `LocalFirstAuth` from `jazz-tools/svelte` also exposes `login` and `signOut` for switching or
     clearing accounts.
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
+    </include>
+    `useLocalFirstAuth()` from `jazz-tools/solid` also exposes `login` and `signOut` for switching
+    or clearing accounts.
   </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="jazz-client.ts"'>
@@ -96,7 +103,7 @@ keeps the same Jazz account.
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx">
@@ -113,6 +120,11 @@ keeps the same Jazz account.
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-backup
     </include>
   </Tab>
+  <Tab value="Solid">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-backup
+    </include>
+  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-backup
@@ -127,7 +139,7 @@ local-first auth flow:
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx">
@@ -144,6 +156,11 @@ local-first auth flow:
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-restore
     </include>
   </Tab>
+  <Tab value="Solid">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-restore
+    </include>
+  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-restore
@@ -157,7 +174,7 @@ The parser is case-insensitive and tolerant of extra whitespace between words. I
 
 <Callout type="info">
   Calling `login()` on the framework-specific local-first auth handle (`useLocalFirstAuth()` in
-  React/Expo/Vue, `LocalFirstAuth` in Svelte) updates the mounted provider immediately. Plain
+  React/Expo/Vue/Solid, `LocalFirstAuth` in Svelte) updates the mounted provider immediately. Plain
   TypeScript uses `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
   client — the snippets above reload the page so the new secret is picked up on the next load.
 </Callout>
@@ -189,7 +206,7 @@ Create the passkey from the current local-first secret:
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx">
@@ -206,6 +223,11 @@ Create the passkey from the current local-first secret:
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-backup
     </include>
   </Tab>
+  <Tab value="Solid">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-backup
+    </include>
+  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-passkey-backup
@@ -219,7 +241,7 @@ Restore by reading the secret back from the passkey:
   groupId="jazz-framework"
   persist
   updateAnchor
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
 >
   <Tab value="React">
     <include cwd lang="tsx">
@@ -234,6 +256,11 @@ Restore by reading the secret back from the passkey:
   <Tab value="Svelte">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-restore
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-restore
     </include>
   </Tab>
   <Tab value="TypeScript">

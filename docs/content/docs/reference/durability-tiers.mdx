@@ -34,10 +34,11 @@ These options apply to:
 - `useAll(query, options?)` / `useAllSuspense(query, options?)` (React/Expo)
 - `new QuerySubscription(query, options?)` (Svelte)
 - `useAll(query, options?)` (Vue)
+- `useAll(() => ({ query, options }))` (Solid)
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Expo", "TypeScript", "Rust"]}
+  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript", "Rust"]}
   persist
   updateAnchor
 >
@@ -54,6 +55,11 @@ These options apply to:
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="ts" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/docs-snippets.ts#reading-tier-solid
     </include>
   </Tab>
   <Tab value="Expo">
