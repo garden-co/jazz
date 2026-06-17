@@ -122,8 +122,9 @@ function useAuthSubscription(
   onJWTExpired: JwtRefreshFn | undefined,
 ): number {
   // Client-scoped latch serializes concurrent "expired" rejections into one
-  // refresh call across every provider/remount sharing this client.
-  const latch = getAuthRefreshLatch(client);
+  // refresh call across every provider/remount sharing this client. No client
+  // in the seed phase means no auth subscription, so no latch is needed.
+  const latch = client ? getAuthRefreshLatch(client) : null;
   // Refcell keeps the callback fresh without re-subscribing when callers pass
   // an inline function that changes every render.
   const callbackRef = useRef(onJWTExpired);
@@ -135,7 +136,7 @@ function useAuthSubscription(
   const [authRev, setAuthRev] = useState(0);
 
   useEffect(() => {
-    if (!client) return;
+    if (!client || !latch) return;
     return client.db.onAuthChanged((state) => {
       setAuthRev((n) => n + 1);
 
