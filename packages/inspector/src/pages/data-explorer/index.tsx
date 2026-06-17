@@ -15,7 +15,8 @@ export function DataExplorer() {
     queryPropagation,
     setQueryPropagation,
   } = useDevtoolsContext();
-  const { isTablesPanelOpen } = useOutletContext<DataExplorerOutletContext>();
+  const isTablesPanelOpen =
+    useOutletContext<DataExplorerOutletContext | null>()?.isTablesPanelOpen ?? true;
   const { table } = useParams();
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
