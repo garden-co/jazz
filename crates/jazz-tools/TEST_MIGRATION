@@ -16,6 +16,8 @@ and toward `TestingServer` + `JazzClient`.
 - Assert user-visible effects through public client APIs: query rows,
   subscription deltas, accepted/rejected write settlement, or visible row state.
   - Use higher-level utils like `wait_for_query` to wait for results
+  - You can temporarily block communication between nodes using
+    `TestingServer::block_messages_to(client_id)`
 
 ## What Should Stay Internal
 
