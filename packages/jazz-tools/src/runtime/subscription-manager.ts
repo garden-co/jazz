@@ -14,7 +14,7 @@ import type {
 } from "../drivers/types.js";
 import { decodeNativeRow, decodeNativeRowObject } from "./native-row-format.js";
 
-const RowChangeKind = {
+export const RowChangeKind = {
   Added: 0 as const,
   Removed: 1 as const,
   Updated: 2 as const,
@@ -33,7 +33,13 @@ export type RowDelta<T> =
  * Contains the full current state (`all`) plus an ordered row-change stream.
  */
 export interface SubscriptionDelta<T> {
-  /** Current full result set after applying this delta */
+  /**
+   * Current full result set after applying this delta. Freshly allocated on
+   * every delta: the array and its rows are new object references each time,
+   * so consumers that diff by identity will see every row as changed. Reactive
+   * frameworks should reconcile with `applyDelta`/`reconcileArray` from
+   * `reconcile-array.js` to preserve identity for rows that did not change.
+   */
   all: T[];
   /** Ordered list of changes for this delta */
   delta: RowDelta<T>[];

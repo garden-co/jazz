@@ -30,7 +30,7 @@ use crate::runtime_core::{
     SubscriptionDelta, SyncSender,
 };
 use crate::schema_manager::manager::{CurrentPermissionsSummary, PermissionsHeadSummary};
-use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
+use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
@@ -339,9 +339,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
-        self.insert_with_id(table, values, None, session)
+        self.insert_with_id(table, values, None, write_context)
     }
 
     /// Insert a row into a table with an optional external row id.
@@ -350,12 +350,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: HashMap<String, Value>,
         object_id: Option<ObjectId>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
         let ((row_id, row_values), batch_id) =
-            core.insert_with_id(table, values, object_id, owned.as_ref())?;
+            core.insert_with_id(table, values, object_id, write_context)?;
         Ok((row_id, row_values, batch_id))
     }
 
@@ -364,35 +363,32 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         object_id: ObjectId,
         values: Vec<(String, Value)>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.update(object_id, values, owned.as_ref())?)
+        Ok(core.update(object_id, values, write_context)?)
     }
 
     /// Create or update a row with a caller-supplied external row id.
-    pub fn upsert_with_id(
+    pub fn upsert(
         &self,
         table: &str,
         object_id: ObjectId,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.upsert_with_id(table, object_id, values, owned.as_ref())?)
+        Ok(core.upsert(table, object_id, values, write_context)?)
     }
 
     /// Delete a row.
     pub fn delete(
         &self,
         object_id: ObjectId,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let owned = session.cloned().map(WriteContext::from_session);
-        Ok(core.delete(object_id, owned.as_ref())?)
+        Ok(core.delete(object_id, write_context)?)
     }
 
     /// Wait for a batch to settle at the requested durability tier.
@@ -792,20 +788,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(f(core.schema_manager()))
     }
 
-    /// Subscribe to a query with explicit schema context (for server use).
-    pub fn subscribe_with_schema_context(
-        &self,
-        query: Query,
-        schema_context: &QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<crate::sync_manager::QueryId, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core
-            .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
-        Ok(result)
-    }
-
     /// Return a reference to the scheduler stored on this runtime handle.
     ///
     /// The returned scheduler shares `Arc`-based state with the one inside
@@ -850,14 +832,32 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     /// task. The manager drives the WebSocket connection, reconnecting on
     /// failure until the handle is dropped.
     pub fn connect(&self, url: String, auth: crate::transport_manager::AuthConfig) {
+        self.connect_with_retry_config(
+            url,
+            auth,
+            crate::transport_manager::TransportRetryConfig::default(),
+        );
+    }
+
+    /// Connect to a Jazz server over WebSocket with explicit retry attempt
+    /// deadlines.
+    pub fn connect_with_retry_config(
+        &self,
+        url: String,
+        auth: crate::transport_manager::AuthConfig,
+        retry_config: crate::transport_manager::TransportRetryConfig,
+    ) {
         let tick = NativeTickNotifier {
             scheduler: self.scheduler.clone(),
         };
         let manager = {
             let mut core = self.core.lock().unwrap();
-            crate::runtime_core::install_transport::<_, _, crate::ws_stream::NativeWsStream, _>(
-                &mut core, url, auth, tick,
-            )
+            crate::runtime_core::install_transport_with_retry_config::<
+                _,
+                _,
+                crate::ws_stream::NativeWsStream,
+                _,
+            >(&mut core, url, auth, tick, retry_config)
         };
         tokio::spawn(manager.run());
     }

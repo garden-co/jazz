@@ -268,6 +268,21 @@ impl LocalBatchRecord {
         }
     }
 
+    /// True when this record's batch still owes fate reconciliation at
+    /// `terminal_tier`. This is the hydration gate used by the browser main
+    /// thread, which holds mirrored records but cannot consult the worker's
+    /// sync manager for a settlement target directly.
+    pub fn needs_fate_reconciliation_at(&self, terminal_tier: DurabilityTier) -> bool {
+        match self.latest_fate.as_ref() {
+            None => true,
+            Some(
+                BatchFate::DurableDirect { confirmed_tier, .. }
+                | BatchFate::AcceptedTransaction { confirmed_tier, .. },
+            ) => *confirmed_tier < terminal_tier,
+            Some(BatchFate::Missing { .. } | BatchFate::Rejected { .. }) => false,
+        }
+    }
+
     pub fn upsert_member(&mut self, member: LocalBatchMember) {
         match self.members.binary_search_by(|existing| {
             Self::compare_member_identity(existing, &member)
@@ -1057,6 +1072,55 @@ mod tests {
                 confirmed_tier: DurabilityTier::GlobalServer,
             })
         );
+    }
+
+    #[test]
+    fn record_fate_reconciliation_matrix() {
+        fn record_with_fate(batch_id: BatchId, fate: Option<BatchFate>) -> LocalBatchRecord {
+            LocalBatchRecord::new(batch_id, BatchMode::Direct, true, fate)
+        }
+
+        let local = |batch_id| BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        };
+        let edge = |batch_id| BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+        };
+
+        // No fate yet: always pending.
+        let record = record_with_fate(BatchId::new(), None);
+        assert!(record.needs_fate_reconciliation_at(DurabilityTier::Local));
+        assert!(record.needs_fate_reconciliation_at(DurabilityTier::EdgeServer));
+
+        // Local fate is terminal at Local (serverless main thread) but still
+        // pending when an upstream raises the bar to EdgeServer.
+        let batch_id = BatchId::new();
+        let record = record_with_fate(batch_id, Some(local(batch_id)));
+        assert!(!record.needs_fate_reconciliation_at(DurabilityTier::Local));
+        assert!(record.needs_fate_reconciliation_at(DurabilityTier::EdgeServer));
+
+        // Edge fate satisfies both gates the bridge can choose.
+        let batch_id = BatchId::new();
+        let record = record_with_fate(batch_id, Some(edge(batch_id)));
+        assert!(!record.needs_fate_reconciliation_at(DurabilityTier::Local));
+        assert!(!record.needs_fate_reconciliation_at(DurabilityTier::EdgeServer));
+
+        // Rejected and Missing never reconcile through this gate.
+        let batch_id = BatchId::new();
+        let rejected = BatchFate::Rejected {
+            batch_id,
+            code: "denied".into(),
+            reason: "denied".into(),
+        };
+        let record = record_with_fate(batch_id, Some(rejected));
+        assert!(!record.needs_fate_reconciliation_at(DurabilityTier::EdgeServer));
+
+        let batch_id = BatchId::new();
+        let missing = BatchFate::Missing { batch_id };
+        let record = record_with_fate(batch_id, Some(missing));
+        assert!(!record.needs_fate_reconciliation_at(DurabilityTier::EdgeServer));
     }
 
     #[test]

@@ -1,5 +1,14 @@
 # jazz-napi
 
+## 2.0.0-alpha.51
+
+### Patch Changes
+
+- b11d29b: Reject an oversized LZ4 frame on the pre-authentication WebSocket handshake before decompressing it, closing an unauthenticated decompression-bomb that could exhaust server memory. The inbound WebSocket message-size limit is also pinned explicitly.
+- 6f7a83f: Fix an owner `db.update` of a backend-created row hard-deleting the row instead of updating it on persistent-storage clients. A client write can no longer downgrade a batch the server has already accepted, so the row survives and the update applies.
+- 5c76bfc: Add soft-deleted row restoration with `db.restore(...)`.
+- 5c76bfc: `db.update(...)` now fails when trying to update deleted rows, similarly to insert and delete.
+
 ## 2.0.0-alpha.50
 
 ### Patch Changes

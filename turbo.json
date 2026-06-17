@@ -10,7 +10,13 @@
       "dependsOn": [
         "todo-client-localfirst-react#build",
         "todo-client-localfirst-ts#build",
-        "todo-server-ts#build"
+        "todo-server-ts#build",
+        "todo-client-localfirst-react-docs#build",
+        "todo-client-localfirst-ts-docs#build",
+        "todo-client-localfirst-svelte-docs#build",
+        "todo-client-localfirst-vue-docs#build",
+        "todo-client-localfirst-expo-docs#build",
+        "todo-server-ts-docs#build"
       ],
       "outputs": [".next/**", "!.next/cache/**"]
     },

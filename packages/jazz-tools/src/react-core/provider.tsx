@@ -7,6 +7,10 @@ import React, {
   type ReactNode,
 } from "react";
 import type { AuthState } from "../runtime/auth-state.js";
+import {
+  acquireClient as registryAcquireClient,
+  releaseClient as registryReleaseClient,
+} from "../runtime/client-registry.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
@@ -50,76 +54,50 @@ type JazzContextValue = {
 
 const JazzContext = createContext<JazzContextValue | null>(null);
 
-type CachedClientEntry = {
-  configKey: string;
-  createJazzClient: CreateJazzClient;
-  initPromise: Promise<CoreJazzClient>;
-  holders: Set<object>;
-  releaseTimer: ReturnType<typeof setTimeout> | null;
-};
-
-let cachedClientEntry: CachedClientEntry | null = null;
-
+// Client lifecycle is delegated to the framework-agnostic, refcounted client
+// registry (keyed by configKey, with deferred release to survive Strict Mode's
+// mount→unmount→remount cycle). Using the shared Map-backed registry — rather
+// than a single cached slot — lets distinct configs (e.g. two principals on one
+// screen) coexist instead of evicting one another.
 function acquireClient<TClient extends CoreJazzClient>(
   configKey: string,
   config: DbConfig,
   createJazzClient: CreateJazzClient<TClient>,
   holder: object,
 ): Promise<TClient> {
-  if (
-    cachedClientEntry?.configKey !== configKey ||
-    cachedClientEntry?.createJazzClient !== createJazzClient
-  ) {
-    cachedClientEntry = {
-      configKey,
-      createJazzClient,
-      initPromise: createJazzClient(config),
-      holders: new Set(),
-      releaseTimer: null,
-    };
-  }
-
-  cachedClientEntry.holders.add(holder);
-  if (cachedClientEntry.releaseTimer) {
-    clearTimeout(cachedClientEntry.releaseTimer);
-    cachedClientEntry.releaseTimer = null;
-  }
-
-  return cachedClientEntry.initPromise as Promise<TClient>;
+  return registryAcquireClient<TClient>(configKey, () => createJazzClient(config), holder);
 }
 
 function releaseClient(configKey: string, holder: object): void {
-  if (!cachedClientEntry || cachedClientEntry.configKey !== configKey) {
-    return;
+  void registryReleaseClient(configKey, holder);
+}
+
+// Refresh latch keyed on the client, not the component. The client is a
+// module-singleton, so a remount or a second provider would otherwise each
+// hold their own latch and double-fire the JWT refresh on an "expired" event.
+const authRefreshLatches = new WeakMap<object, { inFlight: boolean }>();
+
+// Ceiling on how long the latch stays held for a single refresh. A caller whose
+// `onJWTExpired` never settles must not wedge the latch forever — after this we
+// release it so a later "expired" event can retry.
+const JWT_REFRESH_TIMEOUT_MS = 30_000;
+
+function getAuthRefreshLatch(client: object): { inFlight: boolean } {
+  let latch = authRefreshLatches.get(client);
+  if (!latch) {
+    latch = { inFlight: false };
+    authRefreshLatches.set(client, latch);
   }
-
-  cachedClientEntry.holders.delete(holder);
-  if (cachedClientEntry.holders.size > 0 || cachedClientEntry.releaseTimer) {
-    return;
-  }
-
-  const entry = cachedClientEntry;
-  // Delayed release survives Strict Mode's mount→unmount→remount cycle:
-  // without it, the unmount would tear down the client before the remount reuses it.
-  entry.releaseTimer = setTimeout(() => {
-    if (entry.holders.size > 0) {
-      entry.releaseTimer = null;
-      return;
-    }
-
-    void entry.initPromise.then((resolved) => resolved.shutdown()).catch(() => {});
-    if (cachedClientEntry === entry) {
-      cachedClientEntry = null;
-    }
-  }, 0);
+  return latch;
 }
 
 function useAuthSubscription(
   client: CoreJazzClient,
   onJWTExpired: JwtRefreshFn | undefined,
 ): number {
-  // Latch serializes concurrent "expired" rejections into one refresh call.
-  const inFlight = useRef(false);
+  // Client-scoped latch serializes concurrent "expired" rejections into one
+  // refresh call across every provider/remount sharing this client.
+  const latch = getAuthRefreshLatch(client);
   // Refcell keeps the callback fresh without re-subscribing when callers pass
   // an inline function that changes every render.
   const callbackRef = useRef(onJWTExpired);
@@ -137,22 +115,34 @@ function useAuthSubscription(
       if (state.error !== "expired") return;
       const fn = callbackRef.current;
       if (!fn) return;
-      if (inFlight.current) return;
-      inFlight.current = true;
+      if (latch.inFlight) return;
+      latch.inFlight = true;
+
+      // Release exactly once — whichever of settle or timeout comes first. The
+      // `settled` guard also stops a refresh that resolves *after* timing out
+      // from applying a now-stale token.
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        latch.inFlight = false;
+      };
+      const timeoutId = setTimeout(release, JWT_REFRESH_TIMEOUT_MS);
 
       Promise.resolve()
         .then(() => fn())
         .then((newToken) => {
-          if (newToken) {
+          if (!settled && newToken) {
             client.db.updateAuthToken(newToken);
           }
         })
         .catch(() => {})
         .finally(() => {
-          inFlight.current = false;
+          clearTimeout(timeoutId);
+          release();
         });
     });
-  }, [client]);
+  }, [client, latch]);
 
   return authRev;
 }

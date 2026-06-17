@@ -609,7 +609,4 @@ class DevToolsJazzClient {
   getRuntime(): Runtime {
     throw new Error("Method not implemented.");
   }
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
-    throw new Error("Method not implemented.");
-  }
 }

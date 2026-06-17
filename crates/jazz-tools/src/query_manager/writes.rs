@@ -43,6 +43,7 @@ struct PreparedUpdateWrite {
     descriptor: Arc<RowDescriptor>,
     indexed_columns: Option<Arc<Vec<ColumnName>>>,
     row_layout: Arc<crate::row_format::CompiledRowLayout>,
+    row_locator: RowLocator,
 }
 
 struct PreparedUpdateCommit<'a> {
@@ -67,6 +68,7 @@ struct PreparedLocalRowHistoryWrite<'a> {
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
     row_locator: &'a RowLocator,
     descriptor: Arc<RowDescriptor>,
+    is_known_new_object: bool,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -144,6 +146,15 @@ impl QueryManager {
                 .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
                 .is_some()
             {
+                if let Some(table) = self.load_row_table_name(storage, object_id) {
+                    let branch = self.current_branch();
+                    if self.row_is_deleted_on_branch(storage, &table, &branch, object_id)
+                        || self.visible_row_is_hard_deleted(storage, object_id, &branch)
+                    {
+                        return Err(QueryError::RowAlreadyDeleted(object_id));
+                    }
+                }
+
                 return Err(QueryError::EncodingError(format!(
                     "object already exists: {object_id}"
                 )));
@@ -468,7 +479,9 @@ impl QueryManager {
             index_mutations,
             row_locator,
             descriptor,
+            is_known_new_object,
         } = write;
+        self.persist_row_locator(storage, row_id, row_locator);
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
 
@@ -494,7 +507,7 @@ impl QueryManager {
                 table: table.to_string(),
                 branch: branch_name.as_str().to_string().into(),
                 context,
-                is_known_new_object: true,
+                is_known_new_object,
             },
         )
         .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
@@ -535,7 +548,11 @@ impl QueryManager {
         }
     }
 
-    fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
+    pub(crate) fn load_row_table_name(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+    ) -> Option<String> {
         let locator = storage.load_row_locator(row_id).ok().flatten()?;
         let table = locator.table.as_str();
         resolve_current_table_name(
@@ -827,6 +844,7 @@ impl QueryManager {
             descriptor: table_write.descriptor.clone(),
             indexed_columns: table_write.indexed_columns.clone(),
             row_layout: table_write.row_layout.clone(),
+            row_locator: table_write.row_locator.clone(),
         })
     }
 
@@ -846,6 +864,7 @@ impl QueryManager {
         } = commit;
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
+        let is_known_new_object = parents.is_empty();
         let row = self.authored_row_batch(
             id,
             branch,
@@ -854,14 +873,20 @@ impl QueryManager {
             self.row_batch_authoring(provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
-        let (batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            id,
-            row,
-            index_mutations,
-        )?;
+        let (batch_id, visibility_change) = self
+            .apply_local_row_history_write_with_prepared_context(
+                storage,
+                PreparedLocalRowHistoryWrite {
+                    table,
+                    branch_name: &branch_name,
+                    row_id: id,
+                    row,
+                    index_mutations,
+                    row_locator: &prepared.row_locator,
+                    descriptor: prepared.descriptor.clone(),
+                    is_known_new_object,
+                },
+            )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, batch_id),
@@ -935,8 +960,14 @@ impl QueryManager {
             &mut transform_context,
         )
         .map(|resolved| {
+            let resolved_table = resolve_current_table_name(
+                schema_context,
+                &table,
+                branch_schema_map.get(resolved.branch_name.as_str()),
+            )
+            .unwrap_or_else(|| table.clone());
             (
-                table,
+                resolved_table,
                 resolved.branch_name.as_str().to_string(),
                 resolved.content,
                 resolved.batch_id,
@@ -1051,7 +1082,7 @@ impl QueryManager {
         let data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
         let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
         // Deny anonymous writes before any policy evaluation.
@@ -1164,6 +1195,7 @@ impl QueryManager {
                     index_mutations: &index_mutations,
                     row_locator: &table_write.row_locator,
                     descriptor: table_write.descriptor.clone(),
+                    is_known_new_object: true,
                 },
             )?;
         self.maybe_track_local_pending_batch_overlay(
@@ -1752,6 +1784,12 @@ impl QueryManager {
                     .map(|(_, row)| row)
             })
             .ok_or(QueryError::ObjectNotFound(id))?;
+        if current_row.is_soft_deleted()
+            || current_row.is_hard_deleted()
+            || self.row_is_deleted_on_branch(storage, &table, branch.as_str(), id)
+        {
+            return Err(QueryError::RowAlreadyDeleted(id));
+        }
         let old_data = current_row.data.clone();
         let old_provenance = current_row.row_provenance();
         let write_schema = self.schema.clone();
@@ -1845,7 +1883,7 @@ impl QueryManager {
         let index_mutations = if Self::write_context_is_open_batch(write_context) {
             Vec::new()
         } else if was_soft_deleted {
-            Self::index_mutations_for_undelete_on_branch(
+            Self::index_mutations_for_restore_on_branch(
                 table,
                 branch,
                 id,
@@ -2086,6 +2124,7 @@ impl QueryManager {
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
+        let is_known_new_object = parents.is_empty();
         let delete_row = self.authored_row_batch(
             id,
             branch,
@@ -2106,14 +2145,20 @@ impl QueryManager {
             )
         };
         let branch_name = BranchName::new(branch);
-        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
-            storage,
-            table,
-            &branch_name,
-            id,
-            delete_row,
-            &index_mutations,
-        )?;
+        let (delete_batch_id, visibility_change) = self
+            .apply_local_row_history_write_with_prepared_context(
+                storage,
+                PreparedLocalRowHistoryWrite {
+                    table,
+                    branch_name: &branch_name,
+                    row_id: id,
+                    row: delete_row,
+                    index_mutations: &index_mutations,
+                    row_locator: &table_write.row_locator,
+                    descriptor: table_write.descriptor.clone(),
+                    is_known_new_object,
+                },
+            )?;
         self.maybe_track_local_pending_batch_overlay(
             table,
             RowBatchKey::new(id, branch_name, delete_batch_id),
@@ -2140,40 +2185,54 @@ impl QueryManager {
         })
     }
 
-    /// Undelete a soft-deleted row.
+    /// Restore a soft-deleted row.
     ///
     /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
     /// Creates a new commit with the provided values (no `delete` metadata).
-    pub fn undelete<H: Storage>(
+    pub fn restore<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
         values: &[Value],
     ) -> Result<InsertResult, QueryError> {
-        // Check for hard delete first
-        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
-            return Err(QueryError::RowHardDeleted(id));
-        }
-
-        // Get table name from object metadata
         let table = self
             .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        self.restore_on_branch_with_schema_and_write_context(
+            storage,
+            &table,
+            &current_branch,
+            id,
+            values,
+            write_schema.as_ref(),
+            None,
+        )
+    }
 
-        let table_name = TableName::new(&table);
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn restore_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        id: ObjectId,
+        values: &[Value],
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        if self.visible_row_is_hard_deleted(storage, id, branch) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
 
-        // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(storage, &table, id) {
+        if !self.row_is_deleted_on_branch(storage, table, branch, id) {
             return Err(QueryError::RowNotDeleted(id));
         }
 
-        let current_branch = self.current_branch().as_str().to_string();
-        let write_schema = self.schema.clone();
-        let table_write = self.write_table_cache_entry_for_schema(
-            &current_branch,
-            table_name,
-            write_schema.as_ref(),
-        )?;
+        let table_name = TableName::new(table);
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
         let descriptor = table_write.descriptor.as_ref();
 
         if values.len() != descriptor.columns.len() {
@@ -2185,57 +2244,57 @@ impl QueryManager {
 
         self.validate_json_for_values(descriptor, values)?;
         Self::validate_write_index_values_on_branch(
-            &table,
-            &current_branch,
+            table,
+            branch,
             values,
             descriptor,
             table_write.indexed_columns.as_deref().map(Vec::as_slice),
         )?;
 
-        // Encode new row data
         let new_data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
-
-        // Get parent commit
-        let branch = self.current_branch();
-        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
+        let parents = self.load_branch_tip_ids(storage, table, id, branch);
         let old_provenance = self
-            .load_row_provenance_on_branch(storage, id, branch.as_str())
+            .load_row_provenance_on_branch(storage, id, branch)
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
-        let timestamp = self.reserve_write_timestamp();
-        let row_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
+        let timestamp = self.resolve_update_timestamp(write_context);
+        let row_provenance =
+            self.row_provenance_for_update(&old_provenance, write_context, timestamp);
 
-        // Add commit with row data (no delete metadata = undelete)
         let row = self.authored_row_batch(
             id,
-            branch.as_str(),
+            branch,
             parents,
             new_data.clone(),
-            self.row_batch_authoring(&row_provenance, None, None),
+            self.row_batch_authoring(&row_provenance, None, write_context),
         );
-        let index_mutations = Self::index_mutations_for_undelete_on_branch(
-            &table,
-            branch.as_str(),
-            id,
-            &new_data,
-            descriptor,
-            table_write.indexed_columns.as_deref().map(Vec::as_slice),
-        );
-        let branch_name = BranchName::new(branch.as_str());
+        let index_mutations = if Self::write_context_is_open_batch(write_context) {
+            Vec::new()
+        } else {
+            Self::index_mutations_for_restore_on_branch(
+                table,
+                branch,
+                id,
+                &new_data,
+                descriptor,
+                table_write.indexed_columns.as_deref().map(Vec::as_slice),
+            )
+        };
+        let branch_name = BranchName::new(branch);
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
-            &table,
+            table,
             &branch_name,
             id,
             row,
             &index_mutations,
         )?;
         self.maybe_track_local_pending_batch_overlay(
-            &table,
+            table,
             RowBatchKey::new(id, branch_name, row_batch_id),
-            None,
+            write_context,
             false,
             &visibility_change,
         );
@@ -2244,7 +2303,7 @@ impl QueryManager {
             &branch_name,
             id,
             row_batch_id,
-            None,
+            write_context,
             &visibility_change,
         )?;
 

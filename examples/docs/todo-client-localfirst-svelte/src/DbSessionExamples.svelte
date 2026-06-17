@@ -12,7 +12,7 @@
   // #endregion db-access-svelte
 
   // #region session-svelte
-  const session = getSession(); // { user_id: string } | null
+  const session = getSession(); // { current: Session | null }
   // #endregion session-svelte
 
   void addTodo;

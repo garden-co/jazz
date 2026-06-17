@@ -49,15 +49,14 @@ async fn client_reconnects_after_server_reaps_stale_state() {
         .connect()
         .await;
 
-    let (todo_id, _) = alice
-        .create(
+    let (todo_id, _, _) = alice
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("survive-reap".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create todo");
 
     // Wait for edge-settlement so the data is persisted server-side
@@ -134,7 +133,6 @@ async fn client_reconnects_after_server_reaps_stale_state() {
                 Value::Text("updated-after-reap".to_string()),
             )],
         )
-        .await
         .expect("update after reconnect");
 
     wait_for_query(
@@ -232,24 +230,22 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
 
     // Both create a todo
     alice
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("alice-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("alice create");
 
-    bob.create(
+    bob.insert(
         "todos",
         HashMap::from([
             ("title".to_string(), Value::Text("bob-todo".to_string())),
             ("completed".to_string(), Value::Boolean(false)),
         ]),
     )
-    .await
     .expect("bob create");
 
     // Wait for both to be edge-settled
@@ -301,14 +297,13 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
     assert_eq!(bob_rows.len(), 2);
 
     // Bob can still create
-    bob.create(
+    bob.insert(
         "todos",
         HashMap::from([
             ("title".to_string(), Value::Text("bob-todo-2".to_string())),
             ("completed".to_string(), Value::Boolean(false)),
         ]),
     )
-    .await
     .expect("bob create after reap");
 
     wait_for_query(

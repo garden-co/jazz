@@ -2093,6 +2093,7 @@ fn noop_waker() -> std::task::Waker {
     unsafe { std::task::Waker::from_raw(std::task::RawWaker::new(std::ptr::null(), &VTABLE)) }
 }
 
+mod accepted_batch_downgrade;
 mod basic;
 mod batched_tick_parked_drain;
 mod fk_remove_error;

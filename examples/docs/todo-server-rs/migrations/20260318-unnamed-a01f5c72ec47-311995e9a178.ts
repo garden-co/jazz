@@ -4,6 +4,7 @@ import { schema as s } from "jazz-tools";
 export default s.defineMigration({
   migrate: {
     todos: {
+      priority: s.add.int({ default: null }),
       description: s.add.string({ default: null }),
     },
   },
@@ -21,6 +22,7 @@ export default s.defineMigration({
     todos: s.table({
       title: s.string(),
       done: s.boolean(),
+      priority: s.int().optional(),
       description: s.string().optional(),
       parent: s.ref("todos").optional(),
       project: s.ref("projects").optional(),

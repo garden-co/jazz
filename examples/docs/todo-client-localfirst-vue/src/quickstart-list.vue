@@ -4,7 +4,7 @@ import { app } from "../schema.js";
 import TodoItem from "./TodoItem.vue";
 import AddTodo from "./AddTodo.vue";
 
-const todos = useAll(app.todos);
+const { data: todos } = useAll(app.todos);
 </script>
 
 <template>

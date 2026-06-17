@@ -3,7 +3,7 @@
 import { useAll } from "jazz-tools/vue";
 import { app } from "../schema.js";
 
-const todos = useAll(app.todos.where({ done: false }));
+const { data: todos } = useAll(app.todos.where({ done: false }));
 </script>
 
 <template>

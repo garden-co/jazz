@@ -41,6 +41,22 @@ describe("TS Query API", () => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("can read deleted rows with includeDeleted", async () => {
+      const project = insertProject(db, "Deleted Project");
+      db.delete(app.projects, project.id);
+
+      const defaultResult = await db.one(app.projects.where({ id: { eq: project.id } }));
+      expect(defaultResult).toBeNull();
+
+      const deletedResult = await db.one(
+        app.projects.includeDeleted().where({ id: { eq: project.id } }),
+      );
+
+      assert(deletedResult, "Deleted row is not defined");
+      expectTypeOf(deletedResult).branded.toEqualTypeOf<Project>();
+      expect(deletedResult).toEqual(project);
+    });
+
     it("filters nullable columns with isNull:true", async () => {
       const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",
@@ -100,6 +116,136 @@ describe("TS Query API", () => {
 
       const results = await db.all(app.todos.where({ ownerId: undefined }));
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+    });
+
+    describe("in operator", () => {
+      it("queries by id with in", async () => {
+        const projectA = insertProject(db, "Project A");
+        const projectB = insertProject(db, "Project B");
+        const _projectC = insertProject(db, "Project C");
+
+        const results = await db.all(
+          app.projects.where({ id: { in: [projectA.id, projectB.id] } }),
+        );
+
+        expect(results.map((project) => project.id).sort()).toEqual(
+          [projectA.id, projectB.id].sort(),
+        );
+      });
+
+      it("returns no rows for an empty in list", async () => {
+        insertProject(db, "Project A");
+
+        const results = await db.all(app.projects.where({ id: { in: [] } }));
+
+        expect(results).toEqual([]);
+      });
+
+      it("filters enum columns", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, { enum: "a" });
+        const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
+        db.insert(app.table_with_defaults, { enum: "c" });
+
+        const results = await db.all(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
+
+        expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+      });
+
+      it("filters reference columns", async () => {
+        const projectA = insertProject(db, "Project A");
+        const projectB = insertProject(db, "Project B");
+        const projectC = insertProject(db, "Project C");
+        const todoA = insertTodo(db, { title: "A", projectId: projectA.id });
+        const todoB = insertTodo(db, { title: "B", projectId: projectB.id });
+        const _todoC = insertTodo(db, { title: "C", projectId: projectC.id });
+
+        const results = await db.all(
+          app.todos.where({ projectId: { in: [projectA.id, projectB.id] } }),
+        );
+
+        expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
+      });
+
+      it("filters nullable reference columns", async () => {
+        const owner = insertUser(db, "Owner");
+        const todoWithOwner = insertTodo(db, { title: "Owned", ownerId: owner.id });
+        const _todoWithoutOwner = insertTodo(db, { title: "Unowned", ownerId: null });
+
+        const results = await db.all(app.todos.where({ ownerId: { in: [owner.id] } }));
+
+        expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
+      });
+
+      it("filters string columns", async () => {
+        const todoA = insertTodo(db, { title: "Buy milk" });
+        const todoB = insertTodo(db, { title: "Walk dog" });
+        const _todoC = insertTodo(db, { title: "Write code" });
+
+        const results = await db.all(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
+
+        expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
+      });
+
+      it("filters boolean columns", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, { boolean: true });
+        db.insert(app.table_with_defaults, { boolean: false });
+
+        const results = await db.all(app.table_with_defaults.where({ boolean: { in: [true] } }));
+
+        expect(results.map((row) => row.id)).toEqual([rowA.id]);
+      });
+
+      it("filters numeric columns", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, { integer: 5, float: 1.5 });
+        const { value: rowB } = db.insert(app.table_with_defaults, { integer: 10, float: 2.5 });
+        db.insert(app.table_with_defaults, { integer: 15, float: 3.5 });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ integer: { in: [5, 10] }, float: { in: [1.5, 2.5] } }),
+        );
+
+        expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+      });
+
+      it("filters timestamp columns", async () => {
+        const first = new Date("2026-01-01T00:00:00.000Z");
+        const second = new Date("2026-01-02T00:00:00.000Z");
+        const third = new Date("2026-01-03T00:00:00.000Z");
+        const { value: rowA } = db.insert(app.table_with_defaults, { timestampDate: first });
+        const { value: rowB } = db.insert(app.table_with_defaults, { timestampDate: second });
+        db.insert(app.table_with_defaults, { timestampDate: third });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ timestampDate: { in: [first, second] } }),
+        );
+
+        expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+      });
+
+      it("filters byte-array columns", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, {
+          bytes: new Uint8Array([1, 2, 3]),
+        });
+        db.insert(app.table_with_defaults, { bytes: new Uint8Array([4, 5, 6]) });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ bytes: { in: [new Uint8Array([1, 2, 3])] } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([rowA.id]);
+      });
+
+      it("filters array columns as whole-array equality", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, { array: ["a", "b"] });
+        db.insert(app.table_with_defaults, { array: ["a"] });
+        db.insert(app.table_with_defaults, { array: ["b", "a"] });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ array: { in: [["a", "b"]] } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([rowA.id]);
+      });
     });
 
     it("filters int columns with multiple range operators on the same column", async () => {

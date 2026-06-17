@@ -6,10 +6,6 @@ export function hiddenIncludeColumnName(relationName: string): string {
   return `${HIDDEN_INCLUDE_COLUMN_PREFIX}${relationName}`;
 }
 
-export function isHiddenIncludeColumnName(columnName: string): boolean {
-  return columnName.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX);
-}
-
 export function resolveSelectedColumns(
   tableName: string,
   schema: WasmSchema,

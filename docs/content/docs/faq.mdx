@@ -78,4 +78,48 @@ Jazz may return the following errors when a client's request is rejected by the 
 
 </Accordion>
 
+<Accordion
+  id="browser-version-mismatch-prompt"
+  title="How do I customize the browser version mismatch prompt?"
+>
+
+In persistent browser mode, one tab owns the local OPFS-backed worker and other tabs connect through
+the same browser broker. If a tab from a different app version or runtime configuration is already
+open, a new tab may be unable to join that broker safely. By default Jazz shows a native browser
+prompt asking the user to close the other tabs and reload.
+
+Use `onIncompatibleBrowserBrokerConfiguration` to extend or replace that default flow. Providing the
+handler disables the built-in prompt, so call `window.confirm(...)` and `window.location.reload()`
+yourself if you still want the native browser behavior:
+
+```tsx title="App.tsx"
+<JazzProvider
+  config={{
+    appId,
+    serverUrl,
+    secret,
+    onIncompatibleBrowserBrokerConfiguration(error) {
+      // Optional: report the mismatch before continuing with the browser-native flow.
+      console.warn(error);
+
+      const shouldReload = window.confirm(
+        "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?",
+      );
+
+      if (shouldReload) {
+        window.location.reload();
+      }
+    },
+  }}
+>
+  <App />
+</JazzProvider>
+```
+
+The same option is available on plain `createDb(...)`. The callback is only a handling hook for this
+startup failure; the incompatible client creation still rejects, so the tab should reload or show
+your app's normal initialization error state.
+
+</Accordion>
+
 </Accordions>

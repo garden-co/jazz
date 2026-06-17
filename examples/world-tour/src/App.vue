@@ -134,24 +134,36 @@ import GeolocateFab from "./components/GeolocateFab.vue";
 
 const db = useDb();
 const session = useSession();
-const canEdit = !!session && !isPublicMode;
+const canEdit = computed(() => !!session.value && !isPublicMode);
 
 function switchView() {
-  if (canEdit) {
+  if (canEdit.value) {
     window.location.href = window.location.pathname + "?public";
   } else {
     window.location.href = window.location.pathname;
   }
 }
 
-ensureData(db, session?.user_id, canEdit).catch((err) =>
+ensureData(db, session.value?.user_id, canEdit.value).catch((err) =>
   console.error("Failed to ensure data:", err),
 );
 
 const selectedStop = ref<StopWithVenue | null>(null);
 const posterStop = ref<StopWithVenue | null>(null);
-const showLandingPoster = ref(!canEdit);
-const showSplash = ref(canEdit);
+const showLandingPoster = ref(!canEdit.value);
+const showSplash = ref(canEdit.value);
+
+// Session resolves async — update splash state once auth is confirmed.
+watch(
+  canEdit,
+  (val) => {
+    if (val) {
+      showLandingPoster.value = false;
+      showSplash.value = true;
+    }
+  },
+  { once: true },
+);
 const sheetOpen = ref(false);
 const sheetMode = ref<"detail" | "create">("detail");
 
@@ -191,11 +203,11 @@ const stopsQuery = computed(() => {
     .include({ venue: true })
     .orderBy("date", "asc")
     .limit(12);
-  return canEdit ? base : confirmed;
+  return canEdit.value ? base : confirmed;
 });
-const stopsData = useAll(stopsQuery);
+const { data: stopsData } = useAll(stopsQuery);
 
-const bandsData = useAll(app.bands.limit(1));
+const { data: bandsData } = useAll(app.bands.limit(1));
 
 const firstBandId = computed(() => {
   const bands = bandsData.value;
@@ -258,7 +270,7 @@ function onStopButtonClick(stopId: string) {
 }
 
 function selectStop(stop: StopWithVenue) {
-  if (!canEdit) {
+  if (!canEdit.value) {
     posterStop.value = stop;
   } else {
     selectedStop.value = stop;
@@ -368,7 +380,7 @@ onMounted(async () => {
     // Reject clicks outside valid Earth coordinates
     if (e.lat < -90 || e.lat > 90 || e.lng < -180 || e.lng > 180) return;
 
-    if (canEdit) {
+    if (canEdit.value) {
       popoverX.value = e.x;
       popoverY.value = e.y;
       popoverLat.value = e.lat;

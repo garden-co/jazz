@@ -33,14 +33,21 @@ export interface WorkerBridgeOptions {
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
+  workerLockName?: string;
+  leadershipId?: number;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
 
 export interface PeerSyncBatch {
   peerId: string;
-  term: number;
+  leadershipId: number;
   payload: Uint8Array[];
+}
+
+export interface FollowerPortEvent {
+  peerId: string;
+  leadershipId: number;
 }
 
 interface WasmBridgeHandle {
@@ -48,8 +55,10 @@ interface WasmBridgeHandle {
   updateAuth(jwtToken?: string | null): void;
   sendLifecycleHint(event: string): void;
   openPeer(peerId: string): void;
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
+  sendPeerSync(peerId: string, leadershipId: number, payload: Uint8Array[]): void;
   closePeer(peerId: string): void;
+  attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void;
+  detachFollowerPort(peerId: string, leadershipId: number): void;
   setServerPayloadForwarder(
     callback:
       | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
@@ -68,14 +77,24 @@ interface WasmBridgeHandle {
 
 interface RuntimeWithWorkerBridge extends Runtime {
   createWorkerBridge?(worker: Worker, options: object): WasmBridgeHandle;
+  createMessagePortBridge?(port: MessagePort): WasmMessagePortBridgeHandle;
 }
 
 interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  onFollowerPortAttached?: (event: FollowerPortEvent) => void;
+  onFollowerPortClosed?: (event: FollowerPortEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
+
+interface WasmMessagePortBridgeHandle {
+  updateAuth(jwtToken?: string | null): void;
+  onAuthFailure?(callback: (reason: AuthFailureReason) => void): void;
+  detachForReconnect(): void;
+  shutdown(): void;
+}
 
 export class WorkerBridge {
   private readonly worker: Worker;
@@ -218,15 +237,73 @@ export class WorkerBridge {
     this.bridge?.setListeners(this.listeners);
   }
 
+  onFollowerPortAttached(listener: (event: FollowerPortEvent) => void): void {
+    this.listeners.onFollowerPortAttached = listener;
+    this.bridge?.setListeners(this.listeners);
+  }
+
+  onFollowerPortClosed(listener: (event: FollowerPortEvent) => void): void {
+    this.listeners.onFollowerPortClosed = listener;
+    this.bridge?.setListeners(this.listeners);
+  }
+
   openPeer(peerId: string): void {
     this.bridge?.openPeer(peerId);
   }
 
-  sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void {
-    this.bridge?.sendPeerSync(peerId, term, payload);
+  sendPeerSync(peerId: string, leadershipId: number, payload: Uint8Array[]): void {
+    this.bridge?.sendPeerSync(peerId, leadershipId, payload);
   }
 
   closePeer(peerId: string): void {
     this.bridge?.closePeer(peerId);
+  }
+
+  attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void {
+    this.bridge?.attachFollowerPort(peerId, leadershipId, port);
+  }
+
+  detachFollowerPort(peerId: string, leadershipId: number): void {
+    this.bridge?.detachFollowerPort(peerId, leadershipId);
+  }
+}
+
+export class MessagePortRuntimeBridge {
+  private readonly port: MessagePort;
+  private readonly runtime: Runtime;
+  private bridge: WasmMessagePortBridgeHandle | null = null;
+
+  constructor(port: MessagePort, runtime: Runtime) {
+    this.port = port;
+    this.runtime = runtime;
+  }
+
+  init(): void {
+    if (this.bridge) return;
+    const create = (this.runtime as RuntimeWithWorkerBridge).createMessagePortBridge;
+    if (typeof create !== "function") {
+      throw new Error(
+        "MessagePortRuntimeBridge requires a WasmRuntime with `createMessagePortBridge`",
+      );
+    }
+    this.bridge = create.call(this.runtime, this.port);
+  }
+
+  shutdown(): void {
+    this.bridge?.shutdown();
+    this.bridge = null;
+  }
+
+  detachForReconnect(): void {
+    this.bridge?.detachForReconnect();
+    this.bridge = null;
+  }
+
+  updateAuth(auth: { jwtToken?: string }): void {
+    this.bridge?.updateAuth(auth.jwtToken ?? null);
+  }
+
+  onAuthFailure(callback: (reason: AuthFailureReason) => void): void {
+    this.bridge?.onAuthFailure?.(callback);
   }
 }

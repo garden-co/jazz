@@ -49,6 +49,30 @@ describe("JazzClientProvider — onJWTExpired", () => {
     });
   });
 
+  it("dedups the refresh across two providers sharing one client", async () => {
+    const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
+    const onJWTExpired = vi.fn().mockResolvedValue("fresh.jwt.token");
+
+    render(
+      <>
+        <JazzClientProvider client={client} onJWTExpired={onJWTExpired}>
+          <div />
+        </JazzClientProvider>
+        <JazzClientProvider client={client} onJWTExpired={onJWTExpired}>
+          <div />
+        </JazzClientProvider>
+      </>,
+    );
+
+    await act(async () => {
+      client.__markUnauthenticated("expired");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onJWTExpired).toHaveBeenCalledTimes(1);
+  });
+
   it("does not fire for non-expired errors", async () => {
     const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
     const onJWTExpired = vi.fn();
@@ -65,5 +89,51 @@ describe("JazzClientProvider — onJWTExpired", () => {
     });
 
     expect(onJWTExpired).not.toHaveBeenCalled();
+  });
+
+  it("releases the latch after a hung refresh times out so a later expiry can retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
+      const onJWTExpired = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise<string | null>(() => {}))
+        .mockResolvedValueOnce("fresh.jwt.token");
+
+      render(
+        <JazzClientProvider client={client} onJWTExpired={onJWTExpired}>
+          <div />
+        </JazzClientProvider>,
+      );
+
+      await act(async () => {
+        client.__markUnauthenticated("expired");
+        await Promise.resolve();
+      });
+      expect(onJWTExpired).toHaveBeenCalledTimes(1);
+
+      // Still in-flight before the timeout: a repeated expiry is ignored.
+      await act(async () => {
+        client.__markUnauthenticated("expired");
+        await Promise.resolve();
+      });
+      expect(onJWTExpired).toHaveBeenCalledTimes(1);
+
+      // The first refresh never settles; the timeout releases the latch.
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        client.__markUnauthenticated("expired");
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(onJWTExpired).toHaveBeenCalledTimes(2);
+      expect(client.__updateAuthTokenSpy.lastToken).toBe("fresh.jwt.token");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

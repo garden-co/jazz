@@ -79,6 +79,15 @@ const write = db.upsert(
 await write.wait({ tier: "edge" });
 ```
 
+### Restore a deleted row
+
+Trying to insert, update or delete an already deleted row will fail. Use `restore(...)` to make a soft-deleted row visible again.
+`restore` requires providing new data for the restored row (missing fields will use schema defaults, if they exist).
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
+</include>
+
 ### Partial updates and nullable fields
 
 `update(...)` only modifies the keys you pass.
@@ -208,7 +217,7 @@ afterEach(() => {
 });
 
 it("tasks have a title", () => {
-  const task = transaction.insert(todos, { title: "Test task", done: false });
+  const task = transaction.insert(app.todos, { title: "Test task", done: false });
   expect(task.title).toEqual("Test task");
 });
 ```

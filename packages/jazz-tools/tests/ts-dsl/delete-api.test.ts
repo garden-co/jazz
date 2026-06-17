@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
-import { insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertUser, uniqueDbName } from "./factories";
 
 describe("TS Delete API", () => {
   let db: Db;
@@ -58,5 +58,33 @@ describe("TS Delete API", () => {
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(rows).toEqual([]);
+  });
+
+  it("can use caller-supplied updatedAt on delete", async () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const project = insertProject(db);
+
+    db.delete(app.projects, project.id, { updatedAt });
+
+    const deleted = await db.one(
+      app.projects
+        .select("name", "$updatedAt")
+        .includeDeleted()
+        .where({ id: { eq: project.id } }),
+    );
+    expect(deleted).toEqual({
+      id: project.id,
+      name: project.name,
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
+
+  it("trying to delete an already-deleted row fails", async () => {
+    const project = insertProject(db);
+    db.delete(app.projects, project.id);
+
+    expect(() => db.delete(app.projects, project.id)).toThrow(
+      `Delete failed: WriteError("row already deleted: ${project.id}")`,
+    );
   });
 });

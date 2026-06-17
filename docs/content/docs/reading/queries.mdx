@@ -139,16 +139,16 @@ magic columns.
 
 Each framework has a reactive binding that re-renders when query results change. See [Supported Frameworks](/docs/reference/supported-frameworks/overview) for side-by-side examples.
 
-| Framework  | API                            | Notes                                |
-| ---------- | ------------------------------ | ------------------------------------ |
-| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`           |
-| Vue        | `useAll(query)`                | Returns a `Ref`                      |
-| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current`          |
-| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }` |
+| Framework  | API                            | Notes                                               |
+| ---------- | ------------------------------ | --------------------------------------------------- |
+| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`                          |
+| Vue        | `useAll(query)`                | Returns `{ data, error, loading }` refs             |
+| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
+| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
 
 ### The `undefined` loading state
 
-`useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+`useAll` (its `data` ref in Vue) and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
 <OtherFrameworks />
 
@@ -179,7 +179,7 @@ In practice this means:
 
 - Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
 - Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
-- Vue's `useAll` returns a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+- Vue's `useAll` returns `{ data, error, loading }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
 - Solid's `useAll` returns a store, so Solid's fine-grained dependency tracking only re-runs computations that read changed fields.
 
 React's `useAll` follows React's own re-render model and returns a fresh array each tick; the granularity benefit there comes from React's diffing, not from in-place reconciliation.

@@ -20,13 +20,13 @@ import type {
 import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
-  DirectBatch as RuntimeDirectBatch,
   WriteResult,
   JazzClient,
   type MutationErrorEvent,
-  Transaction as RuntimeTransaction,
   WriteHandle,
+  type BatchMode,
   type CreateOptions,
+  type RestoreOptions,
   type UpdateOptions,
   type UpsertOptions,
   type DurabilityTier,
@@ -36,14 +36,23 @@ import {
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
   Scoped,
+  type DeleteOptions,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
-import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
+import {
+  MessagePortRuntimeBridge,
+  WorkerBridge,
+  type WorkerBridgeOptions,
+} from "./worker-bridge.js";
+import {
+  isIncompatibleBrowserBrokerConfigurationError,
+  type IncompatibleBrowserBrokerConfigurationHandler,
+} from "./browser-broker-errors.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
+import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
@@ -55,7 +64,6 @@ import {
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
-import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "./worker-bridge.js";
 import {
   normalizeBuiltQuery,
@@ -72,18 +80,45 @@ import {
 } from "./runtime-config.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
-  isTabSyncMessage,
-  resolveBroadcastChannelCtor,
-  type BroadcastChannelLike,
-  type FollowerCloseMessage,
-  type FollowerSyncMessage,
-  type LeaderSyncMessage,
-  type TabSyncMessage,
-} from "./tab-sync-protocol.js";
-import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
+  installWasmTeardownTrapSuppressor,
+  isWasmTeardownInProgress,
+  isWasmTeardownTrap,
+  markWasmTeardownInProgress,
+} from "./wasm-teardown-trap-suppressor.js";
+import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "./browser-broker-client.js";
+import {
+  createRandomId,
+  createBrowserBrokerFingerprint,
+  createRuntimeSourceIdentity,
+  isStaleLeadershipId,
+  stringifyError,
+  type BrowserBrokerRole,
+  type BrowserBrokerVisibility,
+} from "./browser-broker-protocol.js";
+import { acquireWebLockWithRetry, type LeaderLockLease } from "./leader-lock.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
+
+const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
+const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
+const BROKER_STORAGE_DELETE_RETRY_MAX_MS = 500;
+
+function isBrokerStorageLockedError(error: unknown): boolean {
+  const name = (error as { name?: string } | undefined)?.name;
+  return name === "NoModificationAllowedError" || name === "InvalidStateError";
+}
+
+function brokerStorageDeleteRetryDelayMs(retry: number): number {
+  return Math.min(
+    BROKER_STORAGE_DELETE_RETRY_BASE_MS * 2 ** retry,
+    BROKER_STORAGE_DELETE_RETRY_MAX_MS,
+  );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Configuration for creating a Db instance.
@@ -97,6 +132,12 @@ export interface DbConfig {
   serverUrl?: string;
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
+  /**
+   * Called when this tab cannot join the persistent browser broker because
+   * another tab is already connected with an incompatible app/runtime version.
+   * The default browser behavior shows a reload prompt.
+   */
+  onIncompatibleBrowserBrokerConfiguration?: IncompatibleBrowserBrokerConfigurationHandler;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
   /** User branch name (default: "main") */
@@ -159,6 +200,10 @@ function trimOptionalString(value?: string | null): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function createBrowserTabId(): string {
+  return createRandomId();
 }
 
 /** @internal Derive the default browser persistence namespace for this Db config. */
@@ -420,7 +465,6 @@ function resolveNativeSubscriptionColumns(
 
 function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
   get: () => WasmSchema;
-  peek: () => WasmSchema | undefined;
 } {
   let cachedRuntimeSchema: WasmSchema | undefined;
 
@@ -431,7 +475,6 @@ function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
       }
       return cachedRuntimeSchema;
     },
-    peek: () => cachedRuntimeSchema,
   };
 }
 
@@ -478,9 +521,11 @@ export type ColumnTransformMap = Record<string, ColumnTransform>;
 
 type DbBatchHandleBinding = {
   client: JazzClient;
-  runtimeHandle: RuntimeTransaction;
+  batchId: string;
+  session?: Session;
+  attribution?: string;
 };
-type AnyDbBatchHandle = DbBatchHandleBase<RuntimeTransaction | RuntimeDirectBatch>;
+type AnyDbBatchHandle = DbBatchHandleBase;
 
 const dbBatchHandleBindings = new WeakMap<AnyDbBatchHandle, DbBatchHandleBinding>();
 
@@ -541,11 +586,13 @@ function transformInputColumns(
 /**
  * Shared implementation for batches and transactions.
  */
-abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | RuntimeDirectBatch> {
+abstract class DbBatchHandleBase {
   constructor(
     private readonly bindingName: "DbTransaction" | "DbDirectBatch",
+    private readonly batchMode: BatchMode,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly beginRuntimeHandle: (client: JazzClient) => TRuntimeHandle,
+    private readonly session?: Session,
+    private readonly attribution?: string,
   ) {}
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
@@ -556,8 +603,13 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     }
 
     const client = this.resolveClient(table._schema);
-    const runtimeHandle = this.beginRuntimeHandle(client);
-    const binding = { client, runtimeHandle };
+    const batchId = client.beginBatch(this.batchMode);
+    const binding = {
+      client,
+      batchId,
+      session: this.session,
+      attribution: this.attribution,
+    };
     dbBatchHandleBindings.set(this, binding);
     return binding;
   }
@@ -566,20 +618,20 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
     return this.bindTable(query as unknown as TableProxy<T, never>, this.bindingName);
   }
 
-  private requireRuntimeHandle(operation: string): TRuntimeHandle {
-    return getDbBatchHandleBinding(this, operation, this.bindingName)
-      .runtimeHandle as TRuntimeHandle;
+  private requireBinding(operation: string): DbBatchHandleBinding {
+    return getDbBatchHandleBinding(this, operation, this.bindingName);
   }
 
   batchId(): string {
-    return this.requireRuntimeHandle("batchId").batchId();
+    return this.requireBinding("batchId").batchId;
   }
 
   /**
    * Commit this batch.
    */
   commit(): WriteHandle {
-    return this.requireRuntimeHandle("commit").commit();
+    const { client, batchId } = this.requireBinding("commit");
+    return client.commitBatch(batchId);
   }
 
   /**
@@ -591,7 +643,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): void {
-    this.requireRuntimeHandle("rollback").rollback();
+    const { client, batchId } = this.requireBinding("rollback");
+    client.rollbackBatch(batchId);
   }
 
   /**
@@ -603,9 +656,37 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
-    const runtimeHandle = this.requireRuntimeHandle("insert");
-    const row = runtimeHandle.create(table._table, values, options);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const { client, batchId, session, attribution } = this.requireBinding("insert");
+    const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
+    return transformOutputRow(table, transformRow(row, table._schema, table._table));
+  }
+
+  /**
+   * Restore a soft-deleted row.
+   *
+   * The restore is scoped to this batch, and will only be globally visible
+   * once it's committed.
+   */
+  restore<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Init,
+    options?: RestoreOptions,
+  ): T {
+    this.bindTable(table, this.bindingName);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const { client, batchId, session, attribution } = this.requireBinding("restore");
+    const row = client.restoreInternal(
+      table._table,
+      id,
+      values,
+      options,
+      session,
+      attribution,
+      batchId,
+    );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -618,8 +699,9 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeHandle("upsert").upsert(table._table, values, options);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const { client, batchId, session, attribution } = this.requireBinding("upsert");
+    client.upsertInternal(table._table, values, options, session, attribution, batchId);
   }
 
   /**
@@ -631,8 +713,9 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeHandle("update").update(id, updates);
+    const updates = toWriteRecord(transformedData, table._schema, table._table);
+    const { client, batchId, session, attribution } = this.requireBinding("update");
+    client.updateInternal(id, updates, undefined, session, attribution, batchId);
   }
 
   /**
@@ -642,8 +725,8 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { runtimeHandle } = this.bindTable(table, this.bindingName);
-    runtimeHandle.delete(id);
+    const { client, batchId, session, attribution } = this.bindTable(table, this.bindingName);
+    client.deleteInternal(id, undefined, session, attribution, batchId);
   }
 
   /**
@@ -652,14 +735,22 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
    * Read data is scoped to this batch.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, runtimeHandle } = this.bindQuery(query);
+    const { client, batchId, session } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const rows = await runtimeHandle.query(translateQuery(builderJson, planningSchema), options);
+    const rows = await client.query(
+      translateQuery(builderJson, planningSchema),
+      {
+        ...options,
+        localUpdates: "deferred",
+        transactionBatchId: batchId,
+      },
+      session,
+    );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -691,37 +782,44 @@ abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | Run
  * globally visible once it's committed using {@link DbTransaction.commit} and
  * accepted by the authority.
  */
-export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
+export class DbTransaction extends DbBatchHandleBase {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
-    beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
+    session?: Session,
+    attribution?: string,
   ) {
-    super("DbTransaction", resolveClient, beginRuntimeTransaction);
+    super("DbTransaction", "transactional", resolveClient, session, attribution);
   }
 }
 
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Scoped<DbTransaction>;
+export type TransactionScope = Scoped<DbTransaction>;
 
 /**
  * Direct batches group a set of writes that should become visible together on batch commit,
  * without waiting for an authority approval.
  */
-export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
+export class DbDirectBatch extends DbBatchHandleBase {
   constructor(
     resolveClient: (schema: WasmSchema) => JazzClient,
-    beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
+    session?: Session,
+    attribution?: string,
   ) {
-    super("DbDirectBatch", resolveClient, beginRuntimeBatch);
+    super("DbDirectBatch", "direct", resolveClient, session, attribution);
   }
 }
 
 /**
  * Batch object available inside {@link Db.batch}'s callback.
  */
-export type DbBatchScope = Scoped<DbDirectBatch>;
+export type BatchScope = Scoped<DbDirectBatch>;
+
+interface BrokerPromotionState {
+  leadershipId: number;
+  cancelled: boolean;
+}
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -748,26 +846,41 @@ export type DbBatchScope = Scoped<DbDirectBatch>;
  */
 export class Db {
   private clients = new Map<string, JazzClient>();
+  private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
+  private brokerClient: BrowserBrokerClient | null = null;
+  private brokerPromotion: Promise<void> | null = null;
+  private activeBrokerPromotion: BrokerPromotionState | null = null;
+  private tabLockLease: LeaderLockLease | null = null;
+  private brokerLeaderReadyLeadershipId: number | null = null;
+  private followerDataPort: MessagePort | null = null;
+  private followerPortBridge: MessagePortRuntimeBridge | null = null;
+  private followerReady: Promise<void> | null = null;
+  private resolveFollowerReady: (() => void) | null = null;
+  private rejectFollowerReady: ((error: Error) => void) | null = null;
+  private followerReadyResolved = false;
+  private followerPortReadyLeadershipId: number | null = null;
+  private followerLeaderReadyLeadershipId: number | null = null;
+  private durablePathError: Error | null = null;
+  private brokerSchemaFingerprint: string | null = null;
+  private brokerResetSchema: WasmSchema | null = null;
+  private readonly pendingLeaderFollowerPorts = new Map<
+    string,
+    { followerTabId: string; leadershipId: number; port: MessagePort }
+  >();
   private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
   private workerDbName: string | null = null;
-  private leaderElection: TabLeaderElection | null = null;
-  private leaderElectionUnsubscribe: (() => void) | null = null;
-  private tabRole: LeaderRole = "follower";
+  private tabRole: BrowserBrokerRole = "follower";
   private tabId: string | null = null;
   private currentLeaderTabId: string | null = null;
-  private currentLeaderTerm = 0;
-  private syncChannel: BroadcastChannelLike | null = null;
-  private readonly leaderPeerIds = new Set<string>();
-  private activeRemoteLeaderTabId: string | null = null;
+  private currentLeadershipId = 0;
   private workerReconfigure: Promise<void> = Promise.resolve();
-  private storageReset: StorageResetCoordinator | null = null;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -791,15 +904,16 @@ export class Db {
    */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
-  private readonly onSyncChannelMessage = (event: MessageEvent): void => {
-    this.handleSyncChannelMessage(event.data);
-  };
   private readonly onVisibilityChange = (): void => {
     if (typeof document === "undefined") return;
     const hidden = document.visibilityState === "hidden";
+    this.brokerClient?.reportVisibility(hidden ? "hidden" : "visible");
     this.sendLifecycleHint(hidden ? "visibility-hidden" : "visibility-visible");
   };
   private readonly onPageHide = (): void => {
+    // Page navigating away: open the teardown window so the suppressor swallows
+    // the inert WASM-teardown trap.
+    markWasmTeardownInProgress();
     this.sendLifecycleHint("pagehide");
   };
   private readonly onPageFreeze = (): void => {
@@ -893,6 +1007,9 @@ export class Db {
     this.workerBridge?.updateAuth({
       jwtToken,
     });
+    this.followerPortBridge?.updateAuth({
+      jwtToken,
+    });
 
     return true;
   }
@@ -915,6 +1032,9 @@ export class Db {
     }
 
     this.workerBridge?.updateAuth({
+      jwtToken: this.config.jwtToken,
+    });
+    this.followerPortBridge?.updateAuth({
       jwtToken: this.config.jwtToken,
     });
 
@@ -946,46 +1066,61 @@ export class Db {
     }
     db.primaryDbName = resolveDefaultPersistentDbName(config);
     db.workerDbName = db.primaryDbName;
+    db.tabId = createBrowserTabId();
+    db.tabRole = "follower";
 
     try {
-      const election = new TabLeaderElection({
+      db.attachLifecycleHooks();
+      const broker = await BrowserBrokerClient.connect({
         appId: config.appId,
         dbName: db.primaryDbName,
+        tabId: db.tabId,
+        fingerprint: Db.createBrokerFingerprint(config, db.primaryDbName),
+        visibility: db.currentBrokerVisibility(),
+        runtimeSources: config.runtimeSources,
+        onBecomeLeader: (client, leadershipId, resetRequestId) => {
+          db.brokerClient = client;
+          const promotion = db.promoteViaBroker(leadershipId, resetRequestId);
+          db.brokerPromotion = promotion;
+          return promotion;
+        },
+        onDemote: (leadershipId) => db.demoteViaBroker(leadershipId),
+        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
+          db.handleBrokerAttachFollowerPort(followerTabId, leadershipId, port);
+        },
+        onDetachFollowerPort: (followerTabId, leadershipId) => {
+          db.handleBrokerDetachFollowerPort(followerTabId, leadershipId);
+        },
+        onUseFollowerPort: (leaderTabId, leadershipId, port) => {
+          db.handleBrokerUseFollowerPort(leaderTabId, leadershipId, port);
+        },
+        onFollowerReady: (leaderTabId, leadershipId) => {
+          db.handleBrokerFollowerReady(leaderTabId, leadershipId);
+        },
+        onCloseFollowerPort: (leadershipId) => {
+          db.handleBrokerCloseFollowerPort(leadershipId);
+        },
+        onStorageResetBegin: (_requestId, leadershipId) =>
+          db.prepareForBrokerStorageReset(leadershipId),
+        onSchemaBlocked: (reason) => {
+          db.handleBrokerSchemaBlocked(reason);
+        },
+        onReconnected: (client) => {
+          db.handleBrokerReconnected(client);
+        },
+        onClosed: (error) => {
+          db.handleBrokerClosed(error);
+        },
       });
-      db.leaderElection = election;
-      election.start();
-
-      let initialLeader: LeaderSnapshot | null = null;
-      try {
-        // Allow at least one startup election window with default heartbeat settings.
-        initialLeader = await election.waitForInitialLeader(1600);
-      } catch {
-        // Fall back to whatever state election has reached so far.
-        initialLeader = election.snapshot();
-      }
-      db.adoptLeaderSnapshot(initialLeader);
-      db.workerDbName = Db.resolveWorkerDbNameForSnapshot(db.primaryDbName, initialLeader);
-      db.openSyncChannel();
-      db.storageReset = new StorageResetCoordinator(db.createStorageResetHost());
-      db.attachLifecycleHooks();
-      db.leaderElectionUnsubscribe = election.onChange((snapshot) => {
-        db.onLeaderElectionChange(snapshot);
-      });
-
-      db.worker = await Db.spawnWorker(config.runtimeSources);
-
+      db.brokerClient = broker;
+      db.adoptBrokerSnapshot(broker.snapshot());
+      await db.waitForInitialBrokerPromotion();
       return db;
     } catch (error) {
-      db.closeSyncChannel();
       db.detachLifecycleHooks();
-      if (db.leaderElectionUnsubscribe) {
-        db.leaderElectionUnsubscribe();
-        db.leaderElectionUnsubscribe = null;
-      }
-      if (db.leaderElection) {
-        db.leaderElection.stop();
-        db.leaderElection = null;
-      }
+      db.releaseBrokerLeadershipResources();
+      await db.brokerClient?.shutdown();
+      db.brokerClient = null;
       throw error;
     }
   }
@@ -1010,15 +1145,18 @@ export class Db {
     // Use the canonical schema JSON as the client cache key, but memoize it by
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
+    this.reportBrokerSchemaReady(key);
 
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
+      const usesDurablePeer = this.worker !== null || this.brokerClient !== null;
 
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
-        hasWorker: this.worker !== null,
-        useBinaryEncoding: this.worker !== null,
+        hasWorker: usesDurablePeer,
+        useBinaryEncoding: usesDurablePeer,
+        bufferOutboxWithoutSyncSender: this.brokerClient !== null,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
@@ -1029,15 +1167,19 @@ export class Db {
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
       }
+      if (!this.worker && this.brokerClient) {
+        this.attachFollowerPortBridgeForClient(client);
+      }
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
-      if (!this.worker && this.config.serverUrl) {
+      if (!usesDurablePeer && this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
         });
       }
       this.clients.set(key, client);
+      this.clientSchemas.set(key, runtimeSchema);
     }
 
     return this.clients.get(key)!;
@@ -1072,6 +1214,15 @@ export class Db {
     if (this.bridgeReady) {
       await this.bridgeReady;
     }
+    if (this.isShuttingDown) {
+      return;
+    }
+    if (this.brokerClient && this.tabRole === "follower") {
+      this.attachFollowerPortBridgeForExistingClient();
+      await this.ensureDurablePathReadyPromise();
+    } else if (this.brokerClient && this.activeBrokerPromotion) {
+      await this.ensureDurablePathReadyPromise();
+    }
   }
 
   protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
@@ -1085,26 +1236,100 @@ export class Db {
     await this.workerBridge.waitForUpstreamServerConnection();
   }
 
+  private async ensureWriteWaitReady(options: { tier: DurabilityTier }): Promise<void> {
+    await this.ensureBridgeReady();
+    if (!this.workerBridge || !this.config.serverUrl || options.tier === "local") {
+      return;
+    }
+    await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
+  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
+    const wait = handle.wait.bind(handle);
+    handle.wait = (async (options: { tier: DurabilityTier }) => {
+      await this.ensureWriteWaitReady(options);
+      return wait(options);
+    }) as THandle["wait"];
+    return handle;
+  }
+
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
     if (!this.worker) {
       throw new Error("Cannot attach worker bridge without an active worker");
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
-    this.leaderPeerIds.clear();
-    bridge.onPeerSync((batch) => {
-      this.handleWorkerPeerSync(batch);
-    });
-    this.applyBridgeRoutingForCurrentLeader(bridge, false);
+    bridge.setServerPayloadForwarder(null);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
     });
+    bridge.onFollowerPortAttached((event) => {
+      if (this.tabRole !== "leader") return;
+      if (event.leadershipId !== this.currentLeadershipId) return;
+      const leadershipId = event.leadershipId;
+      const reportAttached = () => {
+        if (this.tabRole !== "leader") return;
+        if (leadershipId !== this.currentLeadershipId) return;
+        if (this.workerBridge !== bridge) return;
+        this.brokerClient?.reportFollowerPortAttached(event.peerId, leadershipId);
+      };
+      if (!this.config.serverUrl) {
+        reportAttached();
+        return;
+      }
+      reportAttached();
+      void bridge.waitForUpstreamServerConnection().catch((error) => {
+        if (
+          this.brokerClient &&
+          this.tabRole === "leader" &&
+          this.currentLeadershipId === leadershipId &&
+          this.workerBridge === bridge
+        ) {
+          this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
+        }
+      });
+    });
+    bridge.onFollowerPortClosed((event) => {
+      if (this.tabRole !== "leader") return;
+      if (event.leadershipId !== this.currentLeadershipId) return;
+      if (this.workerBridge !== bridge) return;
+      this.brokerClient?.reportFollowerPortClosed(event.peerId, event.leadershipId);
+    });
     this.workerBridge = bridge;
+    const leadershipId = this.currentLeadershipId;
     const bridgeReady = bridge
       .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => {
+        if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
+        this.flushPendingLeaderFollowerPorts();
+        this.reportBrokerLeaderReady();
+        this.resolveDurablePathReady();
+      })
       .then(() => undefined);
-    bridgeReady.catch(() => undefined);
+    bridgeReady.catch((error) => {
+      if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
+      void this.handleBrokerLeaderBridgeFailure(error, bridge, leadershipId);
+    });
     this.bridgeReady = bridgeReady;
+  }
+
+  private async handleBrokerLeaderBridgeFailure(
+    error: unknown,
+    failedBridge: WorkerBridge,
+    leadershipId: number,
+  ): Promise<void> {
+    if (this.workerBridge !== failedBridge || this.currentLeadershipId !== leadershipId) return;
+    if (this.brokerClient && this.tabRole === "leader") {
+      this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
+    }
+    if (this.tabRole !== "leader") return;
+
+    this.closePendingLeaderFollowerPorts();
+    await this.shutdownLeaderWorker();
+    this.releaseBrokerLeadershipResources();
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyLeadershipId = null;
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1190,52 +1415,519 @@ export class Db {
       adminSecret: this.config.adminSecret,
       runtimeSources,
       fallbackWasmUrl,
+      workerLockName:
+        this.brokerClient && this.tabRole === "leader" ? this.brokerWorkerLockName() : undefined,
+      leadershipId:
+        this.brokerClient && this.tabRole === "leader" ? this.currentLeadershipId : undefined,
       logLevel: this.config.logLevel,
       telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
   }
 
-  private adoptLeaderSnapshot(snapshot: LeaderSnapshot): void {
+  private static createBrokerFingerprint(config: DbConfig, primaryDbName: string): string {
+    const driver = resolveStorageDriver(config.driver);
+    return createBrowserBrokerFingerprint({
+      appId: config.appId,
+      dbName: primaryDbName,
+      persistentDriverNamespace:
+        driver.type === "persistent" ? (driver.dbName ?? primaryDbName) : primaryDbName,
+      env: config.env ?? "dev",
+      userBranch: config.userBranch ?? "main",
+      serverUrl: config.serverUrl ?? null,
+      schemaHash: null,
+      authClass: Db.resolveBrokerAuthClass(config),
+      runtimeSourceIdentity: createRuntimeSourceIdentity(config.runtimeSources),
+    });
+  }
+
+  private static resolveBrokerAuthClass(config: DbConfig): string {
+    if (config.adminSecret) {
+      return "admin";
+    }
+
+    const session = resolveClientSessionSync({
+      appId: config.appId,
+      jwtToken: config.jwtToken,
+      cookieSession: config.cookieSession,
+    });
+    if (!session?.user_id || session.authMode === "anonymous") {
+      return "anonymous";
+    }
+    return `${session.authMode}:${session.user_id}`;
+  }
+
+  private reportBrokerSchemaReady(schemaFingerprint: string): void {
+    if (!this.brokerClient) return;
+
+    if (this.brokerSchemaFingerprint && this.brokerSchemaFingerprint !== schemaFingerprint) {
+      throw new Error(
+        "Persistent browser broker mode does not support multiple schemas in one Db instance.",
+      );
+    }
+
+    if (this.brokerSchemaFingerprint === schemaFingerprint) return;
+
+    this.brokerSchemaFingerprint = schemaFingerprint;
+    this.brokerClient.reportSchemaReady(schemaFingerprint);
+  }
+
+  private adoptBrokerSnapshot(snapshot: BrowserBrokerClientSnapshot): void {
     this.tabRole = snapshot.role;
     this.tabId = snapshot.tabId;
     this.currentLeaderTabId = snapshot.leaderTabId;
-    this.currentLeaderTerm = snapshot.term;
+    this.currentLeadershipId = snapshot.leadershipId;
   }
 
-  private openSyncChannel(): void {
-    if (this.syncChannel || !this.primaryDbName) return;
-    const ChannelCtor = resolveBroadcastChannelCtor();
-    if (!ChannelCtor) {
+  private currentBrokerVisibility(): BrowserBrokerVisibility {
+    if (typeof document === "undefined") {
+      return "visible";
+    }
+    return document.visibilityState === "visible" ? "visible" : "hidden";
+  }
+
+  private brokerTabLockName(): string {
+    return `jazz-leader-tab:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
+  }
+
+  private brokerWorkerLockName(): string {
+    return `jazz-leader-worker:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
+  }
+
+  private async promoteViaBroker(leadershipId: number, resetRequestId?: string): Promise<void> {
+    if (this.isShuttingDown || !this.primaryDbName) return;
+
+    const promotion: BrokerPromotionState = { leadershipId, cancelled: false };
+    this.activeBrokerPromotion = promotion;
+    this.markDurablePathPending();
+
+    this.closeFollowerPortState(undefined, {
+      preserveOutbox: true,
+    });
+    this.closePendingLeaderFollowerPorts();
+    this.currentLeaderTabId = this.tabId;
+    this.currentLeadershipId = leadershipId;
+    this.workerDbName = this.primaryDbName;
+    this.brokerLeaderReadyLeadershipId = null;
+
+    try {
+      const tabLockName = this.brokerTabLockName();
+      const tabLockLease = await acquireWebLockWithRetry(tabLockName, {
+        onLost: (reason) => {
+          void this.handleBrokerLeaderLockLost(leadershipId, tabLockName, reason);
+        },
+      });
+      if (!tabLockLease) {
+        throw new Error(`Unable to acquire ${tabLockName}`);
+      }
+      this.tabLockLease = tabLockLease;
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
+
+      if (resetRequestId) {
+        await this.deleteBrokerStorageFiles();
+        if (await this.finishCancelledBrokerPromotion(promotion)) return;
+      }
+
+      const worker = await Db.spawnWorker(this.config.runtimeSources);
+      if (await this.finishCancelledBrokerPromotion(promotion, worker)) return;
+      this.worker = worker;
+      this.tabRole = "leader";
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
+      this.recreateFirstClientAfterBrokerReset();
+      this.attachWorkerBridgeForExistingClient();
+      if (resetRequestId && !this.workerBridge) {
+        // Fresh namespace: no schema has ever been used, so there is no client
+        // to recreate and no bridge to initialize. The OPFS wipe already
+        // happened above, so report readiness directly and let the broker
+        // finish the reset instead of waiting for a bridge that will never exist.
+        this.reportBrokerLeaderReady({ bridgelessStorageReset: true });
+      }
+    } catch (error) {
+      if (await this.finishCancelledBrokerPromotion(promotion)) return;
+      this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));
+      await this.resignBrokerLeadership();
+      throw error;
+    } finally {
+      if (this.activeBrokerPromotion === promotion) {
+        this.activeBrokerPromotion = null;
+      }
+    }
+  }
+
+  private async waitForInitialBrokerPromotion(): Promise<void> {
+    if (!this.brokerClient) return;
+
+    if (this.brokerPromotion) {
+      await this.brokerPromotion;
+    }
+  }
+
+  /**
+   * The single leadership-resignation sequence shared by every demote path.
+   * The durable path goes back to pending (waiters survive for the next
+   * leadership), the tab steps down, leader-side ports and the worker are
+   * torn down, and the leadership locks are released.
+   */
+  private async resignBrokerLeadership(
+    options: {
+      closePendingFollowerPorts?: boolean;
+      shutdown?: () => Promise<void>;
+    } = {},
+  ): Promise<void> {
+    this.markDurablePathPending();
+    this.tabRole = "follower";
+    this.currentLeaderTabId = null;
+    this.brokerLeaderReadyLeadershipId = null;
+    if (options.closePendingFollowerPorts ?? true) {
+      this.closePendingLeaderFollowerPorts();
+    }
+    await (options.shutdown ? options.shutdown() : this.shutdownLeaderWorker());
+    this.releaseBrokerLeadershipResources();
+  }
+
+  private async demoteViaBroker(leadershipId: number): Promise<void> {
+    const activePromotion = this.activeBrokerPromotion;
+    const demotedActivePromotion = activePromotion?.leadershipId === leadershipId;
+    if (!demotedActivePromotion && leadershipId !== this.currentLeadershipId) return;
+    if (demotedActivePromotion) {
+      activePromotion.cancelled = true;
+    } else if (this.tabRole !== "leader") {
+      return;
+    }
+    await this.resignBrokerLeadership();
+  }
+
+  private async handleBrokerLeaderLockLost(
+    leadershipId: number,
+    lockName: string,
+    reason: unknown,
+  ): Promise<void> {
+    const activePromotion = this.activeBrokerPromotion;
+    if (activePromotion?.leadershipId === leadershipId) {
+      activePromotion.cancelled = true;
+    } else if (leadershipId !== this.currentLeadershipId || this.tabRole !== "leader") {
       return;
     }
 
-    const channelName = `jazz-tab-sync:${this.config.appId}:${this.primaryDbName}`;
-    this.syncChannel = new ChannelCtor(channelName);
-    this.syncChannel.addEventListener("message", this.onSyncChannelMessage);
+    const message = stringifyError(reason);
+    this.brokerClient?.reportLeaderFailed(leadershipId, message || `${lockName} was lost`);
+    await this.resignBrokerLeadership();
   }
 
-  private closeSyncChannel(): void {
-    if (!this.syncChannel) return;
-    this.syncChannel.removeEventListener("message", this.onSyncChannelMessage);
-    this.syncChannel.close();
-    this.syncChannel = null;
+  private async finishCancelledBrokerPromotion(
+    promotion: BrokerPromotionState,
+    worker?: Worker,
+  ): Promise<boolean> {
+    if (
+      !promotion.cancelled &&
+      !this.isShuttingDown &&
+      this.currentLeadershipId === promotion.leadershipId
+    ) {
+      return false;
+    }
+
+    if (worker && this.worker !== worker) {
+      worker.terminate();
+    }
+    await this.resignBrokerLeadership();
+    return true;
   }
 
-  private postSyncChannelMessage(message: TabSyncMessage): void {
-    this.syncChannel?.postMessage(message);
+  private async prepareForBrokerStorageReset(leadershipId: number): Promise<void> {
+    if (this.isShuttingDown) return;
+    if (leadershipId !== this.currentLeadershipId) return;
+
+    const activePromotion = this.activeBrokerPromotion;
+    if (activePromotion?.leadershipId === leadershipId) {
+      activePromotion.cancelled = true;
+      await this.brokerPromotion?.catch(() => undefined);
+    }
+
+    // Pending leader follower ports are left untouched: the broker clears all
+    // attachments itself when the reset starts and re-issues them afterwards.
+    await this.resignBrokerLeadership({
+      closePendingFollowerPorts: false,
+      shutdown: () => this.shutdownWorkerAndClientsForStorageReset(),
+    });
   }
 
-  private async resumeWorker(): Promise<void> {
-    if (this.worker || this.isShuttingDown) {
+  private reportBrokerLeaderReady(options?: { bridgelessStorageReset?: boolean }): void {
+    if (!this.brokerClient || this.tabRole !== "leader") return;
+    if (this.brokerLeaderReadyLeadershipId === this.currentLeadershipId) return;
+    this.brokerLeaderReadyLeadershipId = this.currentLeadershipId;
+    this.brokerClient.reportLeaderReady({
+      leadershipId: this.currentLeadershipId,
+      tabLockName: this.brokerTabLockName(),
+      workerLockName: this.brokerWorkerLockName(),
+      ...(options?.bridgelessStorageReset ? { bridgelessStorageReset: true } : {}),
+    });
+  }
+
+  private handleBrokerAttachFollowerPort(
+    followerTabId: string,
+    leadershipId: number,
+    port: MessagePort,
+  ): void {
+    if (this.tabRole !== "leader" || leadershipId !== this.currentLeadershipId) {
+      port.close();
       return;
     }
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
+
+    this.pendingLeaderFollowerPorts.set(followerTabId, { followerTabId, leadershipId, port });
+    this.flushPendingLeaderFollowerPorts();
+  }
+
+  private handleBrokerDetachFollowerPort(followerTabId: string, leadershipId: number): void {
+    const pending = this.pendingLeaderFollowerPorts.get(followerTabId);
+    if (pending?.leadershipId === leadershipId) {
+      pending.port.close();
+      this.pendingLeaderFollowerPorts.delete(followerTabId);
+    }
+    this.workerBridge?.detachFollowerPort(followerTabId, leadershipId);
+  }
+
+  private flushPendingLeaderFollowerPorts(): void {
+    if (!this.workerBridge || this.tabRole !== "leader") return;
+
+    for (const [followerTabId, entry] of this.pendingLeaderFollowerPorts) {
+      this.pendingLeaderFollowerPorts.delete(followerTabId);
+      if (entry.leadershipId !== this.currentLeadershipId) {
+        entry.port.close();
+        continue;
+      }
+      this.workerBridge.attachFollowerPort(entry.followerTabId, entry.leadershipId, entry.port);
+    }
+  }
+
+  private closePendingLeaderFollowerPorts(): void {
+    for (const entry of this.pendingLeaderFollowerPorts.values()) {
+      entry.port.close();
+    }
+    this.pendingLeaderFollowerPorts.clear();
+  }
+
+  private handleBrokerUseFollowerPort(
+    leaderTabId: string,
+    leadershipId: number,
+    port: MessagePort,
+  ): void {
+    if (this.tabRole === "leader" || isStaleLeadershipId(leadershipId, this.currentLeadershipId)) {
+      port.close();
+      return;
+    }
+
+    this.markDurablePathPending();
+    const preserveLeaderReadySignal = this.followerLeaderReadyLeadershipId === leadershipId;
+    this.closeFollowerPortState(undefined, {
+      preserveOutbox: true,
+      preserveLeaderReadySignal,
+    });
+    this.tabRole = "follower";
+    this.currentLeaderTabId = leaderTabId;
+    this.currentLeadershipId = leadershipId;
+    this.followerDataPort = port;
+    this.ensureDurablePathReadyPromise();
+    this.attachFollowerPortBridgeForExistingClient();
+    this.resolveFollowerDurablePathIfReady();
+  }
+
+  private handleBrokerFollowerReady(leaderTabId: string, leadershipId: number): void {
+    if (this.tabRole !== "follower") return;
+    if (isStaleLeadershipId(leadershipId, this.currentLeadershipId)) return;
+    this.currentLeaderTabId = leaderTabId;
+    this.currentLeadershipId = leadershipId;
+    this.followerLeaderReadyLeadershipId = leadershipId;
+    this.resolveFollowerDurablePathIfReady();
+  }
+
+  private handleBrokerCloseFollowerPort(leadershipId: number): void {
+    if (leadershipId !== this.currentLeadershipId) return;
+    this.markDurablePathPending();
+    this.closeFollowerPortState(undefined, {
+      preserveOutbox: true,
+    });
+  }
+
+  private ensureDurablePathReadyPromise(): Promise<void> {
+    if (this.durablePathError) {
+      return Promise.reject(this.durablePathError);
+    }
+    if (this.followerReadyResolved) {
+      return Promise.resolve();
+    }
+    if (this.followerReady) {
+      return this.followerReady;
+    }
+
+    this.followerReady = new Promise<void>((resolve, reject) => {
+      this.resolveFollowerReady = resolve;
+      this.rejectFollowerReady = reject;
+    });
+    return this.followerReady;
+  }
+
+  private markDurablePathPending(): void {
+    this.durablePathError = null;
+    if (this.followerReadyResolved) {
+      this.followerReady = null;
+      this.followerReadyResolved = false;
+    }
+  }
+
+  private resolveDurablePathReady(): void {
+    this.durablePathError = null;
+    this.followerReadyResolved = true;
+    this.resolveFollowerReady?.();
+    this.followerReady = Promise.resolve();
+    this.resolveFollowerReady = null;
+    this.rejectFollowerReady = null;
+  }
+
+  private rejectDurablePathReady(error: Error): void {
+    this.durablePathError = error;
+    this.followerReadyResolved = false;
+    this.rejectFollowerReady?.(error);
+    this.followerReady = null;
+    this.resolveFollowerReady = null;
+    this.rejectFollowerReady = null;
+  }
+
+  private attachFollowerPortBridgeForExistingClient(): void {
+    const first = this.clients.values().next();
+    if (first.done) return;
+    this.attachFollowerPortBridgeForClient(first.value);
+  }
+
+  private attachFollowerPortBridgeForClient(client: JazzClient): void {
+    if (this.followerPortBridge || !this.followerDataPort) {
+      return;
+    }
+
+    const bridge = new MessagePortRuntimeBridge(this.followerDataPort, client.getRuntime());
+    bridge.init();
+    bridge.onAuthFailure((reason) => {
+      this.markUnauthenticated(reason);
+    });
+    this.followerPortBridge = bridge;
+    this.followerDataPort = null;
+    this.followerPortReadyLeadershipId = this.currentLeadershipId;
+    this.resolveFollowerDurablePathIfReady();
+  }
+
+  private resolveFollowerDurablePathIfReady(): void {
+    if (this.tabRole !== "follower") return;
+    if (this.currentLeadershipId <= 0) return;
+    if (this.followerPortReadyLeadershipId !== this.currentLeadershipId) return;
+    if (this.followerLeaderReadyLeadershipId !== this.currentLeadershipId) return;
+    this.resolveDurablePathReady();
+  }
+
+  // Schema-blocked is non-terminal: queries fail fast with the reason, but the
+  // broker connection stays up so a later canonical-schema re-election can
+  // adopt this tab (any acceptance path clears the error via
+  // markDurablePathPending).
+  private handleBrokerSchemaBlocked(reason: string): void {
+    this.rejectDurablePathReady(new Error(reason));
+  }
+
+  private handleBrokerReconnected(client: BrowserBrokerClient): void {
+    this.adoptBrokerSnapshot(client.snapshot());
+    this.markDurablePathPending();
+    if (this.brokerSchemaFingerprint) {
+      client.reportSchemaReady(this.brokerSchemaFingerprint);
+    }
+  }
+
+  private handleBrokerClosed(error: Error): void {
+    this.rejectDurablePathReady(error);
+  }
+
+  private attachWorkerBridgeForExistingClient(): void {
+    if (!this.worker || this.workerBridge) return;
+    const first = this.clients.entries().next();
+    if (first.done) return;
+    const [schemaJson, client] = first.value;
+    this.attachWorkerBridge(schemaJson, client);
+  }
+
+  private recreateFirstClientAfterBrokerReset(): void {
+    if (this.clients.size > 0 || !this.brokerResetSchema) return;
+    if (!this.runtimeModule) {
+      throw new Error("Db runtime module is not initialized for broker storage reset");
+    }
+
+    const schema = this.brokerResetSchema;
+    const schemaJson = getRuntimeSchemaCacheKey(schema);
+    this.brokerResetSchema = null;
+    this.installMainThreadWasmTelemetry();
+    const client = this.runtimeModule.createClient({
+      config: { ...this.config },
+      schema,
+      hasWorker: true,
+      useBinaryEncoding: true,
+      bufferOutboxWithoutSyncSender: true,
+      onAuthFailure: (reason) => {
+        this.markUnauthenticated(reason);
+      },
+    });
+    this.attachMutationErrorHandler(client);
+    this.clients.set(schemaJson, client);
+    this.clientSchemas.set(schemaJson, schema);
+  }
+
+  private closeFollowerPortState(
+    error?: Error,
+    options: { preserveOutbox?: boolean; preserveLeaderReadySignal?: boolean } = {},
+  ): void {
+    if (options.preserveOutbox && !error) {
+      this.markDurablePathPending();
+    }
+    if (options.preserveOutbox) {
+      this.followerPortBridge?.detachForReconnect();
+    } else {
+      this.followerPortBridge?.shutdown();
+    }
+    this.followerPortBridge = null;
+    this.followerPortReadyLeadershipId = null;
+    if (!options.preserveLeaderReadySignal) {
+      this.followerLeaderReadyLeadershipId = null;
+    }
+    this.followerDataPort?.close();
+    this.followerDataPort = null;
+
+    if (error) {
+      this.rejectDurablePathReady(error);
+    }
+  }
+
+  private async shutdownLeaderWorker(): Promise<void> {
+    if (this.workerBridge && this.worker) {
+      try {
+        await this.workerBridge.shutdown();
+      } catch {
+        // Best effort during broker demotion/shutdown.
+      }
+    }
+    this.workerBridge = null;
+    this.bridgeReady = null;
+
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+  }
+
+  private releaseBrokerLeadershipResources(): void {
+    const tabLockLease = this.tabLockLease;
+    this.tabLockLease = null;
+    tabLockLease?.release();
   }
 
   private attachLifecycleHooks(): void {
     if (this.lifecycleHooksAttached) return;
     if (typeof window === "undefined" || typeof document === "undefined") return;
 
+    // Arm the teardown-trap suppressor before the first `pagehide` can fire.
+    installWasmTeardownTrapSuppressor();
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     window.addEventListener("pagehide", this.onPageHide);
     // "freeze"/"resume" are non-standard but available in Chromium lifecycle APIs.
@@ -1270,199 +1962,79 @@ export class Db {
     });
   }
 
-  private handleSyncChannelMessage(raw: unknown): void {
-    if (this.isShuttingDown || !this.tabId) return;
-    if (!isTabSyncMessage(raw)) return;
-
-    if (this.storageReset?.handleSyncChannelMessage(raw)) {
-      return;
+  private async deleteBrokerStorageFiles(): Promise<void> {
+    if (!this.primaryDbName) {
+      throw new Error("Browser storage reset requires an initialized primary Db namespace.");
     }
 
-    switch (raw.type) {
-      case "follower-sync":
-        this.handleFollowerSync(raw);
-        return;
-      case "leader-sync":
-        this.handleLeaderSync(raw);
-        return;
-      case "follower-close":
-        this.handleFollowerClose(raw);
-        return;
+    const rootDirectory = await navigator.storage.getDirectory();
+    const namespaces = await this.collectBrokerStorageNamespaces(rootDirectory, this.primaryDbName);
+    for (const namespace of namespaces) {
+      await this.removeBrokerStorageNamespace(rootDirectory, namespace);
     }
   }
 
-  private handleFollowerSync(message: FollowerSyncMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    if (!this.leaderPeerIds.has(message.fromTabId)) {
-      this.leaderPeerIds.add(message.fromTabId);
-      this.workerBridge.openPeer(message.fromTabId);
-    }
-    this.workerBridge.sendPeerSync(message.fromTabId, message.term, message.payload);
-  }
-
-  private handleLeaderSync(message: LeaderSyncMessage): void {
-    if (this.tabRole !== "follower") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toTabId !== this.tabId) return;
-    if (!this.currentLeaderTabId || message.fromLeaderTabId !== this.currentLeaderTabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-
-    for (const payload of message.payload) {
-      this.workerBridge.applyIncomingServerPayload(payload);
-    }
-  }
-
-  private handleFollowerClose(message: FollowerCloseMessage): void {
-    if (this.tabRole !== "leader") return;
-    if (!this.workerBridge) return;
-    if (!this.tabId || message.toLeaderTabId !== this.tabId) return;
-    if (message.term !== this.currentLeaderTerm) return;
-    if (!this.leaderPeerIds.has(message.fromTabId)) return;
-
-    this.leaderPeerIds.delete(message.fromTabId);
-    this.workerBridge.closePeer(message.fromTabId);
-  }
-
-  private handleWorkerPeerSync(batch: PeerSyncBatch): void {
-    if (this.isShuttingDown) return;
-    if (this.tabRole !== "leader") return;
-    if (!this.tabId) return;
-    if (batch.term !== this.currentLeaderTerm) return;
-
-    this.postSyncChannelMessage({
-      type: "leader-sync",
-      fromLeaderTabId: this.tabId,
-      toTabId: batch.peerId,
-      term: batch.term,
-      payload: batch.payload,
-    });
-  }
-
-  private sendFollowerClose(leaderTabId: string | null, term: number): void {
-    if (!leaderTabId || !this.tabId) return;
-    if (leaderTabId === this.tabId) return;
-
-    this.postSyncChannelMessage({
-      type: "follower-close",
-      fromTabId: this.tabId,
-      toLeaderTabId: leaderTabId,
-      term,
-    });
-  }
-
-  private applyBridgeRoutingForCurrentLeader(
-    bridge: WorkerBridge,
-    replayConnection: boolean,
-  ): void {
-    if (this.tabRole === "leader") {
-      bridge.setServerPayloadForwarder(null);
-      this.activeRemoteLeaderTabId = null;
-    } else {
-      bridge.setServerPayloadForwarder((payload) => {
-        if (!this.tabId || !this.currentLeaderTabId) return;
-        if (this.currentLeaderTabId === this.tabId) return;
-
-        this.postSyncChannelMessage({
-          type: "follower-sync",
-          fromTabId: this.tabId,
-          toLeaderTabId: this.currentLeaderTabId,
-          term: this.currentLeaderTerm,
-          payload: [payload],
-        });
-      });
-      this.activeRemoteLeaderTabId = this.currentLeaderTabId;
+  private async collectBrokerStorageNamespaces(
+    rootDirectory: FileSystemDirectoryHandle,
+    primaryDbName: string,
+  ): Promise<string[]> {
+    const namespaces = new Set<string>([primaryDbName]);
+    const rootWithEntries = rootDirectory as FileSystemDirectoryHandle & {
+      entries?: () => AsyncIterable<[string, FileSystemHandle]>;
+    };
+    if (typeof rootWithEntries.entries !== "function") {
+      return [...namespaces];
     }
 
-    if (replayConnection) {
-      bridge.replayServerConnection();
-    }
-  }
-
-  private onLeaderElectionChange(snapshot: LeaderSnapshot): void {
-    if (this.isShuttingDown || !this.primaryDbName) return;
-
-    const previousRole = this.tabRole;
-    const previousLeaderTabId = this.currentLeaderTabId;
-    const previousTerm = this.currentLeaderTerm;
-    this.adoptLeaderSnapshot(snapshot);
-
-    if (previousRole === "follower" && previousLeaderTabId !== this.currentLeaderTabId) {
-      this.sendFollowerClose(previousLeaderTabId, previousTerm);
-    }
-
-    const nextDbName = Db.resolveWorkerDbNameForSnapshot(this.primaryDbName, snapshot);
-    const dbNameChanged = nextDbName !== this.workerDbName;
-    this.workerDbName = nextDbName;
-
-    // No bridge means no runtime server edge exists yet.
-    if (!this.workerBridge) return;
-
-    this.enqueueWorkerReconfigure(async () => {
-      if (this.isShuttingDown) return;
-      if (dbNameChanged) {
-        await this.restartWorkerWithCurrentDbName();
-        return;
+    const suffix = ".opfsbtree";
+    const legacyFallbackPrefix = `${primaryDbName}__fallback__`;
+    for await (const [name] of rootWithEntries.entries()) {
+      if (!name.endsWith(suffix)) continue;
+      const namespace = name.slice(0, -suffix.length);
+      if (namespace === primaryDbName || namespace.startsWith(legacyFallbackPrefix)) {
+        namespaces.add(namespace);
       }
-
-      if (this.workerBridge) {
-        this.applyBridgeRoutingForCurrentLeader(this.workerBridge, true);
-      }
-    });
-  }
-
-  private enqueueWorkerReconfigure(task: () => Promise<void>): void {
-    this.workerReconfigure = this.workerReconfigure.then(task).catch((error) => {
-      console.error("[db] Worker reconfigure failed:", error);
-    });
-  }
-
-  private async restartWorkerWithCurrentDbName(): Promise<void> {
-    const currentWorker = this.worker;
-    if (!currentWorker) return;
-
-    // If bridge init is in flight, wait before tearing down.
-    if (this.bridgeReady) {
-      await this.bridgeReady;
     }
 
-    if (this.workerBridge) {
+    return [...namespaces];
+  }
+
+  private async removeBrokerStorageNamespace(
+    rootDirectory: FileSystemDirectoryHandle,
+    namespace: string,
+  ): Promise<void> {
+    const fileName = `${namespace}.opfsbtree`;
+    for (let attempt = 0; attempt <= BROKER_STORAGE_DELETE_MAX_RETRIES; attempt++) {
       try {
-        await this.workerBridge.shutdown();
-      } catch {
-        // Best effort
+        await rootDirectory.removeEntry(fileName, { recursive: false });
+        return;
+      } catch (error) {
+        const name = (error as { name?: string } | undefined)?.name;
+        if (name === "NotFoundError") {
+          return;
+        }
+        if (!isBrokerStorageLockedError(error)) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}": ${stringifyError(error)}`,
+          );
+        }
+        if (attempt === BROKER_STORAGE_DELETE_MAX_RETRIES) {
+          throw new Error(
+            `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
+          );
+        }
+        await sleepMs(brokerStorageDeleteRetryDelayMs(attempt));
       }
-      this.workerBridge = null;
     }
-    this.bridgeReady = null;
-
-    currentWorker.terminate();
-    this.worker = await Db.spawnWorker(this.config.runtimeSources);
-
-    // Re-attach immediately for existing client runtime(s) so subscriptions replay.
-    const first = this.clients.entries().next();
-    if (!first.done) {
-      const [schemaJson, client] = first.value;
-      this.attachWorkerBridge(schemaJson, client);
-      if (this.bridgeReady) {
-        await this.bridgeReady;
-      }
-    }
-  }
-
-  private currentWorkerNamespace(): string {
-    const driver = resolveStorageDriver(this.config.driver);
-    if (driver.type !== "persistent") {
-      throw new Error("Worker namespace is only available for driver.type='persistent'");
-    }
-    return this.workerDbName ?? driver.dbName ?? this.config.appId;
   }
 
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
     const currentWorker = this.worker;
+    const firstClient = this.clients.entries().next();
+    this.brokerResetSchema = firstClient.done
+      ? null
+      : (this.clientSchemas.get(firstClient.value[0]) ??
+        normalizeRuntimeSchema(firstClient.value[1].getSchema()));
 
     if (this.workerBridge && currentWorker) {
       try {
@@ -1473,45 +2045,21 @@ export class Db {
     }
     this.workerBridge = null;
     this.bridgeReady = null;
+    this.brokerLeaderReadyLeadershipId = null;
+    this.closePendingLeaderFollowerPorts();
+    this.closeFollowerPortState(undefined);
 
     for (const client of this.clients.values()) {
       await client.shutdown();
     }
     this.clients.clear();
-    this.leaderPeerIds.clear();
-    this.activeRemoteLeaderTabId = null;
+    this.clientSchemas.clear();
+    this.brokerSchemaFingerprint = null;
 
     if (currentWorker) {
       currentWorker.terminate();
     }
     this.worker = null;
-  }
-
-  private createStorageResetHost(): StorageResetHost {
-    return {
-      isShuttingDown: () => this.isShuttingDown,
-      getTabId: () => this.tabId,
-      getTabRole: () => this.tabRole,
-      getCurrentLeaderTabId: () => this.currentLeaderTabId,
-      getCurrentLeaderTerm: () => this.currentLeaderTerm,
-      hasSyncChannel: () => this.syncChannel !== null,
-      getPrimaryDbName: () => this.primaryDbName,
-      getCurrentWorkerNamespace: () => this.currentWorkerNamespace(),
-      postSyncChannelMessage: (message) => this.postSyncChannelMessage(message),
-      ensureBridgeReady: async () => {
-        if (this.bridgeReady) await this.bridgeReady;
-      },
-      shutdownWorkerAndClients: () => this.shutdownWorkerAndClientsForStorageReset(),
-      resumeWorker: () => this.resumeWorker(),
-    };
-  }
-
-  private static resolveWorkerDbNameForSnapshot(
-    primaryDbName: string,
-    snapshot: LeaderSnapshot,
-  ): string {
-    if (snapshot.role === "leader") return primaryDbName;
-    return `${primaryDbName}__fallback__${snapshot.tabId}`;
   }
 
   private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
@@ -1555,6 +2103,14 @@ export class Db {
         clearTimeout(timeout);
         reject(new Error(`Worker load error: ${e.message}`));
       });
+    });
+
+    // Swallow the inert trap from the worker's dying WASM heap on navigation;
+    // only during the teardown window — a genuine worker fault still propagates.
+    worker.addEventListener("error", (e) => {
+      if (!isWasmTeardownInProgress()) return;
+      if (!isWasmTeardownTrap(e.message)) return;
+      e.preventDefault();
     });
 
     return worker;
@@ -1655,19 +2211,49 @@ export class Db {
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    const inserted = context
-      ? client.createHandleInternal(
-          table._table,
-          values,
-          context.session,
-          context.attribution,
-          options,
-        )
-      : client.create(table._table, values, options);
-    return inserted.mapValue((row) =>
-      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    const inserted = client.insert(
+      table._table,
+      values,
+      options,
+      context?.session,
+      context?.attribution,
+    );
+    return this.wrapWriteWait(
+      inserted.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
+    );
+  }
+
+  /**
+   * Restore a soft-deleted row without waiting for durability.
+   *
+   * Use {@link WriteResult.wait} to wait for durable confirmation.
+   */
+  restore<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Init,
+    options?: RestoreOptions,
+  ): WriteResult<T> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const context = this.getRuntimeOperationContext();
+    const restored = client.restore(
+      table._table,
+      id,
+      values,
+      options,
+      context?.session,
+      context?.attribution,
+    );
+    return this.wrapWriteWait(
+      restored.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
     );
   }
 
@@ -1683,18 +2269,11 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.upsertHandleInternal(
-          table._table,
-          values,
-          options.id,
-          context.session,
-          context.attribution,
-          options.updatedAt,
-        )
-      : client.upsert(table._table, values, options);
+    return this.wrapWriteWait(
+      client.upsert(table._table, values, options, context?.session, context?.attribution),
+    );
   }
 
   /**
@@ -1710,18 +2289,11 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.updateHandleInternal(
-          id,
-          updates,
-          context.session,
-          context.attribution,
-          undefined,
-          options?.updatedAt,
-        )
-      : client.update(id, updates, options);
+    return this.wrapWriteWait(
+      client.update(id, updates, options, context?.session, context?.attribution),
+    );
   }
 
   /**
@@ -1729,12 +2301,10 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return context
-      ? client.deleteHandleInternal(id, context.session, context.attribution)
-      : client.delete(id);
+    return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
   }
 
   /**
@@ -1750,7 +2320,8 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbTransaction(
       (schema) => this.getClient(schema),
-      (client) => client.beginTransactionInternal(context?.session, context?.attribution),
+      context?.session,
+      context?.attribution,
     );
   }
 
@@ -1762,11 +2333,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => Promise<TResult>,
+    callback: (tx: TransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: DbTransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
   transaction<TResult>(
-    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInBatch(
@@ -1789,7 +2360,8 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     return new DbDirectBatch(
       (schema) => this.getClient(schema),
-      (client) => client.beginBatchInternal(context?.session, context?.attribution),
+      context?.session,
+      context?.attribution,
     );
   }
 
@@ -1801,11 +2373,11 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   batch<TResult>(
-    callback: (batch: DbBatchScope) => Promise<TResult>,
+    callback: (batch: BatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
   batch<TResult>(
-    callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginBatch();
     return runInBatch(
@@ -1818,16 +2390,15 @@ export class Db {
   /**
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
-   * This clears the primary namespace plus any active follower fallback namespaces for the same
-   * browser app/database. It does not touch localStorage-based local-first auth state.
+   * This clears the brokered primary namespace for the same browser app/database. It does not touch
+   * localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
    * - Can be initiated from either leader or follower tabs
-   * - Coordinates worker shutdown over the tab sync channel before deleting OPFS files
+   * - Coordinates worker shutdown through the SharedWorker broker before deleting OPFS files
    * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS files, respawns workers
-   * - If deletion fails, all participating tabs still respawn their workers before surfacing the error
+   * - Tears down worker + clients, deletes OPFS files, and reconnects participating tabs
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
@@ -1841,12 +2412,12 @@ export class Db {
       return;
     }
 
-    const coordinator = this.storageReset;
-    if (!coordinator) {
-      throw new Error("deleteClientStorage() requires an initialized storage-reset coordinator.");
+    const brokerClient = this.brokerClient;
+    if (!brokerClient) {
+      throw new Error("deleteClientStorage() requires an initialized browser broker.");
     }
     const operation = this.workerReconfigure.then(async () => {
-      await coordinator.requestReset();
+      await brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
     });
 
     this.workerReconfigure = operation.then(
@@ -1902,12 +2473,7 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     const rows =
       context || usesRelationTraversal
-        ? await client.queryInternal(
-            wasmQuery,
-            context?.session,
-            runtimeQueryOptions,
-            runtimeSchema.peek(),
-          )
+        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -1987,8 +2553,12 @@ export class Db {
    * Subscribe to a query and receive updates when results change.
    *
    * The callback receives a SubscriptionDelta with:
-   * - `all`: Complete current result set
-   * - `delta`: Ordered list of row-level changes
+   * - `all`: Complete current result set. Freshly allocated on every delta —
+   *   the rows are new object references each time, so diffing `all` by identity
+   *   sees every row as changed. Reactive-framework consumers should reconcile
+   *   with `applyDelta`/`reconcileArray` from `reconcile-array.js` to preserve
+   *   identity for unchanged rows.
+   * - `delta`: Ordered list of row-level changes (see `RowDelta`)
    *
    * @param query QueryBuilder instance
    * @param callback Called with delta whenever results change
@@ -1996,11 +2566,13 @@ export class Db {
    *
    * @example
    * ```typescript
+   * import { RowChangeKind } from "jazz-tools";
+   *
    * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   for (const change of delta.delta) {
-   *     if (change.kind === 0) {
-   *       console.log("New row:", change.row);
+   *     if (change.kind === RowChangeKind.Added) {
+   *       console.log("New row:", change.item);
    *     }
    *   }
    * });
@@ -2061,26 +2633,38 @@ export class Db {
 
     const queryOptions = ordinaryDbQueryOptions(options);
     const context = this.getRuntimeOperationContext();
-    const subId =
-      context || session
-        ? client.subscribeInternal(
-            wasmQuery,
-            handleDelta,
-            context?.session ?? session,
-            queryOptions,
-            runtimeSchema.peek(),
-          )
-        : client.subscribe(wasmQuery, handleDelta, queryOptions);
-    const traceId = this.registerActiveQuerySubscriptionTrace(
-      wasmQuery,
-      builtQuery.table,
-      queryOptions,
-    );
+    let unsubscribed = false;
+    let subId: number | null = null;
+    let traceId: string | null = null;
+
+    const startSubscription = () => {
+      if (unsubscribed) return;
+      subId = client.subscribe(wasmQuery, handleDelta, queryOptions, context?.session ?? session);
+      traceId = this.registerActiveQuerySubscriptionTrace(
+        wasmQuery,
+        builtQuery.table,
+        queryOptions,
+      );
+    };
+
+    if (this.brokerClient && this.tabRole === "follower") {
+      void this.ensureQueryReady(queryOptions)
+        .then(startSubscription)
+        .catch((error) => {
+          if (unsubscribed) return;
+          console.error("Failed to start Jazz subscription", error);
+        });
+    } else {
+      startSubscription();
+    }
 
     // Return unsubscribe function
     return () => {
+      unsubscribed = true;
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      client.unsubscribe(subId);
+      if (subId !== null) {
+        client.unsubscribe(subId);
+      }
       manager.clear();
     };
   }
@@ -2104,30 +2688,33 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
-    this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
-    this.activeRemoteLeaderTabId = null;
-    this.leaderPeerIds.clear();
-    this.closeSyncChannel();
+    this.closePendingLeaderFollowerPorts();
+    this.closeFollowerPortState(new Error("Db shutdown"));
     this.detachLifecycleHooks();
 
-    if (this.leaderElectionUnsubscribe) {
-      this.leaderElectionUnsubscribe();
-      this.leaderElectionUnsubscribe = null;
-    }
-    if (this.leaderElection) {
-      this.leaderElection.stop();
-      this.leaderElection = null;
-    }
+    let shutdownError: unknown = null;
 
-    await this.workerReconfigure;
+    try {
+      await this.workerReconfigure;
+    } catch (error) {
+      shutdownError = error;
+    }
 
     // Ensure bridge init has completed before sending shutdown —
     // otherwise the worker may still be opening OPFS handles
-    await this.ensureBridgeReady();
+    try {
+      await this.ensureBridgeReady();
+    } catch (error) {
+      shutdownError ??= error;
+    }
 
     // Shutdown worker bridge — waits for OPFS handles to be released
     if (this.workerBridge && this.worker) {
-      await this.workerBridge.shutdown();
+      try {
+        await this.workerBridge.shutdown();
+      } catch (error) {
+        shutdownError ??= error;
+      }
       this.workerBridge = null;
     }
 
@@ -2138,10 +2725,25 @@ export class Db {
       await client.shutdown();
     }
     this.clients.clear();
+    this.clientSchemas.clear();
 
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
+    }
+
+    this.releaseBrokerLeadershipResources();
+    if (this.brokerClient) {
+      try {
+        await this.brokerClient.shutdown();
+      } catch (error) {
+        shutdownError ??= error;
+      }
+      this.brokerClient = null;
+    }
+
+    if (shutdownError) {
+      throw shutdownError;
     }
   }
 
@@ -2356,6 +2958,32 @@ function createRuntimeTokenOptions(
   };
 }
 
+const DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE =
+  "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?";
+
+function handleIncompatibleBrowserBrokerConfiguration(error: unknown, config: DbConfig): void {
+  if (!isIncompatibleBrowserBrokerConfigurationError(error)) {
+    return;
+  }
+
+  if (config.onIncompatibleBrowserBrokerConfiguration) {
+    config.onIncompatibleBrowserBrokerConfiguration(error);
+    return;
+  }
+
+  showDefaultIncompatibleBrowserBrokerConfigurationPrompt();
+}
+
+function showDefaultIncompatibleBrowserBrokerConfigurationPrompt(): void {
+  if (typeof window === "undefined" || typeof window.confirm !== "function") {
+    return;
+  }
+
+  if (window.confirm(DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE)) {
+    window.location.reload();
+  }
+}
+
 export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeModule: DbRuntimeModule<RuntimeConfig>,
@@ -2403,7 +3031,12 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     isBrowser() &&
     driver.type === "persistent"
   ) {
-    db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+    try {
+      db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
+    } catch (error) {
+      handleIncompatibleBrowserBrokerConfiguration(error, resolvedConfig);
+      throw error;
+    }
   } else {
     db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   }

@@ -16,40 +16,27 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
-  insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
-  update(objectId: string, values: any): any
-  updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
-  delete(objectId: string): any
-  deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
-  loadBatchFate(batchId: string): any | null
+  insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
+  update(objectId: string, values: any, writeContextJson?: string | undefined | null): any
+  upsert(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
+  delete(objectId: string, writeContextJson?: string | undefined | null): any
+  restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void
-  discardLocalBatch(batchId: string): boolean
-  sealBatch(batchId: string): void
+  rollbackBatch(batchId: string): boolean
+  beginBatch(batchMode: string): string
+  commitBatch(batchId: string): void
   waitForBatch(batchId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
-  subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
-  /** Called by JS when a sync message arrives from a client (not a server). */
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
-  addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
-  removeServer(): void
-  addClient(): string
-  /** Set a client's role ("user", "admin", or "peer"). */
-  setClientRole(clientId: string, role: string): void
   getSchema(): any
   getSchemaHash(): string
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
-  static deriveUserId(seedB64: string): string
-  static mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
-  static getPublicKeyBase64url(seedB64: string): string
   /**
    * Connect to a Jazz server over WebSocket.
    *
@@ -83,17 +70,7 @@ export declare class TestingServer {
   stop(): Promise<void>
 }
 
-export declare function currentTimestamp(): number
-
-export declare function deriveUserId(seedB64: string): string
-
-export declare function generateId(): string
-
-export declare function getPublicKeyBase64url(seedB64: string): string
-
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
-
-export declare function parseSchema(json: string): any
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 

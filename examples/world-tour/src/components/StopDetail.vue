@@ -81,7 +81,7 @@ const emit = defineEmits<{
 
 const db = useDb();
 const session = useSession();
-const canEdit = !!session;
+const canEdit = !!session.value;
 
 const venue = computed(() => props.stop.venue);
 

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use jazz_tools::binding_support::parse_external_object_id;
+use jazz_tools::binding_support::{parse_batch_mode_input, parse_external_object_id};
 use js_sys::Function;
 use js_sys::Uint8Array;
 #[cfg(target_arch = "wasm32")]
@@ -86,22 +86,20 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jazz_tools::batch_fate::LocalBatchRecord;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::binding_support::serialize_mutation_error_event;
-use jazz_tools::binding_support::{parse_batch_id_input, serialize_batch_fate};
+use jazz_tools::binding_support::{parse_batch_id_input, parse_read_durability_options};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
 #[cfg(target_arch = "wasm32")]
+use jazz_tools::runtime_core::ReadDurabilityOptions;
+#[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{MutationErrorCallback, RejectedBatchAcknowledgedCallback};
-use jazz_tools::runtime_core::{
-    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
-};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -110,10 +108,12 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
+#[cfg(target_arch = "wasm32")]
 use jazz_tools::sync_manager::QueryPropagation;
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::sync_manager::{ClientId, InboxEntry, Source};
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    Destination, DurabilityTier, OutboxEntry, ServerId, SyncManager, SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -189,92 +189,6 @@ fn parse_write_context_json(
     }
 }
 
-#[derive(Debug, serde::Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-    transaction_overlay: Option<QueryTransactionOverlayWire>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct QueryTransactionOverlayWire {
-    batch_id: String,
-    branch_name: String,
-    row_ids: Vec<String>,
-}
-
-fn parse_read_durability_options(
-    tier: Option<String>,
-    options_json: Option<String>,
-) -> Result<
-    (
-        ReadDurabilityOptions,
-        QueryPropagation,
-        Option<QueryLocalOverlay>,
-    ),
-    JsError,
-> {
-    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
-    let Some(raw) = options_json else {
-        return Ok((
-            ReadDurabilityOptions {
-                tier: parsed_tier,
-                local_updates: LocalUpdates::Immediate,
-            },
-            QueryPropagation::Full,
-            None,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
-        .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(JsError::new(&format!(
-            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
-            other
-        ))),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(LocalUpdates::Immediate),
-        Some("deferred") => Ok(LocalUpdates::Deferred),
-        Some(other) => Err(JsError::new(&format!(
-            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
-            other
-        ))),
-    }?;
-
-    let transaction_overlay = match options.transaction_overlay {
-        None => None,
-        Some(overlay) => Some(QueryLocalOverlay {
-            batch_id: parse_batch_id_input(&overlay.batch_id)
-                .map_err(|err| JsError::new(&format!("Invalid query batch id: {err}")))?,
-            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
-            row_ids: overlay
-                .row_ids
-                .into_iter()
-                .map(|row_id| {
-                    parse_external_object_id(Some(&row_id))
-                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
-                        .map_err(|err| JsError::new(&format!("Invalid query row id: {err}")))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        }),
-    };
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-        transaction_overlay,
-    ))
-}
-
 #[cfg(target_arch = "wasm32")]
 fn parse_subscription_inputs(
     query_json: &str,
@@ -292,8 +206,9 @@ fn parse_subscription_inputs(
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation, _overlay) =
-        parse_read_durability_options(settled_tier, options_json)?;
+    let (durability, propagation, _transaction_batch_id) =
+        parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
+            .map_err(|err| JsError::new(&err))?;
     Ok((query, session, durability, propagation))
 }
 
@@ -515,6 +430,27 @@ fn deliver_pending_mutation_errors(core_rc: &Rc<RefCell<WasmCoreType>>) {
     }
 }
 
+/// Shared, take-once slot holding a boxed one-shot task. Factored out to keep
+/// [`once_task_into_js`]'s type within clippy's complexity budget.
+type OnceTaskSlot = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+
+/// Wrap a one-shot task as a JS function that runs it **at most once**.
+///
+/// Unlike `Closure::once_into_js`, a second invocation is a safe no-op instead
+/// of a use-after-free of the freed `FnOnce`. See
+/// `specs/todo/issues/wasm-memory-access-oob-multi-client-teardown.md`.
+fn once_task_into_js(label: &'static str, task: impl FnOnce() + 'static) -> JsValue {
+    let slot: OnceTaskSlot = Rc::new(RefCell::new(Some(Box::new(task))));
+    Closure::<dyn FnMut()>::new(move || match slot.borrow_mut().take() {
+        Some(task) => task(),
+        None => tracing::warn!(
+            task = label,
+            "scheduled one-shot task invoked again; suppressed"
+        ),
+    })
+    .into_js_value()
+}
+
 fn schedule_pending_mutation_errors_emit(
     core_rc: Rc<RefCell<WasmCoreType>>,
     scheduled: Rc<RefCell<bool>>,
@@ -527,7 +463,7 @@ fn schedule_pending_mutation_errors_emit(
     drop(scheduled_guard);
 
     let scheduled_in_task = Rc::clone(&scheduled);
-    let task = Closure::once_into_js(move || {
+    let task = once_task_into_js("mutation_error_delivery", move || {
         *scheduled_in_task.borrow_mut() = false;
         deliver_pending_mutation_errors(&core_rc);
     });
@@ -544,7 +480,7 @@ fn schedule_pending_mutation_errors_emit(
 
 fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
     let flag_in_task = Rc::clone(&flag);
-    let task = Closure::once_into_js(move || {
+    let task = once_task_into_js("batched_tick", move || {
         *flag_in_task.borrow_mut() = false;
 
         let Some(core_rc) = core_ref.upgrade() else {
@@ -645,7 +581,7 @@ struct RustOutboxSenderInner {
     /// Worker-side: the runtime client id assigned to the main-thread peer.
     /// `None` on the main side and during the brief window before init.
     main_client_id: RefCell<Option<String>>,
-    /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
+    /// Worker-side: `(clientId: string) => { peerId, leadershipId } | null` lookup
     /// for routing client-bound payloads to the right follower-tab peer.
     peer_routing_lookup: RefCell<Option<Function>>,
     /// Worker-side: `() => void` invoked after each batch flush that
@@ -658,7 +594,7 @@ struct RustOutboxSenderInner {
     server_payload_forwarder: RefCell<Option<Function>>,
     /// Worker-side: while `true`, server-bound `isCatalogue=true` outbox
     /// entries are queued into the main-bound sync batch. Set by the TS
-    /// shim around the `addServer/removeServer` bootstrap dance.
+    /// shim around the internal server attach/detach bootstrap dance.
     bootstrap_catalogue_forwarding: RefCell<bool>,
     /// Encoding mode for **server-bound** payloads. Client-bound payloads
     /// are always binary postcard. JSON when `false`, postcard when `true`.
@@ -857,7 +793,7 @@ impl SyncSender for RustOutboxSender {
             return;
         }
 
-        // Peer client: look up (peerId, term) and post peer-sync immediately.
+        // Peer client: look up (peerId, leadership_id) and post peer-sync immediately.
         let routing = inner.peer_routing_lookup.borrow();
         let Some(lookup) = routing.as_ref() else {
             return;
@@ -882,15 +818,19 @@ impl SyncSender for RustOutboxSender {
             Ok(v) => v.as_string(),
             Err(_) => None,
         };
-        let term = match js_sys::Reflect::get(&routing_value, &"term".into()) {
+        let leadership_id = match js_sys::Reflect::get(&routing_value, &"leadershipId".into()) {
             Ok(v) => v.as_f64(),
             Err(_) => None,
         };
-        let (Some(peer_id), Some(term)) = (peer_id, term) else {
+        let (Some(peer_id), Some(leadership_id)) = (peer_id, leadership_id) else {
             return;
         };
+        let target_override = match js_sys::Reflect::get(&routing_value, &"target".into()) {
+            Ok(v) if !v.is_null() && !v.is_undefined() => Some(v),
+            _ => None,
+        };
 
-        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
+        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, leadership_id, payloads:[bytes] }`
         // and post the Uint8Array with the underlying ArrayBuffer transferred.
         let bytes_payload = match encoded {
             SyncEntry::BareBytes(b) | SyncEntry::SequencedBytes { payload: b, .. } => b,
@@ -899,7 +839,7 @@ impl SyncSender for RustOutboxSender {
         };
         let wire = crate::worker_protocol::WorkerToMainWire::PeerSync {
             peer_id,
-            term: term as u32,
+            leadership_id: leadership_id as u32,
             payloads: vec![bytes_payload],
         };
         let Ok(bytes) = postcard::to_allocvec(&wire) else {
@@ -909,8 +849,12 @@ impl SyncSender for RustOutboxSender {
         let transferables = js_sys::Array::new();
         transferables.push(&arr.buffer().into());
 
-        let target = inner.target.borrow();
-        let _ = post_message_with_transfer(&target, &arr, &transferables);
+        if let Some(target) = target_override {
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        } else {
+            let target = inner.target.borrow();
+            let _ = post_message_with_transfer(&target, &arr, &transferables);
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1032,7 +976,7 @@ pub struct WasmRuntime {
     pub(crate) core: Rc<RefCell<WasmCoreType>>,
     pub(crate) mutation_error_emit_scheduled: Rc<RefCell<bool>>,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
-    /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
+    /// clone and mutates `upstream_server_id` via internal server attach helpers
     /// — those updates must be visible through the original handle too.
     pub(crate) upstream_server_id: Rc<std::cell::Cell<Option<ServerId>>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
@@ -1075,6 +1019,408 @@ impl WasmRuntime {
             .borrow_mut()
             .acknowledge_handled_rejected_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            SyncPayload::from_bytes(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_bytes(payload: &[u8]) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_bytes(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn parse_sync_payload_json(payload: &str) -> Result<SyncPayload, JsError> {
+        SyncPayload::from_json(payload)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+    }
+
+    /// Internal worker/bridge hook for server-originated sync payloads.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server(
+        &self,
+        payload: JsValue,
+        sequence: Option<f64>,
+    ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        let sequence = Self::parse_optional_sequence(sequence)?;
+        self.receive_sync_payload_from_server(payload, sequence)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_bytes(
+        &self,
+        payload: &[u8],
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_bytes(payload)?, sequence)
+    }
+
+    /// String-native variant of [`Self::receive_sync_message_from_server`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_server_json(
+        &self,
+        payload: &str,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_server(Self::parse_sync_payload_json(payload)?, sequence)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_server(
+        &self,
+        mut payload: SyncPayload,
+        sequence: Option<u64>,
+    ) -> Result<(), JsError> {
+        let _span =
+            debug_span!("wasm::receiveSyncMessageFromServer", tier = self.tier_label).entered();
+        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
+            (sequence.as_ref(), &mut payload)
+        {
+            // Local worker->main delivery is ordered and lossless, so the
+            // upstream stream watermark cannot be interpreted against this
+            // unsequenced in-process hop.
+            *through_seq = 0;
+        }
+        let server_id = self
+            .upstream_server_id
+            .get()
+            .ok_or_else(|| JsError::new("No upstream server registered before sync delivery"))?;
+
+        let entry = InboxEntry {
+            source: Source::Server(server_id),
+            payload,
+        };
+
+        let mut core = self.core.borrow_mut();
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
+        Ok(())
+    }
+
+    /// Internal worker/bridge hook for client-originated sync payloads.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_client(
+        &self,
+        client_id: &str,
+        payload: JsValue,
+    ) -> Result<(), JsError> {
+        let payload = self.parse_sync_payload(payload)?;
+        self.receive_sync_payload_from_client(client_id, payload)
+    }
+
+    /// Bytes-native variant of [`Self::receive_sync_message_from_client`] for
+    /// payloads already in wasm memory; skips the JsValue round-trip copy.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn receive_sync_message_from_client_bytes(
+        &self,
+        client_id: &str,
+        payload: &[u8],
+    ) -> Result<(), JsError> {
+        self.receive_sync_payload_from_client(client_id, Self::parse_sync_payload_bytes(payload)?)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn receive_sync_payload_from_client(
+        &self,
+        client_id: &str,
+        payload: SyncPayload,
+    ) -> Result<(), JsError> {
+        let _span = debug_span!(
+            "wasm::receiveSyncMessageFromClient",
+            tier = self.tier_label,
+            client_id
+        )
+        .entered();
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let entry = InboxEntry {
+            source: Source::Client(cid),
+            payload,
+        };
+
+        self.core.borrow_mut().park_sync_message(entry);
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_client(&self) -> String {
+        let _span = info_span!("wasm::add_client", tier = self.tier_label).entered();
+        let client_id = ClientId::new();
+        info!(%client_id, "generated client id");
+        let mut core = self.core.borrow_mut();
+        core.add_client(client_id, None);
+        client_id.0.to_string()
+    }
+
+    /// Add a server connection.
+    ///
+    /// After adding the server, immediately flushes the outbox so that
+    /// catalogue sync messages (from queue_full_sync_to_server) are sent
+    /// before the call returns, rather than being deferred to a microtask.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> Result<(), JsError> {
+        let _span = info_span!("wasm::add_server", tier = self.tier_label).entered();
+        let transport_server_id = self
+            .core
+            .borrow()
+            .transport()
+            .map(|handle| handle.server_id);
+        let server_id = match self.upstream_server_id.get() {
+            Some(id) => id,
+            None => {
+                let id = match transport_server_id {
+                    Some(id) => id,
+                    None => ServerId::new(),
+                };
+                self.upstream_server_id.set(Some(id));
+                id
+            }
+        };
+        let mut core = self.core.borrow_mut();
+        // Re-attach semantics: remove existing upstream edge then add again so
+        // replay/full-sync runs on every successful reconnect.
+        core.remove_server(server_id);
+        core.add_server_with_catalogue_state_hash(
+            server_id,
+            server_catalogue_state_hash.as_deref(),
+        );
+        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
+        core.batched_tick();
+        Ok(())
+    }
+
+    /// Remove the current upstream server connection.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn remove_server(&self) {
+        let mut core = self.core.borrow_mut();
+        if let Some(server_id) = self.upstream_server_id.get() {
+            core.remove_server(server_id);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
+        use jazz_tools::sync_manager::ClientRole;
+
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let client_role = match role {
+            "user" => ClientRole::User,
+            "admin" => ClientRole::Admin,
+            "peer" => ClientRole::Peer,
+            _ => {
+                return Err(JsError::new(&format!(
+                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
+                    role
+                )));
+            }
+        };
+
+        self.core
+            .borrow_mut()
+            .set_client_role_by_name(cid, client_role);
+        Ok(())
+    }
+
+    /// Drive the runtime's batched receive/apply/send loop immediately.
+    pub fn batched_tick(&self) {
+        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
+        self.batched_tick_and_emit_mutation_errors();
+    }
+
+    fn batched_tick_and_emit_mutation_errors(&self) {
+        self.core.borrow_mut().batched_tick();
+    }
+
+    pub fn replay_batch_rejection(
+        &self,
+        batch_id: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.replay_batch_rejection(batch_id, code, reason)
+            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
+    }
+
+    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
+        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
+            .schema;
+
+        let mut core = self.core.borrow_mut();
+        core.add_live_schema_and_persist_catalogue(schema)
+            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
+
+        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
+        core.immediate_tick();
+        core.batched_tick();
+
+        Ok(())
+    }
+
+    /// Flush all data to persistent storage (snapshot).
+    pub fn flush(&self) -> Result<(), JsValue> {
+        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
+        self.core
+            .borrow_mut()
+            .flush_storage()
+            .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
+    }
+
+    /// Flush only the WAL buffer to OPFS (not the snapshot).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn flush_wal(&self) -> Result<(), JsValue> {
+        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
+        self.core
+            .borrow_mut()
+            .flush_wal()
+            .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
+    }
+
+    /// Create a persistent WasmRuntime backed by OPFS.
+    ///
+    /// Opens a single OPFS file namespace and restores state from the latest
+    /// durable checkpoint.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn open_persistent(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+    ) -> Result<WasmRuntime, JsValue> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
+        let _span = info_span!(
+            "WasmRuntime::openPersistent",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening persistent OPFS runtime");
+
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let mut schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
+                .map_err(JsValue::from)?;
+
+        let storage: Box<dyn Storage> = Box::new(
+            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
+                .await
+                .map_err(|e| {
+                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
+                        let err = js_sys::Error::new(msg);
+                        err.set_name("SecurityError");
+                        JsValue::from(err)
+                    } else {
+                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
+                    }
+                })?,
+        );
+
+        if let Err(error) =
+            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
+        {
+            warn!(
+                %app_id,
+                ?error,
+                "failed to rehydrate schema manager from catalogue storage"
+            );
+        }
+
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
+            tier_label,
+            use_binary_encoding,
+        ))
+    }
+
+    /// Create an ephemeral WasmRuntime backed by in-memory storage.
+    ///
+    /// Data is not persisted across page loads. Used as a fallback when OPFS
+    /// is unavailable (e.g. Firefox private browsing mode).
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_ephemeral(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+    ) -> Result<WasmRuntime, JsError> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
+        let _span = info_span!(
+            "WasmRuntime::openEphemeral",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening ephemeral in-memory runtime (OPFS unavailable)");
+
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
+
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
+
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
+            tier_label,
+            use_binary_encoding,
+        ))
     }
 }
 
@@ -1189,104 +1535,7 @@ impl WasmRuntime {
         })
     }
 
-    /// Called by JS when a sync message arrives from the server.
-    ///
-    /// # Arguments
-    /// * `payload` - Either postcard-encoded SyncPayload bytes (`Uint8Array`)
-    ///   or JSON-encoded SyncPayload (`string`)
-    #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(
-        &self,
-        payload: JsValue,
-        sequence: Option<f64>,
-    ) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let mut payload = self.parse_sync_payload(payload)?;
-        let sequence = Self::parse_optional_sequence(sequence)?;
-        if let (None, SyncPayload::QuerySettled { through_seq, .. }) =
-            (sequence.as_ref(), &mut payload)
-        {
-            // Local worker->main delivery is ordered and lossless, so the
-            // upstream stream watermark cannot be interpreted against this
-            // unsequenced in-process hop.
-            *through_seq = 0;
-        }
-        let server_id = self.upstream_server_id.get().ok_or_else(|| {
-            JsError::new("No upstream server registered; call addServer() before sync delivery")
-        })?;
-
-        let entry = InboxEntry {
-            source: Source::Server(server_id),
-            payload,
-        };
-
-        let mut core = self.core.borrow_mut();
-        if let Some(sequence) = sequence {
-            core.park_sync_message_with_sequence(entry, sequence);
-        } else {
-            core.park_sync_message(entry);
-        }
-        Ok(())
-    }
-
-    /// Called by JS when a sync message arrives from a client (not a server).
-    ///
-    /// # Arguments
-    /// * `client_id` - UUID string of the sending client
-    /// * `payload` - Postcard-encoded SyncPayload bytes
-    #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
-    pub fn on_sync_message_received_from_client(
-        &self,
-        client_id: &str,
-        payload: JsValue,
-    ) -> Result<(), JsError> {
-        let _span = debug_span!(
-            "wasm::onSyncMessageReceivedFromClient",
-            tier = self.tier_label,
-            client_id
-        )
-        .entered();
-        let uuid = uuid::Uuid::parse_str(client_id)
-            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let payload = self.parse_sync_payload(payload)?;
-
-        let entry = InboxEntry {
-            source: Source::Client(cid),
-            payload,
-        };
-
-        self.core.borrow_mut().park_sync_message(entry);
-        Ok(())
-    }
-
-    /// Drive the runtime's batched receive/apply/send loop immediately.
-    #[wasm_bindgen(js_name = batchedTick)]
-    pub fn batched_tick(&self) {
-        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
-        self.batched_tick_and_emit_mutation_errors();
-    }
-
-    fn batched_tick_and_emit_mutation_errors(&self) {
-        self.core.borrow_mut().batched_tick();
-    }
-
-    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
-        if let Some(json) = payload.as_string() {
-            SyncPayload::from_json(&json)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
-        } else if payload.is_instance_of::<Uint8Array>() {
-            let bytes = Uint8Array::new(&payload).to_vec();
-            SyncPayload::from_bytes(&bytes)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
-        } else {
-            Err(JsError::new(
-                "Invalid sync payload type: expected Uint8Array or JSON string",
-            ))
-        }
-    }
-
+    #[cfg(target_arch = "wasm32")]
     fn parse_optional_sequence(sequence: Option<f64>) -> Result<Option<u64>, JsError> {
         let Some(sequence) = sequence else {
             return Ok(None);
@@ -1321,6 +1570,15 @@ impl WasmRuntime {
         crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createMessagePortBridge)]
+    pub fn create_message_port_bridge(
+        &self,
+        port: web_sys::MessagePort,
+    ) -> Result<crate::worker_bridge::WasmMessagePortBridge, JsError> {
+        crate::worker_bridge::WasmMessagePortBridge::attach(port, self)
+    }
+
     /// Bridge/host shutdown: replace the active sync sender with a noop so
     /// post-shutdown outbox drains do nothing — even if the runtime keeps
     /// emitting (e.g. follower-tab promotion). Mirrors the spec's
@@ -1330,6 +1588,21 @@ impl WasmRuntime {
         self.core
             .borrow_mut()
             .set_sync_sender(Box::new(NoopSyncSender));
+    }
+
+    /// Temporary bridge detach: leave no fallback sender installed so the
+    /// runtime keeps future outbox entries until a replacement bridge attaches.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn clear_sync_sender(&self) {
+        self.core.borrow_mut().clear_sync_sender();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = enableOutboxBufferingWithoutSyncSender)]
+    pub fn enable_outbox_buffering_without_sync_sender(&self) {
+        self.core
+            .borrow_mut()
+            .set_buffer_outbox_without_sync_sender(true);
     }
 
     /// Register a callback for unhandled mutation errors.
@@ -1361,39 +1634,10 @@ impl WasmRuntime {
         &self,
         table: &str,
         values: JsValue,
-        object_id: Option<String>,
-    ) -> Result<JsValue, JsError> {
-        let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
-
-        let mut core = self.core.borrow_mut();
-        let ((object_id, row_values), batch_id) = core
-            .insert_with_id(table, named_values, object_id, None)
-            .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
-
-        let row = WasmInsertResult {
-            id: object_id.uuid().to_string(),
-            values: row_values,
-            batch_id: batch_id.to_string(),
-        };
-        tracing::debug!(object_id = %row.id, "inserted");
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        row.serialize(&serializer)
-            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-    }
-
-    /// Insert a row into a table as an explicit session principal.
-    #[wasm_bindgen(js_name = insertWithSession)]
-    pub fn insert_with_session(
-        &self,
-        table: &str,
-        values: JsValue,
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
-        let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
+        let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
         let object_id = parse_external_object_id(object_id.as_deref())
@@ -1409,7 +1653,7 @@ impl WasmRuntime {
             values: row_values,
             batch_id: batch_id.to_string(),
         };
-        tracing::debug!(object_id = %row.id, "inserted_with_session");
+        tracing::debug!(object_id = %row.id, "inserted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         row.serialize(&serializer)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
@@ -1430,17 +1674,20 @@ impl WasmRuntime {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, overlay) =
-            parse_read_durability_options(settled_tier, options_json)?;
+        let (durability, propagation, transaction_batch_id) =
+            parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
+                .map_err(|err| JsError::new(&err))?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            match overlay {
-                Some(overlay) => {
-                    core.query_with_local_overlay(query, session, durability, propagation, overlay)
-                }
-                None => core.query_with_propagation(query, session, durability, propagation),
-            }
+            core.query_with_local_batch(
+                query,
+                session,
+                durability,
+                propagation,
+                transaction_batch_id,
+            )
+            .map_err(|e| JsError::new(&format!("Query setup failed: {e}")))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1470,44 +1717,13 @@ impl WasmRuntime {
 
     /// Update a row by ObjectId.
     #[wasm_bindgen]
-    pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {
-        let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
-
-        let mut core = self.core.borrow_mut();
-        let batch_id = core
-            .update(oid, updates, None)
-            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
-
-        tracing::debug!(object_id, "updated");
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        WasmMutationResult {
-            batch_id: batch_id.to_string(),
-        }
-        .serialize(&serializer)
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-    }
-
-    /// Update a row by ObjectId as an explicit session principal.
-    ///
-    /// # Arguments
-    /// * `object_id` - UUID string of target object
-    /// * `values` - Partial update map (`{ columnName: Value }`)
-    /// * `session_json` - Optional JSON-encoded Session used for policy checks
-    #[wasm_bindgen(js_name = updateWithSession)]
-    pub fn update_with_session(
+    pub fn update(
         &self,
         object_id: &str,
         values: JsValue,
         write_context_json: Option<String>,
     ) -> Result<JsValue, JsError> {
-        let _span =
-            debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
+        let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -1519,9 +1735,39 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         let batch_id = core
             .update(oid, updates, write_context.as_ref())
-            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
 
-        tracing::debug!(object_id, "updated_with_session");
+        tracing::debug!(object_id, "updated");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
+    /// Create or update a row using a caller-supplied ObjectId.
+    #[wasm_bindgen]
+    pub fn upsert(
+        &self,
+        table: &str,
+        object_id: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::upsert", tier = self.tier_label, table, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut core = self.core.borrow_mut();
+        let batch_id = core
+            .upsert(table, oid, named_values, write_context.as_ref())
+            .map_err(|e| JsError::new(&format!("Upsert failed: {:?}", e)))?;
+
+        tracing::debug!(object_id, "upserted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         WasmMutationResult {
             batch_id: batch_id.to_string(),
@@ -1532,15 +1778,20 @@ impl WasmRuntime {
 
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
-    pub fn delete(&self, object_id: &str) -> Result<JsValue, JsError> {
+    pub fn delete(
+        &self,
+        object_id: &str,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self.core.borrow_mut();
         let batch_id = core
-            .delete(oid, None)
+            .delete(oid, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "deleted");
@@ -1552,32 +1803,43 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
-    /// Delete a row by ObjectId as an explicit session principal.
-    #[wasm_bindgen(js_name = deleteWithSession)]
-    pub fn delete_with_session(
+    /// Restore a soft-deleted row by ObjectId.
+    #[wasm_bindgen]
+    pub fn restore(
         &self,
+        table: &str,
         object_id: &str,
+        values: JsValue,
         write_context_json: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span =
-            debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
+            debug_span!("wasm::restore", tier = self.tier_label, table, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self.core.borrow_mut();
-        let batch_id = core
-            .delete(oid, write_context.as_ref())
-            .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        let ((object_id, row_values), batch_id) = core
+            .restore(table, oid, named_values, write_context.as_ref())
+            .map_err(|e| JsError::new(&format!("Restore failed: {:?}", e)))?;
 
-        tracing::debug!(object_id, "deleted_with_session");
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        WasmMutationResult {
+        let row = WasmInsertResult {
+            id: object_id.uuid().to_string(),
+            values: row_values,
             batch_id: batch_id.to_string(),
-        }
-        .serialize(&serializer)
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+        };
+        tracing::debug!(object_id = %row.id, "restored");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        row.serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
+    #[wasm_bindgen(js_name = beginBatch)]
+    pub fn begin_batch(&self, batch_mode: &str) -> Result<String, JsError> {
+        let batch_mode = parse_batch_mode_input(batch_mode).map_err(|err| JsError::new(&err))?;
+        Ok(self.core.borrow_mut().begin_batch(batch_mode).to_string())
     }
 
     /// Wait for a batch to settle at the requested durability tier.
@@ -1620,110 +1882,25 @@ impl WasmRuntime {
         }))
     }
 
-    #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
-    pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
-        let mut data = vec![0; bytes.length() as usize];
-        bytes.copy_to(&mut data);
-        let record = LocalBatchRecord::decode_storage_row(&data)
-            .map_err(|e| JsError::new(&format!("Decode local batch record failed: {e}")))?;
-        let mut core = self.core.borrow_mut();
-        core.hydrate_local_batch_record(record)
-            .map_err(|e| JsError::new(&format!("Hydrate local batch record failed: {e}")))
-    }
-
-    #[wasm_bindgen(js_name = loadBatchFate)]
-    pub fn load_batch_fate(&self, batch_id: &str) -> Result<JsValue, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let core = self.core.borrow();
-        let fate = core
-            .batch_fate(batch_id)
-            .map_err(|e| JsError::new(&format!("Load batch fate failed: {e}")))?;
-        match fate {
-            Some(fate) => {
-                let serializer =
-                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-                serialize_batch_fate(&fate)
-                    .serialize(&serializer)
-                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-            }
-            None => Ok(JsValue::null()),
-        }
-    }
-
-    #[wasm_bindgen(js_name = replayBatchRejection)]
-    pub fn replay_batch_rejection(
-        &self,
-        batch_id: &str,
-        code: &str,
-        reason: &str,
-    ) -> Result<(), JsError> {
+    #[wasm_bindgen(js_name = rollbackBatch)]
+    pub fn rollback_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
-        core.replay_batch_rejection(batch_id, code, reason)
-            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
+        core.rollback_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Rollback batch failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = discardLocalBatch)]
-    pub fn discard_local_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+    #[wasm_bindgen(js_name = commitBatch)]
+    pub fn commit_batch(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
-        core.discard_local_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Discard local batch failed: {e}")))
-    }
-
-    #[wasm_bindgen(js_name = sealBatch)]
-    pub fn seal_batch(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
-        let mut core = self.core.borrow_mut();
-        core.seal_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
+        core.commit_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Commit batch failed: {e}")))
     }
 
     // =========================================================================
     // Subscriptions
     // =========================================================================
-
-    /// Subscribe to a query with a callback.
-    ///
-    /// Default behavior matches RuntimeCore:
-    /// - with upstream server: first callback waits for protocol QuerySettled convergence
-    /// - without upstream server: first callback is local-immediate
-    ///
-    /// Pass durability options to override this default.
-    ///
-    /// # Returns
-    /// Subscription handle (f64) for later unsubscription.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen]
-    pub fn subscribe(
-        &self,
-        query_json: &str,
-        on_update: Function,
-        session_json: Option<String>,
-        settled_tier: Option<String>,
-        options_json: Option<String>,
-    ) -> Result<f64, JsError> {
-        let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
-        let (query, session, durability, propagation) =
-            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
-        let callback = make_subscription_callback(on_update);
-
-        let handle = self
-            .core
-            .borrow_mut()
-            .subscribe_with_durability_and_propagation(
-                query,
-                callback,
-                session,
-                durability,
-                propagation,
-            )
-            .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
-
-        let subscription_id = handle.0;
-        tracing::debug!(subscription_id, "subscribed");
-        Ok(subscription_id as f64)
-    }
 
     /// Unsubscribe from a query.
     #[cfg(target_arch = "wasm32")]
@@ -1781,104 +1958,6 @@ impl WasmRuntime {
             .execute_subscription(sub_handle, callback)
             .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
 
-        Ok(())
-    }
-
-    // =========================================================================
-    // Sync Operations
-    // =========================================================================
-
-    /// Add a server connection.
-    ///
-    /// After adding the server, immediately flushes the outbox so that
-    /// catalogue sync messages (from queue_full_sync_to_server) are sent
-    /// before the call returns, rather than being deferred to a microtask.
-    #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(
-        &self,
-        server_catalogue_state_hash: Option<String>,
-        next_sync_seq: Option<f64>,
-    ) -> Result<(), JsError> {
-        let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
-        let transport_server_id = self
-            .core
-            .borrow()
-            .transport()
-            .map(|handle| handle.server_id);
-        let server_id = match self.upstream_server_id.get() {
-            Some(id) => id,
-            None => {
-                let id = match transport_server_id {
-                    Some(id) => id,
-                    None => ServerId::new(),
-                };
-                self.upstream_server_id.set(Some(id));
-                id
-            }
-        };
-        let mut core = self.core.borrow_mut();
-        // Re-attach semantics: remove existing upstream edge then add again so
-        // replay/full-sync runs on every successful reconnect.
-        core.remove_server(server_id);
-        core.add_server_with_catalogue_state_hash(
-            server_id,
-            server_catalogue_state_hash.as_deref(),
-        );
-        if let Some(next_sync_seq) = Self::parse_optional_sequence(next_sync_seq)? {
-            core.set_next_expected_server_sequence(server_id, next_sync_seq);
-        }
-        core.batched_tick();
-        Ok(())
-    }
-
-    /// Remove the current upstream server connection.
-    #[wasm_bindgen(js_name = removeServer)]
-    pub fn remove_server(&self) {
-        let mut core = self.core.borrow_mut();
-        if let Some(server_id) = self.upstream_server_id.get() {
-            core.remove_server(server_id);
-        }
-    }
-
-    /// Add a client connection (for server-side use in tests).
-    #[wasm_bindgen(js_name = addClient)]
-    pub fn add_client(&self) -> String {
-        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
-        let client_id = ClientId::new();
-        info!(%client_id, "generated client id");
-        let mut core = self.core.borrow_mut();
-        core.add_client(client_id, None);
-        client_id.0.to_string()
-    }
-
-    /// Set a client's role.
-    ///
-    /// # Arguments
-    /// * `client_id` - UUID string of the client
-    /// * `role` - One of "user", "admin", "peer"
-    #[wasm_bindgen(js_name = setClientRole)]
-    pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
-        use jazz_tools::sync_manager::ClientRole;
-
-        let uuid = uuid::Uuid::parse_str(client_id)
-            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
-        let cid = ClientId(uuid);
-
-        let client_role = match role {
-            "user" => ClientRole::User,
-            "admin" => ClientRole::Admin,
-            "peer" => ClientRole::Peer,
-            _ => {
-                return Err(JsError::new(&format!(
-                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
-                    role
-                )));
-            }
-        };
-
-        self.core
-            .borrow_mut()
-            .set_client_role_by_name(cid, client_role);
         Ok(())
     }
 
@@ -1959,157 +2038,6 @@ impl WasmRuntime {
             ))
         })
     }
-
-    /// Debug helper: seed a historical schema and persist schema/lens catalogue objects.
-    #[wasm_bindgen(js_name = __debugSeedLiveSchema)]
-    pub fn debug_seed_live_schema(&self, schema_json: &str) -> Result<(), JsError> {
-        let schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?
-            .schema;
-
-        let mut core = self.core.borrow_mut();
-        core.add_live_schema_and_persist_catalogue(schema)
-            .map_err(|e| JsError::new(&format!("Failed to seed live schema: {:?}", e)))?;
-
-        // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
-        core.immediate_tick();
-        core.batched_tick();
-
-        Ok(())
-    }
-
-    /// Flush all data to persistent storage (snapshot).
-    #[wasm_bindgen]
-    pub fn flush(&self) -> Result<(), JsValue> {
-        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
-        self.core
-            .borrow_mut()
-            .flush_storage()
-            .map_err(|e| JsValue::from_str(&format!("flush failed: {e}")))
-    }
-
-    /// Flush only the WAL buffer to OPFS (not the snapshot).
-    #[wasm_bindgen(js_name = flushWal)]
-    pub fn flush_wal(&self) -> Result<(), JsValue> {
-        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
-        self.core
-            .borrow_mut()
-            .flush_wal()
-            .map_err(|e| JsValue::from_str(&format!("flush WAL failed: {e}")))
-    }
-
-    /// Create a persistent WasmRuntime backed by OPFS.
-    ///
-    /// Opens a single OPFS file namespace and restores state from the latest
-    /// durable checkpoint.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openPersistent)]
-    pub async fn open_persistent(
-        schema_json: &str,
-        app_id: &str,
-        env: &str,
-        user_branch: &str,
-        db_name: &str,
-        tier: Option<String>,
-        use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsValue> {
-        #[cfg(feature = "console_error_panic_hook")]
-        console_error_panic_hook::set_once();
-        init_tracing();
-
-        let tier_label = tier_label_for_node_tier(tier.as_deref());
-        let _span = info_span!(
-            "WasmRuntime::openPersistent",
-            tier = tier_label,
-            app_id,
-            env,
-            user_branch,
-            db_name
-        )
-        .entered();
-        info!("opening persistent OPFS runtime");
-
-        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let mut schema_manager =
-            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
-                .map_err(JsValue::from)?;
-
-        let storage: Box<dyn Storage> = Box::new(
-            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
-                .await
-                .map_err(|e| {
-                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
-                        let err = js_sys::Error::new(msg);
-                        err.set_name("SecurityError");
-                        JsValue::from(err)
-                    } else {
-                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
-                    }
-                })?,
-        );
-
-        if let Err(error) =
-            rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
-        {
-            warn!(
-                %app_id,
-                ?error,
-                "failed to rehydrate schema manager from catalogue storage"
-            );
-        }
-
-        Ok(assemble_wasm_runtime(
-            schema_manager,
-            storage,
-            tier_label,
-            use_binary_encoding,
-        ))
-    }
-
-    /// Create an ephemeral WasmRuntime backed by in-memory storage.
-    ///
-    /// Data is not persisted across page loads. Used as a fallback when OPFS
-    /// is unavailable (e.g. Firefox private browsing mode).
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openEphemeral)]
-    pub fn open_ephemeral(
-        schema_json: &str,
-        app_id: &str,
-        env: &str,
-        user_branch: &str,
-        db_name: &str,
-        tier: Option<String>,
-        use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsError> {
-        #[cfg(feature = "console_error_panic_hook")]
-        console_error_panic_hook::set_once();
-        init_tracing();
-
-        let tier_label = tier_label_for_node_tier(tier.as_deref());
-        let _span = info_span!(
-            "WasmRuntime::openEphemeral",
-            tier = tier_label,
-            app_id,
-            env,
-            user_branch,
-            db_name
-        )
-        .entered();
-        info!("opening ephemeral in-memory runtime (OPFS unavailable)");
-
-        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let schema_manager =
-            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
-
-        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
-
-        Ok(assemble_wasm_runtime(
-            schema_manager,
-            storage,
-            tier_label,
-            use_binary_encoding,
-        ))
-    }
 }
 
 /// A `SyncSender` that drops every message. Installed on bridge shutdown so
@@ -2166,13 +2094,6 @@ impl WasmRuntime {
             now_seconds,
         )
         .map_err(|e| JsError::new(&e))
-    }
-
-    #[wasm_bindgen(js_name = "getPublicKeyBase64url")]
-    pub fn get_public_key_b64_static(seed_b64: &str) -> Result<String, JsError> {
-        let seed = decode_seed(seed_b64)?;
-        let verifying_key = identity::derive_verifying_key(&seed);
-        Ok(URL_SAFE_NO_PAD.encode(verifying_key.as_bytes()))
     }
 
     /// Connect to a Jazz server over WebSocket.

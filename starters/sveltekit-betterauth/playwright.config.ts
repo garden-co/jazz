@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const BASE_URL = "http://localhost:5173";
+const PROD = process.env.JAZZ_E2E_PROD === "1";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -20,10 +21,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev",
-    env: { BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production" },
+    command: PROD ? "node --env-file=.env build" : "pnpm dev",
+    env: PROD
+      ? { PORT: "5173", ORIGIN: BASE_URL }
+      : { BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production" },
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    timeout: PROD ? 120_000 : 60_000,
   },
 });

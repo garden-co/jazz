@@ -8,7 +8,7 @@ const filter = ref<string | null>(null);
 const query = computed(() =>
   filter.value ? app.todos.where({ title: { contains: filter.value } }) : undefined,
 );
-const filtered = useAll(query);
+const { data: filtered } = useAll(query);
 </script>
 
 <template>

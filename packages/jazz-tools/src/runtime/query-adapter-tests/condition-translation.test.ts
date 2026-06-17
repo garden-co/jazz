@@ -287,6 +287,28 @@ describe("condition translation", () => {
     });
   });
 
+  it("translates empty in condition as an In predicate", () => {
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [
+        {
+          column: "title",
+          op: "in",
+          value: [],
+        },
+      ],
+      includes: {},
+      orderBy: [],
+    });
+
+    const result = parseTranslatedQuery(builderJson, basicSchema);
+    expect(expectFilterPredicate(result)).toEqual({
+      type: "In",
+      left: { scope: "todos", column: "title" },
+      values: [],
+    });
+  });
+
   it("translates contains condition with array element value", () => {
     const builderJson = JSON.stringify({
       table: "todos",

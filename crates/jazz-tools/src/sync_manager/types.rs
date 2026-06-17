@@ -161,12 +161,82 @@ pub enum ClientRole {
 // Connection State
 // ============================================================================
 
+/// The set of batch ids already sent to a peer for one `(row, branch)`.
+///
+/// A newtype around the underlying set purely so its `Clone` can be observed.
+/// The set grows with a row's history, and an earlier regression cloned the
+/// whole set on every queued batch just to test membership, making each forward
+/// O(n) in the history length. Membership is now checked by borrow; the custom
+/// `Clone` is instrumented under `cfg(test)` so a guard test can assert the
+/// forwarding hot path never clones the set again.
+#[derive(Debug, Default)]
+pub struct SentBatchIds(HashSet<BatchId>);
+
+impl Clone for SentBatchIds {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        sent_batch_clone_probe::record();
+        Self(self.0.clone())
+    }
+}
+
+impl std::ops::Deref for SentBatchIds {
+    type Target = HashSet<BatchId>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SentBatchIds {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl IntoIterator for SentBatchIds {
+    type Item = BatchId;
+    type IntoIter = std::collections::hash_set::IntoIter<BatchId>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<const N: usize> From<[BatchId; N]> for SentBatchIds {
+    fn from(batch_ids: [BatchId; N]) -> Self {
+        Self(HashSet::from(batch_ids))
+    }
+}
+
+/// Test-only probe counting clones of [`SentBatchIds`] on the current thread, so
+/// a guard test can assert the forwarding hot path checks membership by borrow
+/// rather than by cloning the whole set.
+#[cfg(test)]
+pub(crate) mod sent_batch_clone_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CLONES: Cell<usize> = Cell::new(0);
+    }
+
+    pub(crate) fn reset() {
+        CLONES.with(|clones| clones.set(0));
+    }
+
+    pub(crate) fn record() {
+        CLONES.with(|clones| clones.set(clones.get() + 1));
+    }
+
+    pub(crate) fn count() -> usize {
+        CLONES.with(Cell::get)
+    }
+}
+
 /// Tracking state for a connected server.
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
     /// What we've pushed to this server for row-history sync:
     /// (row object, branch) -> set of known batch ids.
-    pub sent_batch_ids: HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
+    pub sent_batch_ids: HashMap<(ObjectId, BranchName), SentBatchIds>,
     /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
@@ -191,7 +261,7 @@ pub struct ClientState {
     pub queries: HashMap<QueryId, QueryScope>,
     /// What we've sent to this client for row-history sync:
     /// (row object, branch) -> set of known batch ids.
-    pub sent_batch_ids: HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
+    pub sent_batch_ids: HashMap<(ObjectId, BranchName), SentBatchIds>,
     /// Row IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }

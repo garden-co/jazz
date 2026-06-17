@@ -249,6 +249,19 @@ impl SyncManager {
         fallback_row: StoredRowBatch,
     ) {
         let batch_id = fate.batch_id();
+
+        // A client-originated rejection must never downgrade a batch the server
+        // has already settled with a non-rejected outcome.
+        if let Some(existing) = storage
+            .load_authoritative_batch_fate(batch_id)
+            .ok()
+            .flatten()
+            && !matches!(existing, BatchFate::Rejected { .. })
+        {
+            self.queue_batch_fate_to_client_unfiltered(origin_client_id, existing);
+            return;
+        }
+
         if let Err(error) = storage.upsert_authoritative_batch_fate(&fate) {
             tracing::warn!(
                 ?batch_id,

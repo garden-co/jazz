@@ -137,7 +137,7 @@ Any component inside `JazzSvelteProvider` can reach the database and the current
 import { getDb, getSession } from "jazz-tools/svelte";
 
 const db = getDb(); // full query + write API
-const session = getSession(); // { user_id, ... } | null
+const session = getSession(); // { current: Session | null }
 ```
 
 Used in `InstrumentRow`, `InstrumentManager`, and `Participants` — each just calls `getDb()` directly.
@@ -200,7 +200,7 @@ function toggleBeat(index: number) {
       jam: jamId,
       instrument: instrument.id,
       beat_index: index,
-      placed_by: session?.user_id ?? "anonymous", // tag the author
+      placed_by: session.current?.user_id ?? "anonymous", // tag the author
     });
   }
 }
@@ -276,7 +276,7 @@ const allParticipants = new QuerySubscription(app.participants);
 db.update(app.participants, editingId, { display_name: name });
 ```
 
-Identity flows through `session.user_id` — the same ID that colours your beats in the grid.
+Identity flows through `session.current?.user_id` — the same ID that colours your beats in the grid.
 
 ---
 

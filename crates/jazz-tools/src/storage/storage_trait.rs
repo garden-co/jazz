@@ -578,6 +578,11 @@ pub trait Storage {
         )
     }
 
+    /// Return every sealed submission row still retained in storage, sorted by batch id.
+    ///
+    /// This is not a scan of every batch ever sealed. Submissions are deleted once
+    /// the runtime no longer needs the original seal/member list for replay or
+    /// reconciliation.
     fn scan_sealed_batch_submissions(&self) -> Result<Vec<SealedBatchSubmission>, StorageError> {
         let mut submissions = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(SEALED_BATCH_SUBMISSION_TABLE, "batch:")? {
@@ -693,6 +698,13 @@ pub trait Storage {
         Ok(batch_ids)
     }
 
+    /// Return every authoritative fate row retained in storage, sorted by batch id.
+    ///
+    /// These rows are settlement/idempotency tombstones (`Missing`, `Rejected`,
+    /// `DurableDirect`, or `AcceptedTransaction`). A fate row does not imply that
+    /// storage still has the sealed submission or local batch record for the same
+    /// batch; callers combine this scan with submission scans and the settlement
+    /// predicate to derive pending work.
     fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {
         let mut settlements = Vec::new();
         for (key, bytes) in

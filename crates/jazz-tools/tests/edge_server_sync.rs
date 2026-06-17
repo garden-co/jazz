@@ -260,20 +260,22 @@ async fn write_through_one_edge_replica_becomes_visible_through_another_edge() {
     let alice = cluster.connect_user(&cluster.edge_us, "alice", None).await;
     let bob = cluster.connect_user(&cluster.edge_eu, "bob", None).await;
 
-    let (todo_id, _) = tokio::time::timeout(
-        Duration::from_secs(20),
-        alice.create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("global via edge".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
-        ),
+        )
+        .expect("alice create should succeed");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        alice.wait_for_batch(batch_id, DurabilityTier::GlobalServer),
     )
     .await
     .expect("global settlement through edge should complete before timeout")
-    .expect("alice create should succeed");
+    .expect("alice create should settle globally");
 
     let rows = wait_for_query(
         &bob,
@@ -317,15 +319,17 @@ async fn edge_tier_write_propagates_from_writer_edge_to_core_and_peer_edge() {
         .connect_user(&cluster.edge_eu, "dave-edge-eu", None)
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("edge-local then replicated".to_string()),
             )]),
-            DurabilityTier::EdgeServer,
         )
+        .expect("alice edge-tier create should settle on edge_us");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
         .await
         .expect("alice edge-tier create should settle on edge_us");
 
@@ -414,15 +418,17 @@ async fn global_tier_write_through_edge_is_visible_at_global_tier_everywhere() {
         .connect_user(&cluster.edge_eu, "dave-global-reader", None)
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("edge write with global durability".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("global-tier create through edge_us should wait for core");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("global-tier create through edge_us should wait for core");
 
@@ -505,17 +511,19 @@ async fn core_write_reaches_subscribed_clients_on_both_edges() {
     let mut alice_log = Vec::new();
     let mut bob_log = Vec::new();
 
-    let (todo_id, _) = carol
-        .create_persisted(
+    let (todo_id, _, batch_id) = carol
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("core write to both edges".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
-        .await
         .expect("core global-tier create");
+    carol
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+        .await
+        .expect("core global-tier create should settle");
 
     wait_for_subscription_update(
         &mut alice_stream,
@@ -605,15 +613,17 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
         .connect_user(&cluster.edge_eu, "bob-after-catalogue", None)
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("released after catalogue push".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("alice create should settle globally after catalogue reaches edge_us");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("alice create should settle globally after catalogue reaches edge_us");
 
@@ -680,15 +690,17 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
         .connect()
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("fresh edge catalogue pull".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("fresh edge should write after pulling core catalogue");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("fresh edge should write after pulling core catalogue");
 
@@ -779,15 +791,17 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
         .connect()
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("catalogue forwarded through core".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("peer edge should write after receiving forwarded catalogue");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("peer edge should write after receiving forwarded catalogue");
 
@@ -896,15 +910,17 @@ async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() 
         .connect()
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("catalogue over app-scoped ws upstream".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("alice writes after catalogue is published through ws-style upstream");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("alice writes after catalogue is published through ws-style upstream");
 
@@ -1025,8 +1041,8 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
         .connect()
         .await;
 
-    let (todo_id, _) = alice
-        .create_persisted(
+    let (todo_id, _, batch_id) = alice
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -1038,8 +1054,10 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
                     Value::Text("v2 column available before work proceeds".to_string()),
                 ),
             ]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("v2 write should settle after stale edge receives catalogue replay");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("v2 write should settle after stale edge receives catalogue replay");
 
@@ -1115,15 +1133,17 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge()
     let mut alice_log = Vec::new();
     let mut bob_log = Vec::new();
 
-    let (todo_id, _) = carol
-        .create_persisted(
+    let (todo_id, _, batch_id) = carol
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("visible before permissions tighten".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("core write should settle under allow permissions");
+    carol
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("core write should settle under allow permissions");
 
@@ -1233,15 +1253,16 @@ async fn edge_global_query_receives_global_query_settled() {
         .expect("empty global query through edge_us should settle");
     assert!(empty_rows.is_empty());
 
-    let (todo_id, _) = bob
-        .create_persisted(
+    let (todo_id, _, batch_id) = bob
+        .insert(
             "todos",
             HashMap::from([(
                 "title".to_string(),
                 Value::Text("global query settlement through edge".to_string()),
             )]),
-            DurabilityTier::GlobalServer,
         )
+        .expect("bob global-tier create through edge_eu");
+    bob.wait_for_batch(batch_id, DurabilityTier::GlobalServer)
         .await
         .expect("bob global-tier create through edge_eu");
 

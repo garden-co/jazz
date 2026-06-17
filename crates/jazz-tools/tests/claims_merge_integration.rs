@@ -75,8 +75,8 @@ async fn ephemeral_claims_merged_into_session() {
         .connect()
         .await;
 
-    let (room_id, _) = admin
-        .create(
+    let (room_id, _, _) = admin
+        .insert(
             "rooms",
             HashMap::from([
                 ("name".to_string(), Value::Text("Party Room".to_string())),
@@ -86,7 +86,6 @@ async fn ephemeral_claims_merged_into_session() {
                 ),
             ]),
         )
-        .await
         .expect("admin creates room");
 
     let query = QueryBuilder::new("rooms").build();

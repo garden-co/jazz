@@ -1,4 +1,5 @@
 import {
+  computed,
   defineComponent,
   inject,
   onUnmounted,
@@ -6,6 +7,7 @@ import {
   shallowRef,
   triggerRef,
   watch,
+  type ComputedRef,
   type InjectionKey,
   type PropType,
   type ShallowRef,
@@ -135,8 +137,14 @@ export function useDb(): Db {
 }
 
 /**
- * Get the current Jazz {@link Session}, including the user's id, claims and auth mode.
+ * Subscribe to the current Jazz {@link Session}.
+ * Returns a {@link ComputedRef} whose `.value` updates automatically as the user
+ * logs in or out — use it in templates or computed properties.
  */
-export function useSession(): Session | null {
-  return useJazzClient().session ?? null;
+export function useSession(): ComputedRef<Session | null> {
+  const ctx = inject(JazzContextKey, null);
+  if (!ctx) {
+    throw new Error("Jazz Vue composables must be used within <JazzProvider>");
+  }
+  return computed(() => ctx.value?.session ?? null);
 }

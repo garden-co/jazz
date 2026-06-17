@@ -37,11 +37,6 @@
 //! const query = new WasmQueryBuilder('todos').branch('main').build();
 //! const results = await runtime.query(query);
 //!
-//! // Subscribe to changes
-//! const subId = await runtime.subscribe(query, (delta) => {
-//!   console.log('Changes:', delta);
-//! });
-//!
 //! // Tick must be called periodically
 //! setInterval(() => runtime.tick(), 100);
 //! ```

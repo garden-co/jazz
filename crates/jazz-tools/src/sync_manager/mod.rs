@@ -316,6 +316,55 @@ impl SyncManager {
         self.my_tiers.iter().copied().max()
     }
 
+    /// The durability tier at which this runtime considers a batch settled:
+    /// batches confirmed at or above this tier need no further reconciliation,
+    /// replay, or retained bookkeeping on this node.
+    ///
+    /// With an upstream server registered or pending the target is
+    /// `GlobalServer` (local fates are provisional until the upstream
+    /// confirms). Without one, this node's own strongest tier is terminal:
+    /// there is nobody else to wait for.
+    pub fn settlement_target(&self) -> DurabilityTier {
+        if self.has_servers_or_pending_servers() {
+            DurabilityTier::GlobalServer
+        } else {
+            self.max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local)
+        }
+    }
+
+    /// True when `fate` is terminal at `target`: rejected outright, or
+    /// confirmed at/above it. `Missing` is neither — it pends retransmission,
+    /// not retirement.
+    pub fn fate_settled_at(fate: &BatchFate, target: DurabilityTier) -> bool {
+        matches!(fate, BatchFate::Rejected { .. })
+            || fate.confirmed_tier().is_some_and(|tier| tier >= target)
+    }
+
+    /// True when a batch with `fate` still pends settlement reconciliation at
+    /// `target`. `Missing` is excluded: it never retires bookkeeping, but it
+    /// is owned by the retransmission paths: the live fate handler resends
+    /// immediately, and the pending-set derivation special-cases stored
+    /// `Missing` fates for submissions it still retains.
+    pub fn fate_needs_settlement_at(fate: Option<&BatchFate>, target: DurabilityTier) -> bool {
+        match fate {
+            None => true,
+            Some(BatchFate::Missing { .. }) => false,
+            Some(fate) => !Self::fate_settled_at(fate, target),
+        }
+    }
+
+    /// [`Self::fate_settled_at`] against this node's settlement target.
+    pub fn batch_fate_is_settled(&self, fate: &BatchFate) -> bool {
+        Self::fate_settled_at(fate, self.settlement_target())
+    }
+
+    /// [`Self::fate_needs_settlement_at`] against this node's settlement
+    /// target.
+    pub fn batch_needs_settlement(&self, fate: Option<&BatchFate>) -> bool {
+        Self::fate_needs_settlement_at(fate, self.settlement_target())
+    }
+
     /// Approximate heap-backed memory owned by sync state, grouped for benches.
     ///
     /// Returns `(catalogue, connections, subscriptions, queues, total)`.
@@ -454,6 +503,9 @@ impl SyncManager {
     pub fn has_servers_or_pending_servers(&self) -> bool {
         if !self.servers.is_empty() {
             return true;
+        }
+        if self.pending_servers.is_empty() {
+            return false;
         }
         let now = Instant::now();
         self.pending_servers

@@ -213,14 +213,14 @@ describe("attachDevTools mutation bridge", () => {
       batchId: "batch-insert-devtools",
     };
     const waitForBatch = vi.fn(async () => undefined);
-    const create = vi.fn(
+    const insert = vi.fn(
       () =>
         new WriteResult(insertedRow, insertedRow.batchId, {
           waitForBatch,
         } as any),
     );
     const fakeClient = {
-      create,
+      insert,
       update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForBatch } as any)),
       delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForBatch } as any)),
       unsubscribe: vi.fn(),
@@ -252,7 +252,7 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
-    expect(create).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
+    expect(insert).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
     expect(waitForBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
   });
 
@@ -263,7 +263,7 @@ describe("attachDevTools mutation bridge", () => {
     const waitForBatch = vi.fn(async () => undefined);
     const update = vi.fn(() => new WriteHandle("batch-update-devtools", { waitForBatch } as any));
     const fakeClient = {
-      create: vi.fn(
+      insert: vi.fn(
         () =>
           new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },
@@ -317,7 +317,7 @@ describe("attachDevTools mutation bridge", () => {
       () => new WriteHandle("batch-delete-devtools", { waitForBatch } as any),
     );
     const fakeClient = {
-      create: vi.fn(
+      insert: vi.fn(
         () =>
           new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },

@@ -504,6 +504,20 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add an array foreign key column.
+    pub fn array_fk_column(mut self, name: &str, references: &str) -> Self {
+        self.columns.push(
+            ColumnDescriptor::new(
+                name,
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references(references),
+        );
+        self
+    }
+
     /// Set policies for the table.
     pub fn policies(mut self, policies: TablePolicies) -> Self {
         self.policies = policies;

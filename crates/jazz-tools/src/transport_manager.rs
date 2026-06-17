@@ -6,6 +6,7 @@
 use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, SyncPayload};
 use futures::channel::mpsc;
+use std::time::Duration;
 
 pub const SYNC_PROTOCOL_VERSION: u32 = 3;
 const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
@@ -90,6 +91,16 @@ pub struct TransportHandle {
     /// catalogue-state digest so the server can emit schema diagnostics
     /// against a real schema hash.
     pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// Per-attempt retry deadlines for native Tokio transports.
+///
+/// Non-Tokio transports currently ignore these fields and keep their existing
+/// connection and authentication timing behavior.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransportRetryConfig {
+    pub connect_attempt_timeout: Option<Duration>,
+    pub auth_handshake_timeout: Option<Duration>,
 }
 
 impl TransportHandle {
@@ -425,6 +436,7 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     inbound_tx: mpsc::UnboundedSender<TransportInbound>,
     pub tick: T,
     reconnect: ReconnectState,
+    retry_config: TransportRetryConfig,
     pub client_id: ClientId,
     ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Sender side of the handshake-completion watch. Held by the manager
@@ -447,6 +459,15 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     url: String,
     auth: AuthConfig,
     tick: T,
+) -> (TransportHandle, TransportManager<W, T>) {
+    create_with_retry_config(url, auth, tick, TransportRetryConfig::default())
+}
+
+pub fn create_with_retry_config<W: StreamAdapter, T: TickNotifier>(
+    url: String,
+    auth: AuthConfig,
+    tick: T,
+    retry_config: TransportRetryConfig,
 ) -> (TransportHandle, TransportManager<W, T>) {
     let server_id = ServerId::new();
     let client_id = ClientId::new();
@@ -478,6 +499,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         inbound_tx,
         tick,
         reconnect: ReconnectState::new(),
+        retry_config,
         client_id,
         ever_connected,
         #[cfg(feature = "transport-websocket")]
@@ -810,17 +832,65 @@ enum ControlOrPhase<T> {
 }
 
 #[cfg(feature = "runtime-tokio")]
+fn format_timeout_duration(duration: Duration) -> String {
+    if duration.as_millis().is_multiple_of(1_000) {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
+#[cfg(feature = "runtime-tokio")]
+async fn connect_with_optional_timeout<W: StreamAdapter>(
+    url: String,
+    timeout: Option<Duration>,
+) -> Result<W, String> {
+    match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, W::connect(&url)).await {
+            Ok(Ok(ws)) => Ok(ws),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!(
+                "connect attempt timed out after {}",
+                format_timeout_duration(timeout)
+            )),
+        },
+        None => W::connect(&url).await.map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(feature = "runtime-tokio")]
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    async fn do_handshake_with_optional_timeout(
+        ws: &mut W,
+        frame: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> HandshakeResult {
+        match timeout {
+            Some(timeout) => {
+                match tokio::time::timeout(timeout, Self::do_handshake(ws, frame)).await {
+                    Ok(result) => result,
+                    Err(_) => HandshakeResult::NetworkError(format!(
+                        "auth handshake timed out after {}",
+                        format_timeout_duration(timeout)
+                    )),
+                }
+            }
+            None => Self::do_handshake(ws, frame).await,
+        }
+    }
+
     /// Drive the transport: connect, authenticate, relay frames, reconnect on failure.
     /// Returns only when the `TransportHandle` is dropped or a Shutdown control is received.
     pub async fn run(mut self) {
         use futures::StreamExt as _;
         loop {
             // Phase: Connect.
+            let url = self.url.clone();
+            let connect_attempt_timeout = self.retry_config.connect_attempt_timeout;
             let connect_outcome = tokio::select! {
                 biased;
                 ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
-                res = W::connect(&self.url) => ControlOrPhase::Phase(res),
+                res = connect_with_optional_timeout::<W>(url, connect_attempt_timeout) => ControlOrPhase::Phase(res),
             };
             let ws = match connect_outcome {
                 ControlOrPhase::Control(None)
@@ -831,8 +901,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     continue;
                 }
                 ControlOrPhase::Phase(Ok(ws)) => ws,
-                ControlOrPhase::Phase(Err(e)) => {
-                    let reason = format!("{e}");
+                ControlOrPhase::Phase(Err(reason)) => {
                     tracing::warn!("ws connect failed: {reason}");
                     let _ = self
                         .inbound_tx
@@ -865,10 +934,15 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             let mut ws = ws;
             let handshake_outcome = {
                 let handshake_frame = self.build_handshake_frame();
+                let auth_handshake_timeout = self.retry_config.auth_handshake_timeout;
                 tokio::select! {
                     biased;
                     ctrl = self.control_rx.next() => ControlOrPhase::Control(ctrl),
-                    res = Self::do_handshake(&mut ws, handshake_frame) => ControlOrPhase::Phase(res),
+                    res = Self::do_handshake_with_optional_timeout(
+                        &mut ws,
+                        handshake_frame,
+                        auth_handshake_timeout,
+                    ) => ControlOrPhase::Phase(res),
                 }
             };
             match handshake_outcome {
@@ -886,13 +960,13 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 ControlOrPhase::Phase(HandshakeResult::Connected(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
-                    #[cfg(feature = "transport-websocket")]
-                    let _ = self.connected_tx.send(true);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
                         catalogue_state_hash: resp.catalogue_state_hash,
                         next_sync_seq: resp.next_sync_seq,
                     });
                     self.tick.notify();
+                    #[cfg(feature = "transport-websocket")]
+                    let _ = self.connected_tx.send(true);
                     self.reconnect.reset();
                     match self.run_connected(&mut ws).await {
                         ConnectedExit::Shutdown => {
@@ -1192,6 +1266,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn handshake_decode_rejects_oversized_frame() {
@@ -1369,6 +1444,57 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn pending_connect_attempt_times_out_and_retries() {
+        let controller = Arc::new(TestStreamController::default());
+        controller.connect_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let retry_config = TransportRetryConfig {
+            connect_attempt_timeout: Some(Duration::from_secs(5)),
+            auth_handshake_timeout: None,
+        };
+        let (mut handle, manager) = create_with_retry_config::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+            retry_config,
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::task::yield_now().await;
+        assert_eq!(controller.connect_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(5_001)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            controller.connect_calls.load(Ordering::SeqCst) >= 2,
+            "timed-out connect attempt should be followed by a retry"
+        );
+        let mut saw_timeout = false;
+        while let Some(msg) = handle.try_recv_inbound() {
+            if let TransportInbound::ConnectFailed { reason } = msg
+                && reason.contains("connect attempt timed out")
+            {
+                saw_timeout = true;
+            }
+        }
+        assert!(
+            saw_timeout,
+            "timed-out connect attempt should emit ConnectFailed"
+        );
+
+        handle.disconnect();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit promptly after shutdown")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn shutdown_during_backoff() {
         let controller = Arc::new(TestStreamController::default());
@@ -1419,6 +1545,61 @@ mod tests {
             .expect("manager should exit during handshake on Shutdown")
             .unwrap();
         assert!(controller.close_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_auth_handshake_times_out_and_retries() {
+        let controller = Arc::new(TestStreamController::default());
+        controller.recv_pending.store(true, Ordering::SeqCst);
+        install_controller(controller.clone());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let retry_config = TransportRetryConfig {
+            connect_attempt_timeout: None,
+            auth_handshake_timeout: Some(Duration::from_secs(5)),
+        };
+        let (mut handle, manager) = create_with_retry_config::<TestStreamAdapter, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(counter.clone()),
+            retry_config,
+        );
+        let task = tokio::spawn(manager.run());
+
+        tokio::task::yield_now().await;
+        assert_eq!(controller.connect_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_millis(5_001)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            controller.connect_calls.load(Ordering::SeqCst) >= 2,
+            "timed-out auth handshake should be followed by a retry"
+        );
+        assert!(
+            controller.close_calls.load(Ordering::SeqCst) >= 1,
+            "timed-out auth handshake should close the stalled socket"
+        );
+        let mut saw_timeout = false;
+        while let Some(msg) = handle.try_recv_inbound() {
+            if let TransportInbound::ConnectFailed { reason } = msg
+                && reason.contains("auth handshake timed out")
+            {
+                saw_timeout = true;
+            }
+        }
+        assert!(
+            saw_timeout,
+            "timed-out auth handshake should emit ConnectFailed"
+        );
+
+        handle.disconnect();
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("manager should exit promptly after shutdown")
+            .unwrap();
     }
 
     #[tokio::test]

@@ -47,7 +47,7 @@ impl SyncManager {
         table: &str,
         server_id: ServerId,
         object_id: ObjectId,
-        metadata: HashMap<String, String>,
+        metadata: &HashMap<String, String>,
         row: StoredRowBatch,
     ) {
         let branch_name = BranchName::new(&row.branch);
@@ -199,14 +199,14 @@ impl SyncManager {
         }
 
         for server_id in server_ids {
-            let mut visiting = HashSet::new();
+            let mut visited = HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
                 table,
                 server_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
-                &mut visiting,
+                &mut visited,
             );
         }
     }
@@ -216,66 +216,76 @@ impl SyncManager {
         storage: &H,
         table: &str,
         server_id: ServerId,
-        metadata: HashMap<String, String>,
+        metadata: &HashMap<String, String>,
         row: StoredRowBatch,
-        visiting: &mut HashSet<BatchId>,
+        visited: &mut HashSet<BatchId>,
     ) {
         let object_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
-        let already_sent = self
-            .servers
-            .get(&server_id)
-            .and_then(|server| {
-                server
-                    .sent_batch_ids
-                    .get(&(object_id, branch_name))
-                    .cloned()
-            })
-            .unwrap_or_default();
 
-        for parent_batch_id in row.parents.iter().copied() {
-            if already_sent.contains(&parent_batch_id) {
+        // Iterative post-order walk, not recursion: a deep history chain would
+        // otherwise put one frame per ancestor on the stack and overflow it.
+        let mut stack: Vec<(StoredRowBatch, usize)> = vec![(row, 0)];
+        while !stack.is_empty() {
+            let descend = {
+                let (current, parent_index) = stack.last_mut().expect("stack is non-empty");
+                let mut next_parent = None;
+                while *parent_index < current.parents.len() {
+                    let parent_batch_id = current.parents[*parent_index];
+                    *parent_index += 1;
+                    // Borrow rather than clone the sent set: it grows with the row's history.
+                    if self
+                        .servers
+                        .get(&server_id)
+                        .and_then(|server| server.sent_batch_ids.get(&(object_id, branch_name)))
+                        .is_some_and(|sent| sent.contains(&parent_batch_id))
+                    {
+                        continue;
+                    }
+                    if !visited.insert(parent_batch_id) {
+                        continue;
+                    }
+
+                    match storage.load_history_row_batch(
+                        table,
+                        current.branch.as_str(),
+                        object_id,
+                        parent_batch_id,
+                    ) {
+                        Ok(Some(parent_row)) => {
+                            next_parent = Some(parent_row);
+                            break;
+                        }
+                        Ok(None) => tracing::warn!(
+                            %server_id,
+                            %object_id,
+                            %branch_name,
+                            ?parent_batch_id,
+                            "missing parent row batch in local storage while queueing row batch to server"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %server_id,
+                            %object_id,
+                            %branch_name,
+                            ?parent_batch_id,
+                            %error,
+                            "failed to load parent row batch while queueing row batch to server"
+                        ),
+                    }
+                }
+                next_parent
+            };
+
+            if let Some(parent_row) = descend {
+                stack.push((parent_row, 0));
                 continue;
             }
-            if !visiting.insert(parent_batch_id) {
-                continue;
-            }
 
-            match storage.load_history_row_batch(
-                table,
-                row.branch.as_str(),
-                object_id,
-                parent_batch_id,
-            ) {
-                Ok(Some(parent_row)) => self.queue_row_to_server_with_missing_parents(
-                    storage,
-                    table,
-                    server_id,
-                    metadata.clone(),
-                    parent_row,
-                    visiting,
-                ),
-                Ok(None) => tracing::warn!(
-                    %server_id,
-                    %object_id,
-                    %branch_name,
-                    ?parent_batch_id,
-                    "missing parent row batch in local storage while queueing row batch to server"
-                ),
-                Err(error) => tracing::warn!(
-                    %server_id,
-                    %object_id,
-                    %branch_name,
-                    ?parent_batch_id,
-                    %error,
-                    "failed to load parent row batch while queueing row batch to server"
-                ),
-            }
-
-            visiting.remove(&parent_batch_id);
+            let (current, _) = stack.pop().expect("stack is non-empty");
+            self.queue_row_to_server_with_storage(
+                storage, table, server_id, object_id, metadata, current,
+            );
         }
-
-        self.queue_row_to_server_with_storage(storage, table, server_id, object_id, metadata, row);
     }
 
     pub(crate) fn forward_row_batch_to_servers<H: Storage>(
@@ -325,7 +335,7 @@ impl SyncManager {
             self.queue_row_to_server_with_metadata(
                 server_id,
                 object_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
                 include_metadata,
             );
@@ -357,7 +367,7 @@ impl SyncManager {
             self.queue_row_to_server_with_metadata(
                 server_id,
                 object_id,
-                metadata.clone(),
+                &metadata,
                 row.clone(),
                 true,
             );

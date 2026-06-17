@@ -366,6 +366,19 @@ function conditionToRelPredicate(
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
   }
+  if (cond.op === "in") {
+    if (!Array.isArray(cond.value)) {
+      throw new Error('"in" operator requires an array value');
+    }
+    return {
+      In: {
+        left: columnRef,
+        values: cond.value.map((value) => ({
+          Literal: toWasmValue(value, columnType, column),
+        })),
+      },
+    };
+  }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const rightLiteral =
@@ -440,18 +453,6 @@ function conditionToRelPredicate(
       return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
     case "contains":
       return { Contains: { left: columnRef, right: rightLiteral } };
-    case "in":
-      if (!Array.isArray(cond.value)) {
-        throw new Error('"in" operator requires an array value');
-      }
-      return {
-        In: {
-          left: columnRef,
-          values: cond.value.map((value) => ({
-            Literal: toWasmValue(value, columnType, column),
-          })),
-        },
-      };
     default:
       throw new Error(`Unknown operator: ${cond.op}`);
   }
@@ -815,6 +816,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
       requireIncludes: builder.requireIncludes,
     }),
     relation_ir: relation,
+    ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
   };
 

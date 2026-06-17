@@ -23,6 +23,6 @@
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
-    "vue-tsc": "^2.1.10"
+    "vue-tsc": "catalog:default"
   }
 }

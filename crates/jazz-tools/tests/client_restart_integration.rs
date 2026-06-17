@@ -403,8 +403,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     .expect("connect client");
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
-    client
-        .create_persisted(
+    let (_, _, batch_id) = client
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -413,10 +413,12 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create before restart");
+    client
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("wait for create before restart");
 
     let _ = wait_for_todos_count(
         &client,
@@ -452,8 +454,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         "existing client should continue serving Edge-settled queries after server restart"
     );
 
-    client
-        .create_persisted(
+    let (_, _, batch_id) = client
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -462,10 +464,12 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
-            DurabilityTier::EdgeServer,
         )
-        .await
         .expect("create after restart");
+    client
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("wait for create after restart");
 
     let rows_after_create = wait_for_todos_count(
         &client,
@@ -505,7 +509,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
         .expect("connect memory client");
 
     client
-        .create(
+        .insert(
             "todos",
             HashMap::from([
                 (
@@ -515,7 +519,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
-        .await
         .expect("create todo");
 
     let initial_rows = client

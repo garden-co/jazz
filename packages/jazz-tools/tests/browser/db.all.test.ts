@@ -137,6 +137,11 @@ const files: TableProxy<File, Omit<File, "id">> = {
   _initType: {} as Omit<File, "id">,
 };
 
+const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000101";
+const CONDITION_ALPHA_ID = "00000000-0000-0000-0000-000000000102";
+const CONDITION_BETA_ID = "00000000-0000-0000-0000-000000000103";
+const CONDITION_GAMMA_ID = "00000000-0000-0000-0000-000000000104";
+
 function uniqueDbName(label: string): string {
   return `db-all-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -227,6 +232,11 @@ describe("db.all browser integration", () => {
       expectedTitles: ["alpha", "gamma"],
     },
     {
+      name: "in-array-element",
+      conditions: [{ column: "tags", op: "in", value: ["work"] }],
+      expectedTitles: [],
+    },
+    {
       name: "contains-text",
       conditions: [{ column: "title", op: "contains", value: "alp" }],
       expectedTitles: ["alpha"],
@@ -235,6 +245,52 @@ describe("db.all browser integration", () => {
       name: "contains-text-empty",
       conditions: [{ column: "title", op: "contains", value: "" }],
       expectedTitles: ["alpha", "beta", "gamma"],
+    },
+    {
+      name: "in-id",
+      conditions: [
+        {
+          column: "id",
+          op: "in",
+          value: [CONDITION_ALPHA_ID, "00000000-0000-0000-0000-000000000199"],
+        },
+      ],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-text",
+      conditions: [{ column: "title", op: "in", value: ["alpha", "gamma"] }],
+      expectedTitles: ["alpha", "gamma"],
+    },
+    {
+      name: "in-boolean",
+      conditions: [{ column: "done", op: "in", value: [false] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-number",
+      conditions: [{ column: "priority", op: "in", value: [1, 999] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-reference",
+      conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+      expectedTitles: ["alpha", "beta", "gamma"],
+    },
+    {
+      name: "in-array-whole-value",
+      conditions: [{ column: "tags", op: "in", value: [["work", "backend"]] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-bytea",
+      conditions: [{ column: "payload", op: "in", value: [[1, 2, 3]] }],
+      expectedTitles: ["alpha"],
+    },
+    {
+      name: "in-empty",
+      conditions: [{ column: "title", op: "in", value: [] }],
+      expectedTitles: [],
     },
     {
       name: "eq-bytea",
@@ -261,32 +317,44 @@ describe("db.all browser integration", () => {
     });
     const {
       value: { id: userId },
-    } = await db.insert(users, { name: "Alice", team_id: teamId });
+    } = await db.insert(users, { name: "Alice", team_id: teamId }, { id: CONDITION_OWNER_ID });
 
-    await db.insert(todos, {
-      title: "alpha",
-      done: false,
-      priority: 1,
-      owner_id: userId,
-      tags: ["work", "backend"],
-      payload: new Uint8Array([1, 2, 3]),
-    });
-    await db.insert(todos, {
-      title: "beta",
-      done: true,
-      priority: 2,
-      owner_id: userId,
-      tags: ["home"],
-      payload: new Uint8Array([4, 5, 6]),
-    });
-    await db.insert(todos, {
-      title: "gamma",
-      done: true,
-      priority: undefined,
-      owner_id: userId,
-      tags: ["work", "urgent"],
-      payload: undefined,
-    });
+    await db.insert(
+      todos,
+      {
+        title: "alpha",
+        done: false,
+        priority: 1,
+        owner_id: userId,
+        tags: ["work", "backend"],
+        payload: new Uint8Array([1, 2, 3]),
+      },
+      { id: CONDITION_ALPHA_ID },
+    );
+    await db.insert(
+      todos,
+      {
+        title: "beta",
+        done: true,
+        priority: 2,
+        owner_id: userId,
+        tags: ["home"],
+        payload: new Uint8Array([4, 5, 6]),
+      },
+      { id: CONDITION_BETA_ID },
+    );
+    await db.insert(
+      todos,
+      {
+        title: "gamma",
+        done: true,
+        priority: undefined,
+        owner_id: userId,
+        tags: ["work", "urgent"],
+        payload: undefined,
+      },
+      { id: CONDITION_GAMMA_ID },
+    );
   }
 
   afterEach(async () => {

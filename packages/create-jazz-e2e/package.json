@@ -1,0 +1,26 @@
+{
+  "name": "create-jazz-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end harness that scaffolds each create-jazz starter, builds it against the local workspace, and runs its Playwright suite against the production build.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "e2e": "tsx src/cli.ts",
+    "e2e:all": "tsx src/cli.ts --all"
+  },
+  "dependencies": {
+    "create-jazz": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "picocolors": "^1.1.1",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:default"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

@@ -118,7 +118,7 @@ const emit = defineEmits<{
 }>();
 
 const db = useDb();
-const venues = useAll(app.venues);
+const { data: venues } = useAll(app.venues);
 
 const venueMode = ref<"new" | "existing">("new");
 

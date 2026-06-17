@@ -11,5 +11,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  <slot />
+  {#snippet children()}
+    <!-- Insert your app's main component -->
+  {/snippet}
 </JazzSvelteProvider>

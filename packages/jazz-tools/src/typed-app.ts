@@ -225,7 +225,7 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
 type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
-  { gt?: T; gte?: T; lt?: T; lte?: T }
+  { gt?: T; gte?: T; lt?: T; lte?: T; in?: T[] }
 >;
 type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   Date | number,
@@ -235,29 +235,32 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     gte?: Date | number;
     lt?: Date | number;
     lte?: Date | number;
+    in?: (Date | number)[];
   }
 >;
-type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
-  ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
-  : WhereEqNe<
-      string,
-      TOptional,
-      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
-    >;
+type UuidWhere<TOptional extends boolean> = WhereEqNe<
+  string,
+  TOptional,
+  TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+>;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string; in?: string[] }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? boolean
+      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, { in?: boolean[] }>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
           ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
           : ColumnBuilderSqlType<TBuilder> extends "UUID"
-            ? UuidWhere<ColumnBuilderOptional<TBuilder>, ColumnBuilderReferences<TBuilder>>
+            ? UuidWhere<ColumnBuilderOptional<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
+              ? WhereEqNe<
+                  Uint8Array,
+                  ColumnBuilderOptional<TBuilder>,
+                  { in?: (Uint8Array | number[])[] }
+                >
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
                 ? WhereEqNe<
                     StoredColumnValue<TBuilder>,
@@ -276,7 +279,10 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                     ? WhereEqNe<
                         StoredColumnValue<TBuilder>,
                         ColumnBuilderOptional<TBuilder>,
-                        { contains?: TSTypeFromSqlType<TElementSql> }
+                        {
+                          contains?: TSTypeFromSqlType<TElementSql>;
+                          in?: StoredColumnValue<TBuilder>[];
+                        }
                       >
                     : never;
 
@@ -774,6 +780,10 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
   return { ...condition };
 }
 
+function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
+  return value instanceof Uint8Array ? [...value] : value;
+}
+
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
   return {
     ...(relation.table ? { table: relation.table } : {}),
@@ -818,6 +828,7 @@ export class TypedTableQueryBuilder<
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
+  private _includeDeleted = false;
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
@@ -884,6 +895,12 @@ export class TypedTableQueryBuilder<
   offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._offsetVal = n;
+    return clone;
+  }
+
+  includeDeleted(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._includeDeleted = true;
     return clone;
   }
 
@@ -999,19 +1016,23 @@ export class TypedTableQueryBuilder<
   }
 
   _build(): string {
-    return JSON.stringify({
-      table: this._table,
-      conditions: this._conditions,
-      includes: this._includes,
-      __jazz_requireIncludes: this._requireIncludes || undefined,
-      select: this._selectColumns,
-      orderBy: this._orderBys,
-      limit: this._limitVal,
-      offset: this._offsetVal,
-      hops: this._hops,
-      gather: this._gatherVal,
-      ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
-    });
+    return JSON.stringify(
+      {
+        table: this._table,
+        conditions: this._conditions,
+        includes: this._includes,
+        __jazz_requireIncludes: this._requireIncludes || undefined,
+        select: this._selectColumns,
+        orderBy: this._orderBys,
+        limit: this._limitVal,
+        offset: this._offsetVal,
+        includeDeleted: this._includeDeleted || undefined,
+        hops: this._hops,
+        gather: this._gatherVal,
+        ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
+      },
+      queryBuilderJsonReplacer,
+    );
   }
 
   toJSON(): unknown {
@@ -1035,6 +1056,7 @@ export class TypedTableQueryBuilder<
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
+    clone._includeDeleted = this._includeDeleted;
     clone._hops = [...this._hops];
     clone._gatherVal = this._gatherVal ? cloneBuiltGather(this._gatherVal) : undefined;
     clone._unionVal = this._unionVal ? cloneBuiltRelation(this._unionVal) : undefined;
@@ -1083,73 +1105,39 @@ export interface Query<
   TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
   TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = any,
   TSchema extends SchemaLike = SchemaLike,
-> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, false> {
+  TRequired extends boolean = false,
+> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
-  ): Query<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
     ...columns: [NewSelection, ...NewSelection[]]
-  ): Query<TTable, TInclude, NewSelection, TSchema>;
+  ): Query<TTable, TInclude, NewSelection, TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
-  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema>;
-  requireIncludes(): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;
+  requireIncludes(): Query<TTable, TInclude, TSelection, TSchema, true>;
   orderBy(
     column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>>,
     direction?: "asc" | "desc",
-  ): Query<TTable, TInclude, TSelection, TSchema>;
-  limit(n: number): Query<TTable, TInclude, TSelection, TSchema>;
-  offset(n: number): Query<TTable, TInclude, TSelection, TSchema>;
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  limit(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  offset(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  includeDeleted(): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
   ): Query<
     RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
     {},
     DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
+    TSchema,
+    TRequired
   >;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): Query<TTable, TInclude, TSelection, TSchema>;
-}
-
-export interface RequiredQuery<
-  TTable extends string,
-  TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
-  TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = any,
-  TSchema extends SchemaLike = SchemaLike,
-> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, true> {
-  where(
-    conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
-  ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
-    ...columns: [NewSelection, ...NewSelection[]]
-  ): RequiredQuery<TTable, TInclude, NewSelection, TSchema>;
-  include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
-    relations: NewInclude,
-  ): RequiredQuery<TTable, TInclude & NewInclude, TSelection, TSchema>;
-  requireIncludes(): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  orderBy(
-    column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>>,
-    direction?: "asc" | "desc",
-  ): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  limit(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  offset(n: number): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
-  hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
-    relation: TRelation,
-  ): RequiredQuery<
-    RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>["name"],
-    {},
-    DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
-    TSchema
-  >;
-  gather(options: {
-    start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
-    step: (ctx: { current: string }) => QueryBuilder<unknown>;
-    maxDepth?: number;
-  }): RequiredQuery<TTable, TInclude, TSelection, TSchema>;
+  }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
 
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
@@ -1200,13 +1188,11 @@ export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit 
 export type TableMetaOf<TTable> =
   TTable extends Table<infer TTableName, infer TSchema>
     ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-    : TTable extends Query<infer TTableName, any, any, infer TSchema>
+    : TTable extends Query<infer TTableName, any, any, infer TSchema, any>
       ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-      : TTable extends RequiredQuery<infer TTableName, any, any, infer TSchema>
-        ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
-        : TTable extends TypedTableQueryBuilder<infer TMeta, any, any, any>
-          ? TMeta
-          : never;
+      : TTable extends TypedTableQueryBuilder<infer TMeta, any, any, any>
+        ? TMeta
+        : never;
 export type WhereOf<TQuery> = TQuery extends { where(input: infer TWhere): unknown }
   ? TWhere
   : never;

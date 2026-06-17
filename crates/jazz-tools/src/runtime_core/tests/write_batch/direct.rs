@@ -19,6 +19,18 @@ fn rc_insert_returns_immediately() {
 }
 
 #[test]
+fn rc_auto_committed_direct_write_rejects_later_commit() {
+    let mut core = create_test_runtime();
+    let (_, batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let expected_error = format!("Write error: batch {batch_id} is already committed");
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+}
+
+#[test]
 fn rc_insert_data_syncs_to_server() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =
@@ -78,12 +90,13 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
     let ((row_id, _row_values), batch_id) = core
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
-    core.seal_batch(batch_id).unwrap();
-    let sealed_submission = core
-        .storage()
-        .load_sealed_batch_submission(batch_id)
-        .unwrap()
-        .expect("offline direct write should persist one sealed submission");
+    assert_eq!(
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "serverless direct writes settle locally and retire the sealed submission"
+    );
 
     core.add_server(server_id);
     core.batched_tick();
@@ -96,13 +109,111 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
             payload: SyncPayload::RowBatchCreated { row, .. },
         } if *id == server_id && row.row_id == row_id && row.batch_id == batch_id
     )));
-    assert!(outbox.iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Server(id),
-            payload: SyncPayload::SealBatch { submission },
-        } if *id == server_id && *submission == sealed_submission
-    )));
+
+    let stored_row = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.batch_id == batch_id)
+        .expect("committed row history should exist");
+    let branch_name = core.schema_manager().branch_name();
+
+    let seal = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (Destination::Server(id), SyncPayload::SealBatch { submission })
+                if *id == server_id =>
+            {
+                Some(submission.clone())
+            }
+            _ => None,
+        })
+        .expect("add_server should replay a regenerated seal");
+
+    assert_eq!(seal.batch_id, batch_id);
+    assert_eq!(seal.mode, crate::batch_fate::BatchMode::Direct);
+    assert_eq!(seal.target_branch_name, branch_name);
+    assert_eq!(
+        seal.members,
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: stored_row.content_digest(),
+        }],
+        "regenerated seal must carry exactly the committed member with its stored digest"
+    );
+    assert!(
+        seal.captured_frontier.is_empty(),
+        "a seal regenerated from row history carries no captured frontier"
+    );
+}
+
+#[test]
+fn rc_stored_missing_fate_replays_seal_and_rows_after_restart() {
+    // A live `Missing` fate triggers an immediate retransmit, but if the app
+    // restarts before that retransmit settles, the stored `Missing` fate is all
+    // that's left. `add_server` must still re-offer the retained seal.
+    let schema = test_schema();
+    let mut core = create_runtime_with_storage_and_sync_manager(
+        schema.clone(),
+        "missing-fate-restart-replay-test",
+        MemoryStorage::new(),
+        SyncManager::new(),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let ((row_id, _row_values), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+    core.sync_sender().take();
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
+        },
+    });
+    core.batched_tick();
+    core.sync_sender().take();
+    assert_eq!(
+        core.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::Missing { batch_id }),
+        "the restart path must read back a stored Missing fate"
+    );
+
+    let storage = core.into_storage();
+    let mut restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "missing-fate-restart-replay-test",
+        storage,
+        SyncManager::new(),
+    );
+    let server_id = ServerId::new();
+    restarted.add_server(server_id);
+    restarted.batched_tick();
+
+    let outbox = restarted.sync_sender().take();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::SealBatch { submission } if submission.batch_id == batch_id
+        )),
+        "a stored Missing fate must keep the batch pending so add_server resends the seal"
+    );
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::RowBatchCreated { row, .. }
+                if row.row_id == row_id && row.batch_id == batch_id
+        )),
+        "add_server must also resend the batch rows"
+    );
 }
 
 #[test]
@@ -206,10 +317,98 @@ fn rc_delete_sync() {
 }
 
 #[test]
+fn rc_sealing_empty_batch_completes_waits_without_local_record() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+
+    core.commit_batch(batch_id).unwrap();
+
+    assert_eq!(
+        core.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "empty batches should not persist a replayable local batch record"
+    );
+    assert_eq!(
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "empty batches should not persist a sealed submission"
+    );
+
+    let mut receiver = core
+        .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+        .unwrap();
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
+
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let error = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .expect_err("sealed empty batch should not accept later writes");
+    assert_eq!(
+        error.to_string(),
+        format!("Write error: batch {batch_id} has already been completed or was never opened")
+    );
+}
+
+#[test]
+fn rc_rolled_back_batch_rejects_later_operations() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    core.rollback_batch(batch_id).unwrap();
+
+    let expected_error =
+        format!("Write error: batch {batch_id} has already been completed or was never opened");
+
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+
+    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(rollback_err, expected_error);
+
+    let write_err = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(write_err, expected_error);
+
+    let query_err = match core.query_with_local_batch(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        Some(batch_id),
+    ) {
+        Ok(_) => panic!("query should reject rolled back batch"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(query_err, expected_error);
+}
+
+#[test]
 fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
-    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
 
     let ((row_id, _), _) = core
         .insert(
@@ -251,7 +450,7 @@ fn rc_same_row_direct_batch_overwrites_staged_member_in_place() {
         crate::row_histories::RowState::StagingPending
     );
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
     let visible_row = core
         .storage()
@@ -336,7 +535,7 @@ fn rc_worker_direct_batch_persists_batch_fate_on_seal() {
         "open direct batches should not persist replayable durability records before seal"
     );
 
-    s.b.seal_batch(batch_id).unwrap();
+    s.b.commit_batch(batch_id).unwrap();
 
     let branch_name = s.b.schema_manager().branch_name();
     match s
@@ -397,17 +596,14 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
         )
         .unwrap();
 
-    core.seal_batch(batch_id).unwrap();
+    core.commit_batch(batch_id).unwrap();
 
-    let submission = core
-        .storage()
-        .load_sealed_batch_submission(batch_id)
-        .unwrap()
-        .expect("sealed direct batch should keep its sealed submission");
     assert_eq!(
-        submission.captured_frontier,
-        Vec::<CapturedFrontierMember>::new(),
-        "direct batch seals should not capture transactional frontier state"
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "serverless direct batches settle locally and retire the sealed submission"
     );
 
     let err = core
@@ -419,9 +615,54 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
         .expect_err("sealed direct batches should be frozen");
     let err = format!("{err:?}");
     assert!(
-        err.contains("already sealed"),
-        "expected sealed-batch error, got {err:?}"
+        err.contains("already sealed") || err.contains("already committed"),
+        "expected sealed or committed batch error, got {err:?}"
     );
+}
+
+#[test]
+fn rc_committed_batch_rejects_later_handle_operations() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.commit_batch(batch_id).unwrap();
+
+    let expected_error = format!("Write error: batch {batch_id} is already committed");
+
+    let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(commit_err, expected_error);
+
+    let rollback_err = core.rollback_batch(batch_id).unwrap_err().to_string();
+    assert_eq!(rollback_err, expected_error);
+
+    let write_err = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(write_err, expected_error);
+
+    let query_err = match core.query_with_local_batch(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        Some(batch_id),
+    ) {
+        Ok(_) => panic!("query should reject committed batch"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(query_err, expected_error);
 }
 
 #[test]
@@ -522,5 +763,209 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
             .unwrap(),
         None,
         "recovered settlement should prune the sealed submission marker"
+    );
+}
+
+#[test]
+fn rc_local_only_runtime_settles_direct_batches_and_replays_nothing_on_worker_sync() {
+    // A durable Local-tier runtime with no upstream server: the serverless
+    // browser worker. After commit the batch is settled at this runtime's own
+    // settlement target, so nothing should remain pending for worker sync or
+    // reconciliation.
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "local-only-settlement",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let ((_row_id, _), _batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let replayed = core.local_batch_records_for_worker_sync().unwrap();
+    assert!(
+        replayed.is_empty(),
+        "a local-only runtime settles at Local; worker sync must replay nothing, got {replayed:?}"
+    );
+    assert!(
+        core.pending_batch_ids_needing_reconciliation_for_test()
+            .is_empty(),
+        "no batch should pend reconciliation on a serverless runtime"
+    );
+}
+
+#[test]
+fn rc_worker_with_upstream_retains_settled_submission_until_target_tier() {
+    // B is a Local-tier worker with upstream C. When B settles A's batch at
+    // Local, the submission is B's only durable membership record for a batch
+    // that still owes upstream reconciliation.
+    let mut s = create_3tier_rc();
+    let ((_row_id, _), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    pump_a_to_b(&mut s);
+
+    assert_eq!(
+        s.b.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap()
+            .and_then(|fate| fate.confirmed_tier()),
+        Some(DurabilityTier::Local),
+        "worker should settle the client batch at Local"
+    );
+    assert!(
+        s.b.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_some(),
+        "worker must retain the submission while the batch is below its settlement target"
+    );
+}
+
+#[test]
+fn rc_serverless_authority_prunes_submission_at_local_settlement() {
+    // A Local-tier authority with no upstream settles at its own tier, so the
+    // submission retires immediately.
+    let mut b = create_runtime_with_schema_and_sync_manager(
+        test_schema(),
+        "serverless-authority-prune",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let client_id = ClientId::new();
+    b.add_client(client_id, None);
+    b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Peer);
+
+    let mut a = create_runtime_with_schema(test_schema(), "serverless-authority-prune");
+    let server_id = ServerId::new();
+    a.add_server(server_id);
+    a.batched_tick();
+    a.sync_sender().take();
+
+    let ((_row_id, _), batch_id) = a
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    pump_client_messages_to_server(&mut a, &mut b, server_id, client_id);
+
+    assert!(
+        b.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_none(),
+        "serverless authority settles at Local and retires the submission"
+    );
+}
+
+#[test]
+fn rc_client_retires_batch_bookkeeping_when_fate_reaches_settlement_target() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    assert!(
+        s.a.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_some(),
+        "submission pends while below the target"
+    );
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    assert!(
+        s.a.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_none(),
+        "global fate retires the submission"
+    );
+    assert!(
+        s.a.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .is_none(),
+        "global fate retires the local batch record"
+    );
+    assert!(
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap()
+            .is_some(),
+        "the fate itself stays as a terminal tombstone"
+    );
+    assert!(
+        s.a.pending_batch_ids_needing_reconciliation_for_test()
+            .is_empty()
+    );
+}
+
+#[test]
+fn rc_serverless_commit_retires_submission_immediately() {
+    let mut core = create_test_runtime();
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let ((_row_id, _), _insert_batch_id) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+    core.commit_batch(batch_id).unwrap();
+
+    assert!(
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_none(),
+        "serverless commit settles at Local and must not retain the submission"
+    );
+    let results = execute_query(&mut core, Query::new("users"));
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn rc_wait_for_unattainable_tier_errors_instead_of_hanging() {
+    let mut core = create_test_runtime();
+    let ((_row_id, _), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    assert!(
+        core.wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+            .is_err(),
+        "waiting on an unattainable tier must error immediately"
+    );
+    let mut receiver = core
+        .wait_for_batch(batch_id, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
+}
+
+#[test]
+fn rc_non_durable_client_without_server_errors_on_local_wait() {
+    let mut core = create_runtime_with_schema(test_schema(), "non-durable-no-server-wait");
+    core.set_non_durable_client_runtime();
+
+    let ((_row_id, _), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    assert!(
+        core.wait_for_batch(batch_id, DurabilityTier::Local)
+            .is_err(),
+        "a non-durable client with no upstream has no producer for any tier"
     );
 }

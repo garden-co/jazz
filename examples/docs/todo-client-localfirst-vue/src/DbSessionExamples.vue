@@ -12,7 +12,7 @@ async function addTodo(title: string) {
 // #endregion db-access-vue
 
 // #region session-vue
-const session = useSession(); // ShallowRef<{ user_id: string } | null>
+const session = useSession(); // ComputedRef<Session | null>
 // #endregion session-vue
 
 void addTodo;

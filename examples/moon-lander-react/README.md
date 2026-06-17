@@ -6,15 +6,11 @@ Jazz handles all the real-time sync: player positions, fuel deposits, inventory,
 
 ## Running locally
 
-You need two terminals: one for the Jazz sync server and one for the Vite dev server.
-
 ```bash
-# Terminal 1: Jazz server (port 4200)
-pnpm dev:server
-
-# Terminal 2: Vite dev server
 pnpm dev
 ```
+
+`pnpm dev` runs Vite with the Jazz sync server embedded via `jazzPlugin()`, so a single command is all you need.
 
 Open the URL Vite prints (usually `http://localhost:5173`) in two browser windows to see multiplayer in action.
 

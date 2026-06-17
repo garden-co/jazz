@@ -129,22 +129,52 @@ export function resolveRuntimeConfigWorkerUrl(
   locationHref: string | undefined,
   runtime?: RuntimeSourcesConfig,
 ): string {
-  if (runtime?.workerUrl) {
-    return resolveConfiguredUrl(runtime.workerUrl, locationHref);
-  }
+  return resolveRuntimeConfigScriptUrl(
+    runtimeModuleUrl,
+    locationHref,
+    runtime,
+    runtime?.workerUrl,
+    "worker/jazz-worker.js",
+    "../worker/jazz-worker.js",
+  );
+}
 
+export function resolveRuntimeConfigBrokerWorkerUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  runtime?: RuntimeSourcesConfig,
+): string {
+  return resolveRuntimeConfigScriptUrl(
+    runtimeModuleUrl,
+    locationHref,
+    runtime,
+    runtime?.brokerWorkerUrl,
+    "worker/jazz-broker-worker.js",
+    "../worker/jazz-broker-worker.js",
+  );
+}
+
+function resolveRuntimeConfigScriptUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  runtime: RuntimeSourcesConfig | undefined,
+  explicitUrl: string | undefined,
+  baseRelativePath: string,
+  moduleRelativePath: string,
+): string {
+  if (explicitUrl) {
+    return resolveConfiguredUrl(explicitUrl, locationHref);
+  }
   if (runtime?.baseUrl) {
     const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
     if (baseUrl) {
-      return new URL("worker/jazz-worker.js", baseUrl).href;
+      return new URL(baseRelativePath, baseUrl).href;
     }
   }
-
   if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
-    return new URL("../worker/jazz-worker.js", runtimeModuleUrl).href;
+    return new URL(moduleRelativePath, runtimeModuleUrl).href;
   }
-
-  return new URL("worker/jazz-worker.js", resolveBrowserAssetBase(locationHref)).href;
+  return new URL(baseRelativePath, resolveBrowserAssetBase(locationHref)).href;
 }
 
 export function appendWorkerRuntimeWasmUrl(workerUrl: string, wasmUrl: string | null): string {

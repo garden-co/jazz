@@ -289,6 +289,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     );
             }
             self.durability.record_batch_ack(batch_id, acked_tier);
+            // Only confirmed fates retire bookkeeping here: `Rejected` keeps
+            // its record for the mutation-error replay path and `Missing`
+            // pends retransmission, and neither carries a confirmed tier.
+            if acked_tier >= self.settlement_target() {
+                self.retire_settled_batch(batch_id);
+            }
         }
     }
 
@@ -809,7 +815,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
             } else if let Some(sync_sender) = self.sync_sender.as_ref() {
                 sync_sender.send_sync_message(msg);
-            } else {
+            } else if self.buffer_outbox_without_sync_sender {
                 unsent.push(msg);
             }
         }
@@ -861,6 +867,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
+                    self.schema_manager
+                        .query_manager_mut()
+                        .sync_manager_mut()
+                        .add_pending_server(server_id);
                 }
                 crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                     tracing::warn!(%server_id, %reason, "transport connect failed");
@@ -1125,7 +1135,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
-                released_server_hold = true;
+                self.schema_manager
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .add_pending_server(server_id);
             }
             crate::transport_manager::TransportInbound::ConnectFailed { reason } => {
                 debug!(%reason, "transport connect failed; releasing pending-server hold");
