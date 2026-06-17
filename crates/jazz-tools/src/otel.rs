@@ -105,6 +105,13 @@ pub fn init_logger_provider() -> SdkLoggerProvider {
         .build()
         .expect("failed to build OTLP log exporter");
 
+    // `with_batch_exporter` builds the dedicated-thread BatchLogProcessor (not
+    // the async-runtime variant). That's what makes `force_flush()` safe to
+    // call from the panic hook (see `install_otel_panic_hook` in the CLI): the
+    // flush runs on the processor's own thread with the blocking HTTP client,
+    // so it doesn't depend on the unwinding Tokio runtime, and its force-flush
+    // is internally bounded (~5s) so a missing collector can't stall the crash
+    // path.
     SdkLoggerProvider::builder()
         .with_resource(otel_resource(&resolved_service_name()))
         .with_batch_exporter(exporter)
@@ -138,6 +145,61 @@ where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
     opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider)
+}
+
+/// Install a panic hook that pushes the panic through the OTLP log pipeline
+/// before the process unwinds away.
+///
+/// Without this, a Rust panic is never a `tracing` event, and the batch log
+/// processor's buffered records die with the process — so the crash is
+/// invisible to structured telemetry and survives only as the stderr backtrace
+/// (scraped by the node collector's filelog pipeline). This hook turns the
+/// panic into a structured, trace-correlated `error!` event and force-flushes
+/// `logger_provider` synchronously so it actually ships.
+///
+/// The previous hook is preserved and re-invoked, so the stderr backtrace still
+/// prints and the filelog safety net stays intact. Call once, after the
+/// `tracing` subscriber (incl. [`log_bridge`]) is installed, and only when OTLP
+/// export is active — otherwise the `error!` event has nowhere to go.
+///
+/// `force_flush` is safe to call from here because [`init_logger_provider`]
+/// builds the dedicated-thread `BatchLogProcessor` with the blocking HTTP
+/// client: the flush runs off the (unwinding) Tokio runtime and is internally
+/// bounded (~5s), so a missing collector can't stall the crash path.
+///
+/// Does NOT cover OOM-kill / SIGKILL / `abort` — the kernel terminates the
+/// process with no chance to run the hook. Those need a metrics-side signal
+/// (`kube_pod_container_status_last_terminated_reason`), not a log.
+pub fn install_panic_hook(logger_provider: SdkLoggerProvider) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+
+        // Emitted via `tracing` so the otel_log_layer bridge converts it into an
+        // OTLP LogRecord, carrying the active span's trace context.
+        tracing::error!(
+            panic.message = %message,
+            panic.location = %location,
+            panic.backtrace = %backtrace,
+            "process panicked",
+        );
+
+        // The event above is only enqueued; force-flush so it ships before we die.
+        let _ = logger_provider.force_flush();
+
+        // Preserve the original behaviour: stderr backtrace = filelog safety net.
+        default_hook(info);
+    }));
 }
 
 /// Metric name for the active inbound WebSocket gauge.
@@ -197,5 +259,70 @@ mod tests {
             })
             .expect("active_websockets gauge datapoint present");
         assert_eq!(observed, 1);
+    }
+
+    // A panic must become a flushed, structured OTLP log record (carrying the
+    // message + source location), and the previously installed hook must still
+    // run so the stderr backtrace / filelog safety net survives. Uses an
+    // in-memory exporter so it needs no collector, and restores the prior
+    // global panic hook so it doesn't leak into the rest of the test binary.
+    #[test]
+    fn panic_hook_emits_flushed_otlp_log_and_preserves_previous_hook() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use opentelemetry_sdk::logs::InMemoryLogExporter;
+        use tracing_subscriber::prelude::*;
+
+        let exporter = InMemoryLogExporter::default();
+        let provider = SdkLoggerProvider::builder()
+            .with_batch_exporter(exporter.clone())
+            .build();
+
+        // Route `tracing` events to the OTLP bridge for this thread. The panic
+        // hook runs on the panicking thread, so this thread-local default is
+        // active when the hook emits its `error!` event.
+        let subscriber = tracing_subscriber::registry()
+            .with(log_bridge::<tracing_subscriber::Registry>(&provider));
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        // Sentinel previous hook (in a local Arc) — install_panic_hook must
+        // capture and re-invoke it. Save the prior global hook and restore it
+        // after the panic so this test doesn't disturb the rest of the binary.
+        let saved_hook = std::panic::take_hook();
+        let previous_ran = Arc::new(AtomicBool::new(false));
+        let previous_ran_in_hook = previous_ran.clone();
+        std::panic::set_hook(Box::new(move |_| {
+            previous_ran_in_hook.store(true, Ordering::SeqCst);
+        }));
+        install_panic_hook(provider.clone());
+
+        let result = std::panic::catch_unwind(|| panic!("boom-from-test"));
+        std::panic::set_hook(saved_hook);
+
+        assert!(result.is_err(), "the panic should have been caught");
+        assert!(
+            previous_ran.load(Ordering::SeqCst),
+            "install_panic_hook must re-invoke the previously installed hook",
+        );
+
+        let logs = exporter.get_emitted_logs().expect("read emitted logs");
+        let panic_record = logs
+            .iter()
+            .find(|log| format!("{:?}", log.record.body()).contains("process panicked"))
+            .expect("panic hook should emit a 'process panicked' log record");
+
+        let attrs = format!(
+            "{:?}",
+            panic_record.record.attributes_iter().collect::<Vec<_>>()
+        );
+        assert!(
+            attrs.contains("panic.message") && attrs.contains("boom-from-test"),
+            "panic log must carry the panic message as an attribute; got: {attrs}",
+        );
+        assert!(
+            attrs.contains("panic.location"),
+            "panic log must carry the source location; got: {attrs}",
+        );
     }
 }
