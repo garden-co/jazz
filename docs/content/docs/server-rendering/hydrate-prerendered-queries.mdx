@@ -1,12 +1,10 @@
 ---
 title: "SSR with data hydration"
 description: Prefetch a query on the server, send the result with the page, and seed the client from it so the first render shows real data instead of a loading state.
-reviewedAt: "26d44a26c"
+reviewedAt: "25be222fa"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
-Render a page on the server with its Jazz data already in place, then let the client take over without refetching. The server runs the query at the route level, turns the result into JSON, and sends it with the page. The query that reads it finds the data before its first render&hairsp;—&hairsp;and the server's CRDT sync bundle travels with it, so the local store is already warm and the hand-off to live sync is flash-free, not just the first paint.
+Jazz can render a page on the server with its data already in place, then hydrate on the client to continue the subscription. The server runs the query at the route level, and sends the results with the rendered page. The client uses the results from the server to seed its local database before rendering, so sync can continue in real-time without a flash of unloaded content.
 
 <Callout type="warn">
   SSR is powerful, but read this page **in full** before using it for anything user-specific. A
@@ -21,12 +19,25 @@ Render a page on the server with its Jazz data already in place, then let the cl
 - A flash-free hand-off: the snapshot carries the server's sync bundle, so the local store already holds the rows when the live client connects&hairsp;—&hairsp;no blank frame between the seeded render and the live one.
 - Keeping everything else about Jazz the same: once mounted, the client subscribes to the same query and sync brings the snapshot up to date.
 
-## When not to use this
-
-- **The latest state at load time.** The snapshot is the data as it was when the server rendered. Anything newer arrives over sync after the page mounts.
-- **Writing data.** Prefetching is read-only&hairsp;—&hairsp;make changes through the normal client APIs.
-- **Streaming or Suspense.** You get one snapshot per render, taken before the response is sent. A suspense read in the seed phase resolves to empty rather than blocking the response.
-- **Mismatched schemas.** A snapshot built against a different schema is discarded and the client fetches normally. Cross-version lensing isn't built yet.
+<Sequence
+  eyebrow="SSR with data hydration"
+  description="The server prefetches a query and ships its snapshot with the HTML; the client seeds from it, then live sync takes over."
+  participants={[
+    { id: "server", label: "Server" },
+    { id: "browser", label: "Browser" },
+    { id: "sync", label: "Sync server", createAtStep: 5 },
+  ]}
+  steps={[
+    { kind: "note", over: "server", text: "prefetch(db, query)" },
+    { kind: "note", over: "server", text: "dehydrate() → snapshot" },
+    { kind: "message", from: "server", to: "browser", text: "HTML + snapshot" },
+    { kind: "note", over: "browser", text: "Seed store from snapshot" },
+    { kind: "note", over: "browser", text: "First paint, no loading state" },
+    { kind: "message", from: "browser", to: "sync", text: "Live client connects" },
+    { kind: "message", from: "sync", to: "browser", text: "Live updates", line: "dashed" },
+    { kind: "note", over: "browser", text: "Sync takes over, flash-free" },
+  ]}
+/>
 
 ## Server: prefetch a query
 
@@ -95,6 +106,12 @@ Render `<TodoPanel snapshot={data.snapshot} />` from your `+page.svelte`. `TodoP
 
 </Tab>
 </Tabs>
+
+<Callout type="info">
+  SSR'd components can't suspend&hairsp;—&hairsp;their seeded data is already on the first render,
+  so there's nothing to wait for. To mix them with components that do suspend, set up granular
+  Suspense boundaries.
+</Callout>
 
 ## Who runs the query
 

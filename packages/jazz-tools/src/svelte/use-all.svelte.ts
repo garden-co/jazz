@@ -9,12 +9,19 @@ import { getJazzContext, type JazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
 
-/** Query options for a {@link QuerySubscription}, plus an optional SSR snapshot. */
+/**
+ * Query options for a {@link QuerySubscription}, plus an optional SSR snapshot.
+ * The whole bag may be passed as a getter to make the query options reactive; a
+ * `snapshot` can ride along in that getter, so reactive options and a one-shot
+ * snapshot can be combined, e.g. `() => ({ tier, snapshot })`.
+ */
 type QuerySubscriptionOptions = QueryOptions & {
   /**
    * A server-rendered snapshot for this query, co-located at the call site.
    * Seeds rows for synchronous first paint and queues its sync bundle for
-   * flash-free hydration when the db attaches.
+   * flash-free hydration when the db attaches. Applied once at construction and
+   * never reactive: a snapshot that changes afterwards is ignored, with a
+   * development warning.
    */
   snapshot?: DehydratedSnapshot;
 };
@@ -31,7 +38,9 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *   (e.g. `() => filter ? app.todos.where({ title: { contains: filter } }) : undefined`).
  *   When a getter is passed, any reactive reads inside it are tracked, so the
  *   subscription re-runs when its dependencies change.
- * @param options - optional query execution options, or a getter for them
+ * @param options - optional query execution options, or a getter for them. The
+ *   bag may carry a one-shot `snapshot` in either form; the snapshot seeds once
+ *   and is not reactive.
  *
  * ```svelte
  * <script lang="ts">
@@ -55,6 +64,8 @@ export class QuerySubscription<T extends { id: string }> {
   error: Error | null = $state(null);
 
   #snapshotApplied = false;
+  #appliedSnapshot: DehydratedSnapshot | undefined;
+  #snapshotChangeWarned = false;
 
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
@@ -166,18 +177,31 @@ export class QuerySubscription<T extends { id: string }> {
       queryKeyOptions = Object.keys(rest).length > 0 ? rest : undefined;
     }
 
-    if (snapshot && !this.#snapshotApplied) {
-      this.#snapshotApplied = true;
-      applySnapshot({
-        manager,
-        snapshot,
-        // The client's own fingerprint comes from the query's schema: a snapshot
-        // built against a different schema is skipped, not seeded.
-        expected: {
-          principalId: ctx.session?.user_id ?? null,
-          schemaFingerprint: computeSchemaFingerprint(query._schema),
-        },
-      });
+    if (snapshot) {
+      if (!this.#snapshotApplied) {
+        this.#snapshotApplied = true;
+        this.#appliedSnapshot = snapshot;
+        applySnapshot({
+          manager,
+          snapshot,
+          // The client's own fingerprint comes from the query's schema: a snapshot
+          // built against a different schema is skipped, not seeded.
+          expected: {
+            principalId: ctx.session?.user_id ?? null,
+            schemaFingerprint: computeSchemaFingerprint(query._schema),
+          },
+        });
+      } else if (snapshot !== this.#appliedSnapshot && !this.#snapshotChangeWarned) {
+        // A snapshot seeds the store once at construction; a later, different one
+        // (e.g. reactive state passed through the options getter) is ignored, so
+        // flag it rather than letting it silently go stale.
+        this.#snapshotChangeWarned = true;
+        console.warn(
+          "[jazz] QuerySubscription: the `snapshot` changed after the first render and was " +
+            "ignored. An SSR snapshot seeds the store once at construction; let live sync deliver " +
+            "later updates instead of swapping the snapshot.",
+        );
+      }
     }
 
     return queryKeyOptions;
