@@ -900,7 +900,6 @@ export class Db {
   private workerDbName: string | null = null;
   private tabRole: BrowserBrokerRole = "follower";
   private tabId: string | null = null;
-  private currentLeaderTabId: string | null = null;
   private currentLeadershipId = 0;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private _localFirstSecret: string | null = null;
@@ -1113,11 +1112,11 @@ export class Db {
         onDetachFollowerPort: (followerTabId, leadershipId) => {
           db.handleBrokerDetachFollowerPort(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (leaderTabId, leadershipId, port) => {
-          db.handleBrokerUseFollowerPort(leaderTabId, leadershipId, port);
+        onUseFollowerPort: (leadershipId, port) => {
+          db.handleBrokerUseFollowerPort(leadershipId, port);
         },
-        onFollowerReady: (leaderTabId, leadershipId) => {
-          db.handleBrokerFollowerReady(leaderTabId, leadershipId);
+        onFollowerReady: (leadershipId) => {
+          db.handleBrokerFollowerReady(leadershipId);
         },
         onCloseFollowerPort: (leadershipId) => {
           db.handleBrokerCloseFollowerPort(leadershipId);
@@ -1350,7 +1349,6 @@ export class Db {
     await this.shutdownLeaderWorker();
     this.releaseBrokerLeadershipResources();
     this.tabRole = "follower";
-    this.currentLeaderTabId = null;
     this.brokerLeaderReadyLeadershipId = null;
   }
 
@@ -1496,7 +1494,6 @@ export class Db {
   private adoptBrokerSnapshot(snapshot: BrowserBrokerClientSnapshot): void {
     this.tabRole = snapshot.role;
     this.tabId = snapshot.tabId;
-    this.currentLeaderTabId = snapshot.leaderTabId;
     this.currentLeadershipId = snapshot.leadershipId;
   }
 
@@ -1526,7 +1523,6 @@ export class Db {
       preserveOutbox: true,
     });
     this.closePendingLeaderFollowerPorts();
-    this.currentLeaderTabId = this.tabId;
     this.currentLeadershipId = leadershipId;
     this.workerDbName = this.primaryDbName;
     this.brokerLeaderReadyLeadershipId = null;
@@ -1597,7 +1593,6 @@ export class Db {
   ): Promise<void> {
     this.markDurablePathPending();
     this.tabRole = "follower";
-    this.currentLeaderTabId = null;
     this.brokerLeaderReadyLeadershipId = null;
     if (options.closePendingFollowerPorts ?? true) {
       this.closePendingLeaderFollowerPorts();
@@ -1727,11 +1722,7 @@ export class Db {
     this.pendingLeaderFollowerPorts.clear();
   }
 
-  private handleBrokerUseFollowerPort(
-    leaderTabId: string,
-    leadershipId: number,
-    port: MessagePort,
-  ): void {
+  private handleBrokerUseFollowerPort(leadershipId: number, port: MessagePort): void {
     if (this.tabRole === "leader" || isStaleLeadershipId(leadershipId, this.currentLeadershipId)) {
       port.close();
       return;
@@ -1744,7 +1735,6 @@ export class Db {
       preserveLeaderReadySignal,
     });
     this.tabRole = "follower";
-    this.currentLeaderTabId = leaderTabId;
     this.currentLeadershipId = leadershipId;
     this.followerDataPort = port;
     this.ensureDurablePathReadyPromise();
@@ -1752,10 +1742,9 @@ export class Db {
     this.resolveFollowerDurablePathIfReady();
   }
 
-  private handleBrokerFollowerReady(leaderTabId: string, leadershipId: number): void {
+  private handleBrokerFollowerReady(leadershipId: number): void {
     if (this.tabRole !== "follower") return;
     if (isStaleLeadershipId(leadershipId, this.currentLeadershipId)) return;
-    this.currentLeaderTabId = leaderTabId;
     this.currentLeadershipId = leadershipId;
     this.followerLeaderReadyLeadershipId = leadershipId;
     this.resolveFollowerDurablePathIfReady();
