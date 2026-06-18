@@ -2,7 +2,7 @@ use super::*;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
 use crate::query_manager::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -406,6 +406,45 @@ pub mod policy_expr {
         PolicyValueInput::Literal(Value::Null)
     }
 
+    pub fn session_cmp(
+        path: impl IntoSessionPath,
+        op: CmpOp,
+        value: impl Into<Value>,
+    ) -> PolicyExpr {
+        PolicyExpr::SessionCmp {
+            path: path.into_session_path(),
+            op,
+            value: value.into(),
+        }
+    }
+
+    pub fn session_eq(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
+        session_cmp(path, CmpOp::Eq, value)
+    }
+
+    pub fn session_ne(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
+        session_cmp(path, CmpOp::Ne, value)
+    }
+
+    pub fn session_is_null(path: impl IntoSessionPath) -> PolicyExpr {
+        PolicyExpr::SessionIsNull {
+            path: path.into_session_path(),
+        }
+    }
+
+    pub fn session_is_not_null(path: impl IntoSessionPath) -> PolicyExpr {
+        PolicyExpr::SessionIsNotNull {
+            path: path.into_session_path(),
+        }
+    }
+
+    pub fn session_contains(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
+        PolicyExpr::SessionContains {
+            path: path.into_session_path(),
+            value: value.into(),
+        }
+    }
+
     pub fn always() -> PolicyExpr {
         PolicyExpr::True
     }
@@ -457,6 +496,19 @@ pub mod policy_expr {
         PolicyExpr::In {
             column: column.into(),
             session_path: path.into_session_path(),
+        }
+    }
+
+    pub fn in_list<V>(column: impl Into<String>, values: impl IntoIterator<Item = V>) -> PolicyExpr
+    where
+        V: Into<PolicyValueInput>,
+    {
+        PolicyExpr::InList {
+            column: column.into(),
+            values: values
+                .into_iter()
+                .map(|value| value.into().into())
+                .collect(),
         }
     }
 
@@ -685,6 +737,10 @@ pub mod policy_expr {
                 PredicateCmpOp::Eq,
                 ValueRef::OuterColumn(ColumnRef::unscoped(outer_column)),
             )
+        }
+
+        pub fn eq_outer_id(column: impl Into<String>) -> PredicateExpr {
+            cmp(column, PredicateCmpOp::Eq, ValueRef::RowId(RowIdRef::Outer))
         }
 
         pub fn eq_literal(column: impl Into<String>, value: impl Into<Value>) -> PredicateExpr {

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
+use super::{pe, permissions};
 use jazz_tools::jazz_transport::SyncBatchRequest;
-use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
@@ -151,15 +151,18 @@ async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClien
 /// ```
 #[tokio::test]
 async fn created_by_policies_scope_crud_to_creators() {
-    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
-            TablePolicies::new()
-                .with_select(created_by_policy.clone())
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
-                .with_delete(created_by_policy),
+            permissions(|p| {
+                p.allow_read().where_(created_by_policy.clone());
+                p.allow_insert().always();
+                p.allow_update()
+                    .where_old(created_by_policy.clone())
+                    .where_new(created_by_policy.clone());
+                p.allow_delete().where_(created_by_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -252,15 +255,18 @@ async fn created_by_policies_scope_crud_to_creators() {
 /// ```
 #[tokio::test]
 async fn created_by_policies_hide_server_generated_rows_without_attribution() {
-    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
-            TablePolicies::new()
-                .with_select(created_by_policy.clone())
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
-                .with_delete(created_by_policy),
+            permissions(|p| {
+                p.allow_read().where_(created_by_policy.clone());
+                p.allow_insert().always();
+                p.allow_update()
+                    .where_old(created_by_policy.clone())
+                    .where_new(created_by_policy.clone());
+                p.allow_delete().where_(created_by_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -320,19 +326,22 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution() {
 /// ```
 #[tokio::test]
 async fn created_by_policies_can_allow_reads_from_system_author() {
-    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
-    let system_author_policy = PolicyExpr::eq_literal("$createdBy", "jazz:system".into());
+    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
+    let system_author_policy = pe::eq("$createdBy", "jazz:system");
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
-            TablePolicies::new()
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_read().where_(pe::any_of([
                     created_by_policy.clone(),
                     system_author_policy,
-                ]))
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
-                .with_delete(created_by_policy),
+                ]));
+                p.allow_insert().always();
+                p.allow_update()
+                    .where_old(created_by_policy.clone())
+                    .where_new(created_by_policy.clone());
+                p.allow_delete().where_(created_by_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -405,15 +414,18 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
 /// ```
 #[tokio::test]
 async fn created_by_policies_allow_backend_attribution_to_specific_user() {
-    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
-            TablePolicies::new()
-                .with_select(created_by_policy.clone())
-                .with_insert(PolicyExpr::False)
-                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
-                .with_delete(created_by_policy),
+            permissions(|p| {
+                p.allow_read().where_(created_by_policy.clone());
+                p.allow_insert().never();
+                p.allow_update()
+                    .where_old(created_by_policy.clone())
+                    .where_new(created_by_policy.clone());
+                p.allow_delete().where_(created_by_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -464,19 +476,19 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user() {
 /// ```
 #[tokio::test]
 async fn updated_by_select_policy_moves_visibility_to_last_editor() {
-    let updated_by_policy = PolicyExpr::eq_session("$updatedBy", vec!["user_id".into()]);
-    let shared_policy = PolicyExpr::eq_literal("shared", true.into());
+    let updated_by_policy = pe::eq("$updatedBy", pe::session("user_id"));
+    let shared_policy = pe::eq("shared", true);
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("notes")
                 .column("title", ColumnType::Text)
                 .column("shared", ColumnType::Boolean)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::or(vec![shared_policy, updated_by_policy]))
-                        .with_insert(PolicyExpr::True)
-                        .with_update(Some(PolicyExpr::True), PolicyExpr::True),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::any_of([shared_policy, updated_by_policy]));
+                    p.allow_insert().always();
+                    p.allow_update().always();
+                })),
         )
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -587,11 +599,12 @@ async fn provenance_magic_columns_expose_user_principals_and_insert_timestamps()
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-                .with_delete(PolicyExpr::True),
+            permissions(|p| {
+                p.allow_read().always();
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_delete().always();
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;

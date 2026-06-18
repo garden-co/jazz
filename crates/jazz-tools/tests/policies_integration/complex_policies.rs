@@ -5,9 +5,8 @@ use super::support::{
     has_added, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::query_manager::policy::{
-    CmpOp, OUTER_ROW_SESSION_PREFIX, Operation, PolicyExpr, PolicyValue,
-};
+use super::{pe, permissions};
+use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::relation_ir::{
     ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
     RelExpr, RowIdRef, ValueRef,
@@ -75,157 +74,105 @@ fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchema
         .policies(policies)
 }
 
-fn outer_row_id_ref() -> PolicyValue {
-    PolicyValue::SessionRef(vec![OUTER_ROW_SESSION_PREFIX.into(), "id".into()])
-}
-
 fn shared_document_select_policy() -> PolicyExpr {
-    PolicyExpr::Exists {
-        table: "document_shares".into(),
-        condition: Box::new(PolicyExpr::and(vec![
-            PolicyExpr::Cmp {
-                column: "document_id".into(),
-                op: CmpOp::Eq,
-                value: outer_row_id_ref(),
-            },
-            PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
-        ])),
-    }
+    pe::exists(pe::table("document_shares").where_(pe::rel::all_of([
+        pe::rel::eq_outer_id("document_id"),
+        pe::rel::eq_session("user_id", "user_id"),
+    ])))
 }
 
 fn editor_document_update_policy() -> PolicyExpr {
-    PolicyExpr::Exists {
-        table: "document_editors".into(),
-        condition: Box::new(PolicyExpr::and(vec![
-            PolicyExpr::Cmp {
-                column: "document_id".into(),
-                op: CmpOp::Eq,
-                value: outer_row_id_ref(),
-            },
-            PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
-        ])),
-    }
+    pe::exists(pe::table("document_editors").where_(pe::rel::all_of([
+        pe::rel::eq_outer_id("document_id"),
+        pe::rel::eq_session("user_id", "user_id"),
+    ])))
 }
 
 fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
-    PolicyExpr::Exists {
-        table: "chats".into(),
-        condition: Box::new(PolicyExpr::and(vec![
-            PolicyExpr::Cmp {
-                column: "id".into(),
-                op: CmpOp::Eq,
-                value: outer_row_id_ref(),
-            },
-            PolicyExpr::Cmp {
-                column: "created_by".into(),
-                op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec![
-                    OUTER_ROW_SESSION_PREFIX.into(),
-                    "created_by".into(),
-                ]),
-            },
-            PolicyExpr::Cmp {
-                column: "is_public".into(),
-                op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec![
-                    OUTER_ROW_SESSION_PREFIX.into(),
-                    "is_public".into(),
-                ]),
-            },
-        ])),
-    }
+    pe::exists(pe::table("chats").where_(pe::rel::all_of([
+        pe::rel::eq_outer_id("id"),
+        pe::rel::eq_outer("created_by", "created_by"),
+        pe::rel::eq_outer("is_public", "is_public"),
+    ])))
 }
 
 fn join_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::TableScan {
-                    table: TableName::new("document_grants"),
-                }),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("group_memberships"),
-                }),
-                on: vec![JoinCondition {
-                    left: ColumnRef::scoped("document_grants", "group_slug"),
-                    right: ColumnRef::scoped("group_memberships", "group_slug"),
-                }],
-                join_kind: JoinKind::Inner,
+    pe::exists(RelExpr::Filter {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(RelExpr::TableScan {
+                table: TableName::new("document_grants"),
             }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::scoped("document_grants", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::scoped("group_memberships", "user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
-                },
-            ]),
-        },
-    }
+            right: Box::new(RelExpr::TableScan {
+                table: TableName::new("group_memberships"),
+            }),
+            on: vec![JoinCondition {
+                left: ColumnRef::scoped("document_grants", "group_slug"),
+                right: ColumnRef::scoped("group_memberships", "group_slug"),
+            }],
+            join_kind: JoinKind::Inner,
+        }),
+        predicate: PredicateExpr::And(vec![
+            PredicateExpr::Cmp {
+                left: ColumnRef::scoped("document_grants", "document_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::RowId(RowIdRef::Outer),
+            },
+            PredicateExpr::Cmp {
+                left: ColumnRef::scoped("group_memberships", "user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        ]),
+    })
 }
 
 fn hop_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Project {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
-                            table: TableName::new("group_memberships"),
-                        }),
-                        predicate: PredicateExpr::Cmp {
-                            left: ColumnRef::scoped("group_memberships", "user_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
-                        },
+    pe::exists(RelExpr::Project {
+        input: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("group_memberships"),
                     }),
-                    right: Box::new(RelExpr::TableScan {
-                        table: TableName::new("document_grants"),
-                    }),
-                    on: vec![JoinCondition {
-                        left: ColumnRef::scoped("group_memberships", "group_slug"),
-                        right: ColumnRef::scoped("__hop_0", "group_slug"),
-                    }],
-                    join_kind: JoinKind::Inner,
+                    predicate: PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("group_memberships", "user_id"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    },
                 }),
-                predicate: PredicateExpr::Cmp {
-                    left: ColumnRef::scoped("__hop_0", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("document_grants"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("group_memberships", "group_slug"),
+                    right: ColumnRef::scoped("__hop_0", "group_slug"),
+                }],
+                join_kind: JoinKind::Inner,
             }),
-            columns: vec![ProjectColumn {
-                alias: "document_id".to_string(),
-                expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "document_id")),
-            }],
-        },
-    }
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::scoped("__hop_0", "document_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::RowId(RowIdRef::Outer),
+            },
+        }),
+        columns: vec![ProjectColumn {
+            alias: "document_id".to_string(),
+            expr: ProjectExpr::Column(ColumnRef::scoped("__hop_0", "document_id")),
+        }],
+    })
 }
 
 fn mixed_complex_select_policy() -> PolicyExpr {
-    PolicyExpr::and(vec![
-        PolicyExpr::eq_literal("published", true.into()),
-        PolicyExpr::in_session("team_slug", vec!["claims".into(), "team_slugs".into()]),
-        PolicyExpr::Exists {
-            table: "document_flags".into(),
-            condition: Box::new(PolicyExpr::and(vec![
-                PolicyExpr::Cmp {
-                    column: "document_id".into(),
-                    op: CmpOp::Eq,
-                    value: outer_row_id_ref(),
-                },
-                PolicyExpr::eq_literal("flag", "allow".into()),
-            ])),
-        },
-        PolicyExpr::and(vec![
-            PolicyExpr::IsNotNull {
-                column: "folder_id".into(),
-            },
-            PolicyExpr::inherits(Operation::Select, "folder_id"),
+    pe::all_of([
+        pe::eq("published", true),
+        pe::in_session("team_slug", "claims.team_slugs"),
+        pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
+            pe::rel::eq_outer_id("document_id"),
+            pe::rel::eq_literal("flag", "allow"),
+        ]))),
+        pe::all_of([
+            pe::is_not_null("folder_id"),
+            pe::allowed_to_read("folder_id"),
         ]),
     ])
 }
@@ -234,10 +181,11 @@ fn exists_share_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-                .with_select(shared_document_select_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_read().where_(shared_document_select_policy());
+            }),
         ))
         .table(
             TableSchema::builder("document_shares")
@@ -251,9 +199,10 @@ fn exists_join_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(join_membership_select_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(join_membership_select_policy());
+            }),
         ))
         .table(
             TableSchema::builder("document_grants")
@@ -273,21 +222,20 @@ fn joined_table_select_policy_schema() -> Schema {
         .table(
             TableSchema::builder("join_users")
                 .column("name", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                })),
         )
         .table(
             TableSchema::builder("join_posts")
                 .column("owner_name", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session("owner_name", vec!["user_id".into()])),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(pe::eq("owner_name", pe::session("user_id")));
+                })),
         )
         .build()
 }
@@ -296,9 +244,10 @@ fn exists_hop_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(hop_membership_select_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(hop_membership_select_policy());
+            }),
         ))
         .table(
             TableSchema::builder("document_grants")
@@ -317,15 +266,18 @@ fn mixed_complex_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::eq("owner_id", pe::session("user_id")));
+            }),
         ))
         .table(make_complex_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(mixed_complex_select_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(mixed_complex_select_policy());
+            }),
         ))
         .table(
             TableSchema::builder("document_flags")
@@ -339,10 +291,13 @@ fn exists_update_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::True)
-                .with_update(Some(editor_document_update_policy()), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().always();
+                p.allow_update()
+                    .where_old(editor_document_update_policy())
+                    .where_new(pe::always());
+            }),
         ))
         .table(
             TableSchema::builder("document_editors")
@@ -354,15 +309,13 @@ fn exists_update_policy_schema() -> Schema {
                 .column("name", ColumnType::Text)
                 .column("created_by", ColumnType::Text)
                 .column("is_public", ColumnType::Boolean)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True)
-                        .with_update(
-                            Some(PolicyExpr::True),
-                            immutable_chat_metadata_update_check_policy(),
-                        ),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                    p.allow_update()
+                        .where_old(pe::always())
+                        .where_new(immutable_chat_metadata_update_check_policy());
+                })),
         )
         .build()
 }

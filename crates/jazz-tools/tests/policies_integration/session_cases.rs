@@ -6,7 +6,7 @@ use super::support::{
     has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::query_manager::policy::PolicyExpr;
+use super::{pe, permissions};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
@@ -26,22 +26,22 @@ fn join_select_policy_schema() -> Schema {
         .table(
             TableSchema::builder("orgs")
                 .column("name", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
+                .policies(super::explicit_allow_all_policies(permissions(|_| {}))),
         )
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
                 .fk_column("org_id", "orgs")
-                .policies(super::explicit_allow_all_policies(TablePolicies::new())),
+                .policies(super::explicit_allow_all_policies(permissions(|_| {}))),
         )
         .table(
             TableSchema::builder("team_memberships")
                 .column("owner_id", ColumnType::Text)
                 .fk_column("team_id", "teams")
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                )),
+                .policies(super::explicit_allow_all_policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::eq("owner_id", pe::session("user_id")));
+                }))),
         )
         .build()
 }
@@ -49,19 +49,20 @@ fn join_select_policy_schema() -> Schema {
 /// Schema for documents owned by `owner_id` with INSERT/UPDATE/DELETE restricted
 /// to the row owner. SELECT is unrestricted (no policy) so observers can read.
 fn write_policy_schema() -> Schema {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
 
     SchemaBuilder::new()
         .table(
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new()
-                        .with_insert(owner_policy.clone())
-                        .with_update(Some(owner_policy.clone()), PolicyExpr::True)
-                        .with_delete(owner_policy),
-                )),
+                .policies(super::explicit_allow_all_policies(permissions(|p| {
+                    p.allow_insert().where_(owner_policy.clone());
+                    p.allow_update()
+                        .where_old(owner_policy.clone())
+                        .where_new(pe::always());
+                    p.allow_delete().where_(owner_policy);
+                }))),
         )
         .build()
 }
@@ -70,16 +71,18 @@ fn write_policy_schema() -> Schema {
 /// and `with_check = owner_policy` (only the owner may commit the new value).
 /// This lets tests verify that the two clauses are evaluated independently.
 fn write_check_policy_schema() -> Schema {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
 
     SchemaBuilder::new()
         .table(
             TableSchema::builder("documents")
                 .column("owner_id", ColumnType::Text)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy),
-                )),
+                .policies(super::explicit_allow_all_policies(permissions(|p| {
+                    p.allow_update()
+                        .where_old(pe::always())
+                        .where_new(owner_policy);
+                }))),
         )
         .build()
 }
@@ -90,12 +93,10 @@ fn in_session_array_policy_schema() -> Schema {
             TableSchema::builder("team_documents")
                 .column("team_id", ColumnType::Uuid)
                 .column("title", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new().with_select(PolicyExpr::in_session(
-                        "team_id",
-                        vec!["claims".into(), "team_ids".into()],
-                    )),
-                )),
+                .policies(super::explicit_allow_all_policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::in_session("team_id", "claims.team_ids"));
+                }))),
         )
         .build()
 }
@@ -107,10 +108,10 @@ fn authorized_pagination_schema() -> Schema {
                 .column("title", ColumnType::Text)
                 .column("score", ColumnType::Integer)
                 .column("owner_id", ColumnType::Text)
-                .policies(super::explicit_allow_all_policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                )),
+                .policies(super::explicit_allow_all_policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::eq("owner_id", pe::session("user_id")));
+                }))),
         )
         .build()
 }
@@ -291,9 +292,11 @@ async fn select_policies_filter_subscription_results_per_client_session() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            permissions(|p| {
+                let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+                p.allow_read().where_(owner_policy.clone());
+                p.allow_insert().where_(owner_policy);
+            }),
         ))
         .build();
 
@@ -471,9 +474,11 @@ async fn session_user_id_alias_resolves_identically_to_snake_case() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["userId".into()]))
-                .with_insert(PolicyExpr::eq_session("owner_id", vec!["userId".into()])),
+            permissions(|p| {
+                let owner_policy = pe::eq("owner_id", pe::session("userId"));
+                p.allow_read().where_(owner_policy.clone());
+                p.allow_insert().where_(owner_policy);
+            }),
         ))
         .build();
 
@@ -554,9 +559,11 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            permissions(|p| {
+                let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+                p.allow_read().where_(owner_policy.clone());
+                p.allow_insert().where_(owner_policy);
+            }),
         ))
         .build();
 
@@ -628,15 +635,18 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
 /// ```
 #[tokio::test]
 async fn session_user_id_policies_scope_crud_to_owned_rows() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_select(owner_policy.clone())
-                .with_insert(owner_policy.clone())
-                .with_update(Some(owner_policy.clone()), owner_policy.clone())
-                .with_delete(owner_policy),
+            permissions(|p| {
+                p.allow_read().where_(owner_policy.clone());
+                p.allow_insert().where_(owner_policy.clone());
+                p.allow_update()
+                    .where_old(owner_policy.clone())
+                    .where_new(owner_policy.clone());
+                p.allow_delete().where_(owner_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
@@ -791,21 +801,22 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
 /// ```
 #[tokio::test]
 async fn ownership_transfer_allowed_only_for_unarchived_documents() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
-    let unarchived_policy = PolicyExpr::eq_literal("archived", false.into());
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let unarchived_policy = pe::eq("archived", false);
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_insert(owner_policy.clone())
-                .with_update(
-                    Some(PolicyExpr::and(vec![
+            permissions(|p| {
+                p.allow_read()
+                    .where_(pe::eq("owner_id", pe::session("user_id")));
+                p.allow_insert().where_(owner_policy.clone());
+                p.allow_update()
+                    .where_old(pe::all_of([
                         owner_policy.clone(),
                         unarchived_policy.clone(),
-                    ])),
-                    unarchived_policy.clone(),
-                ),
+                    ]))
+                    .where_new(unarchived_policy);
+            }),
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
