@@ -153,7 +153,6 @@ impl ColumnType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnMergeStrategy {
     Counter,
-    /// Grow-only set: concurrent writes converge to the union of all elements.
     GSet,
 }
 

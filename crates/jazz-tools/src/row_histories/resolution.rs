@@ -21,7 +21,7 @@
 //!   [`preview_override_sidecar`] — building blocks reused by `types.rs` when
 //!   encoding the visible-row sidecar.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::metadata::DeleteKind;
 use crate::query_manager::types::{
@@ -201,28 +201,21 @@ pub(super) fn merge_column_with_strategy<'a>(
                 ))
             })?;
 
-            // Union of ancestor ∪ contenders. Key each element by its canonical
-            // encoding so the dedupe and sort are byte-identical across replicas.
-            let mut keyed: Vec<(Vec<u8>, Value)> = Vec::new();
-            collect_set_elements(column, element_type, ancestor_value, &mut keyed)?;
-
-            let mut latest_contributor: Option<&StoredRowBatch> = None;
+            // Union of ancestor ∪ contenders, keyed by canonical encoding. The
+            // BTreeMap sorts keys (deterministic output order) and dedupes as it
+            // goes; the survivor of a key collision can't affect convergence,
+            // because the stored row re-encodes elements through this same encoding.
+            let mut elements: BTreeMap<Vec<u8>, Value> = BTreeMap::new();
+            collect_set_elements(column, element_type, ancestor_value, &mut elements)?;
             for contender in contenders {
-                collect_set_elements(column, element_type, contender.value, &mut keyed)?;
-                if latest_contributor
-                    .map(|current| {
-                        (contender.row.updated_at, contender.row.batch_id())
-                            > (current.updated_at, current.batch_id())
-                    })
-                    .unwrap_or(true)
-                {
-                    latest_contributor = Some(contender.row);
-                }
+                collect_set_elements(column, element_type, contender.value, &mut elements)?;
             }
+            let merged = elements.into_values().collect();
 
-            keyed.sort_by(|a, b| a.0.cmp(&b.0));
-            keyed.dedup_by(|a, b| a.0 == b.0);
-            let merged = keyed.into_iter().map(|(_, value)| value).collect();
+            let latest_contributor = contenders
+                .iter()
+                .max_by_key(|contender| (contender.row.updated_at, contender.row.batch_id()))
+                .map(|contender| contender.row);
 
             Ok((Value::Array(merged), latest_contributor))
         }
@@ -248,21 +241,17 @@ pub(super) fn merge_column_with_strategy<'a>(
     }
 }
 
-/// Collect a set-merge column's array elements, keyed by canonical encoding.
-/// `Null` contributes nothing (empty set); any non-array value is malformed.
 fn collect_set_elements(
     column: &ColumnDescriptor,
     element_type: &ColumnType,
     value: &Value,
-    out: &mut Vec<(Vec<u8>, Value)>,
+    out: &mut BTreeMap<Vec<u8>, Value>,
 ) -> Result<(), EncodingError> {
     match value {
         Value::Array(elements) => {
             for element in elements {
-                out.push((
-                    encode_value_with_type(element, element_type),
-                    element.clone(),
-                ));
+                out.entry(encode_value_with_type(element, element_type))
+                    .or_insert_with(|| element.clone());
             }
             Ok(())
         }
