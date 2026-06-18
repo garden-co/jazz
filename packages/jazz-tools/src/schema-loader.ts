@@ -128,6 +128,8 @@ function columnMergeStrategyToAst(
       return undefined;
     case "Counter":
       return "counter";
+    case "GSet":
+      return "g-set";
   }
 }
 

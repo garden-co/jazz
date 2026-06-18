@@ -307,6 +307,12 @@ function normalizeColumnMergeStrategy(
   if (strategy === "lww") {
     return undefined;
   }
+  if (strategy === "g-set") {
+    if (nullable || typeof sqlType !== "object" || sqlType.kind !== "ARRAY") {
+      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
+    }
+    return "g-set";
+  }
   if (sqlType !== "INTEGER" || nullable) {
     throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
   }
@@ -523,8 +529,8 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   constructor(public _element: T) {}
 
   optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    if (this._mergeStrategy === "g-set") {
+      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
     }
     this._nullable = true;
     return this;
