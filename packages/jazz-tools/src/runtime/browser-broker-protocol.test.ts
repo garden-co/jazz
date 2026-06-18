@@ -5,7 +5,6 @@ import {
   createRuntimeSourceIdentity,
   detectBrowserBrokerMissingCapabilities,
   formatUnsupportedBrowserBrokerError,
-  selectLeaderCandidate,
   type BrowserBrokerFingerprintInput,
 } from "./browser-broker-protocol.js";
 
@@ -35,25 +34,6 @@ describe("browser broker protocol", () => {
         navigator: {},
       }),
     ).toEqual(["MessageChannel", "Web Locks"]);
-  });
-
-  it("chooses the newest visible tab as leader candidate", () => {
-    expect(
-      selectLeaderCandidate([
-        { tabId: "a", visibility: "visible", lastVisibleAt: 10 },
-        { tabId: "b", visibility: "visible", lastVisibleAt: 20 },
-        { tabId: "c", visibility: "hidden", lastVisibleAt: 30 },
-      ])?.tabId,
-    ).toBe("b");
-  });
-
-  it("chooses the newest last-visible tab when all candidates are hidden", () => {
-    expect(
-      selectLeaderCandidate([
-        { tabId: "a", visibility: "hidden", lastVisibleAt: 10 },
-        { tabId: "b", visibility: "hidden", lastVisibleAt: 20 },
-      ])?.tabId,
-    ).toBe("b");
   });
 
   it("creates a deterministic fingerprint from stable compatibility fields", () => {

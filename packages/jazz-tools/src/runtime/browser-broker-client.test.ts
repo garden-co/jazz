@@ -84,8 +84,40 @@ function createFakeWorkerEnv(options: FakeWorkerEnvOptions = {}) {
   return { workers, workerUrls, FakeSharedWorker };
 }
 
+type TestableBrowserBrokerClient = {
+  shutdown(): Promise<void>;
+  connectToBroker(wasmModulePromise: Promise<unknown>): Promise<void>;
+  closeWithError(error: Error): void;
+};
+
+function createTestClient(
+  options: Partial<Parameters<typeof BrowserBrokerClient.connect>[0]> = {},
+): TestableBrowserBrokerClient {
+  const Constructor = BrowserBrokerClient as unknown as {
+    new (options: Parameters<typeof BrowserBrokerClient.connect>[0]): TestableBrowserBrokerClient;
+  };
+  return new Constructor({
+    appId: "app",
+    dbName: "db",
+    tabId: "tab-a",
+    fingerprint: "fingerprint",
+    visibility: "visible",
+    globalLike: {
+      SharedWorker: class {
+        readonly port = new EventTarget() as MessagePort;
+      },
+      MessageChannel,
+      navigator: {
+        locks: { request() {} },
+      },
+    },
+    ...options,
+  } as Parameters<typeof BrowserBrokerClient.connect>[0]);
+}
+
 describe("BrowserBrokerClient", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -335,6 +367,85 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("sanitizes invalid numeric broker options before posting hello", async () => {
+    const env = createFakeWorkerEnv();
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      forceTakeoverTimeoutMs: Number.NaN,
+      brokerPingIntervalMs: -1,
+      brokerPongTimeoutMs: 1.5,
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    expect(env.workers[0]!.port.postedMessages[0]).toMatchObject({
+      type: "hello",
+      forceTakeoverTimeoutMs: undefined,
+      brokerPingIntervalMs: undefined,
+      brokerPongTimeoutMs: 1,
+    });
+
+    await client.shutdown();
+  });
+
+  it("closes transferred follower ports when no callback is registered", async () => {
+    const env = createFakeWorkerEnv();
+    const attachPort = { close: vi.fn() } as unknown as MessagePort;
+    const usePort = { close: vi.fn() } as unknown as MessagePort;
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "become-leader",
+      brokerInstanceId: "instance-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "attach-follower-port",
+      brokerInstanceId: "instance-a",
+      followerTabId: "tab-b",
+      leadershipId: 1,
+      port: attachPort,
+    } satisfies BrowserBrokerControlMessage);
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "use-follower-port",
+      brokerInstanceId: "instance-a",
+      leaderTabId: "tab-b",
+      leadershipId: 1,
+      port: usePort,
+    } satisfies BrowserBrokerControlMessage);
+
+    expect(attachPort.close).toHaveBeenCalledTimes(1);
+    expect(usePort.close).toHaveBeenCalledTimes(1);
+
+    await client.shutdown();
+  });
+
   it("uses an explicit broker worker URL override", async () => {
     const env = createFakeWorkerEnv();
 
@@ -420,6 +531,151 @@ describe("BrowserBrokerClient", () => {
       "Browser broker SharedWorker failed to start: script URL mismatch",
     );
   }, 10_000);
+
+  it("retries loading the wasm module after a transient init failure", async () => {
+    await vi.resetModules();
+    let initAttempts = 0;
+
+    vi.doMock("jazz-wasm", () => ({
+      initSync: undefined,
+      default: async () => {
+        initAttempts += 1;
+        if (initAttempts === 1) {
+          throw new Error("temporary wasm init failure");
+        }
+      },
+      BrokerClient: class {
+        handleEvent(event: { type: string; message?: { type?: string } }) {
+          if (event.type === "connectRequested") {
+            return [
+              { type: "createSharedWorker", workerId: 1, name: "jazz-broker:app:db" },
+              { type: "attachPortListeners", portId: 1 },
+              {
+                type: "postToBroker",
+                portId: 1,
+                message: {
+                  type: "hello",
+                  tabId: "tab-a",
+                  appId: "app",
+                  dbName: "db",
+                  fingerprint: "fingerprint",
+                  visibility: "visible",
+                },
+              },
+            ];
+          }
+          if (event.type === "brokerMessageReceived" && event.message?.type === "broker-hello") {
+            return [{ type: "resolveConnect" }];
+          }
+          return [];
+        }
+
+        snapshot() {
+          return {
+            brokerInstanceId: "instance-a",
+            role: "follower",
+            tabId: "tab-a",
+            leaderTabId: null,
+            leadershipId: 0,
+          };
+        }
+      },
+    }));
+
+    try {
+      const { BrowserBrokerClient: IsolatedClient } = await import("./browser-broker-client.js");
+      const firstEnv = createFakeWorkerEnv();
+      await expect(
+        IsolatedClient.connect({
+          appId: "app",
+          dbName: "db",
+          tabId: "tab-a",
+          fingerprint: "fingerprint",
+          visibility: "visible",
+          globalLike: {
+            SharedWorker: firstEnv.FakeSharedWorker,
+            MessageChannel,
+            navigator: {
+              locks: { request() {} },
+            },
+          },
+        }),
+      ).rejects.toThrow("temporary wasm init failure");
+
+      const secondEnv = createFakeWorkerEnv();
+      const client = await IsolatedClient.connect({
+        appId: "app",
+        dbName: "db",
+        tabId: "tab-a",
+        fingerprint: "fingerprint",
+        visibility: "visible",
+        globalLike: {
+          SharedWorker: secondEnv.FakeSharedWorker,
+          MessageChannel,
+          navigator: {
+            locks: { request() {} },
+          },
+        },
+      });
+
+      expect(initAttempts).toBe(2);
+      await client.shutdown();
+    } finally {
+      vi.doUnmock("jazz-wasm");
+      await vi.resetModules();
+    }
+  });
+
+  it("rejects pending connect and closes the preconnected port on shutdown", async () => {
+    class FakePort extends EventTarget {
+      closed = false;
+      readonly postedMessages: unknown[] = [];
+
+      postMessage(message: unknown): void {
+        this.postedMessages.push(message);
+      }
+
+      start(): void {}
+
+      close(): void {
+        this.closed = true;
+      }
+    }
+
+    const workers: Array<{ port: FakePort & MessagePort }> = [];
+    class FakeSharedWorker {
+      readonly port = new FakePort() as FakePort & MessagePort;
+
+      constructor() {
+        workers.push(this);
+      }
+    }
+
+    const client = createTestClient({
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+    const connecting = client.connectToBroker(new Promise(() => {}));
+    connecting.catch(() => undefined);
+    await waitFor(() => workers.length === 1, 100, "preconnected worker should be created");
+
+    await client.shutdown();
+
+    const outcome = await Promise.race([
+      connecting.then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 0)),
+    ]);
+    expect(outcome).toBe("Browser broker client closed");
+    expect(workers[0]!.port.closed).toBe(true);
+  });
 
   it("cleans up the port and handlers when broker hello times out", async () => {
     vi.useFakeTimers();
@@ -568,6 +824,43 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("does not post broker-pong when ping responses are disabled", async () => {
+    const env = createFakeWorkerEnv();
+    const respondToBrokerPings = vi.fn(() => false);
+
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      respondToBrokerPings,
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "broker-ping",
+      brokerInstanceId: "instance-a",
+    } satisfies BrowserBrokerControlMessage);
+
+    expect(respondToBrokerPings).toHaveBeenCalled();
+    expect(env.workers[0]!.port.postedMessages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "broker-pong",
+        }),
+      ]),
+    );
+
+    await client.shutdown();
+  });
+
   it("closes with the reconnect failure as the error cause", async () => {
     const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a"] });
     const constructionError = new Error("second construction failed");
@@ -681,6 +974,17 @@ describe("BrowserBrokerClient", () => {
     await expect(client.waitForRole("leader", 10)).rejects.toThrow(
       "incompatible persistent browser configuration",
     );
+  });
+
+  it("notifies onClosed once when close is repeated with a different error", () => {
+    const onClosed = vi.fn();
+    const client = createTestClient({ onClosed });
+
+    client.closeWithError(new Error("first close"));
+    client.closeWithError(new Error("second close"));
+
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(onClosed.mock.calls[0]![0].message).toBe("first close");
   });
 
   it("forwards future demote messages so in-flight promotions can be cancelled", async () => {

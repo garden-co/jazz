@@ -189,6 +189,39 @@ describe("SharedWorker browser broker", () => {
     ).rejects.toThrow("incompatible persistent browser configuration");
   });
 
+  it("keeps an accepted same-tab client connected after rejecting an incompatible reconnect", async () => {
+    const dbName = uniqueName("broker-same-tab-reject");
+    const reconnects: string[] = [];
+    const first = await BrowserBrokerClient.connect({
+      ...createLockingOptions(dbName, "tab-a", "fingerprint-a", {
+        brokerPingIntervalMs: 50,
+        brokerPongTimeoutMs: 100,
+      }),
+      onReconnected: () => {
+        reconnects.push("tab-a");
+      },
+    });
+    clients.push(first);
+    await first.waitForRole("leader", 2000);
+
+    await expect(
+      BrowserBrokerClient.connect({
+        ...createOptions(dbName, "tab-a", "fingerprint-b"),
+        brokerPingIntervalMs: 50,
+        brokerPongTimeoutMs: 100,
+      }),
+    ).rejects.toThrow("incompatible persistent browser configuration");
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(reconnects).toEqual([]);
+    expect(first.snapshot()).toMatchObject({
+      role: "leader",
+      tabId: "tab-a",
+      leaderTabId: "tab-a",
+      leadershipId: 1,
+    });
+  });
+
   it("blocks a schema-mismatched tab and promotes it after the pinning tab departs", async () => {
     const dbName = uniqueName("broker-schema-blocked");
     const blockedReasons: string[] = [];

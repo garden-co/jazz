@@ -9,7 +9,10 @@ use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
 use jazz_wasm::types::Value;
-use jazz_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
+use jazz_wasm::{
+    current_timestamp, generate_id, parse_schema, BrokerClient, BrokerElection, WasmQueryBuilder,
+};
+use serde_json::json;
 
 #[wasm_bindgen_test]
 fn test_generate_id() {
@@ -55,6 +58,57 @@ fn test_parse_schema() {
 fn test_parse_schema_invalid() {
     let result = parse_schema("not valid json");
     assert!(result.is_err());
+}
+
+#[wasm_bindgen_test]
+fn broker_election_wrapper_handles_js_events_and_returns_js_effects() {
+    let mut broker = BrokerElection::new("broker-test".to_string());
+    let event = serde_wasm_bindgen::to_value(&json!({
+        "type": "tabConnected",
+        "tabId": "tab-a",
+        "appId": "app",
+        "dbName": "db",
+        "fingerprint": "fingerprint",
+        "visibility": "visible",
+        "nowMs": 1
+    }))
+    .unwrap();
+
+    let effects_js = broker.handle_event(event).unwrap();
+    let effects: serde_json::Value = serde_wasm_bindgen::from_value(effects_js).unwrap();
+
+    assert_eq!(effects[0]["type"], "sendToTab");
+    assert_eq!(effects[0]["tabId"], "tab-a");
+    assert_eq!(effects[0]["message"]["type"], "broker-ping");
+    assert_eq!(effects[1]["type"], "armTimer");
+    assert_eq!(effects[1]["timerId"]["type"], "brokerPing");
+}
+
+#[wasm_bindgen_test]
+fn broker_client_wrapper_handles_js_events_and_returns_js_effects() {
+    let mut client = BrokerClient::new();
+    let event = serde_wasm_bindgen::to_value(&json!({
+        "type": "connectRequested",
+        "appId": "app",
+        "dbName": "db",
+        "tabId": "tab-a",
+        "fingerprint": "fingerprint",
+        "visibility": "visible",
+        "nowMs": 1
+    }))
+    .unwrap();
+
+    let effects_js = client.handle_event(event).unwrap();
+    let effects: serde_json::Value = serde_wasm_bindgen::from_value(effects_js).unwrap();
+
+    assert_eq!(effects[0]["type"], "createSharedWorker");
+    assert_eq!(effects[0]["workerId"], 1);
+    assert_eq!(effects[1]["type"], "attachPortListeners");
+    assert_eq!(effects[1]["portId"], 1);
+    assert_eq!(effects[2]["type"], "postToBroker");
+    assert_eq!(effects[2]["message"]["type"], "hello");
+    assert_eq!(effects[3]["type"], "armTimer");
+    assert_eq!(effects[3]["kind"]["type"], "brokerHello");
 }
 
 #[wasm_bindgen_test]

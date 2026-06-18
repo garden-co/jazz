@@ -155,7 +155,7 @@ fn insert_todo(runtime: &WasmRuntime, title: &str) {
     Reflect::set(&values, &"title".into(), &title.into()).unwrap();
     Reflect::set(&values, &"completed".into(), &JsValue::FALSE).unwrap();
     runtime
-        .insert("todos", values.into(), None)
+        .insert("todos", values.into(), None, None)
         .expect("insert todo");
 }
 

@@ -1,22 +1,23 @@
 import {
-  DEFAULT_BROKER_PING_INTERVAL_MS,
-  DEFAULT_BROKER_PONG_TIMEOUT_MS,
   detectBrowserBrokerMissingCapabilities,
   formatUnsupportedBrowserBrokerError,
-  normalizePositiveTimeout,
   stringifyError,
   type BrowserBrokerCapabilityGlobal,
   type BrowserBrokerControlMessage,
   type BrowserBrokerRole,
   type BrowserBrokerTabMessage,
-  type BrowserBrokerTabMessageInput,
   type BrowserBrokerVisibility,
 } from "./browser-broker-protocol.js";
-import { createBrowserBrokerUnsupportedError } from "./browser-broker-errors.js";
+import {
+  createBrowserBrokerUnsupportedError,
+  type BrowserBrokerUnsupportedCode,
+} from "./browser-broker-errors.js";
 import type { RuntimeSourcesConfig } from "./context.js";
-import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
-
-const DEFAULT_STORAGE_RESET_TIMEOUT_MS = 5_000;
+import {
+  resolveRuntimeConfigBrokerWorkerUrl,
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+} from "./runtime-config.js";
 
 export interface BrowserBrokerClientSnapshot {
   brokerInstanceId: string | null;
@@ -64,24 +65,6 @@ export interface BrowserBrokerClientOptions {
   storageResetTimeoutMs?: number;
 }
 
-type RoleWaiter = {
-  role: BrowserBrokerRole;
-  resolve: () => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
-
-type ResetWaiter = {
-  resolve: () => void;
-  reject: (error: Error) => void;
-};
-
-type ResetStartWaiter = {
-  resolve: () => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
-
 type SharedWorkerConstructor = new (
   scriptURL: string | URL,
   options?: string | BrowserBrokerSharedWorkerOptions,
@@ -93,29 +76,169 @@ interface BrowserBrokerSharedWorkerOptions {
   credentials?: RequestCredentials;
 }
 
+type BrokerClientBinding = {
+  handleEvent(event: BrokerClientEvent): BrokerClientEffect[];
+  snapshot(): BrowserBrokerClientSnapshot & { closed?: boolean; reconnecting?: boolean };
+};
+
+type BrokerClientModule = {
+  BrokerClient: new () => BrokerClientBinding;
+  default?: (input?: unknown) => Promise<unknown>;
+  initSync?: (input?: unknown) => unknown;
+};
+
+type BrokerClientEvent =
+  | ({ type: "connectRequested" } & ConnectRequestedEvent)
+  | { type: "publicCommand"; command: BrokerClientCommand }
+  | {
+      type: "brokerMessageReceived";
+      message: BrokerControlMessageForCore;
+      respondToBrokerPing: boolean;
+      nowMs: number;
+    }
+  | { type: "timerFired"; timerId: number; kind: BrokerClientTimerKind; nowMs: number }
+  | { type: "callbackResolved"; callbackId: number; nowMs: number }
+  | { type: "callbackRejected"; callbackId: number; errorMessage: string; nowMs: number }
+  | { type: "workerError"; workerId: number; errorMessage: string; nowMs: number }
+  | { type: "portMessageError"; portId: number; nowMs: number };
+
+interface ConnectRequestedEvent {
+  appId: string;
+  dbName: string;
+  tabId: string;
+  fingerprint: string;
+  visibility: BrowserBrokerVisibility;
+  forceTakeoverTimeoutMs?: number;
+  brokerPingIntervalMs?: number;
+  brokerPongTimeoutMs?: number;
+  storageResetTimeoutMs?: number;
+  nowMs: number;
+}
+
+type BrokerClientCommand =
+  | { type: "waitForRole"; role: BrowserBrokerRole; promiseId: number; timeoutMs: number }
+  | {
+      type: "reportLeaderReady";
+      leadershipId: number;
+      tabLockName: string;
+      workerLockName: string;
+      bridgelessStorageReset: boolean;
+    }
+  | { type: "reportLeaderFailed"; leadershipId: number; reason: string }
+  | { type: "reportVisibility"; visibility: BrowserBrokerVisibility }
+  | { type: "reportFollowerPortAttached"; followerTabId: string; leadershipId: number }
+  | { type: "reportFollowerPortClosed"; followerTabId: string; leadershipId: number }
+  | { type: "reportSchemaReady"; schemaFingerprint: string }
+  | {
+      type: "requestStorageReset";
+      requestId: string;
+      startPromiseId: number;
+      completionPromiseId: number;
+    }
+  | {
+      type: "reportStorageResetReady";
+      requestId: string;
+      success: boolean;
+      errorMessage?: string;
+    }
+  | { type: "shutdown" };
+
+type BrokerClientTimerKind =
+  | { type: "brokerHello" }
+  | { type: "initialLeadership" }
+  | { type: "brokerLiveness" }
+  | { type: "roleWaiter"; promiseId: number }
+  | { type: "storageResetStart"; requestId: string; promiseId: number };
+
+// Mirrors the serde-wasm-bindgen event/effect/callback shapes in
+// crates/jazz-wasm/src/broker_client.rs. Keep the Rust serialization tests and
+// these unions in sync until the protocol declarations are generated.
+type BrokerClientCallback =
+  | { type: "brokerPing" }
+  | { type: "becomeLeader"; leadershipId: number; resetRequestId?: string }
+  | { type: "demote"; leadershipId: number }
+  | {
+      type: "attachFollowerPort";
+      followerTabId: string;
+      leadershipId: number;
+      portId?: number;
+    }
+  | { type: "detachFollowerPort"; followerTabId: string; leadershipId: number }
+  | { type: "useFollowerPort"; leaderTabId: string; leadershipId: number; portId?: number }
+  | { type: "followerReady"; leaderTabId: string; leadershipId: number }
+  | { type: "closeFollowerPort"; leadershipId: number }
+  | { type: "storageResetBegin"; requestId: string; leadershipId: number }
+  | { type: "schemaBlocked"; reason: string }
+  | { type: "reconnected" };
+
+type BrokerClientEffect =
+  | { type: "createSharedWorker"; workerId: number; name: string }
+  | { type: "attachPortListeners"; portId: number }
+  | { type: "detachPort"; portId: number; close: boolean }
+  | { type: "postToBroker"; portId: number; message: BrowserBrokerTabMessage }
+  | { type: "armTimer"; timerId: number; kind: BrokerClientTimerKind; delayMs: number }
+  | { type: "cancelTimer"; timerId: number }
+  | { type: "releaseMessagePort"; portId: number }
+  | { type: "invokeCallback"; callbackId: number; callback: BrokerClientCallback }
+  | { type: "resolveConnect" }
+  | { type: "rejectConnect"; reason: string; code?: BrowserBrokerUnsupportedCode }
+  | { type: "resolvePublicPromise"; promiseId: number }
+  | { type: "rejectPublicPromise"; promiseId: number; reason: string }
+  | { type: "closeClient"; reason: string; code?: BrowserBrokerUnsupportedCode };
+
+type BrokerControlMessageForCore =
+  | Exclude<
+      BrowserBrokerControlMessage,
+      { type: "attach-follower-port" } | { type: "use-follower-port" }
+    >
+  | (Omit<Extract<BrowserBrokerControlMessage, { type: "attach-follower-port" }>, "port"> & {
+      portId?: number;
+    })
+  | (Omit<Extract<BrowserBrokerControlMessage, { type: "use-follower-port" }>, "port"> & {
+      portId?: number;
+    });
+
+type PublicPromise = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
+type ConnectWaiter = PublicPromise;
+
+type PreconnectedWorker = {
+  workerId: number;
+  portId: number;
+  worker: SharedWorker;
+  port: MessagePort;
+  queuedMessages: BrowserBrokerControlMessage[];
+  cleanup: () => void;
+  helloPosted: boolean;
+};
+
 export class BrowserBrokerClient {
   private readonly options: BrowserBrokerClientOptions;
+  private core: BrokerClientBinding | null = null;
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
-  private brokerInstanceId: string | null = null;
-  private role: BrowserBrokerRole = "follower";
-  private leaderTabId: string | null = null;
-  private leadershipId = 0;
-  private visibility: BrowserBrokerVisibility;
+  private preconnectedWorker: PreconnectedWorker | null = null;
+  private pendingWorker: { workerId: number; worker: SharedWorker } | null = null;
+  private readonly workers = new Map<number, SharedWorker>();
+  private readonly workerCleanups = new Map<number, () => void>();
+  private readonly ports = new Map<number, MessagePort>();
+  private readonly portCleanups = new Map<number, () => void>();
+  private readonly portToWorker = new Map<number, number>();
+  private readonly timers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly publicPromises = new Map<number, PublicPromise>();
+  private readonly messagePorts = new Map<number, MessagePort>();
+  private readonly suppressHelloPortIds = new Set<number>();
+  private nextPromiseId = 1;
+  private nextMessagePortId = 1;
+  private connectWaiter: ConnectWaiter | null = null;
   private closed = false;
   private closedError: Error | null = null;
-  private reconnecting = false;
-  private reconnectDone: Promise<void> | null = null;
-  private resolveReconnectDone: (() => void) | null = null;
-  private readonly roleWaiters = new Set<RoleWaiter>();
-  private readonly resetWaiters = new Map<string, ResetWaiter[]>();
-  private readonly resetStartWaiters = new Map<string, ResetStartWaiter[]>();
-  private readonly queuedMessages: BrowserBrokerTabMessage[] = [];
-  private brokerLivenessTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(options: BrowserBrokerClientOptions) {
     this.options = options;
-    this.visibility = options.visibility;
   }
 
   static async connect(options: BrowserBrokerClientOptions): Promise<BrowserBrokerClient> {
@@ -125,18 +248,20 @@ export class BrowserBrokerClient {
       throw new Error(formatUnsupportedBrowserBrokerError(missing));
     }
 
+    const wasmModule = loadBrokerClientWasmModule(options.runtimeSources);
     const client = new BrowserBrokerClient(options);
-    await client.connectToBroker();
+    await client.connectToBroker(wasmModule);
     return client;
   }
 
   snapshot(): BrowserBrokerClientSnapshot {
+    const snapshot = this.core?.snapshot();
     return {
-      brokerInstanceId: this.brokerInstanceId,
-      role: this.role,
-      tabId: this.options.tabId,
-      leaderTabId: this.leaderTabId,
-      leadershipId: this.leadershipId,
+      brokerInstanceId: snapshot?.brokerInstanceId ?? null,
+      role: snapshot?.role ?? "follower",
+      tabId: snapshot?.tabId ?? this.options.tabId,
+      leaderTabId: snapshot?.leaderTabId ?? null,
+      leadershipId: snapshot?.leadershipId ?? 0,
     };
   }
 
@@ -144,67 +269,66 @@ export class BrowserBrokerClient {
     if (this.closed) {
       throw this.closedError ?? new Error("Browser broker client closed");
     }
-    if (this.role === role && this.leaderTabId !== null) {
-      return;
-    }
 
-    await new Promise<void>((resolve, reject) => {
-      const waiter: RoleWaiter = {
+    const promiseId = this.nextPublicPromiseId();
+    const promise = this.createPublicPromise(promiseId);
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: {
+        type: "waitForRole",
         role,
-        resolve,
-        reject,
-        timeout: setTimeout(() => {
-          this.roleWaiters.delete(waiter);
-          reject(new Error(`Timed out waiting for broker role ${role}`));
-        }, timeoutMs),
-      };
-      this.roleWaiters.add(waiter);
+        promiseId,
+        timeoutMs: sanitizeOptionalTimeoutMs(timeoutMs) ?? 5_000,
+      },
     });
+    return await promise;
   }
 
   reportLeaderReady(input: BrowserBrokerLeaderReadyInput): void {
-    this.send({
-      type: "leader-ready",
-      leadershipId: input.leadershipId,
-      tabLockName: input.tabLockName,
-      workerLockName: input.workerLockName,
-      ...(input.bridgelessStorageReset ? { bridgelessStorageReset: true } : {}),
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: {
+        type: "reportLeaderReady",
+        leadershipId: input.leadershipId,
+        tabLockName: input.tabLockName,
+        workerLockName: input.workerLockName,
+        bridgelessStorageReset: input.bridgelessStorageReset === true,
+      },
     });
   }
 
   reportLeaderFailed(leadershipId: number, reason: string): void {
-    this.send({
-      type: "leader-failed",
-      leadershipId,
-      reason,
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: { type: "reportLeaderFailed", leadershipId, reason },
     });
   }
 
   reportVisibility(visibility: BrowserBrokerVisibility): void {
-    this.visibility = visibility;
-    this.send({ type: "visibility", visibility });
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: { type: "reportVisibility", visibility },
+    });
   }
 
   reportFollowerPortAttached(followerTabId: string, leadershipId: number): void {
-    this.send({
-      type: "follower-port-attached",
-      followerTabId,
-      leadershipId,
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: { type: "reportFollowerPortAttached", followerTabId, leadershipId },
     });
   }
 
   reportFollowerPortClosed(followerTabId: string, leadershipId: number): void {
-    this.send({
-      type: "follower-port-closed",
-      followerTabId,
-      leadershipId,
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: { type: "reportFollowerPortClosed", followerTabId, leadershipId },
     });
   }
 
   reportSchemaReady(schemaFingerprint: string): void {
-    this.send({
-      type: "schema-ready",
-      schemaFingerprint,
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: { type: "reportSchemaReady", schemaFingerprint },
     });
   }
 
@@ -212,170 +336,242 @@ export class BrowserBrokerClient {
     if (this.closed) {
       throw this.closedError ?? new Error("Browser broker client closed");
     }
-    // A reconnect drops in-flight sends; wait for it to settle so the
-    // reset request reaches the new broker instance instead of vanishing.
-    while (this.reconnecting && this.reconnectDone) {
-      await this.reconnectDone;
-      if (this.closed) {
-        throw this.closedError ?? new Error("Browser broker client closed");
-      }
-    }
-    let startWaiter!: ResetStartWaiter;
-    let waiter!: ResetWaiter;
-    const started = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.removeResetStartWaiter(requestId, startWaiter);
-        reject(new Error(`Timed out waiting for browser storage reset ${requestId} to start`));
-      }, this.storageResetTimeoutMs());
-      startWaiter = { resolve, reject, timeout };
-      const waiters = this.resetStartWaiters.get(requestId) ?? [];
-      waiters.push(startWaiter);
-      this.resetStartWaiters.set(requestId, waiters);
+
+    const startPromiseId = this.nextPublicPromiseId();
+    const completionPromiseId = this.nextPublicPromiseId();
+    const started = this.createPublicPromise(startPromiseId);
+    const completion = this.createPublicPromise(completionPromiseId);
+
+    this.runCoreEvent({
+      type: "publicCommand",
+      command: {
+        type: "requestStorageReset",
+        requestId,
+        startPromiseId,
+        completionPromiseId,
+      },
     });
-    const completion = new Promise<void>((resolve, reject) => {
-      waiter = { resolve, reject };
-      const waiters = this.resetWaiters.get(requestId) ?? [];
-      waiters.push(waiter);
-      this.resetWaiters.set(requestId, waiters);
-    });
-    this.send({
-      type: "storage-reset-request",
-      requestId,
-    });
+
     try {
       await started;
       await completion;
     } catch (error) {
-      this.removeResetWaiter(requestId, waiter);
+      this.publicPromises.delete(completionPromiseId);
       throw error;
     }
   }
 
   async shutdown(): Promise<void> {
     if (this.closed) return;
-    const shutdownMessage = this.stampTabMessage({ type: "shutdown" });
+    this.runCoreEvent({ type: "publicCommand", command: { type: "shutdown" } });
     this.closed = true;
-    this.closedError = new Error("Browser broker client closed");
-    this.stopBrokerLivenessTimer();
-    this.queuedMessages.length = 0;
-    if (shutdownMessage) {
-      this.port?.postMessage(shutdownMessage);
-    }
-    if (this.port) {
-      this.detachBrokerPort(this.port);
-    }
-    for (const waiter of this.roleWaiters) {
-      clearTimeout(waiter.timeout);
-      waiter.reject(new Error("Browser broker client closed"));
-    }
-    this.roleWaiters.clear();
-    this.rejectResetStartWaiters(new Error("Browser broker client closed"));
-    this.rejectResetWaiters(new Error("Browser broker client closed"));
+    const error = new Error("Browser broker client closed");
+    this.closedError = error;
+    this.preconnectedWorker?.cleanup();
+    this.preconnectedWorker?.port.close();
+    this.preconnectedWorker = null;
+    this.connectWaiter?.reject(error);
+    this.connectWaiter = null;
+    this.rejectAllPublicPromises(this.closedError);
   }
 
-  private async connectToBroker(): Promise<void> {
-    const worker = this.createSharedWorker();
+  private connectToBroker(wasmModulePromise: Promise<BrokerClientModule>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.connectWaiter = { resolve, reject };
+      let preconnected: PreconnectedWorker;
+      try {
+        preconnected = this.startPreconnectedWorker();
+        this.preconnectedWorker = preconnected;
+      } catch (error) {
+        this.failConnect(wrapUnknownError(error));
+        return;
+      }
+
+      void wasmModulePromise.then(
+        (wasmModule) => {
+          if (this.closed) {
+            preconnected.cleanup();
+            preconnected.port.close();
+            return;
+          }
+          this.core = new wasmModule.BrokerClient();
+          this.runCoreEvent(this.connectRequestedEvent());
+          this.replayPreconnectedMessages(preconnected);
+        },
+        (error) => {
+          if (this.closed) return;
+          this.failConnect(wrapUnknownError(error));
+        },
+      );
+    });
+  }
+
+  private connectRequestedEvent(): BrokerClientEvent {
+    return {
+      type: "connectRequested",
+      appId: this.options.appId,
+      dbName: this.options.dbName,
+      tabId: this.options.tabId,
+      fingerprint: this.options.fingerprint,
+      visibility: this.options.visibility,
+      forceTakeoverTimeoutMs: sanitizeOptionalTimeoutMs(this.options.forceTakeoverTimeoutMs),
+      brokerPingIntervalMs: sanitizeOptionalTimeoutMs(this.options.brokerPingIntervalMs),
+      brokerPongTimeoutMs: sanitizeOptionalTimeoutMs(this.options.brokerPongTimeoutMs),
+      storageResetTimeoutMs: sanitizeOptionalTimeoutMs(this.options.storageResetTimeoutMs),
+      nowMs: Date.now(),
+    };
+  }
+
+  private startPreconnectedWorker(): PreconnectedWorker {
+    const workerId = 1;
+    const portId = 1;
+    const worker = this.createSharedWorker(this.brokerWorkerName());
     const port = worker.port;
+    const queuedMessages: BrowserBrokerControlMessage[] = [];
+
     this.worker = worker;
     this.port = port;
+    this.suppressHelloPortIds.add(portId);
 
-    port.addEventListener("message", this.onMessage);
-    port.addEventListener("messageerror", this.onPortMessageError);
+    const onMessage = (event: MessageEvent) => {
+      queuedMessages.push(event.data as BrowserBrokerControlMessage);
+    };
+    const onPortMessageError = () => {
+      this.failConnect(new Error("Browser broker port message error"));
+    };
+    port.addEventListener("message", onMessage);
+    port.addEventListener("messageerror", onPortMessageError);
     port.start();
 
-    const hello = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("Timed out waiting for browser broker hello"));
-      }, 5_000);
-
+    let workerCleanup = () => {};
+    if (typeof (worker as Partial<EventTarget>).addEventListener === "function") {
+      const workerEvents = worker as unknown as EventTarget;
       const onWorkerError = (event: Event) => {
-        cleanup();
         const detail =
           (event as ErrorEvent).message ||
           "worker error event (possible script URL or version mismatch)";
-        reject(new Error(`Browser broker SharedWorker failed to start: ${detail}`));
+        this.failConnect(new Error(`Browser broker SharedWorker failed to start: ${detail}`));
       };
+      workerEvents.addEventListener("error", onWorkerError);
+      workerCleanup = () => workerEvents.removeEventListener("error", onWorkerError);
+    }
 
-      const cleanup = () => {
-        clearTimeout(timeout);
-        port.removeEventListener("message", onHello);
-        workerEvents?.removeEventListener("error", onWorkerError);
-      };
+    port.postMessage(this.helloMessage());
 
-      const onHello = (event: MessageEvent) => {
-        const message = event.data as BrowserBrokerControlMessage;
-        if (message?.type === "broker-hello") {
-          cleanup();
-          resolve();
-          return;
-        }
-        if (message?.type === "unsupported") {
-          cleanup();
-          reject(createBrowserBrokerUnsupportedError(message.reason, message.code));
-        }
-      };
+    return {
+      workerId,
+      portId,
+      worker,
+      port,
+      queuedMessages,
+      helloPosted: true,
+      cleanup: () => {
+        port.removeEventListener("message", onMessage);
+        port.removeEventListener("messageerror", onPortMessageError);
+        workerCleanup();
+      },
+    };
+  }
 
-      // Fakes in unit tests (and exotic SharedWorker shims) may not be
-      // EventTargets, so the listener is best-effort.
-      const workerEvents =
-        typeof (worker as Partial<EventTarget>).addEventListener === "function"
-          ? (worker as unknown as EventTarget)
-          : null;
-      workerEvents?.addEventListener("error", onWorkerError);
-      port.addEventListener("message", onHello);
-    });
-
-    port.postMessage({
-      type: "hello",
-      tabId: this.options.tabId,
-      appId: this.options.appId,
-      dbName: this.options.dbName,
-      fingerprint: this.options.fingerprint,
-      visibility: this.visibility,
-      forceTakeoverTimeoutMs: this.options.forceTakeoverTimeoutMs,
-      brokerPingIntervalMs: this.options.brokerPingIntervalMs,
-      brokerPongTimeoutMs: this.options.brokerPongTimeoutMs,
-    });
-
-    try {
-      await hello;
-      await this.waitForInitialLeadershipMessage(port);
-      this.refreshBrokerLivenessTimer();
-      this.flushQueuedMessages();
-    } catch (error) {
-      if (this.port === port) {
-        this.detachBrokerPort(port);
-        this.port = null;
-      }
-      if (this.worker === worker) {
-        this.worker = null;
-      }
-      throw error;
+  private replayPreconnectedMessages(preconnected: PreconnectedWorker): void {
+    for (const message of preconnected.queuedMessages.splice(0)) {
+      this.handleControlMessage(preconnected.portId, message);
     }
   }
 
-  private async waitForInitialLeadershipMessage(port: MessagePort): Promise<void> {
-    if (this.leadershipId > 0 || this.closed || this.port !== port) return;
+  private runCoreEvent(event: BrokerClientEvent): void {
+    if (this.closed && event.type !== "callbackResolved" && event.type !== "callbackRejected") {
+      return;
+    }
 
-    await new Promise<void>((resolve) => {
-      let timeout: ReturnType<typeof setTimeout>;
-      const cleanup = () => {
-        clearTimeout(timeout);
-        port.removeEventListener("message", onMessage);
-        resolve();
-      };
-      const onMessage = () => {
-        if (this.leadershipId > 0 || this.closed || this.port !== port) {
-          cleanup();
-        }
-      };
-      timeout = setTimeout(cleanup, 100);
-      port.addEventListener("message", onMessage);
-    });
+    let effects: BrokerClientEffect[];
+    try {
+      if (!this.core) return;
+      effects = this.core.handleEvent(event);
+    } catch (error) {
+      this.handleEffectExecutionError(error);
+      return;
+    }
+    this.executeEffects(effects);
   }
 
-  private createSharedWorker(): SharedWorker {
+  private executeEffects(effects: BrokerClientEffect[]): void {
+    for (const effect of effects) {
+      try {
+        this.executeEffect(effect);
+      } catch (error) {
+        this.handleEffectExecutionError(error);
+        return;
+      }
+    }
+  }
+
+  private executeEffect(effect: BrokerClientEffect): void {
+    switch (effect.type) {
+      case "createSharedWorker": {
+        const worker =
+          this.preconnectedWorker?.workerId === effect.workerId
+            ? this.preconnectedWorker.worker
+            : this.createSharedWorker(effect.name);
+        this.worker = worker;
+        this.workers.set(effect.workerId, worker);
+        this.pendingWorker = { workerId: effect.workerId, worker };
+        if (this.preconnectedWorker?.workerId !== effect.workerId) {
+          this.attachWorkerErrorListener(effect.workerId, worker);
+        }
+        return;
+      }
+      case "attachPortListeners":
+        this.attachPort(effect.portId);
+        return;
+      case "detachPort":
+        this.detachPort(effect.portId, effect.close);
+        return;
+      case "postToBroker": {
+        if (effect.message.type === "hello" && this.suppressHelloPortIds.delete(effect.portId)) {
+          return;
+        }
+        this.ports.get(effect.portId)?.postMessage(effect.message);
+        return;
+      }
+      case "armTimer":
+        this.armTimer(effect.timerId, effect.kind, effect.delayMs);
+        return;
+      case "cancelTimer":
+        this.cancelTimer(effect.timerId);
+        return;
+      case "releaseMessagePort":
+        this.releaseMessagePort(effect.portId);
+        return;
+      case "invokeCallback":
+        this.invokeCallback(effect.callbackId, effect.callback);
+        return;
+      case "resolveConnect":
+        this.connectWaiter?.resolve();
+        this.connectWaiter = null;
+        return;
+      case "rejectConnect":
+        this.failConnect(errorFromBroker(effect.reason, effect.code));
+        return;
+      case "resolvePublicPromise": {
+        const promise = this.publicPromises.get(effect.promiseId);
+        this.publicPromises.delete(effect.promiseId);
+        promise?.resolve();
+        return;
+      }
+      case "rejectPublicPromise": {
+        const promise = this.publicPromises.get(effect.promiseId);
+        this.publicPromises.delete(effect.promiseId);
+        promise?.reject(new Error(effect.reason));
+        return;
+      }
+      case "closeClient":
+        this.closeWithError(errorFromBroker(effect.reason, effect.code));
+        return;
+    }
+  }
+
+  private createSharedWorker(name: string): SharedWorker {
     const globalLike = this.options.globalLike ?? (globalThis as BrowserBrokerCapabilityGlobal);
     const SharedWorkerCtor = globalLike.SharedWorker as SharedWorkerConstructor;
     const workerUrl =
@@ -386,284 +582,223 @@ export class BrowserBrokerClient {
             this.options.runtimeSources,
           )
         : new URL("../worker/jazz-broker-worker.js", import.meta.url);
-    return new SharedWorkerCtor(workerUrl, {
-      type: "module",
-      name: `jazz-broker:${this.options.appId}:${this.options.dbName}`,
+    return new SharedWorkerCtor(workerUrl, { type: "module", name });
+  }
+
+  private brokerWorkerName(): string {
+    return `jazz-broker:${this.options.appId}:${this.options.dbName}`;
+  }
+
+  private helloMessage(): BrowserBrokerTabMessage {
+    return {
+      type: "hello",
+      tabId: this.options.tabId,
+      appId: this.options.appId,
+      dbName: this.options.dbName,
+      fingerprint: this.options.fingerprint,
+      visibility: this.options.visibility,
+      forceTakeoverTimeoutMs: sanitizeOptionalTimeoutMs(this.options.forceTakeoverTimeoutMs),
+      brokerPingIntervalMs: sanitizeOptionalTimeoutMs(this.options.brokerPingIntervalMs),
+      brokerPongTimeoutMs: sanitizeOptionalTimeoutMs(this.options.brokerPongTimeoutMs),
+    };
+  }
+
+  private attachWorkerErrorListener(workerId: number, worker: SharedWorker): void {
+    if (typeof (worker as Partial<EventTarget>).addEventListener !== "function") return;
+
+    const workerEvents = worker as unknown as EventTarget;
+    const onWorkerError = (event: Event) => {
+      const detail =
+        (event as ErrorEvent).message ||
+        "worker error event (possible script URL or version mismatch)";
+      this.runCoreEvent({
+        type: "workerError",
+        workerId,
+        errorMessage: detail,
+        nowMs: Date.now(),
+      });
+    };
+    workerEvents.addEventListener("error", onWorkerError);
+    this.workerCleanups.set(workerId, () => {
+      workerEvents.removeEventListener("error", onWorkerError);
     });
   }
 
-  private readonly onMessage = (event: MessageEvent): void => {
-    this.handleControlMessage(event.data as BrowserBrokerControlMessage);
-  };
+  private attachPort(portId: number): void {
+    const pending = this.pendingWorker;
+    if (!pending) return;
 
-  private readonly onPortMessageError = (): void => {
-    void this.reconnectAfterBrokerPortFailure(new Error("Browser broker port message error"));
-  };
+    const port = pending.worker.port;
+    if (this.preconnectedWorker?.portId === portId) {
+      this.preconnectedWorker.cleanup();
+      this.preconnectedWorker = null;
+    }
+    this.port = port;
+    this.pendingWorker = null;
+    this.ports.set(portId, port);
+    this.portToWorker.set(portId, pending.workerId);
 
-  private handleControlMessage(message: BrowserBrokerControlMessage): void {
-    if (!message || typeof message !== "object") return;
-    if (this.brokerInstanceId && message.brokerInstanceId !== this.brokerInstanceId) {
-      void this.reconnectAfterBrokerInstanceChange(message.brokerInstanceId);
-      return;
+    const onMessage = (event: MessageEvent) => {
+      this.handleControlMessage(portId, event.data as BrowserBrokerControlMessage);
+    };
+    const onPortMessageError = () => {
+      this.runCoreEvent({ type: "portMessageError", portId, nowMs: Date.now() });
+    };
+    port.addEventListener("message", onMessage);
+    port.addEventListener("messageerror", onPortMessageError);
+    port.start();
+
+    this.portCleanups.set(portId, () => {
+      port.removeEventListener("message", onMessage);
+      port.removeEventListener("messageerror", onPortMessageError);
+    });
+  }
+
+  private detachPort(portId: number, close: boolean): void {
+    const port = this.ports.get(portId);
+    this.portCleanups.get(portId)?.();
+    this.portCleanups.delete(portId);
+    this.ports.delete(portId);
+
+    const workerId = this.portToWorker.get(portId);
+    this.portToWorker.delete(portId);
+    if (workerId !== undefined) {
+      this.workerCleanups.get(workerId)?.();
+      this.workerCleanups.delete(workerId);
+      this.workers.delete(workerId);
     }
 
-    switch (message.type) {
-      case "broker-hello":
-        this.brokerInstanceId = message.brokerInstanceId;
-        return;
-      case "broker-ping":
-        this.refreshBrokerLivenessTimer();
-        this.options.onBrokerPing?.();
-        if (this.shouldRespondToBrokerPing()) {
-          this.port?.postMessage({
-            type: "broker-pong",
-            brokerInstanceId: message.brokerInstanceId,
-          });
-        }
-        return;
-      case "become-leader":
-        this.leadershipId = message.leadershipId;
-        void Promise.resolve(
-          this.options.onBecomeLeader?.(this, message.leadershipId, message.resetRequestId),
-        ).catch((error) => {
-          this.reportLeaderFailed(message.leadershipId, stringifyError(error));
-        });
-        return;
-      case "demote":
-        if (message.leadershipId === this.leadershipId) {
-          this.role = "follower";
-          this.leaderTabId = null;
-          this.resolveRoleWaiters();
-        }
-        void this.options.onDemote?.(message.leadershipId);
-        return;
-      case "leader-ready":
-        this.leadershipId = message.leadershipId;
-        this.leaderTabId = message.leaderTabId;
-        this.role = message.leaderTabId === this.options.tabId ? "leader" : "follower";
-        this.resolveRoleWaiters();
-        return;
-      case "attach-follower-port":
-        if (message.leadershipId !== this.leadershipId) return;
-        this.options.onAttachFollowerPort?.(
-          message.followerTabId,
-          message.leadershipId,
-          message.port,
-        );
-        return;
-      case "use-follower-port":
-        this.leadershipId = message.leadershipId;
-        this.leaderTabId = message.leaderTabId;
-        this.role = "follower";
-        this.options.onUseFollowerPort?.(message.leaderTabId, message.leadershipId, message.port);
-        return;
-      case "follower-ready":
-        this.leadershipId = message.leadershipId;
-        this.leaderTabId = message.leaderTabId;
-        this.role = "follower";
-        this.options.onFollowerReady?.(message.leaderTabId, message.leadershipId);
-        this.resolveRoleWaiters();
-        return;
-      case "close-follower-port":
-        this.options.onCloseFollowerPort?.(message.leadershipId);
-        return;
-      case "detach-follower-port":
-        this.options.onDetachFollowerPort?.(message.followerTabId, message.leadershipId);
-        return;
-      case "storage-reset-begin":
-        this.resolveResetStartWaiters(message.requestId);
-        void Promise.resolve(
-          this.options.onStorageResetBegin?.(message.requestId, message.leadershipId),
-        )
-          .then(() => {
-            this.reportStorageResetReady(message.requestId, true);
-          })
-          .catch((error) => {
-            this.reportStorageResetReady(message.requestId, false, stringifyError(error));
-          });
-        return;
-      case "storage-reset-started":
-        this.resolveResetStartWaiters(message.requestId);
-        return;
-      case "storage-reset-finished":
-        this.resolveResetStartWaiters(message.requestId);
-        this.resolveResetWaiters(message.requestId, message.success, message.errorMessage);
-        return;
-      case "schema-blocked":
-        this.options.onSchemaBlocked?.(message.reason);
-        return;
-      case "unsupported":
-        this.closeWithError(createBrowserBrokerUnsupportedError(message.reason, message.code));
-        return;
+    if (close) {
+      port?.close();
+    }
+    if (this.port === port) {
+      this.port = null;
     }
   }
 
-  private async reconnectAfterBrokerInstanceChange(nextBrokerInstanceId: string): Promise<void> {
-    await this.reconnectAfterBrokerPortFailure(
-      new Error(
-        `Browser broker instance changed from ${this.brokerInstanceId} to ${nextBrokerInstanceId}`,
-      ),
+  private handleControlMessage(_portId: number, rawMessage: BrowserBrokerControlMessage): void {
+    if (!rawMessage || typeof rawMessage !== "object") return;
+    const message = this.prepareControlMessage(rawMessage);
+    this.runCoreEvent({
+      type: "brokerMessageReceived",
+      message,
+      respondToBrokerPing: this.shouldRespondToBrokerPing(),
+      nowMs: Date.now(),
+    });
+  }
+
+  private prepareControlMessage(message: BrowserBrokerControlMessage): BrokerControlMessageForCore {
+    if (message.type === "attach-follower-port" || message.type === "use-follower-port") {
+      const portId = this.nextMessagePortId++;
+      this.messagePorts.set(portId, message.port);
+      const { port: _port, ...rest } = message;
+      return { ...rest, portId } as BrokerControlMessageForCore;
+    }
+    return message;
+  }
+
+  private armTimer(timerId: number, kind: BrokerClientTimerKind, delayMs: number): void {
+    this.cancelTimer(timerId);
+    const timeout = setTimeout(() => {
+      this.timers.delete(timerId);
+      this.runCoreEvent({ type: "timerFired", timerId, kind, nowMs: Date.now() });
+    }, delayMs);
+    this.timers.set(timerId, timeout);
+  }
+
+  private cancelTimer(timerId: number): void {
+    const timer = this.timers.get(timerId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.timers.delete(timerId);
+  }
+
+  private invokeCallback(callbackId: number, callback: BrokerClientCallback): void {
+    let result: void | Promise<void>;
+    try {
+      result = this.callCallback(callback);
+    } catch (error) {
+      this.runCoreEvent({
+        type: "callbackRejected",
+        callbackId,
+        errorMessage: stringifyError(error),
+        nowMs: Date.now(),
+      });
+      return;
+    }
+
+    void Promise.resolve(result).then(
+      () => {
+        this.runCoreEvent({ type: "callbackResolved", callbackId, nowMs: Date.now() });
+      },
+      (error) => {
+        this.runCoreEvent({
+          type: "callbackRejected",
+          callbackId,
+          errorMessage: stringifyError(error),
+          nowMs: Date.now(),
+        });
+      },
     );
   }
 
-  private async reconnectAfterBrokerPortFailure(_error: Error): Promise<void> {
-    if (this.closed || this.reconnecting) return;
-    this.reconnecting = true;
-    this.reconnectDone = new Promise((resolve) => {
-      this.resolveReconnectDone = resolve;
-    });
-
-    const previousRole = this.role;
-    const previousLeadershipId = this.leadershipId;
-    const previousPort = this.port;
-
-    this.stopBrokerLivenessTimer();
-    this.brokerInstanceId = null;
-    this.role = "follower";
-    this.leaderTabId = null;
-    this.leadershipId = 0;
-    this.queuedMessages.length = 0;
-    const resetError = new Error("Browser broker restarted during storage reset");
-    this.rejectResetStartWaiters(resetError);
-    this.rejectResetWaiters(resetError);
-
-    if (previousPort) {
-      this.detachBrokerPort(previousPort);
-      if (this.port === previousPort) {
-        this.port = null;
+  private callCallback(callback: BrokerClientCallback): void | Promise<void> {
+    switch (callback.type) {
+      case "brokerPing":
+        return this.options.onBrokerPing?.();
+      case "becomeLeader":
+        return this.options.onBecomeLeader?.(this, callback.leadershipId, callback.resetRequestId);
+      case "demote":
+        return this.options.onDemote?.(callback.leadershipId);
+      case "attachFollowerPort": {
+        if (!this.options.onAttachFollowerPort) {
+          this.releaseMessagePort(callback.portId);
+          return;
+        }
+        const port = this.takeMessagePort(callback.portId);
+        if (!port) return;
+        return this.options.onAttachFollowerPort(
+          callback.followerTabId,
+          callback.leadershipId,
+          port,
+        );
       }
-    }
-
-    let reconnectError: unknown;
-    try {
-      if (previousLeadershipId > 0) {
-        await this.options.onDemote?.(previousLeadershipId);
+      case "detachFollowerPort":
+        return this.options.onDetachFollowerPort?.(callback.followerTabId, callback.leadershipId);
+      case "useFollowerPort": {
+        if (!this.options.onUseFollowerPort) {
+          this.releaseMessagePort(callback.portId);
+          return;
+        }
+        const port = this.takeMessagePort(callback.portId);
+        if (!port) return;
+        return this.options.onUseFollowerPort(callback.leaderTabId, callback.leadershipId, port);
       }
-      if (previousRole === "follower" && previousLeadershipId > 0) {
-        this.options.onCloseFollowerPort?.(previousLeadershipId);
-      }
-
-      if (!this.closed) {
-        await this.connectToBroker();
-      }
-    } catch (error) {
-      reconnectError = error;
-    }
-
-    this.reconnecting = false;
-    this.resolveReconnectDone?.();
-    this.resolveReconnectDone = null;
-    this.reconnectDone = null;
-    if (reconnectError) {
-      this.closeWithError(new Error(stringifyError(reconnectError), { cause: reconnectError }));
-      return;
-    }
-    if (!this.closed) {
-      this.send({ type: "visibility", visibility: this.visibility });
-      this.options.onReconnected?.(this);
-      this.flushQueuedMessages();
+      case "followerReady":
+        return this.options.onFollowerReady?.(callback.leaderTabId, callback.leadershipId);
+      case "closeFollowerPort":
+        return this.options.onCloseFollowerPort?.(callback.leadershipId);
+      case "storageResetBegin":
+        return this.options.onStorageResetBegin?.(callback.requestId, callback.leadershipId);
+      case "schemaBlocked":
+        return this.options.onSchemaBlocked?.(callback.reason);
+      case "reconnected":
+        return this.options.onReconnected?.(this);
     }
   }
 
-  private resolveRoleWaiters(): void {
-    for (const waiter of this.roleWaiters) {
-      if (this.role !== waiter.role || this.leaderTabId === null) {
-        continue;
-      }
-      clearTimeout(waiter.timeout);
-      this.roleWaiters.delete(waiter);
-      waiter.resolve();
-    }
+  private takeMessagePort(portId: number | undefined): MessagePort | null {
+    if (portId === undefined) return null;
+    const port = this.messagePorts.get(portId) ?? null;
+    this.messagePorts.delete(portId);
+    return port;
   }
 
-  private rejectRoleWaiters(error: Error): void {
-    for (const waiter of this.roleWaiters) {
-      clearTimeout(waiter.timeout);
-      waiter.reject(error);
-    }
-    this.roleWaiters.clear();
-  }
-
-  private reportStorageResetReady(
-    requestId: string,
-    success: boolean,
-    errorMessage?: string,
-  ): void {
-    this.send({
-      type: "storage-reset-ready",
-      requestId,
-      success,
-      ...(errorMessage ? { errorMessage } : {}),
-    });
-  }
-
-  private resolveResetWaiters(
-    requestId: string,
-    success: boolean,
-    errorMessage: string | undefined,
-  ): void {
-    const waiters = this.resetWaiters.get(requestId);
-    if (!waiters) return;
-    this.resetWaiters.delete(requestId);
-    const error = success ? null : new Error(errorMessage ?? "Browser storage reset failed");
-    for (const waiter of waiters) {
-      if (error) {
-        waiter.reject(error);
-      } else {
-        waiter.resolve();
-      }
-    }
-  }
-
-  private resolveResetStartWaiters(requestId: string): void {
-    const waiters = this.resetStartWaiters.get(requestId);
-    if (!waiters) return;
-    this.resetStartWaiters.delete(requestId);
-    for (const waiter of waiters) {
-      clearTimeout(waiter.timeout);
-      waiter.resolve();
-    }
-  }
-
-  private removeResetStartWaiter(requestId: string, waiter: ResetStartWaiter): void {
-    const waiters = this.resetStartWaiters.get(requestId);
-    if (!waiters) return;
-    const next = waiters.filter((candidate) => candidate !== waiter);
-    if (next.length === 0) {
-      this.resetStartWaiters.delete(requestId);
-    } else {
-      this.resetStartWaiters.set(requestId, next);
-    }
-  }
-
-  private removeResetWaiter(requestId: string, waiter: ResetWaiter): void {
-    const waiters = this.resetWaiters.get(requestId);
-    if (!waiters) return;
-    const next = waiters.filter((candidate) => candidate !== waiter);
-    if (next.length === 0) {
-      this.resetWaiters.delete(requestId);
-    } else {
-      this.resetWaiters.set(requestId, next);
-    }
-  }
-
-  private rejectResetStartWaiters(error: Error): void {
-    for (const waiters of this.resetStartWaiters.values()) {
-      for (const waiter of waiters) {
-        clearTimeout(waiter.timeout);
-        waiter.reject(error);
-      }
-    }
-    this.resetStartWaiters.clear();
-  }
-
-  private rejectResetWaiters(error: Error): void {
-    for (const waiters of this.resetWaiters.values()) {
-      for (const waiter of waiters) {
-        waiter.reject(error);
-      }
-    }
-    this.resetWaiters.clear();
+  private releaseMessagePort(portId: number | undefined): void {
+    if (portId === undefined) return;
+    const port = this.messagePorts.get(portId);
+    this.messagePorts.delete(portId);
+    port?.close();
   }
 
   private shouldRespondToBrokerPing(): boolean {
@@ -674,82 +809,164 @@ export class BrowserBrokerClient {
     return respond !== false;
   }
 
-  private refreshBrokerLivenessTimer(): void {
-    this.stopBrokerLivenessTimer();
-    if (this.closed) return;
-    this.brokerLivenessTimer = setTimeout(() => {
-      this.brokerLivenessTimer = null;
-      void this.reconnectAfterBrokerPortFailure(
-        new Error("Browser broker liveness timed out waiting for broker ping"),
-      );
-    }, this.brokerLivenessTimeoutMs());
+  private nextPublicPromiseId(): number {
+    return this.nextPromiseId++;
   }
 
-  private stopBrokerLivenessTimer(): void {
-    if (!this.brokerLivenessTimer) return;
-    clearTimeout(this.brokerLivenessTimer);
-    this.brokerLivenessTimer = null;
+  private createPublicPromise(promiseId: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.publicPromises.set(promiseId, { resolve, reject });
+    });
   }
 
-  private brokerLivenessTimeoutMs(): number {
-    return (
-      normalizePositiveTimeout(this.options.brokerPingIntervalMs, DEFAULT_BROKER_PING_INTERVAL_MS) +
-      normalizePositiveTimeout(this.options.brokerPongTimeoutMs, DEFAULT_BROKER_PONG_TIMEOUT_MS)
-    );
-  }
-
-  private storageResetTimeoutMs(): number {
-    return normalizePositiveTimeout(
-      this.options.storageResetTimeoutMs,
-      DEFAULT_STORAGE_RESET_TIMEOUT_MS,
-    );
-  }
-
-  private send(message: BrowserBrokerTabMessageInput): void {
-    if (this.closed) return;
-    const stampedMessage = this.stampTabMessage(message);
-    if (!stampedMessage) return;
-    if (this.reconnecting) return;
-    if (!this.port) {
-      this.queuedMessages.push(stampedMessage);
-      return;
-    }
-    this.port.postMessage(stampedMessage);
-  }
-
-  private stampTabMessage(message: BrowserBrokerTabMessageInput): BrowserBrokerTabMessage | null {
-    if (message.type === "hello") return message;
-    if (!this.brokerInstanceId) return null;
-    return { ...message, brokerInstanceId: this.brokerInstanceId };
-  }
-
-  private flushQueuedMessages(): void {
-    if (this.closed || this.reconnecting || !this.port) return;
-    const messages = this.queuedMessages.splice(0);
-    for (const message of messages) {
-      this.port.postMessage(message);
-    }
-  }
-
-  private detachBrokerPort(port: MessagePort): void {
-    port.removeEventListener("message", this.onMessage);
-    port.removeEventListener("messageerror", this.onPortMessageError);
-    port.close();
+  private failConnect(error: Error): void {
+    this.closed = true;
+    this.closedError = error;
+    this.preconnectedWorker?.cleanup();
+    this.preconnectedWorker?.port.close();
+    this.preconnectedWorker = null;
+    this.connectWaiter?.reject(error);
+    this.connectWaiter = null;
+    this.rejectAllPublicPromises(error);
   }
 
   private closeWithError(error: Error): void {
-    if (this.closed && this.closedError === error) return;
+    if (this.closed) return;
     this.closed = true;
     this.closedError = error;
-    this.stopBrokerLivenessTimer();
-    this.queuedMessages.length = 0;
-    if (this.port) {
-      this.detachBrokerPort(this.port);
-      this.port = null;
+    this.clearAllTimers();
+    for (const portId of [...this.ports.keys()]) {
+      this.detachPort(portId, true);
     }
-    this.rejectRoleWaiters(error);
-    this.rejectResetStartWaiters(error);
-    this.rejectResetWaiters(error);
+    this.preconnectedWorker?.cleanup();
+    this.preconnectedWorker?.port.close();
+    this.preconnectedWorker = null;
+    this.rejectAllPublicPromises(error);
+    this.connectWaiter?.reject(error);
+    this.connectWaiter = null;
     this.options.onClosed?.(error);
   }
+
+  private handleEffectExecutionError(error: unknown): void {
+    const cause = error instanceof Error ? error : undefined;
+    const wrapped = new Error(stringifyError(error), cause ? { cause } : undefined);
+    if (this.connectWaiter) {
+      this.failConnect(wrapped);
+      for (const portId of [...this.ports.keys()]) {
+        this.detachPort(portId, true);
+      }
+      return;
+    }
+    this.closeWithError(wrapped);
+  }
+
+  private rejectAllPublicPromises(error: Error): void {
+    for (const promise of this.publicPromises.values()) {
+      promise.reject(error);
+    }
+    this.publicPromises.clear();
+  }
+
+  private clearAllTimers(): void {
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer);
+    }
+    this.timers.clear();
+  }
+}
+
+let brokerClientWasmInitPromise: Promise<BrokerClientModule> | null = null;
+
+async function loadBrokerClientWasmModule(
+  runtime?: RuntimeSourcesConfig,
+): Promise<BrokerClientModule> {
+  if (brokerClientWasmInitPromise) {
+    return brokerClientWasmInitPromise;
+  }
+
+  brokerClientWasmInitPromise = loadAndInitializeBrokerClientWasmModule(runtime).catch((error) => {
+    brokerClientWasmInitPromise = null;
+    throw error;
+  });
+  return brokerClientWasmInitPromise;
+}
+
+async function loadAndInitializeBrokerClientWasmModule(
+  runtime?: RuntimeSourcesConfig,
+): Promise<BrokerClientModule> {
+  const wasmModule = (await import("jazz-wasm")) as unknown as BrokerClientModule;
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
+
+  if (syncInitInput && wasmModule.initSync) {
+    wasmModule.initSync(syncInitInput);
+    return wasmModule;
+  }
+
+  if (typeof process !== "undefined" && process.versions?.node && wasmModule.initSync) {
+    try {
+      const wasmBinary = tryLoadNodePackagedWasmBinarySync();
+      if (wasmBinary) {
+        wasmModule.initSync({ module: wasmBinary });
+        return wasmModule;
+      }
+    } catch {
+      // Browser-like runtimes may expose a partial process object.
+    }
+  }
+
+  if (typeof wasmModule.default === "function") {
+    const wasmUrl =
+      typeof location !== "undefined"
+        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
+        : null;
+    if (wasmUrl) {
+      await wasmModule.default({ module_or_path: wasmUrl });
+    } else {
+      await wasmModule.default();
+    }
+  }
+
+  return wasmModule;
+}
+
+function tryLoadNodePackagedWasmBinarySync(): Uint8Array | null {
+  const moduleBuiltin = process.getBuiltinModule?.("module");
+  const fsBuiltin = process.getBuiltinModule?.("fs");
+  const pathBuiltin = process.getBuiltinModule?.("path");
+
+  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
+    return null;
+  }
+
+  const { createRequire } = moduleBuiltin;
+  const { existsSync, readFileSync } = fsBuiltin;
+  const { dirname, resolve } = pathBuiltin;
+
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("jazz-wasm/package.json");
+  const packageDir = dirname(packageJsonPath);
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+  if (!existsSync(wasmPath)) {
+    return null;
+  }
+
+  return readFileSync(wasmPath);
+}
+
+function errorFromBroker(reason: string, code?: BrowserBrokerUnsupportedCode): Error {
+  return code ? createBrowserBrokerUnsupportedError(reason, code) : new Error(reason);
+}
+
+function sanitizeOptionalTimeoutMs(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.max(0, Math.floor(value));
+  return normalized > 0 ? normalized : undefined;
+}
+
+function wrapUnknownError(error: unknown): Error {
+  const cause = error instanceof Error ? error : undefined;
+  return new Error(stringifyError(error), cause ? { cause } : undefined);
 }
