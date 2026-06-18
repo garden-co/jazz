@@ -88,16 +88,26 @@ interface ColumnBuilder {
   _transform?: ColumnTransform<unknown, unknown>;
 }
 
+// The column shape each non-default merge strategy is valid on, keyed by the
+// ColumnMergeStrategy enum. Adding a strategy is a single entry here; the gate
+// below derives the per-column allowed set from it.
+type MergeStrategyColumnType = {
+  counter: "INTEGER";
+  "g-set": { kind: "ARRAY" };
+};
+
 type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
 > = Optional extends true
   ? "lww"
-  : Sql extends "INTEGER"
-    ? "lww" | "counter"
-    : Sql extends { kind: "ARRAY" }
-      ? "lww" | "g-set"
-      : "lww";
+  :
+      | "lww"
+      | {
+          [Strategy in keyof MergeStrategyColumnType]: Sql extends MergeStrategyColumnType[Strategy]
+            ? Strategy
+            : never;
+        }[keyof MergeStrategyColumnType];
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
   : TSTypeFromSqlType<Sql>;
