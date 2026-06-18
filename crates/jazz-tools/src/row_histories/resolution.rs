@@ -24,8 +24,10 @@
 use std::collections::HashMap;
 
 use crate::metadata::DeleteKind;
-use crate::query_manager::types::{ColumnDescriptor, ColumnMergeStrategy, RowDescriptor, Value};
-use crate::row_format::{EncodingError, encode_row};
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
+};
+use crate::row_format::{EncodingError, encode_row, encode_value_with_type};
 use crate::sync_manager::DurabilityTier;
 
 use super::codecs::{flat_user_values, malformed, tier_satisfies};
@@ -190,8 +192,41 @@ pub(super) fn merge_column_with_strategy<'a>(
 
             Ok((Value::Integer(merged), latest_contributor))
         }
-        // RED stub: g-set falls through to LWW until the union merge lands.
-        Some(ColumnMergeStrategy::GSet) | None => {
+        Some(ColumnMergeStrategy::GSet) => {
+            let element_type = column.column_type.element_type().ok_or_else(|| {
+                malformed(format!(
+                    "g-set merge expected ARRAY column for '{}', got {:?}",
+                    column.name_str(),
+                    column.column_type
+                ))
+            })?;
+
+            // Union of ancestor ∪ contenders. Key each element by its canonical
+            // encoding so the dedupe and sort are byte-identical across replicas.
+            let mut keyed: Vec<(Vec<u8>, Value)> = Vec::new();
+            collect_set_elements(column, element_type, ancestor_value, &mut keyed)?;
+
+            let mut latest_contributor: Option<&StoredRowBatch> = None;
+            for contender in contenders {
+                collect_set_elements(column, element_type, contender.value, &mut keyed)?;
+                if latest_contributor
+                    .map(|current| {
+                        (contender.row.updated_at, contender.row.batch_id())
+                            > (current.updated_at, current.batch_id())
+                    })
+                    .unwrap_or(true)
+                {
+                    latest_contributor = Some(contender.row);
+                }
+            }
+
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            keyed.dedup_by(|a, b| a.0 == b.0);
+            let merged = keyed.into_iter().map(|(_, value)| value).collect();
+
+            Ok((Value::Array(merged), latest_contributor))
+        }
+        None => {
             let mut latest_changed: Option<&StoredRowBatch> = None;
             let mut merged_value = ancestor_value.clone();
 
@@ -210,6 +245,33 @@ pub(super) fn merge_column_with_strategy<'a>(
 
             Ok((merged_value, latest_changed))
         }
+    }
+}
+
+/// Collect a set-merge column's array elements, keyed by canonical encoding.
+/// `Null` contributes nothing (empty set); any non-array value is malformed.
+fn collect_set_elements(
+    column: &ColumnDescriptor,
+    element_type: &ColumnType,
+    value: &Value,
+    out: &mut Vec<(Vec<u8>, Value)>,
+) -> Result<(), EncodingError> {
+    match value {
+        Value::Array(elements) => {
+            for element in elements {
+                out.push((
+                    encode_value_with_type(element, element_type),
+                    element.clone(),
+                ));
+            }
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        other => Err(malformed(format!(
+            "g-set merge expected ARRAY value for column '{}', got {:?}",
+            column.name_str(),
+            other
+        ))),
     }
 }
 
@@ -336,6 +398,7 @@ pub(super) fn build_computed_visible_preview(
                         !matches!(
                             (column.merge_strategy, candidate_value),
                             (Some(ColumnMergeStrategy::Counter), Value::Null)
+                                | (Some(ColumnMergeStrategy::GSet), Value::Null)
                         )
                     });
                 changed_from_ancestor.then_some(ColumnContender {

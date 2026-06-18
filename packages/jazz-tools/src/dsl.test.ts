@@ -289,7 +289,6 @@ describe("column merge strategy DSL", () => {
   });
 
   it("rejects g-set merge strategy on non-array columns", () => {
-    // @ts-expect-error g-set is not assignable to a TEXT column's merge strategy
     expect(() => col.string().merge("g-set")).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
     );
