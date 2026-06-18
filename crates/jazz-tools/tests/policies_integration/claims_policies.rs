@@ -117,7 +117,7 @@ async fn create_claim_compound_document(
 #[tokio::test]
 async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
     let table_name = "documents";
-    let admin_policy = pe::session_eq("claims.role", "ADMIN");
+    let admin_policy = pe::session_where("claims.role", "ADMIN");
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
@@ -255,7 +255,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
 #[tokio::test]
 async fn admin_role_claims_reject_member_mutations() {
     let table_name = "documents";
-    let admin_policy = pe::session_eq("claims.role", "ADMIN");
+    let admin_policy = pe::session_where("claims.role", "ADMIN");
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
@@ -589,8 +589,10 @@ async fn role_claim_presence_gates_row_visibility() {
             table_name,
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read()
-                    .where_(pe::session_is_not_null("claims.role"));
+                p.allow_read().where_(pe::session_where(
+                    "claims.role",
+                    pe::SessionWhere::is_null(false),
+                ));
             }),
         ))
         .build();
@@ -938,16 +940,20 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
             null_table,
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read()
-                    .where_(pe::session_is_null("claims.revoked_at"));
+                p.allow_read().where_(pe::session_where(
+                    "claims.revoked_at",
+                    pe::SessionWhere::is_null(true),
+                ));
             }),
         ))
         .table(make_title_documents_schema(
             present_table,
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read()
-                    .where_(pe::session_ne("claims.revoked_at", Value::Null));
+                p.allow_read().where_(pe::session_where(
+                    "claims.revoked_at",
+                    pe::SessionWhere::ne(Value::Null),
+                ));
             }),
         ))
         .build();
@@ -1095,8 +1101,8 @@ async fn row_and_claim_predicates_compose_under_and_and_or() {
                 p.allow_read().where_(pe::all_of([
                     pe::eq("group_slug", "eng"),
                     pe::eq("published", true),
-                    pe::session_eq("claims.org.slug", "north"),
-                    pe::session_contains("claims.groups_allowed", "eng"),
+                    pe::session_where("claims.org.slug", "north"),
+                    pe::session_where("claims.groups_allowed", pe::SessionWhere::contains("eng")),
                 ]));
             }),
         ))
@@ -1108,7 +1114,10 @@ async fn row_and_claim_predicates_compose_under_and_and_or() {
                     pe::eq("group_slug", "public"),
                     pe::all_of([
                         pe::eq("group_slug", "eng"),
-                        pe::session_contains("claims.groups_allowed", "eng"),
+                        pe::session_where(
+                            "claims.groups_allowed",
+                            pe::SessionWhere::contains("eng"),
+                        ),
                     ]),
                 ]));
             }),
