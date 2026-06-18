@@ -629,7 +629,6 @@ describe("Db worker runtime bootstrap", () => {
     try {
       const anyDb = db as unknown as {
         brokerSchemaFingerprint: string | null;
-        currentLeaderTabId: string | null;
         currentLeadershipId: number;
         handleBrokerReconnected(client: unknown): void;
         tabId: string;
@@ -638,7 +637,6 @@ describe("Db worker runtime bootstrap", () => {
       const reportSchemaReady = vi.fn();
 
       anyDb.tabRole = "follower";
-      anyDb.currentLeaderTabId = "old-leader";
       anyDb.currentLeadershipId = 42;
       anyDb.brokerSchemaFingerprint = "schema-a";
 
@@ -654,7 +652,6 @@ describe("Db worker runtime bootstrap", () => {
       });
 
       expect(anyDb.currentLeadershipId).toBe(0);
-      expect(anyDb.currentLeaderTabId).toBeNull();
       expect(reportSchemaReady).toHaveBeenCalledWith("schema-a");
     } finally {
       await db.shutdown();

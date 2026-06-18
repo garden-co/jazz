@@ -198,7 +198,6 @@ function getDbWorkerDebugState(db: Db): Record<string, unknown> {
   const anyDb = db as unknown as {
     tabRole?: unknown;
     tabId?: unknown;
-    currentLeaderTabId?: unknown;
     currentLeadershipId?: unknown;
     activeRemoteLeaderTabId?: unknown;
     primaryDbName?: unknown;
@@ -220,7 +219,6 @@ function getDbWorkerDebugState(db: Db): Record<string, unknown> {
   return {
     tabRole: anyDb.tabRole,
     tabId: anyDb.tabId,
-    currentLeaderTabId: anyDb.currentLeaderTabId,
     currentLeadershipId: anyDb.currentLeadershipId,
     activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
     primaryDbName: anyDb.primaryDbName,

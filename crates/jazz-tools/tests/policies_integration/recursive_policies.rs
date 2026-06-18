@@ -5,6 +5,7 @@ use super::support::{
     collect_stream_deltas, connect_ready_client, connect_ready_user, has_added, has_any_change,
     has_removed, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
+use super::{pe, permissions};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::relation_ir::{
     ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
@@ -39,34 +40,31 @@ fn inherited_non_null_policy_with_depth(
     max_depth: Option<usize>,
 ) -> PolicyExpr {
     let inherits = match max_depth {
-        Some(depth) => PolicyExpr::inherits_with_depth(operation, via_column, depth),
-        None => PolicyExpr::inherits(operation, via_column),
+        Some(depth) => pe::allowed_to_with_depth(operation, via_column, depth),
+        None => pe::allowed_to(operation, via_column),
     };
 
-    PolicyExpr::and(vec![
-        PolicyExpr::IsNotNull {
-            column: via_column.to_string(),
-        },
-        inherits,
-    ])
+    pe::all_of([pe::is_not_null(via_column), inherits])
 }
 
 fn recursive_folder_select_policy(max_depth: Option<usize>) -> PolicyExpr {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let inherited_policy =
         inherited_non_null_policy_with_depth(Operation::Select, "parent_id", max_depth);
 
-    PolicyExpr::or(vec![owner_policy, inherited_policy])
+    pe::any_of([owner_policy, inherited_policy])
 }
 
 fn recursive_folder_policy_schema(max_depth: Option<usize>) -> Schema {
     SchemaBuilder::new()
         .table(make_recursive_folders_schema(
             "recursive_folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-                .with_select(recursive_folder_select_policy(max_depth)),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_read()
+                    .where_(recursive_folder_select_policy(max_depth));
+            }),
         ))
         .build()
 }
@@ -147,33 +145,31 @@ fn reachable_teams_relation() -> RelExpr {
 }
 
 fn recursive_relation_document_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(reachable_teams_relation()),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("resource_access_edges"),
-                }),
-                on: vec![JoinCondition {
-                    left: ColumnRef::unscoped("id"),
-                    right: ColumnRef::scoped("resource_access_edges", "team_id"),
-                }],
-                join_kind: JoinKind::Inner,
+    pe::exists(RelExpr::Filter {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(reachable_teams_relation()),
+            right: Box::new(RelExpr::TableScan {
+                table: TableName::new("resource_access_edges"),
             }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: ColumnRef::scoped("resource_access_edges", "resource_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-                PredicateExpr::Cmp {
-                    left: ColumnRef::scoped("resource_access_edges", "grant_role"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal("viewer".into()),
-                },
-            ]),
-        },
-    }
+            on: vec![JoinCondition {
+                left: ColumnRef::unscoped("id"),
+                right: ColumnRef::scoped("resource_access_edges", "team_id"),
+            }],
+            join_kind: JoinKind::Inner,
+        }),
+        predicate: PredicateExpr::And(vec![
+            PredicateExpr::Cmp {
+                left: ColumnRef::scoped("resource_access_edges", "resource_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::RowId(RowIdRef::Outer),
+            },
+            PredicateExpr::Cmp {
+                left: ColumnRef::scoped("resource_access_edges", "grant_role"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal("viewer".into()),
+            },
+        ]),
+    })
 }
 
 fn recursive_relation_policy_schema() -> Schema {
@@ -197,10 +193,12 @@ fn recursive_relation_policy_schema() -> Schema {
         )
         .table(make_recursive_relation_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-                .with_select(recursive_relation_document_select_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_read()
+                    .where_(recursive_relation_document_select_policy());
+            }),
         ))
         .build()
 }
@@ -210,26 +208,23 @@ fn recursive_step_magic_column_policy_schema() -> Schema {
         .table(
             TableSchema::builder("teams")
                 .column("name", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                })),
         )
         .table(
             TableSchema::builder("team_edges")
                 .column("child_team", ColumnType::Uuid)
                 .column("parent_team", ColumnType::Uuid)
                 .column("owner_id", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::True)
-                        .with_update(
-                            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                            PolicyExpr::True,
-                        ),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().always();
+                    p.allow_update()
+                        .where_old(pe::eq("owner_id", pe::session("user_id")))
+                        .where_new(pe::always());
+                })),
         )
         .build()
 }
