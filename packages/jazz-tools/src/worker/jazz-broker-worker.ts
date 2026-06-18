@@ -246,7 +246,10 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
         // rebuild a worker bridge from. The wipe is already done before the
         // tab reports ready, so step the placeholder leader down before
         // reporting reset completion.
-        clearLeader(message.leadershipId, { demoteLeader: true, removeLeaderTab: false });
+        clearLeader(message.leadershipId, {
+          demoteLeader: true,
+          removeLeaderTab: false,
+        });
         finishStorageReset(activeReset, true);
         return;
       }
@@ -585,7 +588,10 @@ function startLeaderLockMonitors(nextLeader: LeaderState): void {
 
 function handleLeaderLockReleased(leadershipId: number): void {
   if (!leader || leader.leadershipId !== leadershipId) return;
-  const cleared = clearLeader(leadershipId, { demoteLeader: true, removeLeaderTab: true });
+  const cleared = clearLeader(leadershipId, {
+    demoteLeader: true,
+    removeLeaderTab: true,
+  });
   scheduleReplacementElection(cleared);
 }
 
@@ -1118,7 +1124,10 @@ function stopLeaderFailureRetryTimer(): void {
   leaderFailureRetryTimer = null;
 }
 
-function currentLeaderLockNames(): { tabLockName: string; workerLockName: string } | null {
+function currentLeaderLockNames(): {
+  tabLockName: string;
+  workerLockName: string;
+} | null {
   if (!namespace) return null;
   return {
     tabLockName: `jazz-leader-tab:${namespace.appId}:${namespace.dbName}`,
