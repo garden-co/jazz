@@ -31,6 +31,12 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./solid": {
+      "types": "./dist/solid/index.d.ts",
+      "browser": "./dist/solid/index.js",
+      "node": "./dist/solid/index.ssr.js",
+      "default": "./dist/solid/index.js"
+    },
     "./vue": {
       "types": "./dist/vue/index.d.ts",
       "default": "./dist/vue/index.js"
@@ -39,6 +45,10 @@
       "types": "./dist/react-core/index.d.ts",
       "react-native": "./dist/react-native/react-core.js",
       "default": "./dist/react-core/index.js"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "default": "./dist/shared/index.js"
     },
     "./permissions": {
       "types": "./dist/permissions/index.d.ts",
@@ -107,10 +117,12 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte",
-    "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && cp src/worker/jazz-broker-worker.ts dist/worker/jazz-broker-worker.ts",
+    "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
+    "build:runtime": "tsc && node scripts/bundle-broker-worker.mjs && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts",
+    "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",
+    "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
@@ -152,8 +164,11 @@
     "jazz-rn": "workspace:*",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
+    "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-solid": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
@@ -168,6 +183,7 @@
     "jazz-rn": "workspace:*",
     "react": ">=19",
     "react-native": ">=0.76",
+    "solid-js": ">=1.9.13",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"
   },
@@ -191,6 +207,9 @@
       "optional": true
     },
     "react-native": {
+      "optional": true
+    },
+    "solid-js": {
       "optional": true
     },
     "svelte": {

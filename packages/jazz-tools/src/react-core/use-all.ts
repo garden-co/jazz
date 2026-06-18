@@ -1,9 +1,8 @@
 import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
 import type { DehydratedSnapshot } from "../backend/ssr.js";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
+import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
-import type { UseAllState } from "../subscriptions-orchestrator.js";
 import { useIsSeedPhase, useManager } from "./provider.js";
 
 /** Options for {@link useAll}: ordinary query options plus an optional SSR snapshot. */

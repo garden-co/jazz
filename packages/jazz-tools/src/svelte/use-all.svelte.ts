@@ -1,9 +1,12 @@
 import type { DehydratedSnapshot } from "../backend/ssr.js";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
-import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
-import type { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
-import { applyDelta } from "../reconcile-array.js";
 import { computeSchemaFingerprint } from "../drivers/schema-wire.js";
+import { applyDelta } from "../shared/index.js";
+import type {
+  QueryBuilder,
+  QueryOptions,
+  SubscriptionDelta,
+  SubscriptionsOrchestrator,
+} from "../shared/index.js";
 import { applySnapshot } from "../ssr/apply-snapshot.js";
 import { getJazzContext, type JazzContext } from "./context.svelte.js";
 

@@ -2,6 +2,7 @@ mod checksum;
 mod db;
 mod error;
 mod file;
+mod leaf_hint;
 mod page;
 mod superblock;
 mod wal;

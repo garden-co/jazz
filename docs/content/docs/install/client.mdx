@@ -12,7 +12,7 @@ import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.md
 
 Start with a fresh app. If you already have one, skip to [Install](#install).
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```bash title="Terminal"
     pnpm create vite my-jazz-app --template react-ts
@@ -39,6 +39,13 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     </Callout>
 
   </Tab>
+  <Tab value="Solid">
+    ```bash title="Terminal"
+    pnpm create vite my-jazz-app --template solid-ts
+    cd my-jazz-app
+    pnpm install
+    ```
+  </Tab>
   <Tab value="Expo">
     ```bash title="Terminal"
     npx create-expo-app my-jazz-app --template blank-typescript
@@ -56,7 +63,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Install
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```bash title="Terminal"
     pnpm add jazz-tools@alpha
@@ -68,6 +75,11 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     ```
   </Tab>
   <Tab value="Svelte">
+    ```bash title="Terminal"
+    pnpm add jazz-tools@alpha
+    ```
+  </Tab>
+  <Tab value="Solid">
     ```bash title="Terminal"
     pnpm add jazz-tools@alpha
     ```
@@ -166,7 +178,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 Create the basic structure for your app with Jazz and a to-do list.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
@@ -180,6 +192,11 @@ Create the basic structure for your app with Jazz and a to-do list.
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="src/App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="src/App.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/App.tsx
     </include>
   </Tab>
   <Tab value="Expo">
@@ -216,7 +233,7 @@ Use `db.insert` to create a new row.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -233,6 +250,11 @@ Use `db.insert` to create a new row.
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="src/AddTodo.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/AddTodo.svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/quickstart-add.tsx
     </include>
   </Tab>
   <Tab value="Expo">
@@ -253,7 +275,7 @@ Display a to-do with toggle and delete controls.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -270,6 +292,11 @@ Display a to-do with toggle and delete controls.
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="src/TodoItem.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/TodoItem.svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/quickstart-item.tsx
     </include>
   </Tab>
   <Tab value="Expo">
@@ -297,7 +324,7 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 Subscribe to a query to get real-time updates as data changes, regardless of where the change originates.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/quickstart-list.tsx
@@ -311,6 +338,11 @@ Subscribe to a query to get real-time updates as data changes, regardless of whe
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="src/TodoList.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/quickstart-list.svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
+      ../examples/docs/todo-client-localfirst-solid/src/quickstart-list.tsx
     </include>
   </Tab>
   <Tab value="Expo">
@@ -374,5 +406,6 @@ For self-hosted deployments, see [Server Setup](/docs/getting-started/server-set
 ## Example apps
 
 - [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
+- [Todo app (Solid)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-solid)&hairsp;—&hairsp;the same app built with `jazz-tools/solid`
 - [File upload (React)](https://github.com/garden-co/jazz2/tree/main/examples/file-upload-react)&hairsp;—&hairsp;image upload and rendering with Jazz
 - [Wequencer (Svelte)](https://github.com/garden-co/jazz2/tree/main/examples/wequencer)&hairsp;—&hairsp;collaborative real-time music sequencer

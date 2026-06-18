@@ -105,6 +105,13 @@ pub fn init_logger_provider() -> SdkLoggerProvider {
         .build()
         .expect("failed to build OTLP log exporter");
 
+    // `with_batch_exporter` builds the dedicated-thread BatchLogProcessor (not
+    // the async-runtime variant). That's what makes `force_flush()` safe to
+    // call from the panic hook (see `install_otel_panic_hook` in the CLI): the
+    // flush runs on the processor's own thread with the blocking HTTP client,
+    // so it doesn't depend on the unwinding Tokio runtime, and its force-flush
+    // is internally bounded (~5s) so a missing collector can't stall the crash
+    // path.
     SdkLoggerProvider::builder()
         .with_resource(otel_resource(&resolved_service_name()))
         .with_batch_exporter(exporter)
@@ -138,6 +145,61 @@ where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
     opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(provider)
+}
+
+/// Install a panic hook that pushes the panic through the OTLP log pipeline
+/// before the process unwinds away.
+///
+/// Without this, a Rust panic is never a `tracing` event, and the batch log
+/// processor's buffered records die with the process — so the crash is
+/// invisible to structured telemetry and survives only as the stderr backtrace
+/// (scraped by the node collector's filelog pipeline). This hook turns the
+/// panic into a structured, trace-correlated `error!` event and force-flushes
+/// `logger_provider` synchronously so it actually ships.
+///
+/// The previous hook is preserved and re-invoked, so the stderr backtrace still
+/// prints and the filelog safety net stays intact. Call once, after the
+/// `tracing` subscriber (incl. [`log_bridge`]) is installed, and only when OTLP
+/// export is active — otherwise the `error!` event has nowhere to go.
+///
+/// `force_flush` is safe to call from here because [`init_logger_provider`]
+/// builds the dedicated-thread `BatchLogProcessor` with the blocking HTTP
+/// client: the flush runs off the (unwinding) Tokio runtime and is internally
+/// bounded (~5s), so a missing collector can't stall the crash path.
+///
+/// Does NOT cover OOM-kill / SIGKILL / `abort` — the kernel terminates the
+/// process with no chance to run the hook. Those need a metrics-side signal
+/// (`kube_pod_container_status_last_terminated_reason`), not a log.
+pub fn install_panic_hook(logger_provider: SdkLoggerProvider) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic payload>");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+
+        // Emitted via `tracing` so the otel_log_layer bridge converts it into an
+        // OTLP LogRecord, carrying the active span's trace context.
+        tracing::error!(
+            panic.message = %message,
+            panic.location = %location,
+            panic.backtrace = %backtrace,
+            "process panicked",
+        );
+
+        // The event above is only enqueued; force-flush so it ships before we die.
+        let _ = logger_provider.force_flush();
+
+        // Preserve the original behaviour: stderr backtrace = filelog safety net.
+        default_hook(info);
+    }));
 }
 
 /// Metric name for the active inbound WebSocket gauge.

@@ -1,24 +1,6 @@
 use super::*;
 
 #[test]
-fn rc_insert_returns_immediately() {
-    let mut s = create_3tier_rc();
-    let user_id = ObjectId::new();
-    let expected_values = user_row_values(user_id, "Alice");
-    let ((id, row_values), _) =
-        s.a.insert("users", user_insert_values(user_id, "Alice"), None)
-            .unwrap();
-    assert!(!id.uuid().is_nil());
-    assert_eq!(row_values, expected_values);
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.a, query);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, id);
-    assert_eq!(results[0].1, row_values);
-}
-
-#[test]
 fn rc_auto_committed_direct_write_rejects_later_commit() {
     let mut core = create_test_runtime();
     let (_, batch_id) = core
@@ -28,21 +10,6 @@ fn rc_auto_committed_direct_write_rejects_later_commit() {
     let expected_error = format!("Write error: batch {batch_id} is already committed");
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);
-}
-
-#[test]
-fn rc_insert_data_syncs_to_server() {
-    let mut s = create_3tier_rc();
-    let ((id, _row_values), _) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-
-    pump_a_to_b(&mut s);
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.b, query);
-    assert_eq!(results.len(), 1, "Server B should have the synced row");
-    assert_eq!(results[0].0, id);
 }
 
 #[test]
@@ -256,24 +223,6 @@ fn rc_non_durable_client_seals_direct_batch_without_self_confirming_local_fate()
 }
 
 #[test]
-fn rc_update_sync() {
-    let mut s = create_3tier_rc();
-    let ((id, _row_values), _) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-    pump_a_to_b(&mut s);
-
-    s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
-        .unwrap();
-    pump_a_to_b(&mut s);
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.b, query);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1[1], Value::Text("Bob".into()));
-}
-
-#[test]
 fn rc_late_insert_settlement_does_not_hide_newer_update() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), insert_batch_id) =
@@ -298,22 +247,6 @@ fn rc_late_insert_settlement_does_not_hide_newer_update() {
     let results = execute_query(&mut s.a, query);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[1], Value::Text("Bob".into()));
-}
-
-#[test]
-fn rc_delete_sync() {
-    let mut s = create_3tier_rc();
-    let ((id, _row_values), _) =
-        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-            .unwrap();
-    pump_a_to_b(&mut s);
-
-    s.a.delete(id, None).unwrap();
-    pump_a_to_b(&mut s);
-
-    let query = Query::new("users");
-    let results = execute_query(&mut s.b, query);
-    assert_eq!(results.len(), 0, "Row should be deleted on B");
 }
 
 #[test]
@@ -934,24 +867,6 @@ fn rc_serverless_commit_retires_submission_immediately() {
     );
     let results = execute_query(&mut core, Query::new("users"));
     assert_eq!(results.len(), 1);
-}
-
-#[test]
-fn rc_wait_for_unattainable_tier_errors_instead_of_hanging() {
-    let mut core = create_test_runtime();
-    let ((_row_id, _), batch_id) = core
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .unwrap();
-
-    assert!(
-        core.wait_for_batch(batch_id, DurabilityTier::GlobalServer)
-            .is_err(),
-        "waiting on an unattainable tier must error immediately"
-    );
-    let mut receiver = core
-        .wait_for_batch(batch_id, DurabilityTier::Local)
-        .unwrap();
-    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 }
 
 #[test]

@@ -1483,17 +1483,6 @@ fn insert_and_wait_for_batch<S: Storage, Sch: Scheduler>(
     Ok((row, receiver))
 }
 
-fn update_and_wait_for_batch<S: Storage, Sch: Scheduler>(
-    core: &mut RuntimeCore<S, Sch>,
-    object_id: ObjectId,
-    values: Vec<(String, Value)>,
-    write_context: Option<&WriteContext>,
-    tier: DurabilityTier,
-) -> std::result::Result<futures::channel::oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-    let batch_id = core.update(object_id, values, write_context)?;
-    core.wait_for_batch(batch_id, tier)
-}
-
 fn delete_and_wait_for_batch<S: Storage, Sch: Scheduler>(
     core: &mut RuntimeCore<S, Sch>,
     object_id: ObjectId,

@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+#[cfg(feature = "test-utils")]
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "test-utils")]
+use tokio::sync::Notify;
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
 
@@ -78,9 +82,95 @@ pub struct ConnectionRegistration {
 #[derive(Default)]
 pub struct ConnectionEventHub {
     streams: Mutex<HashMap<u64, ConnectionStreamState>>,
+    #[cfg(feature = "test-utils")]
+    blocked_clients: Mutex<HashMap<ClientId, BlockedClientMessages>>,
+}
+
+#[cfg(feature = "test-utils")]
+struct BlockedClientMessages {
+    depth: usize,
+    queue: VecDeque<SyncPayload>,
+    notify: Arc<Notify>,
+}
+
+#[cfg(feature = "test-utils")]
+pub struct BlockedMessagesToClient {
+    hub: Arc<ConnectionEventHub>,
+    client_id: ClientId,
+    unblocked: bool,
+}
+
+#[cfg(feature = "test-utils")]
+impl BlockedMessagesToClient {
+    pub fn buffered_count(&self) -> usize {
+        self.hub.blocked_message_count(self.client_id)
+    }
+
+    pub async fn wait_until_buffered(
+        &self,
+        predicate: impl Fn(&SyncPayload) -> bool,
+        timeout: Duration,
+    ) -> Option<SyncPayload> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if let Some(payload) = self
+                .hub
+                .buffered_message_matching(self.client_id, &predicate)
+            {
+                return Some(payload);
+            }
+
+            let notify = self.hub.notify_for_blocked_client(self.client_id)?;
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            if tokio::time::timeout(remaining, notify.notified())
+                .await
+                .is_err()
+            {
+                return None;
+            }
+        }
+    }
+
+    pub fn unblock(mut self) {
+        if !self.unblocked {
+            self.hub.unblock_messages_to(self.client_id);
+            self.unblocked = true;
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+impl Drop for BlockedMessagesToClient {
+    fn drop(&mut self) {
+        if !self.unblocked {
+            self.hub.unblock_messages_to(self.client_id);
+            self.unblocked = true;
+        }
+    }
 }
 
 impl ConnectionEventHub {
+    #[cfg(feature = "test-utils")]
+    pub fn block_messages_to(self: &Arc<Self>, client_id: ClientId) -> BlockedMessagesToClient {
+        let notify = Arc::new(Notify::new());
+        let mut blocked_clients = self.blocked_clients.lock().unwrap();
+        blocked_clients
+            .entry(client_id)
+            .and_modify(|blocked| blocked.depth += 1)
+            .or_insert_with(|| BlockedClientMessages {
+                depth: 1,
+                queue: VecDeque::new(),
+                notify,
+            });
+
+        BlockedMessagesToClient {
+            hub: Arc::clone(self),
+            client_id,
+            unblocked: false,
+        }
+    }
+
     pub fn register_connection(
         &self,
         connection_id: u64,
@@ -212,8 +302,83 @@ impl ConnectionEventHub {
     }
 
     pub fn dispatch_payload(&self, client_id: ClientId, payload: SyncPayload) {
+        #[cfg(feature = "test-utils")]
+        if self.buffer_payload_if_blocked(client_id, &payload) {
+            return;
+        }
+
         let prepared = self.prepare_payload(client_id, payload);
         self.dispatch_prepared(prepared);
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn buffer_payload_if_blocked(&self, client_id: ClientId, payload: &SyncPayload) -> bool {
+        let notify = {
+            let mut blocked_clients = self.blocked_clients.lock().unwrap();
+            let Some(blocked) = blocked_clients.get_mut(&client_id) else {
+                return false;
+            };
+
+            blocked.queue.push_back(payload.clone());
+            Arc::clone(&blocked.notify)
+        };
+        notify.notify_waiters();
+        true
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn unblock_messages_to(&self, client_id: ClientId) {
+        let mut blocked_clients = self.blocked_clients.lock().unwrap();
+        let Some(blocked) = blocked_clients.get_mut(&client_id) else {
+            return;
+        };
+
+        if blocked.depth > 1 {
+            blocked.depth -= 1;
+            return;
+        }
+
+        let blocked = blocked_clients
+            .remove(&client_id)
+            .expect("blocked client exists");
+
+        blocked.notify.notify_waiters();
+        for payload in blocked.queue {
+            let prepared = self.prepare_payload(client_id, payload);
+            self.dispatch_prepared(prepared);
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn blocked_message_count(&self, client_id: ClientId) -> usize {
+        let blocked_clients = self.blocked_clients.lock().unwrap();
+        blocked_clients
+            .get(&client_id)
+            .map(|blocked| blocked.queue.len())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn buffered_message_matching(
+        &self,
+        client_id: ClientId,
+        predicate: &impl Fn(&SyncPayload) -> bool,
+    ) -> Option<SyncPayload> {
+        let blocked_clients = self.blocked_clients.lock().unwrap();
+        blocked_clients
+            .get(&client_id)?
+            .queue
+            .iter()
+            .find(|payload| predicate(payload))
+            .cloned()
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn notify_for_blocked_client(&self, client_id: ClientId) -> Option<Arc<Notify>> {
+        let blocked_clients = self.blocked_clients.lock().unwrap();
+        blocked_clients
+            .get(&client_id)
+            .map(|blocked| Arc::clone(&blocked.notify))
     }
 }
 

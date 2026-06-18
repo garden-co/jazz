@@ -49,7 +49,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(feature = "client")]
-pub use client::JazzClient;
+pub use client::{JazzClient, JazzTransaction};
 
 #[cfg(feature = "client")]
 pub use object::ObjectId;

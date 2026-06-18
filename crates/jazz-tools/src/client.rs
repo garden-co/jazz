@@ -1,9 +1,11 @@
 //! JazzClient implementation.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::batch_fate::BatchMode;
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
@@ -57,6 +59,50 @@ pub struct JazzClient {
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Next subscription handle ID.
     next_handle: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Transaction-scoped Jazz client handle.
+///
+/// Mutations issued through this handle are staged in the transaction returned
+/// by [`JazzClient::begin_transaction`]. The handle dereferences to the scoped
+/// [`JazzClient`] so regular client methods can be used directly.
+pub struct JazzTransaction {
+    batch_id: BatchId,
+    client: JazzClient,
+}
+
+impl JazzTransaction {
+    /// Logical batch id backing this transaction.
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
+
+    /// The transaction-scoped client.
+    pub fn client(&self) -> &JazzClient {
+        &self.client
+    }
+
+    /// Commit this transaction.
+    ///
+    /// Returns the transaction batch id so callers can wait for durability with
+    /// [`JazzClient::wait_for_batch`] if needed.
+    pub fn commit(self) -> Result<BatchId> {
+        self.client.commit_transaction(self.batch_id)?;
+        Ok(self.batch_id)
+    }
+
+    /// Roll back this transaction locally.
+    pub fn rollback(self) -> Result<bool> {
+        self.client.rollback_transaction(self.batch_id)
+    }
+}
+
+impl Deref for JazzTransaction {
+    type Target = JazzClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
 }
 
 /// State for an active subscription.
@@ -162,6 +208,21 @@ async fn wait_for_initial_transport_handshake(
 }
 
 impl JazzClient {
+    fn read_session(&self) -> Option<Session> {
+        self.write_context
+            .as_ref()
+            .and_then(|context| context.session.clone())
+            .or_else(|| self.default_session.clone())
+    }
+
+    fn write_context_for_batch(&self, batch_id: BatchId, batch_mode: BatchMode) -> WriteContext {
+        self.write_context
+            .clone()
+            .unwrap_or_default()
+            .with_batch_mode(batch_mode)
+            .with_batch_id(batch_id)
+    }
+
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
@@ -311,14 +372,12 @@ impl JazzClient {
             .runtime
             .query(
                 query,
-                self.write_context
-                    .as_ref()
-                    .and_then(|context| context.session.clone())
-                    .or_else(|| self.default_session.clone()),
+                self.read_session(),
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
                 },
+                self.write_context.as_ref().and_then(WriteContext::batch_id),
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
@@ -382,6 +441,37 @@ impl JazzClient {
     pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
         self.runtime
             .delete(object_id, self.write_context.as_ref())
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Begin a transaction and return a transaction-scoped client handle.
+    ///
+    /// Mutations issued through the returned handle are staged locally and are
+    /// not visible to ordinary reads until the transaction is committed and
+    /// accepted by the authority.
+    pub fn begin_transaction(&self) -> Result<JazzTransaction> {
+        let batch_id = self
+            .runtime
+            .begin_batch(BatchMode::Transactional)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let client = self
+            .with_write_context(self.write_context_for_batch(batch_id, BatchMode::Transactional));
+        Ok(JazzTransaction { batch_id, client })
+    }
+
+    /// Commit an open transaction by batch id.
+    pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+        self.runtime
+            .commit_batch(batch_id)
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Roll back an open transaction by batch id.
+    ///
+    /// Returns whether a local batch record existed for the transaction.
+    pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+        self.runtime
+            .rollback_batch(batch_id)
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -469,6 +559,10 @@ impl JazzClient {
 
 #[cfg(feature = "test-utils")]
 impl JazzClient {
+    pub fn client_id(&self) -> Option<ClientId> {
+        self.runtime.transport_client_id()
+    }
+
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
         let context = crate::AppContext::test(schema);
         crate::JazzClient::connect(context)
