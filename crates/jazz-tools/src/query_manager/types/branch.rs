@@ -173,6 +173,9 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
             ColumnMergeStrategy::Counter => {
                 hasher.update(&[1]);
             }
+            ColumnMergeStrategy::GSet => {
+                hasher.update(&[2]);
+            }
         }
     } else {
         hasher.update(&[0]);

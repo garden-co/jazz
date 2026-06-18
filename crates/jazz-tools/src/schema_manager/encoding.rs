@@ -392,6 +392,10 @@ fn encode_column_descriptor_with_version(
                 buf.push(1);
                 buf.push(1);
             }
+            Some(ColumnMergeStrategy::GSet) => {
+                buf.push(1);
+                buf.push(2);
+            }
             None => buf.push(0),
         }
     }
@@ -429,6 +433,7 @@ fn decode_column_descriptor_with_version(
         if has_merge_strategy {
             match read_u8(data, offset)? {
                 1 => Some(ColumnMergeStrategy::Counter),
+                2 => Some(ColumnMergeStrategy::GSet),
                 tag => {
                     return Err(CatalogueEncodingError::InvalidTypeTag {
                         tag,

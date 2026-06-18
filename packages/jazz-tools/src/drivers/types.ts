@@ -86,7 +86,7 @@ export type ColumnType =
   | { type: "Array"; element: ColumnType }
   | { type: "Row"; columns: ColumnDescriptor[] };
 
-export type ColumnMergeStrategy = "Counter";
+export type ColumnMergeStrategy = "Counter" | "GSet";
 
 export interface ColumnDescriptor {
   name: string;

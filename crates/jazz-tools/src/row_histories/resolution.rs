@@ -190,7 +190,8 @@ pub(super) fn merge_column_with_strategy<'a>(
 
             Ok((Value::Integer(merged), latest_contributor))
         }
-        None => {
+        // RED stub: g-set falls through to LWW until the union merge lands.
+        Some(ColumnMergeStrategy::GSet) | None => {
             let mut latest_changed: Option<&StoredRowBatch> = None;
             let mut merged_value = ancestor_value.clone();
 
