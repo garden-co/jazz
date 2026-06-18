@@ -6,6 +6,7 @@ use super::support::{
     has_removed, has_row, has_updated, lacks_row, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
+use super::{pe, permissions};
 use jazz_tools::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
@@ -287,6 +288,113 @@ async fn select_policies_boolean() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that the rows needed to validate a query's permissions are synced
+/// with the query result itself.
+///
+/// `protected_records` is readable when the current user has an active
+/// `access_grants` row. A fresh reader queries only `protected_records`; the
+/// query must still return the protected row without a prior explicit grant
+/// query.
+#[tokio::test]
+async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
+    let active_grant = pe::all_of([
+        pe::eq("principal_id", pe::session("user_id")),
+        pe::eq("active", true),
+    ]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("access_grants")
+                .column("principal_id", ColumnType::Text)
+                .column("active", ColumnType::Boolean)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().where_(active_grant.clone());
+                })),
+        )
+        .table(
+            TableSchema::builder("protected_records")
+                .column("body", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(pe::exists(pe::table("access_grants").where_(active_grant)));
+                })),
+        )
+        .build();
+
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let writer = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
+        .await
+        .expect("connect writer");
+
+    let (grant_id, _, grant_batch_id) = writer
+        .insert(
+            "access_grants",
+            row_input!("principal_id" => "alice", "active" => true),
+        )
+        .expect("seed access grant row");
+    writer
+        .wait_for_batch(grant_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("access grant reaches server");
+
+    let (record_id, _, record_batch_id) = writer
+        .insert("protected_records", row_input!("body" => "visible"))
+        .expect("seed protected record");
+    writer
+        .wait_for_batch(record_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("protected record reaches server");
+
+    let reader = JazzClient::connect(server.make_client_context_for_user(schema, "alice"))
+        .await
+        .expect("connect reader");
+
+    let protected_rows = reader
+        .query(
+            QueryBuilder::new("protected_records")
+                .filter_eq("id", Value::Uuid(record_id))
+                .select(&["body"])
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await
+        .expect("query protected records");
+
+    assert_eq!(
+        protected_rows,
+        vec![(record_id, vec![Value::Text("visible".into())])],
+        "protected record should be visible without querying access_grants first"
+    );
+
+    let local_grant_rows = reader
+        .query(
+            QueryBuilder::new("access_grants")
+                .filter_eq("id", Value::Uuid(grant_id))
+                .select(&["principal_id", "active"])
+                .build(),
+            Some(DurabilityTier::Local),
+        )
+        .await
+        .expect("query access grants locally");
+
+    assert_eq!(
+        local_grant_rows,
+        vec![(
+            grant_id,
+            vec![Value::Text("alice".into()), Value::Boolean(true)]
+        )],
+        "access grant should have been fetched with the protected record query"
+    );
+
+    writer.shutdown().await.expect("shutdown writer");
+    reader.shutdown().await.expect("shutdown reader");
     server.shutdown().await;
 }
 
