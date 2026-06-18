@@ -1,6 +1,5 @@
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
-import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
-import { applyDelta } from "../reconcile-array.js";
+import { applyDelta } from "../shared/index.js";
+import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
 import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
