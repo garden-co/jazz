@@ -1,7 +1,7 @@
 ---
 title: Advanced Internals
 description: "How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
-reviewedAt: "2e983ef11"
+reviewedAt: "2b1e2e78b"
 ---
 
 This page describes Jazz's internal architecture. You do not need any of this to use Jazz, but it
@@ -133,6 +133,8 @@ This is a sensible default, but can cause some unexpected behaviour with certain
 imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
 the value. If they simultaneously write 3, then the new value will be 3, even though they actually each wanted
 to increment by one.
+
+#### Counters
 
 Use `.merge("counter")` on the column to keep deltas additive instead:
 
