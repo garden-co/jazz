@@ -161,8 +161,43 @@ Counter merges are useful for things like:
 <Callout type="warn">
   `merge("counter")` is only valid on **non-nullable integer columns**. Calling it on a string, on a
   nullable integer (`s.int().optional()`), or on any other type throws at schema construction time.
-  `"counter"` is currently the only non-default merge strategy, but more merge strategies are
-  planned in future.
+</Callout>
+
+#### Grow-only sets
+
+Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under
+last-writer-wins, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
+`"blocked"`, one write clobbers the whole array and a tag is silently lost.
+
+Use `.merge("g-set")` to make an array column a grow-only set instead — concurrent writes converge
+to the union of every replica's elements:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  documents: s.table({
+    title: s.string(),
+    tags: s.array(s.string()).merge("g-set"),
+  }),
+};
+```
+
+When concurrent edits meet, the merged array is the union of all contributed elements, deduplicated
+and sorted into a canonical order so every replica converges on a byte-identical result. Alice's
+`"urgent"` and Bob's `"blocked"` both survive. An element written by one replica is never dropped by
+a concurrent write from another that never saw it.
+
+Grow-only sets are useful for things like:
+
+- Accumulating tags, labels, or category membership.
+- Append-only logs of participants, contributors, or seen IDs.
+- Any collection where you care about keeping every element rather than which device wrote last.
+
+<Callout type="warn">
+  `merge("g-set")` is **grow-only**: there is no element removal. It is only valid on **non-nullable
+  array columns**; calling it on any other type, or on a nullable array (`s.array(...).optional()`),
+  throws at schema construction time.
 </Callout>
 
 ### Cold start
