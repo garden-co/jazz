@@ -91,7 +91,13 @@ interface ColumnBuilder {
 type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
-> = Optional extends true ? "lww" : Sql extends "INTEGER" ? ColumnMergeStrategyName : "lww";
+> = Optional extends true
+  ? "lww"
+  : Sql extends "INTEGER"
+    ? "lww" | "counter"
+    : Sql extends { kind: "ARRAY" }
+      ? "lww" | "g-set"
+      : "lww";
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
   : TSTypeFromSqlType<Sql>;
