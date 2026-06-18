@@ -88,9 +88,6 @@ interface ColumnBuilder {
   _transform?: ColumnTransform<unknown, unknown>;
 }
 
-// The column shape each non-default merge strategy is valid on, keyed by the
-// ColumnMergeStrategy enum. Adding a strategy is a single entry here; the gate
-// below derives the per-column allowed set from it.
 type MergeStrategyColumnType = {
   counter: "INTEGER";
   "g-set": { kind: "ARRAY" };

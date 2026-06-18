@@ -201,10 +201,6 @@ pub(super) fn merge_column_with_strategy<'a>(
                 ))
             })?;
 
-            // Union of ancestor ∪ contenders, keyed by canonical encoding. The
-            // BTreeMap sorts keys (deterministic output order) and dedupes as it
-            // goes; the survivor of a key collision can't affect convergence,
-            // because the stored row re-encodes elements through this same encoding.
             let mut elements: BTreeMap<Vec<u8>, Value> = BTreeMap::new();
             collect_set_elements(column, element_type, ancestor_value, &mut elements)?;
             for contender in contenders {
