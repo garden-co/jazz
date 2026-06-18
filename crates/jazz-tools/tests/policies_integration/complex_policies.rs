@@ -76,21 +76,21 @@ fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchema
 
 fn shared_document_select_policy() -> PolicyExpr {
     pe::exists(pe::table("document_shares").where_(pe::rel::all_of([
-        pe::rel::eq_outer_id("document_id"),
+        pe::rel::eq_outer("document_id", "id"),
         pe::rel::eq_session("user_id", "user_id"),
     ])))
 }
 
 fn editor_document_update_policy() -> PolicyExpr {
     pe::exists(pe::table("document_editors").where_(pe::rel::all_of([
-        pe::rel::eq_outer_id("document_id"),
+        pe::rel::eq_outer("document_id", "id"),
         pe::rel::eq_session("user_id", "user_id"),
     ])))
 }
 
 fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
     pe::exists(pe::table("chats").where_(pe::rel::all_of([
-        pe::rel::eq_outer_id("id"),
+        pe::rel::eq_outer("id", "id"),
         pe::rel::eq_outer("created_by", "created_by"),
         pe::rel::eq_outer("is_public", "is_public"),
     ])))
@@ -167,7 +167,7 @@ fn mixed_complex_select_policy() -> PolicyExpr {
         pe::eq("published", true),
         pe::in_session("team_slug", "claims.team_slugs"),
         pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
-            pe::rel::eq_outer_id("document_id"),
+            pe::rel::eq_outer("document_id", "id"),
             pe::rel::eq_literal("flag", "allow"),
         ]))),
         pe::all_of([

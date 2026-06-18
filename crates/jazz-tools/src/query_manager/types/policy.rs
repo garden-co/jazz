@@ -2,7 +2,7 @@ use super::*;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyValue};
 use crate::query_manager::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -406,42 +406,123 @@ pub mod policy_expr {
         PolicyValueInput::Literal(Value::Null)
     }
 
-    pub fn session_cmp(
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum SessionWhere {
+        Cmp { op: CmpOp, value: Value },
+        IsNull(bool),
+        Contains(Value),
+        InList(Vec<Value>),
+    }
+
+    impl SessionWhere {
+        pub fn eq(value: impl Into<Value>) -> Self {
+            let value = value.into();
+            if value == Value::Null {
+                Self::IsNull(true)
+            } else {
+                Self::Cmp {
+                    op: CmpOp::Eq,
+                    value,
+                }
+            }
+        }
+
+        pub fn ne(value: impl Into<Value>) -> Self {
+            let value = value.into();
+            if value == Value::Null {
+                Self::IsNull(false)
+            } else {
+                Self::Cmp {
+                    op: CmpOp::Ne,
+                    value,
+                }
+            }
+        }
+
+        pub fn cmp(op: CmpOp, value: impl Into<Value>) -> Self {
+            match (op, value.into()) {
+                (CmpOp::Eq, Value::Null) => Self::IsNull(true),
+                (CmpOp::Ne, Value::Null) => Self::IsNull(false),
+                (op, value) => Self::Cmp { op, value },
+            }
+        }
+
+        pub fn is_null(value: bool) -> Self {
+            Self::IsNull(value)
+        }
+
+        pub fn contains(value: impl Into<Value>) -> Self {
+            Self::Contains(value.into())
+        }
+
+        pub fn in_list<V>(values: impl IntoIterator<Item = V>) -> Self
+        where
+            V: Into<Value>,
+        {
+            Self::InList(values.into_iter().map(Into::into).collect())
+        }
+    }
+
+    impl From<Value> for SessionWhere {
+        fn from(value: Value) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<&str> for SessionWhere {
+        fn from(value: &str) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<String> for SessionWhere {
+        fn from(value: String) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<bool> for SessionWhere {
+        fn from(value: bool) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<i32> for SessionWhere {
+        fn from(value: i32) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<i64> for SessionWhere {
+        fn from(value: i64) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<f64> for SessionWhere {
+        fn from(value: f64) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    impl From<ObjectId> for SessionWhere {
+        fn from(value: ObjectId) -> Self {
+            Self::eq(value)
+        }
+    }
+
+    pub fn session_where(
         path: impl IntoSessionPath,
-        op: CmpOp,
-        value: impl Into<Value>,
+        condition: impl Into<SessionWhere>,
     ) -> PolicyExpr {
-        PolicyExpr::SessionCmp {
-            path: path.into_session_path(),
-            op,
-            value: value.into(),
-        }
-    }
-
-    pub fn session_eq(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
-        session_cmp(path, CmpOp::Eq, value)
-    }
-
-    pub fn session_ne(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
-        session_cmp(path, CmpOp::Ne, value)
-    }
-
-    pub fn session_is_null(path: impl IntoSessionPath) -> PolicyExpr {
-        PolicyExpr::SessionIsNull {
-            path: path.into_session_path(),
-        }
-    }
-
-    pub fn session_is_not_null(path: impl IntoSessionPath) -> PolicyExpr {
-        PolicyExpr::SessionIsNotNull {
-            path: path.into_session_path(),
-        }
-    }
-
-    pub fn session_contains(path: impl IntoSessionPath, value: impl Into<Value>) -> PolicyExpr {
-        PolicyExpr::SessionContains {
-            path: path.into_session_path(),
-            value: value.into(),
+        let path = path.into_session_path();
+        match condition.into() {
+            SessionWhere::Cmp { op, value } => PolicyExpr::SessionCmp { path, op, value },
+            SessionWhere::IsNull(true) => PolicyExpr::SessionIsNull { path },
+            SessionWhere::IsNull(false) => PolicyExpr::SessionIsNotNull { path },
+            SessionWhere::Contains(value) => PolicyExpr::SessionContains { path, value },
+            SessionWhere::InList(values) if values.is_empty() => PolicyExpr::False,
+            SessionWhere::InList(values) => PolicyExpr::SessionInList { path, values },
         }
     }
 
@@ -737,10 +818,6 @@ pub mod policy_expr {
                 PredicateCmpOp::Eq,
                 ValueRef::OuterColumn(ColumnRef::unscoped(outer_column)),
             )
-        }
-
-        pub fn eq_outer_id(column: impl Into<String>) -> PredicateExpr {
-            cmp(column, PredicateCmpOp::Eq, ValueRef::RowId(RowIdRef::Outer))
         }
 
         pub fn eq_literal(column: impl Into<String>, value: impl Into<Value>) -> PredicateExpr {
