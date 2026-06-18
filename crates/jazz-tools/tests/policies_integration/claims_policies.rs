@@ -6,7 +6,7 @@ use super::support::{
     has_added, has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::query_manager::policy::{CmpOp, PolicyExpr};
+use super::{pe, permissions};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
@@ -117,19 +117,18 @@ async fn create_claim_compound_document(
 #[tokio::test]
 async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
     let table_name = "documents";
-    let admin_policy = PolicyExpr::SessionCmp {
-        path: vec!["claims".into(), "role".into()],
-        op: CmpOp::Eq,
-        value: Value::Text("ADMIN".into()),
-    };
+    let admin_policy = pe::session_eq("claims.role", "ADMIN");
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(admin_policy.clone())
-                .with_update(Some(admin_policy.clone()), admin_policy.clone())
-                .with_delete(admin_policy),
+            permissions(|p| {
+                p.allow_read().always();
+                p.allow_insert().where_(admin_policy.clone());
+                p.allow_update()
+                    .where_old(admin_policy.clone())
+                    .where_new(admin_policy.clone());
+                p.allow_delete().where_(admin_policy);
+            }),
         ))
         .build();
 
@@ -256,19 +255,18 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
 #[tokio::test]
 async fn admin_role_claims_reject_member_mutations() {
     let table_name = "documents";
-    let admin_policy = PolicyExpr::SessionCmp {
-        path: vec!["claims".into(), "role".into()],
-        op: CmpOp::Eq,
-        value: Value::Text("ADMIN".into()),
-    };
+    let admin_policy = pe::session_eq("claims.role", "ADMIN");
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(admin_policy.clone())
-                .with_update(Some(admin_policy.clone()), admin_policy.clone())
-                .with_delete(admin_policy),
+            permissions(|p| {
+                p.allow_read().always();
+                p.allow_insert().where_(admin_policy.clone());
+                p.allow_update()
+                    .where_old(admin_policy.clone())
+                    .where_new(admin_policy.clone());
+                p.allow_delete().where_(admin_policy);
+            }),
         ))
         .build();
 
@@ -426,17 +424,17 @@ async fn admin_role_claims_reject_member_mutations() {
 #[tokio::test]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     let table_name = "documents";
-    let id_claim_policy = PolicyExpr::In {
-        column: "id".into(),
-        session_path: vec!["claims".into(), "editable_doc_ids".into()],
-    };
+    let id_claim_policy = pe::in_session("id", "claims.editable_doc_ids");
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_select(PolicyExpr::True)
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(id_claim_policy.clone()), id_claim_policy),
+            permissions(|p| {
+                p.allow_read().always();
+                p.allow_insert().always();
+                p.allow_update()
+                    .where_old(id_claim_policy.clone())
+                    .where_new(id_claim_policy);
+            }),
         ))
         .build();
 
@@ -589,11 +587,11 @@ async fn role_claim_presence_gates_row_visibility() {
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::SessionIsNotNull {
-                    path: vec!["claims".into(), "role".into()],
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::session_is_not_null("claims.role"));
+            }),
         ))
         .build();
 
@@ -720,12 +718,11 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
     let schema = SchemaBuilder::new()
         .table(make_group_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::in_session(
-                    "group_slug",
-                    vec!["claims".into(), "groups_allowed".into()],
-                )),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::in_session("group_slug", "claims.groups_allowed"));
+            }),
         ))
         .build();
 
@@ -939,21 +936,19 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
     let schema = SchemaBuilder::new()
         .table(make_title_documents_schema(
             null_table,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::SessionIsNull {
-                    path: vec!["claims".into(), "revoked_at".into()],
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::session_is_null("claims.revoked_at"));
+            }),
         ))
         .table(make_title_documents_schema(
             present_table,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::SessionCmp {
-                    path: vec!["claims".into(), "revoked_at".into()],
-                    op: CmpOp::Ne,
-                    value: Value::Null,
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::session_ne("claims.revoked_at", Value::Null));
+            }),
         ))
         .build();
 
@@ -1095,36 +1090,28 @@ async fn row_and_claim_predicates_compose_under_and_and_or() {
     let schema = SchemaBuilder::new()
         .table(make_claim_compound_schema(
             all_of_table,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::and(vec![
-                    PolicyExpr::eq_literal("group_slug", Value::Text("eng".into())),
-                    PolicyExpr::eq_literal("published", Value::Boolean(true)),
-                    PolicyExpr::SessionCmp {
-                        path: vec!["claims".into(), "org".into(), "slug".into()],
-                        op: CmpOp::Eq,
-                        value: Value::Text("north".into()),
-                    },
-                    PolicyExpr::SessionContains {
-                        path: vec!["claims".into(), "groups_allowed".into()],
-                        value: Value::Text("eng".into()),
-                    },
-                ])),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::all_of([
+                    pe::eq("group_slug", "eng"),
+                    pe::eq("published", true),
+                    pe::session_eq("claims.org.slug", "north"),
+                    pe::session_contains("claims.groups_allowed", "eng"),
+                ]));
+            }),
         ))
         .table(make_group_documents_schema(
             any_of_table,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
-                    PolicyExpr::eq_literal("group_slug", Value::Text("public".into())),
-                    PolicyExpr::and(vec![
-                        PolicyExpr::eq_literal("group_slug", Value::Text("eng".into())),
-                        PolicyExpr::SessionContains {
-                            path: vec!["claims".into(), "groups_allowed".into()],
-                            value: Value::Text("eng".into()),
-                        },
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
+                    pe::eq("group_slug", "public"),
+                    pe::all_of([
+                        pe::eq("group_slug", "eng"),
+                        pe::session_contains("claims.groups_allowed", "eng"),
                     ]),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
