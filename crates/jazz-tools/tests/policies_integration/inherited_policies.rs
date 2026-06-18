@@ -7,7 +7,7 @@ use super::support::{
     wait_for_subscription_update,
 };
 use super::{assert_client_policy_denied, pe, permissions};
-use jazz_tools::query_manager::policy::{Operation, PolicyExpr, PolicyValue};
+use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnDescriptor, RowDescriptor, Schema, TableName, TablePolicies, TableSchemaBuilder,
@@ -60,14 +60,15 @@ fn make_multi_folder_documents_schema(
 }
 
 fn file_referencing_schema(array_edge: bool) -> Schema {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let via_column = if array_edge { "images" } else { "image" };
 
-    let files_policies =
-        super::explicit_allow_all_policies(TablePolicies::new().with_select(PolicyExpr::or(vec![
+    let files_policies = super::explicit_allow_all_policies(permissions(|p| {
+        p.allow_read().where_(pe::any_of([
             owner_policy.clone(),
-            PolicyExpr::inherits_referencing(Operation::Select, "todos", via_column),
-        ])));
+            pe::allowed_to_read_referencing("todos", via_column),
+        ]));
+    }));
 
     let mut schema = Schema::new();
     schema.insert(
@@ -79,13 +80,14 @@ fn file_referencing_schema(array_edge: bool) -> Schema {
             .build(),
     );
 
-    let todos_policies = super::explicit_allow_all_policies(
-        TablePolicies::new()
-            .with_select(owner_policy.clone())
-            .with_insert(owner_policy.clone())
-            .with_update(Some(owner_policy.clone()), PolicyExpr::True)
-            .with_delete(owner_policy),
-    );
+    let todos_policies = super::explicit_allow_all_policies(permissions(|p| {
+        p.allow_read().where_(owner_policy.clone());
+        p.allow_insert().where_(owner_policy.clone());
+        p.allow_update()
+            .where_old(owner_policy.clone())
+            .where_new(pe::always());
+        p.allow_delete().where_(owner_policy);
+    }));
 
     let todos_schema = if array_edge {
         let descriptor = RowDescriptor::new(vec![
@@ -117,29 +119,30 @@ fn multi_hop_inherited_parts_schema() -> Schema {
     SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(
             TableSchema::builder("files")
                 .column("title", ColumnType::Text)
                 .nullable_fk_column("folder_id", "folders")
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(inherited_non_null_policy(Operation::Select, "folder_id")),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+                })),
         )
         .table(
             TableSchema::builder("file_parts")
                 .column("title", ColumnType::Text)
                 .nullable_fk_column("file_id", "files")
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(inherited_non_null_policy(Operation::Select, "file_id")),
-                ),
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(inherited_non_null_policy(Operation::Select, "file_id"));
+                })),
         )
         .build()
 }
@@ -147,10 +150,7 @@ fn multi_hop_inherited_parts_schema() -> Schema {
 // -- Policy helpers --
 
 fn folder_owner_policy() -> PolicyExpr {
-    PolicyExpr::Contains {
-        column: "owners".to_string(),
-        value: PolicyValue::SessionRef(vec!["user_id".into()]),
-    }
+    pe::contains("owners", pe::session("user_id"))
 }
 
 fn inherited_non_null_policy(operation: Operation, via_column: &str) -> PolicyExpr {
@@ -163,16 +163,11 @@ fn inherited_non_null_policy_with_depth(
     max_depth: Option<usize>,
 ) -> PolicyExpr {
     let inherits = match max_depth {
-        Some(depth) => PolicyExpr::inherits_with_depth(operation, via_column, depth),
-        None => PolicyExpr::inherits(operation, via_column),
+        Some(depth) => pe::allowed_to_with_depth(operation, via_column, depth),
+        None => pe::allowed_to(operation, via_column),
     };
 
-    PolicyExpr::and(vec![
-        PolicyExpr::IsNotNull {
-            column: via_column.to_string(),
-        },
-        inherits,
-    ])
+    pe::all_of([pe::is_not_null(via_column), inherits])
 }
 
 // -- Value constructors --
@@ -395,15 +390,18 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(inherited_non_null_policy(Operation::Select, "folder_id")),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+            }),
         ))
         .build();
 
@@ -535,16 +533,19 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_delete(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_delete().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(inherited_non_null_policy(Operation::Select, "folder_id")),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+            }),
         ))
         .build();
 
@@ -678,22 +679,24 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
 #[tokio::test]
 #[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
                     owner_policy,
                     inherited_non_null_policy(Operation::Select, "folder_id"),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
@@ -852,30 +855,30 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 #[tokio::test]
 #[should_panic] // "known failing: inherited write policies resolves on wrong branch"
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::and(vec![
+            permissions(|p| {
+                p.allow_insert().where_(pe::all_of([
                     owner_policy.clone(),
-                    PolicyExpr::or(vec![
-                        PolicyExpr::IsNull {
-                            column: "folder_id".into(),
-                        },
+                    pe::any_of([
+                        pe::is_null("folder_id"),
                         inherited_non_null_policy(Operation::Select, "folder_id"),
                     ]),
-                ]))
-                .with_select(PolicyExpr::or(vec![
+                ]));
+                p.allow_read().where_(pe::any_of([
                     owner_policy,
                     inherited_non_null_policy(Operation::Select, "folder_id"),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
@@ -1081,27 +1084,29 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
 #[tokio::test]
 #[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_delete(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_delete().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
                     owner_policy.clone(),
                     inherited_non_null_policy(Operation::Select, "folder_id"),
-                ]))
-                .with_delete(PolicyExpr::or(vec![
+                ]));
+                p.allow_delete().where_(pe::any_of([
                     owner_policy,
                     inherited_non_null_policy(Operation::Delete, "folder_id"),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
@@ -1224,27 +1229,29 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 #[tokio::test]
 #[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_delete(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_delete().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
                     owner_policy.clone(),
                     inherited_non_null_policy(Operation::Select, "folder_id"),
-                ]))
-                .with_delete(PolicyExpr::or(vec![
+                ]));
+                p.allow_delete().where_(pe::any_of([
                     owner_policy,
                     inherited_non_null_policy(Operation::Delete, "folder_id"),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
@@ -1384,24 +1391,27 @@ async fn inherited_multiple_folder_paths_compose_with_or() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "primary_folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(make_folders_schema(
             "secondary_folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy()),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+            }),
         ))
         .table(make_multi_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
                     inherited_non_null_policy(Operation::Select, "primary_folder_id"),
                     inherited_non_null_policy(Operation::Select, "secondary_folder_id"),
-                ])),
+                ]));
+            }),
         ))
         .build();
 
@@ -1550,30 +1560,33 @@ async fn inherited_multiple_folder_paths_compose_with_or() {
 #[tokio::test]
 #[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
-    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_update(Some(folder_owner_policy()), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_update()
+                    .where_old(folder_owner_policy())
+                    .where_new(pe::always());
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::or(vec![
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::any_of([
                     owner_policy.clone(),
                     inherited_non_null_policy(Operation::Select, "folder_id"),
-                ]))
-                .with_update(
-                    Some(PolicyExpr::or(vec![
+                ]));
+                p.allow_update()
+                    .where_old(pe::any_of([
                         owner_policy,
                         inherited_non_null_policy(Operation::Update, "folder_id"),
-                    ])),
-                    PolicyExpr::True,
-                ),
+                    ]))
+                    .where_new(pe::always());
+            }),
         ))
         .build();
 
@@ -2037,16 +2050,19 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_update().always();
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(inherited_non_null_policy(Operation::Select, "folder_id")),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+            }),
         ))
         .build();
 
@@ -2130,17 +2146,20 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_update().always();
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(inherited_non_null_policy(Operation::Select, "folder_id"))
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+                p.allow_update().always();
+            }),
         ))
         .build();
 
@@ -2225,17 +2244,20 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(folder_owner_policy())
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(folder_owner_policy());
+                p.allow_update().always();
+            }),
         ))
         .table(make_folder_documents_schema(
             "documents",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(inherited_non_null_policy(Operation::Select, "folder_id"))
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(inherited_non_null_policy(Operation::Select, "folder_id"));
+                p.allow_update().always();
+            }),
         ))
         .build();
 
