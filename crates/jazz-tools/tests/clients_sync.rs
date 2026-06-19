@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::row_input;
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
@@ -34,6 +36,68 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         |_| Some(()),
     )
     .await;
+}
+
+#[tokio::test]
+async fn wait_for_batch_waits_until_expected_tier_confirmation_reaches_client() {
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let alice =
+        JazzClient::connect(server.make_client_context_for_user(schema, "alice-wait-for-batch"))
+            .await
+            .expect("connect alice");
+    let alice_client_id = alice.client_id().expect("alice transport client id");
+
+    wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
+
+    let blocked = server.block_messages_to(alice_client_id);
+    let (_, _, batch_id) = alice
+        .insert(
+            "todos",
+            row_input!("title" => "blocked confirmation", "completed" => false),
+        )
+        .expect("insert todo");
+
+    blocked
+        .wait_until_buffered(
+            |payload| {
+                matches!(
+                    payload,
+                    SyncPayload::BatchFate { fate }
+                        if fate.batch_id() == batch_id
+                            && fate
+                                .confirmed_tier()
+                                .is_some_and(|tier| tier >= DurabilityTier::EdgeServer)
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("server should produce the edge confirmation while messages are blocked");
+    assert!(
+        blocked.buffered_count() > 0,
+        "blocked client should have buffered server messages"
+    );
+
+    {
+        let wait_for_batch = alice.wait_for_batch(batch_id, DurabilityTier::EdgeServer);
+        tokio::pin!(wait_for_batch);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut wait_for_batch)
+                .await
+                .is_err(),
+            "wait_for_batch should not resolve before the confirmation is delivered"
+        );
+
+        blocked.unblock();
+        wait_for_batch
+            .await
+            .expect("wait_for_batch should resolve after unblocking the confirmation");
+    }
+
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
 }
 
 /// Verifies that a fresh client resolves the latest state for a single object
@@ -204,6 +268,131 @@ async fn jazz_tools_cli_two_clients_sync_values() {
             .iter()
             .any(|value| matches!(value, Value::Boolean(true))),
         "client a should observe client b's update through the server"
+    );
+
+    client_a.shutdown().await.expect("shutdown client a");
+    client_b.shutdown().await.expect("shutdown client b");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results() {
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect client a");
+    let client_b = JazzClient::connect(server.make_client_context(schema))
+        .await
+        .expect("connect client b");
+
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+
+    let (todo_id, _, _) = client_a
+        .insert(
+            "todos",
+            row_input!("title" => "update-through-server", "completed" => false),
+        )
+        .expect("create todo from client a");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &client_b,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "client b sees inserted todo before update",
+        |rows| rows.iter().any(|(id, _)| *id == todo_id).then_some(()),
+    )
+    .await;
+
+    let batch_id = client_a
+        .update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .expect("update todo from client a");
+    client_a
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("update reaches edge");
+
+    let expected_values = vec![
+        Value::Text("update-through-server".to_string()),
+        Value::Boolean(true),
+    ];
+    let rows_after_update = wait_for_query(
+        &client_b,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "client b sees updated todo",
+        |rows| {
+            rows.iter()
+                .find(|(id, values)| *id == todo_id && values == &expected_values)
+                .cloned()
+        },
+    )
+    .await;
+    assert_eq!(rows_after_update.0, todo_id);
+    assert_eq!(rows_after_update.1, expected_values);
+
+    client_a.shutdown().await.expect("shutdown client a");
+    client_b.shutdown().await.expect("shutdown client b");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_through_one_client_removes_row_from_peer_query_results() {
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect client a");
+    let client_b = JazzClient::connect(server.make_client_context(schema))
+        .await
+        .expect("connect client b");
+
+    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+
+    let (todo_id, _, _) = client_a
+        .insert(
+            "todos",
+            row_input!("title" => "delete-through-server", "completed" => false),
+        )
+        .expect("create todo from client a");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &client_b,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "client b sees inserted todo before delete",
+        |rows| rows.iter().any(|(id, _)| *id == todo_id).then_some(()),
+    )
+    .await;
+
+    let batch_id = client_a.delete(todo_id).expect("delete todo from client a");
+    client_a
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("delete reaches edge");
+
+    let rows_after_delete = wait_for_query(
+        &client_b,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "client b no longer sees deleted todo",
+        |rows| rows.iter().all(|(id, _)| *id != todo_id).then_some(rows),
+    )
+    .await;
+    assert!(
+        rows_after_delete.iter().all(|(id, _)| *id != todo_id),
+        "deleted row should not remain visible to peer: {rows_after_delete:?}"
     );
 
     client_a.shutdown().await.expect("shutdown client a");

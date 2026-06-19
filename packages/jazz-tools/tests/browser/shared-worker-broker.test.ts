@@ -644,7 +644,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       };
@@ -727,7 +727,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       };
@@ -808,7 +808,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       };
@@ -898,7 +898,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           clientByTabId.get(tabId)?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
         onReconnected: (client) => {
@@ -969,7 +969,7 @@ describe("SharedWorker browser broker", () => {
         onDetachFollowerPort: (followerTabId, leadershipId) => {
           detachedFollowers.push(`${followerTabId}:${leadershipId}`);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       } as Parameters<typeof BrowserBrokerClient.connect>[0];
@@ -1033,7 +1033,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           leaderClient?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       } as Parameters<typeof BrowserBrokerClient.connect>[0];
@@ -1159,7 +1159,7 @@ describe("SharedWorker browser broker", () => {
           port.close();
           leaderClient?.reportFollowerPortAttached(followerTabId, leadershipId);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       } as Parameters<typeof BrowserBrokerClient.connect>[0];
@@ -1208,7 +1208,7 @@ describe("SharedWorker browser broker", () => {
           attachedFollowers.push(`${followerTabId}:${leadershipId}`);
           port.close();
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       } as Parameters<typeof BrowserBrokerClient.connect>[0];
@@ -1262,7 +1262,7 @@ describe("SharedWorker browser broker", () => {
         onAttachFollowerPort: (_followerTabId, _leadershipId, port) => {
           port.close();
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       };
@@ -1335,7 +1335,7 @@ describe("SharedWorker browser broker", () => {
         onDetachFollowerPort: (followerTabId, leadershipId) => {
           detachedFollowers.push(`${followerTabId}:${leadershipId}`);
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
         onReconnected: (client) => {
@@ -1421,7 +1421,7 @@ describe("SharedWorker browser broker", () => {
             first?.reportFollowerPortAttached(followerTabId, leadershipId);
           }
         },
-        onUseFollowerPort: (_leaderTabId, _leadershipId, port) => {
+        onUseFollowerPort: (_leadershipId, port) => {
           port.close();
         },
       };
