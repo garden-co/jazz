@@ -24,11 +24,12 @@ impl Worker for BtreeWorker {
     }
 
     fn received(&mut self, scope: &WorkerScope<Self>, request: Self::Input, id: HandlerId) {
+        let base_url = request.base_url.clone();
         let profile = request.profile.clone();
         let scope = scope.clone();
         spawn_local(async move {
             let result = async {
-                let (kv, ops) = fetch_dataset(&profile).await?;
+                let (kv, ops) = fetch_dataset(&base_url, &profile).await?;
                 let result = opfs_btree::wasm_bench::run_dataset_result(&kv, &ops)
                     .await
                     .map_err(js_error)?;

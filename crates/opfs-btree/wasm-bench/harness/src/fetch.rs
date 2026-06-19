@@ -1,8 +1,9 @@
 use gloo_net::http::Request;
 
-pub async fn fetch_dataset(profile: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let kv = fetch_bytes(&format!("/data/{profile}.kv")).await?;
-    let ops = fetch_bytes(&format!("/data/{profile}.ops")).await?;
+pub async fn fetch_dataset(base_url: &str, profile: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let base_url = base_url.trim_end_matches('/');
+    let kv = fetch_bytes(&format!("{base_url}/data/{profile}.kv")).await?;
+    let ops = fetch_bytes(&format!("{base_url}/data/{profile}.ops")).await?;
     Ok((kv, ops))
 }
 
