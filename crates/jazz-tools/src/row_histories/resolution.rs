@@ -21,11 +21,13 @@
 //!   [`preview_override_sidecar`] — building blocks reused by `types.rs` when
 //!   encoding the visible-row sidecar.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::metadata::DeleteKind;
-use crate::query_manager::types::{ColumnDescriptor, ColumnMergeStrategy, RowDescriptor, Value};
-use crate::row_format::{EncodingError, encode_row};
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
+};
+use crate::row_format::{EncodingError, encode_row, encode_value_with_type};
 use crate::sync_manager::DurabilityTier;
 
 use super::codecs::{flat_user_values, malformed, tier_satisfies};
@@ -190,6 +192,29 @@ pub(super) fn merge_column_with_strategy<'a>(
 
             Ok((Value::Integer(merged), latest_contributor))
         }
+        Some(ColumnMergeStrategy::GSet) => {
+            let element_type = column.column_type.element_type().ok_or_else(|| {
+                malformed(format!(
+                    "g-set merge expected ARRAY column for '{}', got {:?}",
+                    column.name_str(),
+                    column.column_type
+                ))
+            })?;
+
+            let mut elements: BTreeMap<Vec<u8>, Value> = BTreeMap::new();
+            collect_set_elements(column, element_type, ancestor_value, &mut elements)?;
+            for contender in contenders {
+                collect_set_elements(column, element_type, contender.value, &mut elements)?;
+            }
+            let merged = elements.into_values().collect();
+
+            let latest_contributor = contenders
+                .iter()
+                .max_by_key(|contender| (contender.row.updated_at, contender.row.batch_id()))
+                .map(|contender| contender.row);
+
+            Ok((Value::Array(merged), latest_contributor))
+        }
         None => {
             let mut latest_changed: Option<&StoredRowBatch> = None;
             let mut merged_value = ancestor_value.clone();
@@ -209,6 +234,29 @@ pub(super) fn merge_column_with_strategy<'a>(
 
             Ok((merged_value, latest_changed))
         }
+    }
+}
+
+fn collect_set_elements(
+    column: &ColumnDescriptor,
+    element_type: &ColumnType,
+    value: &Value,
+    out: &mut BTreeMap<Vec<u8>, Value>,
+) -> Result<(), EncodingError> {
+    match value {
+        Value::Array(elements) => {
+            for element in elements {
+                out.entry(encode_value_with_type(element, element_type))
+                    .or_insert_with(|| element.clone());
+            }
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        other => Err(malformed(format!(
+            "g-set merge expected ARRAY value for column '{}', got {:?}",
+            column.name_str(),
+            other
+        ))),
     }
 }
 
@@ -335,6 +383,7 @@ pub(super) fn build_computed_visible_preview(
                         !matches!(
                             (column.merge_strategy, candidate_value),
                             (Some(ColumnMergeStrategy::Counter), Value::Null)
+                                | (Some(ColumnMergeStrategy::GSet), Value::Null)
                         )
                     });
                 changed_from_ancestor.then_some(ColumnContender {

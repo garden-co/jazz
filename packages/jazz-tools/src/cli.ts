@@ -619,6 +619,9 @@ function builderExpressionForColumn(column: ColumnDescriptor): string {
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
   }
+  if (column.merge_strategy === "GSet") {
+    return `${withOptional}.merge("g-set")`;
+  }
   return withOptional;
 }
 

@@ -88,10 +88,23 @@ interface ColumnBuilder {
   _transform?: ColumnTransform<unknown, unknown>;
 }
 
+type MergeStrategyColumnType = {
+  counter: "INTEGER";
+  "g-set": { kind: "ARRAY" };
+};
+
 type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
-> = Optional extends true ? "lww" : Sql extends "INTEGER" ? ColumnMergeStrategyName : "lww";
+> = Optional extends true
+  ? "lww"
+  :
+      | "lww"
+      | {
+          [Strategy in keyof MergeStrategyColumnType]: Sql extends MergeStrategyColumnType[Strategy]
+            ? Strategy
+            : never;
+        }[keyof MergeStrategyColumnType];
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
   : TSTypeFromSqlType<Sql>;
@@ -300,6 +313,12 @@ function normalizeColumnMergeStrategy(
 ): ColumnMergeStrategy | undefined {
   if (strategy === "lww") {
     return undefined;
+  }
+  if (strategy === "g-set") {
+    if (nullable || typeof sqlType !== "object" || sqlType.kind !== "ARRAY") {
+      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
+    }
+    return "g-set";
   }
   if (sqlType !== "INTEGER" || nullable) {
     throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
@@ -517,8 +536,8 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   constructor(public _element: T) {}
 
   optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    if (this._mergeStrategy === "g-set") {
+      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
     }
     this._nullable = true;
     return this;
