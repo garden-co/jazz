@@ -60,6 +60,7 @@ const mockWasmSchema = {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "maybe_done", column_type: { type: "Boolean" }, nullable: true },
       { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
       { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
       { name: "blob", column_type: { type: "Bytea" }, nullable: true },
@@ -115,6 +116,7 @@ describe("TableDataGrid", () => {
         id: "row-2",
         title: "zeta",
         done: false,
+        maybe_done: null,
         meta: { done: true },
         owner_id: "owner-a",
         blob: new Uint8Array([1, 2]),
@@ -124,6 +126,7 @@ describe("TableDataGrid", () => {
         id: "row-1",
         title: "alpha",
         done: true,
+        maybe_done: true,
         meta: null,
         owner_id: "owner-b",
         blob: new Uint8Array([5, 6]),
@@ -321,6 +324,63 @@ describe("TableDataGrid", () => {
     expect(screen.queryByLabelText("Edit done")).toBeNull();
   });
 
+  it("shows a checkbox for nullable boolean null cells after double click", async () => {
+    renderGrid();
+
+    const row = getContainingRow(screen.getByText("row-2"));
+    expect(row).not.toBeNull();
+    const nullMarker = within(row as HTMLElement).getByText("<null>");
+    const nullCell = getContainingCell(nullMarker);
+    expect(nullCell).not.toBeNull();
+
+    fireEvent.doubleClick(nullCell as HTMLElement);
+
+    const maybeDoneCheckbox = within(
+      getContainingRow(screen.getByText("row-2")) as HTMLElement,
+    ).getByRole("checkbox", { name: "Toggle maybe_done for row-2" });
+    expect((maybeDoneCheckbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({
+          maybe_done: false,
+        }),
+      );
+    });
+  });
+
+  it("sets nullable boolean cells back to NULL from the cross action", async () => {
+    renderGrid();
+
+    const maybeDoneCheckbox = screen.getByRole("checkbox", {
+      name: "Toggle maybe_done for row-1",
+    });
+    expect((maybeDoneCheckbox as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Set maybe_done to NULL for row-1" }));
+
+    expect(
+      within(getContainingRow(screen.getByText("row-1")) as HTMLElement).getAllByText("<null>")
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-1",
+        expect.objectContaining({
+          maybe_done: null,
+        }),
+      );
+    });
+  });
+
   it("opens select-backed editors when edit mode starts", () => {
     const selectPrototype = HTMLSelectElement.prototype as HTMLSelectElement & {
       showPicker?: () => void;
@@ -373,8 +433,9 @@ describe("TableDataGrid", () => {
     });
 
     expect(
-      within(getContainingRow(screen.getByText("row-2")) as HTMLElement).getByText("<null>"),
-    ).not.toBeNull();
+      within(getContainingRow(screen.getByText("row-2")) as HTMLElement).getAllByText("<null>")
+        .length,
+    ).toBeGreaterThanOrEqual(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
