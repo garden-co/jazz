@@ -1,26 +1,18 @@
-[workspace]
-
 [package]
-name = "opfs-btree-bench-sqlite"
+name = "opfs-btree-wasm-sqlite"
 version = "0.0.0"
 edition = "2021"
 publish = false
 description = "In-process SQLite (rusqlite + OPFS sahpool VFS) engine for the opfs-btree browser benchmark."
 
 [lib]
-name = "bench_sqlite"
-crate-type = ["cdylib", "rlib"]
+name = "wasm_sqlite"
 
 [dependencies]
 rusqlite = "0.37"
+serde = { version = "1", features = ["derive"] }
 sqlite-wasm-rs = "0.5"
 sqlite-wasm-vfs = "0.2"
 wasm-bindgen = "=0.2.125"
-wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
-serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
-
-[profile.release]
-opt-level = "s"

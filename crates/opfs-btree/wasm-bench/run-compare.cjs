@@ -5,7 +5,7 @@ const http = require("http");
 const path = require("path");
 
 const here = __dirname;
-const dist = path.join(here, "harness", "dist");
+const dist = path.join(here, "dist");
 
 function loadPlaywright() {
   try {
