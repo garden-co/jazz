@@ -21,13 +21,15 @@ results.
 
 ## Datasets
 
-Two datasets are **vendored (committed)** under `datasets/` as gzipped files — no
-download or network access is needed.
+The benchmark consumes ready-to-run `.kv/.ops` fixtures committed under
+`harness/public/data/`. The original source datasets are also vendored under
+`datasets/` as gzipped files for provenance — no download or network access is
+needed.
 
-| Profile     | Vendored file        | Source                                                         | License                     |
-| ----------- | -------------------- | -------------------------------------------------------------- | --------------------------- |
-| `objects`   | `objects.csv.gz`     | [The Met Open Access](https://github.com/metmuseum/openaccess) | **CC0 1.0** (public domain) |
-| `wikipedia` | `wikipedia.jsonl.gz` | [Wikipedia](https://en.wikipedia.org/) article wikitext        | **CC BY-SA 4.0**            |
+| Profile     | Fixture files                   | Source                                                         | License                     |
+| ----------- | ------------------------------- | -------------------------------------------------------------- | --------------------------- |
+| `objects`   | `objects.kv`, `objects.ops`     | [The Met Open Access](https://github.com/metmuseum/openaccess) | **CC0 1.0** (public domain) |
+| `wikipedia` | `wikipedia.kv`, `wikipedia.ops` | [Wikipedia](https://en.wikipedia.org/) article wikitext        | **CC BY-SA 4.0**            |
 
 `objects` = Met museum-object metadata (medium structured records, ~900 B).
 `wikipedia` = real article wikitext (large text values), exercising the
@@ -68,8 +70,8 @@ pnpm --dir crates/opfs-btree run bench:compare
 With the environment above configured, the supported path is one command:
 
 ```bash
-# normalize data, build the Yew harness + Rust workers, run headless Chromium,
-# verify checksums, and print a table
+# build the Yew harness + Rust workers, run headless Chromium,
+# verify checksums against committed fixtures, and print a table
 pnpm --dir crates/opfs-btree run bench:compare
 ```
 
@@ -86,10 +88,10 @@ results instead of the table). Example:
 pnpm --dir crates/opfs-btree run bench:compare -- --profiles objects
 ```
 
-Generated benchmark data lives under `wasm-bench/bench-data/`, copied harness
-data under `wasm-bench/harness/public/data/`, and build output under
-`wasm-bench/harness/dist/` and `wasm-bench/harness/target/`. These are ignored
-and safe to delete.
+Build output lives under `wasm-bench/harness/dist/` and
+`wasm-bench/harness/target/`. These are ignored and safe to delete. The
+`wasm-bench/harness/public/data/*.kv` and `*.ops` files are committed benchmark
+inputs and should stay in the tree.
 
 ## Interpreting output
 

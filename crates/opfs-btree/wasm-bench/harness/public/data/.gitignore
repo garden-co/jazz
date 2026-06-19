@@ -1,2 +1,5 @@
 *
 !.gitignore
+!*.kv
+!*.ops
+!*.license

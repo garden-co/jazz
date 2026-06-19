@@ -38,6 +38,10 @@ examples/wequencer/walkthrough/*.html
 
 # Local data
 data/
+!crates/opfs-btree/wasm-bench/harness/public/data/
+!crates/opfs-btree/wasm-bench/harness/public/data/*.kv
+!crates/opfs-btree/wasm-bench/harness/public/data/*.ops
+!crates/opfs-btree/wasm-bench/harness/public/data/*.license
 
 # Sync server data
 data-multi/
