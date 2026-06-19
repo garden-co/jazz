@@ -64,7 +64,7 @@ const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
 const DATA_COLUMN_MAX_WIDTH = 360;
-const STAGED_INSERT_ROW_ID = "__jazz_inspector_staged_insert__";
+const STAGED_INSERT_ROW_ID_PREFIX = "__jazz_inspector_staged_insert__";
 const ACTIONS_COLUMN_KEY = "__actions__";
 
 interface GridColumn {
@@ -89,11 +89,17 @@ interface QueuedCellEdit {
 
 type QueuedRowEdits = Record<string, QueuedCellEdit>;
 
+interface StagedInsert {
+  id: string;
+  edits: QueuedRowEdits;
+}
+
 interface EditableGridRow extends AnimatedGridRow {
   row: DynamicTableRow;
   sourceRow: DynamicTableRow;
   queuedEdits?: QueuedRowEdits;
   isStagedInsert?: boolean;
+  stagedInsertId?: string;
 }
 
 function isColumnSortable(columnType: ColumnType): boolean {
@@ -253,9 +259,16 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
   return edits;
 }
 
+function createStagedInsert(schemaColumns: ColumnDescriptor[]): StagedInsert {
+  return {
+    id: `${STAGED_INSERT_ROW_ID_PREFIX}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    edits: createInitialStagedInsertEdits(schemaColumns),
+  };
+}
+
 function buildQueuedInsertValues(
   schemaColumns: ColumnDescriptor[],
-  stagedInsertEdits: QueuedRowEdits,
+  queuedInsertEdits: QueuedRowEdits,
 ): Record<string, unknown> {
   const values: Record<string, unknown> = {};
 
@@ -264,7 +277,7 @@ function buildQueuedInsertValues(
       continue;
     }
 
-    const edit = stagedInsertEdits[column.name] ?? {
+    const edit = queuedInsertEdits[column.name] ?? {
       text: "",
       isNull: column.nullable,
     };
@@ -607,7 +620,7 @@ export function TableDataGrid() {
     );
   };
   const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
-  const [stagedInsertEdits, setStagedInsertEdits] = useState<QueuedRowEdits | null>(null);
+  const [stagedInserts, setStagedInserts] = useState<StagedInsert[]>([]);
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
@@ -678,8 +691,9 @@ export function TableDataGrid() {
   }, [queuedEdits]);
   const queuedEditedRowCount = useMemo(() => Object.keys(queuedEdits).length, [queuedEdits]);
   const hasQueuedEdits = queuedEditCount > 0;
-  const hasStagedInsert = stagedInsertEdits !== null;
-  const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0 || hasStagedInsert;
+  const stagedInsertCount = stagedInserts.length;
+  const hasStagedInserts = stagedInsertCount > 0;
+  const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0 || hasStagedInserts;
   const isAnyMutationPending = isQueuedSavePending;
   const gridAnimationScopeKey = useMemo(
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
@@ -723,7 +737,7 @@ export function TableDataGrid() {
   };
   const handleDiscardQueuedEdits = (): void => {
     setQueuedEdits({});
-    setStagedInsertEdits(null);
+    setStagedInserts([]);
     setQueuedDeletes(new Set());
     setQueuedSaveError(null);
   };
@@ -750,9 +764,9 @@ export function TableDataGrid() {
           return { rowId, updates };
         })
         .filter(({ updates }) => Object.keys(updates).length > 0);
-      const insertValues = stagedInsertEdits
-        ? buildQueuedInsertValues(schemaColumns, stagedInsertEdits)
-        : null;
+      const insertValues = stagedInserts.map((stagedInsert) =>
+        buildQueuedInsertValues(schemaColumns, stagedInsert.edits),
+      );
 
       await Promise.all([
         ...rowUpdates.map(({ rowId, updates }) =>
@@ -765,17 +779,15 @@ export function TableDataGrid() {
             tier: mutationDurabilityTier,
           }),
         ),
-        ...(insertValues
-          ? [
-              db.insert(tableProxy, insertValues).wait({
-                tier: mutationDurabilityTier,
-              }),
-            ]
-          : []),
+        ...insertValues.map((values) =>
+          db.insert(tableProxy, values).wait({
+            tier: mutationDurabilityTier,
+          }),
+        ),
       ]);
 
       setQueuedEdits({});
-      setStagedInsertEdits(null);
+      setStagedInserts([]);
       setQueuedDeletes(new Set());
     } catch (error) {
       setQueuedSaveError(
@@ -804,11 +816,9 @@ export function TableDataGrid() {
               className={styles.secondaryButton}
               onClick={() => {
                 setQueuedSaveError(null);
-                setStagedInsertEdits(
-                  (current) => current ?? createInitialStagedInsertEdits(schemaColumns),
-                );
+                setStagedInserts((current) => [...current, createStagedInsert(schemaColumns)]);
               }}
-              disabled={hasStagedInsert || isAnyMutationPending}
+              disabled={isAnyMutationPending}
             >
               Insert
             </button>
@@ -825,12 +835,12 @@ export function TableDataGrid() {
             queryOptions={queryOptions}
             schemaColumnById={schemaColumnById}
             queuedEdits={queuedEdits}
-            stagedInsertEdits={stagedInsertEdits}
+            stagedInserts={stagedInserts}
             queuedDeletes={queuedDeletes}
             animationScopeKey={gridAnimationScopeKey}
             onSortColumnsChange={handleSortColumnsChange}
             onQueuedEditsChange={setQueuedEdits}
-            onStagedInsertEditsChange={setStagedInsertEdits}
+            onStagedInsertsChange={setStagedInserts}
             onQueuedSaveErrorChange={setQueuedSaveError}
             onQueuedDeletesChange={setQueuedDeletes}
           />
@@ -856,7 +866,11 @@ export function TableDataGrid() {
                   {queuedDeletes.size} row{queuedDeletes.size === 1 ? "" : "s"} will be deleted
                 </span>
               ) : null}
-              {hasStagedInsert ? <span>1 staged insert</span> : null}
+              {hasStagedInserts ? (
+                <span>
+                  {stagedInsertCount} staged insert{stagedInsertCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
               {queuedSaveError ? (
                 <span className={styles.queuedBannerError}>{queuedSaveError}</span>
               ) : null}
@@ -1265,12 +1279,12 @@ function PlainTableView({
   queryOptions,
   schemaColumnById,
   queuedEdits,
-  stagedInsertEdits,
+  stagedInserts,
   queuedDeletes,
   animationScopeKey,
   onSortColumnsChange,
   onQueuedEditsChange,
-  onStagedInsertEditsChange,
+  onStagedInsertsChange,
   onQueuedSaveErrorChange,
   onQueuedDeletesChange,
 }: {
@@ -1281,12 +1295,12 @@ function PlainTableView({
   queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
-  stagedInsertEdits: QueuedRowEdits | null;
+  stagedInserts: StagedInsert[];
   queuedDeletes: Set<string>;
   animationScopeKey: string;
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
-  onStagedInsertEditsChange: Dispatch<SetStateAction<QueuedRowEdits | null>>;
+  onStagedInsertsChange: Dispatch<SetStateAction<StagedInsert[]>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
 }) {
@@ -1304,27 +1318,30 @@ function PlainTableView({
       };
     });
 
-    if (!stagedInsertEdits) {
+    if (stagedInserts.length === 0) {
       return realRows;
-    }
-
-    const stagedSourceRow: DynamicTableRow = { id: STAGED_INSERT_ROW_ID };
-    for (const column of gridColumns) {
-      if (column.id !== "id") {
-        stagedSourceRow[column.accessorKey] = undefined;
-      }
     }
 
     return [
       ...realRows,
-      {
-        row: applyQueuedEditsToRow(stagedSourceRow, stagedInsertEdits),
-        sourceRow: stagedSourceRow,
-        queuedEdits: stagedInsertEdits,
-        isStagedInsert: true,
-      },
+      ...stagedInserts.map((stagedInsert) => {
+        const stagedSourceRow: DynamicTableRow = { id: stagedInsert.id };
+        for (const column of gridColumns) {
+          if (column.id !== "id") {
+            stagedSourceRow[column.accessorKey] = undefined;
+          }
+        }
+
+        return {
+          row: applyQueuedEditsToRow(stagedSourceRow, stagedInsert.edits),
+          sourceRow: stagedSourceRow,
+          queuedEdits: stagedInsert.edits,
+          isStagedInsert: true,
+          stagedInsertId: stagedInsert.id,
+        };
+      }),
     ];
-  }, [animatedRows, gridColumns, queuedEdits, stagedInsertEdits]);
+  }, [animatedRows, gridColumns, queuedEdits, stagedInserts]);
   const rowClass = (row: EditableGridRow): string | undefined => {
     if (row.isStagedInsert) {
       return styles.rowStagedInsert;
@@ -1352,15 +1369,25 @@ function PlainTableView({
     onQueuedSaveErrorChange(null);
 
     if (row.isStagedInsert) {
-      onStagedInsertEditsChange((currentStagedInsertEdits) => {
-        if (!currentStagedInsertEdits) {
-          return currentStagedInsertEdits;
-        }
+      const stagedInsertId = row.stagedInsertId;
+      if (!stagedInsertId) {
+        return;
+      }
 
-        return {
-          ...currentStagedInsertEdits,
-          [column.name]: nextEdit,
-        };
+      onStagedInsertsChange((currentStagedInserts) => {
+        return currentStagedInserts.map((stagedInsert) => {
+          if (stagedInsert.id !== stagedInsertId) {
+            return stagedInsert;
+          }
+
+          return {
+            ...stagedInsert,
+            edits: {
+              ...stagedInsert.edits,
+              [column.name]: nextEdit,
+            },
+          };
+        });
       });
       return;
     }
@@ -1521,7 +1548,11 @@ function PlainTableView({
                 onClick={(event) => {
                   event.stopPropagation();
                   onQueuedSaveErrorChange(null);
-                  onStagedInsertEditsChange(null);
+                  onStagedInsertsChange((currentStagedInserts) =>
+                    currentStagedInserts.filter(
+                      (stagedInsert) => stagedInsert.id !== row.stagedInsertId,
+                    ),
+                  );
                 }}
               >
                 Cancel
@@ -1557,7 +1588,7 @@ function PlainTableView({
     return [...dataColumns, actionsColumn];
   }, [
     gridColumns,
-    onStagedInsertEditsChange,
+    onStagedInsertsChange,
     onQueuedSaveErrorChange,
     queueCellEdit,
     queuedDeletes,
@@ -1616,7 +1647,12 @@ function PlainTableView({
           event.preventGridDefault();
           if (args.row?.isStagedInsert) {
             onQueuedSaveErrorChange(null);
-            onStagedInsertEditsChange(null);
+            const stagedInsertId = args.row.stagedInsertId;
+            if (stagedInsertId) {
+              onStagedInsertsChange((currentStagedInserts) =>
+                currentStagedInserts.filter((stagedInsert) => stagedInsert.id !== stagedInsertId),
+              );
+            }
           } else {
             toggleQueuedDelete(rowId);
           }

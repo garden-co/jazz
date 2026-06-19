@@ -27,6 +27,12 @@ function getCellsInRowContaining(text: string): HTMLElement[] {
   return within(row as HTMLElement).getAllByRole("gridcell");
 }
 
+function getCellsInRow(element: HTMLElement): HTMLElement[] {
+  const row = getContainingRow(element);
+  expect(row).not.toBeNull();
+  return within(row as HTMLElement).getAllByRole("gridcell");
+}
+
 function getLastTodosQuery(): { _build: () => string } {
   return [...mockUseAll.mock.calls]
     .reverse()
@@ -324,7 +330,7 @@ describe("TableDataGrid", () => {
       if (originalShowPicker) {
         selectPrototype.showPicker = originalShowPicker;
       } else {
-        delete selectPrototype.showPicker;
+        Reflect.deleteProperty(selectPrototype, "showPicker");
       }
     }
   });
@@ -601,6 +607,71 @@ describe("TableDataGrid", () => {
         }),
       );
       expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
+    });
+  });
+
+  it("queues multiple staged insert rows and inserts them from the banner", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+
+    expect(screen.getAllByText("staged")).toHaveLength(2);
+    expect(screen.getByText("2 staged inserts")).not.toBeNull();
+
+    let stagedBadges = screen.getAllByText("staged");
+    let firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
+    fireEvent.doubleClick(firstStagedCells[1] as HTMLElement);
+    const firstTitleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(firstTitleEditor, { target: { value: "first todo" } });
+    fireEvent.blur(firstTitleEditor);
+
+    stagedBadges = screen.getAllByText("staged");
+    firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
+    fireEvent.doubleClick(firstStagedCells[2] as HTMLElement);
+    const firstDoneEditor = screen.getByLabelText("Edit done");
+    fireEvent.change(firstDoneEditor, { target: { value: "true" } });
+    fireEvent.blur(firstDoneEditor);
+
+    stagedBadges = screen.getAllByText("staged");
+    let secondStagedCells = getCellsInRow(stagedBadges[1] as HTMLElement);
+    fireEvent.doubleClick(secondStagedCells[1] as HTMLElement);
+    const secondTitleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(secondTitleEditor, { target: { value: "second todo" } });
+    fireEvent.blur(secondTitleEditor);
+
+    stagedBadges = screen.getAllByText("staged");
+    secondStagedCells = getCellsInRow(stagedBadges[1] as HTMLElement);
+    fireEvent.doubleClick(secondStagedCells[2] as HTMLElement);
+    const secondDoneEditor = screen.getByLabelText("Edit done");
+    fireEvent.change(secondDoneEditor, { target: { value: "false" } });
+    fireEvent.blur(secondDoneEditor);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockInsert).toHaveBeenCalledTimes(2);
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        expect.objectContaining({
+          title: "first todo",
+          done: true,
+          meta: null,
+          owner_id: null,
+        }),
+      );
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        expect.objectContaining({
+          title: "second todo",
+          done: false,
+          meta: null,
+          owner_id: null,
+        }),
+      );
+      expect(mockInsertWait).toHaveBeenCalledTimes(2);
     });
   });
 
