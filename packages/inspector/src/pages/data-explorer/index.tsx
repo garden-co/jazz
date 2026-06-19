@@ -4,8 +4,47 @@ import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./index.module.css";
 
+const TABLES_SIDEBAR_SIZE_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesSidebarSize";
+const TABLES_SIDEBAR_DEFAULT_SIZE = 10;
+const TABLES_SIDEBAR_MIN_SIZE = 7;
+const TABLES_SIDEBAR_MAX_SIZE = 30;
+
 interface DataExplorerOutletContext {
   isTablesPanelOpen: boolean;
+}
+
+function getStoredTablesSidebarSize(): number {
+  try {
+    const rawSize = localStorage.getItem(TABLES_SIDEBAR_SIZE_STORAGE_KEY);
+    if (rawSize === null) {
+      return TABLES_SIDEBAR_DEFAULT_SIZE;
+    }
+
+    const storedSize = Number(rawSize);
+    if (
+      Number.isFinite(storedSize) &&
+      storedSize >= TABLES_SIDEBAR_MIN_SIZE &&
+      storedSize <= TABLES_SIDEBAR_MAX_SIZE
+    ) {
+      return storedSize;
+    }
+  } catch {
+    // Ignore storage failures and keep the layout usable.
+  }
+
+  return TABLES_SIDEBAR_DEFAULT_SIZE;
+}
+
+function saveTablesSidebarSize(size: number): void {
+  if (!Number.isFinite(size) || size < TABLES_SIDEBAR_MIN_SIZE || size > TABLES_SIDEBAR_MAX_SIZE) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(TABLES_SIDEBAR_SIZE_STORAGE_KEY, String(size));
+  } catch {
+    // Ignore storage failures and keep resizing responsive.
+  }
 }
 
 export function DataExplorer() {
@@ -20,6 +59,7 @@ export function DataExplorer() {
   const { table } = useParams();
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
+  const defaultTablesSidebarSize = useMemo(getStoredTablesSidebarSize, []);
 
   return (
     <Group className={styles.layout} orientation="horizontal">
@@ -28,9 +68,16 @@ export function DataExplorer() {
           <Panel
             id="tables-panel"
             className={styles.sidebarPanel}
-            defaultSize="20%"
-            minSize="14%"
-            maxSize="30%"
+            defaultSize={`${defaultTablesSidebarSize}%`}
+            minSize={`${TABLES_SIDEBAR_MIN_SIZE}%`}
+            maxSize={`${TABLES_SIDEBAR_MAX_SIZE}%`}
+            onResize={(panelSize, _id, previousPanelSize) => {
+              if (previousPanelSize === undefined) {
+                return;
+              }
+
+              saveTablesSidebarSize(panelSize.asPercentage);
+            }}
           >
             <aside className={styles.sidebar}>
               <div className={styles.sidebarHeader}>
