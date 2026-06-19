@@ -67,7 +67,6 @@ const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
 const DATA_COLUMN_MAX_WIDTH = 360;
 const STAGED_INSERT_ROW_ID = "__jazz_inspector_staged_insert__";
-const NULL_SELECT_VALUE = "__jazz_inspector_null__";
 const ACTIONS_COLUMN_KEY = "__actions__";
 
 interface GridColumn {
@@ -975,12 +974,13 @@ function QueuedCellEditor({
     );
   };
   const updateText = (nextText: string) => {
-    applyDraft({ ...draft, text: nextText });
-  };
-  const updateNullState = (nextIsNull: boolean) => {
-    applyDraft({ ...draft, isNull: nextIsNull });
+    applyDraft({ text: nextText, isNull: false });
   };
   const commit = () => {
+    onClose(true, false);
+  };
+  const setNullAndClose = () => {
+    applyDraft({ text: "", isNull: true });
     onClose(true, false);
   };
   const handleEditorKeyDown = (
@@ -990,47 +990,44 @@ function QueuedCellEditor({
       onClose(false, false);
     }
   };
-  const nullToggle = schemaColumn.nullable ? (
-    <label className={styles.inlineNullToggle}>
-      <input
-        type="checkbox"
-        checked={draft.isNull}
-        aria-label={`Set ${schemaColumn.name} to NULL`}
-        onChange={(event) => {
-          updateNullState(event.target.checked);
-        }}
-      />
-      NULL
-    </label>
+  const nullAction = schemaColumn.nullable ? (
+    <button
+      type="button"
+      className={styles.inlineNullButton}
+      aria-label={`Set ${schemaColumn.name} to NULL`}
+      title="Set to NULL"
+      onMouseDown={(event) => {
+        event.preventDefault();
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+        setNullAndClose();
+      }}
+    >
+      <CrossIcon className={styles.inlineNullIcon} />
+    </button>
   ) : null;
 
   if (schemaColumn.column_type.type === "Enum" || schemaColumn.column_type.type === "Boolean") {
-    const selectValue = draft.isNull ? NULL_SELECT_VALUE : draft.text;
+    const selectValue = draft.isNull ? "" : draft.text;
     const predefinedValues =
       schemaColumn.column_type.type === "Enum"
         ? schemaColumn.column_type.variants
         : ["true", "false"];
 
-    return (
+    const selectEditor = (
       <select
         aria-label={`Edit ${schemaColumn.name}`}
         className={styles.inlineEditorSelect}
         autoFocus
         value={selectValue}
         onChange={(event) => {
-          if (event.target.value === NULL_SELECT_VALUE) {
-            applyDraft({ ...draft, isNull: true });
-          } else {
-            applyDraft({ text: event.target.value, isNull: false });
-          }
+          applyDraft({ text: event.target.value, isNull: false });
         }}
-        onBlur={commit}
+        onBlur={schemaColumn.nullable ? undefined : commit}
         onKeyDown={handleEditorKeyDown}
       >
-        {!schemaColumn.nullable && draft.text.length === 0 ? (
-          <option value="">Select value</option>
-        ) : null}
-        {schemaColumn.nullable ? <option value={NULL_SELECT_VALUE}>NULL</option> : null}
+        {selectValue.length === 0 ? <option value="">Select value</option> : null}
         {!draft.isNull && draft.text.length > 0 && !predefinedValues.includes(draft.text) ? (
           <option value={draft.text}>{draft.text}</option>
         ) : null}
@@ -1040,6 +1037,24 @@ function QueuedCellEditor({
           </option>
         ))}
       </select>
+    );
+
+    if (!schemaColumn.nullable) {
+      return selectEditor;
+    }
+
+    return (
+      <div
+        className={styles.inlineEditorStack}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            commit();
+          }
+        }}
+      >
+        {selectEditor}
+        {nullAction}
+      </div>
     );
   }
 
@@ -1062,7 +1077,6 @@ function QueuedCellEditor({
           className={styles.inlineEditorTextarea}
           autoFocus
           value={draft.text}
-          disabled={draft.isNull}
           onChange={(event) => {
             updateText(event.target.value);
           }}
@@ -1073,7 +1087,7 @@ function QueuedCellEditor({
             handleEditorKeyDown(event);
           }}
         />
-        {nullToggle}
+        {nullAction}
       </div>
     );
   }
@@ -1092,7 +1106,6 @@ function QueuedCellEditor({
         className={styles.inlineEditorInput}
         autoFocus
         value={draft.text}
-        disabled={draft.isNull}
         onChange={(event) => {
           updateText(event.target.value);
         }}
@@ -1103,8 +1116,19 @@ function QueuedCellEditor({
           handleEditorKeyDown(event);
         }}
       />
-      {nullToggle}
+      {nullAction}
     </div>
+  );
+}
+
+function CrossIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path
+        d="M4.28 3.22 8 6.94l3.72-3.72 1.06 1.06L9.06 8l3.72 3.72-1.06 1.06L8 9.06l-3.72 3.72-1.06-1.06L6.94 8 3.22 4.28l1.06-1.06Z"
+        fill="currentColor"
+      />
+    </svg>
   );
 }
 

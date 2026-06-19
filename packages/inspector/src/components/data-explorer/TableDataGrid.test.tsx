@@ -313,12 +313,22 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("server pushed update")).toBeNull();
   });
 
-  it("sets nullable columns to NULL from the inline editor", async () => {
+  it("sets nullable columns to NULL from the inline editor action", async () => {
     renderGrid();
 
     fireEvent.doubleClick(screen.getByRole("gridcell", { name: '{"done":true}' }));
-    const nullToggle = screen.getByLabelText("Set meta to NULL");
-    fireEvent.click(nullToggle);
+    expect(screen.queryByRole("checkbox", { name: "Set meta to NULL" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Set meta to NULL" }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Edit meta")).toBeNull();
+    });
+
+    expect(
+      within(getContainingRow(screen.getByText("row-2")) as HTMLElement).getByText("<null>"),
+    ).not.toBeNull();
+
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
