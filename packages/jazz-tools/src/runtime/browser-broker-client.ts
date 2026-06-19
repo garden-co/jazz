@@ -54,8 +54,8 @@ export interface BrowserBrokerClientOptions {
   onDemote?: (leadershipId: number) => void | Promise<void>;
   onAttachFollowerPort?: (followerTabId: string, leadershipId: number, port: MessagePort) => void;
   onDetachFollowerPort?: (followerTabId: string, leadershipId: number) => void;
-  onUseFollowerPort?: (leaderTabId: string, leadershipId: number, port: MessagePort) => void;
-  onFollowerReady?: (leaderTabId: string, leadershipId: number) => void;
+  onUseFollowerPort?: (leadershipId: number, port: MessagePort) => void;
+  onFollowerReady?: (leadershipId: number) => void;
   onCloseFollowerPort?: (leadershipId: number) => void;
   onStorageResetBegin?: (requestId: string, leadershipId: number) => void | Promise<void>;
   onSchemaBlocked?: (reason: string) => void;
@@ -455,13 +455,13 @@ export class BrowserBrokerClient {
         this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
         this.role = "follower";
-        this.options.onUseFollowerPort?.(message.leaderTabId, message.leadershipId, message.port);
+        this.options.onUseFollowerPort?.(message.leadershipId, message.port);
         return;
       case "follower-ready":
         this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
         this.role = "follower";
-        this.options.onFollowerReady?.(message.leaderTabId, message.leadershipId);
+        this.options.onFollowerReady?.(message.leadershipId);
         this.resolveRoleWaiters();
         return;
       case "close-follower-port":

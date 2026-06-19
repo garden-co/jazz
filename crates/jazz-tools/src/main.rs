@@ -548,6 +548,9 @@ fn init_tracing() {
 
             let logger_provider = otel::init_logger_provider();
             let otel_log_layer = otel::log_bridge::<tracing_subscriber::Registry>(&logger_provider);
+            // Route Rust panics through the OTLP log pipeline (with a flush)
+            // before the process dies; see otel::install_panic_hook.
+            otel::install_panic_hook(logger_provider.clone());
             let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
 
             let meter_provider = otel::init_meter_provider();

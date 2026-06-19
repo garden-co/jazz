@@ -1,6 +1,5 @@
 import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
-import type { UseAllState } from "../subscriptions-orchestrator.js";
+import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { useJazzClient } from "./provider.js";
 
 type UseAllOptions = {

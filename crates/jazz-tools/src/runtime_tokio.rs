@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use futures::channel::oneshot;
 
+use crate::batch_fate::BatchMode;
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
@@ -391,6 +392,24 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.delete(object_id, write_context)?)
     }
 
+    /// Begin a batch or transaction and return its logical batch id.
+    pub fn begin_batch(&self, batch_mode: BatchMode) -> Result<BatchId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.begin_batch(batch_mode))
+    }
+
+    /// Commit an open batch or transaction.
+    pub fn commit_batch(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.commit_batch(batch_id)?)
+    }
+
+    /// Roll back an open batch or transaction.
+    pub fn rollback_batch(&self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.rollback_batch(batch_id)?)
+    }
+
     /// Wait for a batch to settle at the requested durability tier.
     pub fn wait_for_batch(
         &self,
@@ -476,14 +495,24 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // =========================================================================
 
     /// Execute a one-shot query with durability options.
+    ///
+    /// When `batch_id` is provided, the query is scoped to that open local
+    /// batch/transaction.
     pub fn query(
         &self,
         query: Query,
         session: Option<Session>,
         durability: ReadDurabilityOptions,
+        batch_id: Option<BatchId>,
     ) -> Result<QueryFuture, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.query_with_propagation(query, session, durability, QueryPropagation::Full))
+        Ok(core.query_with_local_batch(
+            query,
+            session,
+            durability,
+            QueryPropagation::Full,
+            batch_id,
+        )?)
     }
 
     // =========================================================================
@@ -977,7 +1006,7 @@ mod tests {
         // Query
         let query = Query::new("users");
         let future = runtime
-            .query(query, None, ReadDurabilityOptions::default())
+            .query(query, None, ReadDurabilityOptions::default(), None)
             .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 1);
@@ -1006,7 +1035,7 @@ mod tests {
         // Verify update
         let query = Query::new("users");
         let future = runtime
-            .query(query, None, ReadDurabilityOptions::default())
+            .query(query, None, ReadDurabilityOptions::default(), None)
             .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results[0].1[1], Value::Text("Charlie".to_string()));
@@ -1017,7 +1046,7 @@ mod tests {
         // Verify deleted
         let query = Query::new("users");
         let future = runtime
-            .query(query, None, ReadDurabilityOptions::default())
+            .query(query, None, ReadDurabilityOptions::default(), None)
             .unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);

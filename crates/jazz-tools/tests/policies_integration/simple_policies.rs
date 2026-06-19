@@ -6,7 +6,8 @@ use super::support::{
     has_removed, has_row, has_updated, lacks_row, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
-use jazz_tools::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
+use super::{pe, permissions};
+use jazz_tools::query_manager::policy::CmpOp;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
@@ -164,11 +165,11 @@ async fn insert_policies_boolean() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_insert_true",
-            TablePolicies::new().with_insert(PolicyExpr::True),
+            permissions(|p| p.allow_insert().always()),
         ))
         .table(make_documents_schema(
             "documents_insert_false",
-            TablePolicies::new().with_insert(PolicyExpr::False),
+            permissions(|p| p.allow_insert().never()),
         ))
         .build();
 
@@ -232,15 +233,17 @@ async fn select_policies_boolean() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_select_true",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().always();
+            }),
         ))
         .table(make_documents_schema(
             "documents_select_false",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::False),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().never();
+            }),
         ))
         .build();
 
@@ -290,6 +293,113 @@ async fn select_policies_boolean() {
     server.shutdown().await;
 }
 
+/// Verifies that the rows needed to validate a query's permissions are synced
+/// with the query result itself.
+///
+/// `protected_records` is readable when the current user has an active
+/// `access_grants` row. A fresh reader queries only `protected_records`; the
+/// query must still return the protected row without a prior explicit grant
+/// query.
+#[tokio::test]
+async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
+    let active_grant = pe::all_of([
+        pe::eq("principal_id", pe::session("user_id")),
+        pe::eq("active", true),
+    ]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("access_grants")
+                .column("principal_id", ColumnType::Text)
+                .column("active", ColumnType::Boolean)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read().where_(active_grant.clone());
+                })),
+        )
+        .table(
+            TableSchema::builder("protected_records")
+                .column("body", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_insert().always();
+                    p.allow_read()
+                        .where_(pe::exists(pe::table("access_grants").where_(active_grant)));
+                })),
+        )
+        .build();
+
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let writer = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
+        .await
+        .expect("connect writer");
+
+    let (grant_id, _, grant_batch_id) = writer
+        .insert(
+            "access_grants",
+            row_input!("principal_id" => "alice", "active" => true),
+        )
+        .expect("seed access grant row");
+    writer
+        .wait_for_batch(grant_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("access grant reaches server");
+
+    let (record_id, _, record_batch_id) = writer
+        .insert("protected_records", row_input!("body" => "visible"))
+        .expect("seed protected record");
+    writer
+        .wait_for_batch(record_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("protected record reaches server");
+
+    let reader = JazzClient::connect(server.make_client_context_for_user(schema, "alice"))
+        .await
+        .expect("connect reader");
+
+    let protected_rows = reader
+        .query(
+            QueryBuilder::new("protected_records")
+                .filter_eq("id", Value::Uuid(record_id))
+                .select(&["body"])
+                .build(),
+            Some(DurabilityTier::EdgeServer),
+        )
+        .await
+        .expect("query protected records");
+
+    assert_eq!(
+        protected_rows,
+        vec![(record_id, vec![Value::Text("visible".into())])],
+        "protected record should be visible without querying access_grants first"
+    );
+
+    let local_grant_rows = reader
+        .query(
+            QueryBuilder::new("access_grants")
+                .filter_eq("id", Value::Uuid(grant_id))
+                .select(&["principal_id", "active"])
+                .build(),
+            Some(DurabilityTier::Local),
+        )
+        .await
+        .expect("query access grants locally");
+
+    assert_eq!(
+        local_grant_rows,
+        vec![(
+            grant_id,
+            vec![Value::Text("alice".into()), Value::Boolean(true)]
+        )],
+        "access grant should have been fetched with the protected record query"
+    );
+
+    writer.shutdown().await.expect("shutdown writer");
+    reader.shutdown().await.expect("shutdown reader");
+    server.shutdown().await;
+}
+
 /// Verifies that a literal `SELECT archived = false` policy filters archived
 /// rows out of query results.
 ///
@@ -307,9 +417,10 @@ async fn select_policies_filter_out_archived_rows() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", false.into())),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::eq("archived", false));
+            }),
         ))
         .build();
 
@@ -364,15 +475,17 @@ async fn update_policies_boolean() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_update_true",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+            }),
         ))
         .table(make_documents_schema(
             "documents_update_false",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::False), PolicyExpr::False),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().never();
+            }),
         ))
         .build();
 
@@ -454,15 +567,17 @@ async fn delete_policies_boolean() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_delete_true",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_delete(PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_delete().always();
+            }),
         ))
         .table(make_documents_schema(
             "documents_delete_false",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_delete(PolicyExpr::False),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_delete().never();
+            }),
         ))
         .build();
 
@@ -544,17 +659,20 @@ async fn delete_policies_boolean() {
 /// ```
 #[tokio::test]
 async fn archived_state_policies_gate_insert_update_and_delete() {
-    let incomplete_policy = PolicyExpr::eq_literal("archived", false.into());
-    let archived_policy = PolicyExpr::eq_literal("archived", true.into());
+    let incomplete_policy = pe::eq("archived", false);
+    let archived_policy = pe::eq("archived", true);
     let table_name = "documents_archived_lifecycle";
 
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(incomplete_policy.clone())
-                .with_update(Some(incomplete_policy), PolicyExpr::True)
-                .with_delete(archived_policy),
+            permissions(|p| {
+                p.allow_insert().where_(incomplete_policy.clone());
+                p.allow_update()
+                    .where_old(incomplete_policy)
+                    .where_new(pe::always());
+                p.allow_delete().where_(archived_policy);
+            }),
         ))
         .build();
 
@@ -671,53 +789,38 @@ async fn select_policies_scalar_comparators_filter_rows() {
     let schema = SchemaBuilder::new()
         .table(make_priority_schema(
             "documents_select_ne",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "priority".into(),
-                    op: CmpOp::Ne,
-                    value: PolicyValue::Literal(3i32.into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::cmp("priority", CmpOp::Ne, 3));
+            }),
         ))
         .table(make_priority_schema(
             "documents_select_gt",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "priority".into(),
-                    op: CmpOp::Gt,
-                    value: PolicyValue::Literal(3i32.into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::cmp("priority", CmpOp::Gt, 3));
+            }),
         ))
         .table(make_priority_schema(
             "documents_select_gte",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "priority".into(),
-                    op: CmpOp::Ge,
-                    value: PolicyValue::Literal(3i32.into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::cmp("priority", CmpOp::Ge, 3));
+            }),
         ))
         .table(make_priority_schema(
             "documents_select_lt",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "priority".into(),
-                    op: CmpOp::Lt,
-                    value: PolicyValue::Literal(3i32.into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::cmp("priority", CmpOp::Lt, 3));
+            }),
         ))
         .table(make_priority_schema(
             "documents_select_lte",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "priority".into(),
-                    op: CmpOp::Le,
-                    value: PolicyValue::Literal(3i32.into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::cmp("priority", CmpOp::Le, 3));
+            }),
         ))
         .build();
 
@@ -902,63 +1005,52 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     let schema = SchemaBuilder::new()
         .table(make_review_schema(
             "documents_select_eq_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "reviewer_id".into(),
-                    op: CmpOp::Eq,
-                    value: PolicyValue::Literal(Value::Null),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::cmp("reviewer_id", CmpOp::Eq, Value::Null));
+            }),
         ))
         .table(make_review_schema(
             "documents_select_ne_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Cmp {
-                    column: "reviewer_id".into(),
-                    op: CmpOp::Ne,
-                    value: PolicyValue::Literal(Value::Null),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::cmp("reviewer_id", CmpOp::Ne, Value::Null));
+            }),
         ))
         .table(make_review_schema(
             "documents_select_is_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::IsNull {
-                    column: "reviewer_id".into(),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::is_null("reviewer_id"));
+            }),
         ))
         .table(make_review_schema(
             "documents_insert_eq_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::Cmp {
-                    column: "reviewer_id".into(),
-                    op: CmpOp::Eq,
-                    value: PolicyValue::Literal(Value::Null),
-                })
-                .with_select(PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert()
+                    .where_(pe::cmp("reviewer_id", CmpOp::Eq, Value::Null));
+                p.allow_read().always();
+            }),
         ))
         .table(make_review_schema(
             "documents_insert_ne_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::Cmp {
-                    column: "reviewer_id".into(),
-                    op: CmpOp::Ne,
-                    value: PolicyValue::Literal(Value::Null),
-                })
-                .with_select(PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert()
+                    .where_(pe::cmp("reviewer_id", CmpOp::Ne, Value::Null));
+                p.allow_read().always();
+            }),
         ))
         .table(make_review_schema(
             "documents_update_is_null",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::True)
-                .with_update(
-                    Some(PolicyExpr::True),
-                    PolicyExpr::IsNull {
-                        column: "reviewer_id".into(),
-                    },
-                ),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().always();
+                p.allow_update()
+                    .where_old(pe::always())
+                    .where_new(pe::is_null("reviewer_id"));
+            }),
         ))
         .build();
 
@@ -1167,33 +1259,26 @@ async fn row_level_contains_and_in_list_policies_filter_rows() {
     let schema = SchemaBuilder::new()
         .table(make_status_schema(
             "documents_select_contains",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::Contains {
-                    column: "title".into(),
-                    value: PolicyValue::Literal("Launch".into()),
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::contains("title", "Launch"));
+            }),
         ))
         .table(make_status_schema(
             "documents_select_in_list",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::InList {
-                    column: "status".into(),
-                    values: vec![
-                        PolicyValue::Literal("active".into()),
-                        PolicyValue::Literal("trial".into()),
-                    ],
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::in_list("status", ["active", "trial"]));
+            }),
         ))
         .table(make_status_schema(
             "documents_select_empty_in_list",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::InList {
-                    column: "status".into(),
-                    values: vec![],
-                }),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::in_list("status", Vec::<&str>::new()));
+            }),
         ))
         .build();
 
@@ -1310,17 +1395,19 @@ async fn read_and_write_policies_remain_independent() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_read_only",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::True)
-                .with_update(Some(PolicyExpr::False), PolicyExpr::False),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().always();
+                p.allow_update().never();
+            }),
         ))
         .table(make_documents_schema(
             "documents_write_only",
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", false.into()))
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::eq("archived", false));
+                p.allow_update().always();
+            }),
         ))
         .build();
 
@@ -1468,10 +1555,11 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_literal("archived", false.into()))
-                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::eq("archived", false));
+                p.allow_update().always();
+            }),
         ))
         .build();
     let verifier_schema = schema.clone();
@@ -1673,9 +1761,11 @@ async fn admin_secret_ws_client_bypasses_row_select_policies() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
-            TablePolicies::new()
-                .with_insert(PolicyExpr::True)
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read()
+                    .where_(pe::eq("owner_id", pe::session("user_id")));
+            }),
         ))
         .build();
     let server = TestingServer::builder()
