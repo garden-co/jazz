@@ -25,9 +25,11 @@ path = "src/lib.rs"
 bench-sqlite = { package = "opfs-btree-bench-sqlite", path = "../../bench-sqlite" }
 gloo-net = "0.6"
 gloo-worker = "0.6"
+js-sys = "0.3"
 opfs-btree = { path = "../.." }
 serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Document", "Element", "Window"] }
+web-sys = { version = "0.3", features = ["Document", "Element", "Location", "UrlSearchParams", "Window"] }
 yew = { version = "0.21", features = ["csr"] }
