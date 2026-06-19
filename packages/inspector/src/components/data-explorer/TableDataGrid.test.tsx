@@ -179,7 +179,8 @@ describe("TableDataGrid", () => {
     renderGrid();
 
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
-    expect(screen.getByRole("button", { name: "Filter" })).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Schema" })).not.toBeNull();
     expect(screen.getByRole("button", { name: "Insert" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
@@ -256,7 +257,6 @@ describe("TableDataGrid", () => {
   it("adds a where clause and compiles it into query conditions", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
     fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "contains" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "alpha" } });
