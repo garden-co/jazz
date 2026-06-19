@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "opfs-btree-bench-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "opfs-btree-bench-harness"
+path = "src/main.rs"
+
+[[bin]]
+name = "btree-worker"
+path = "src/bin/btree_worker.rs"
+
+[[bin]]
+name = "sqlite-worker"
+path = "src/bin/sqlite_worker.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gloo-worker = "0.6"
+serde = { version = "1", features = ["derive"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Document", "Element", "Window"] }
+yew = { version = "0.21", features = ["csr"] }

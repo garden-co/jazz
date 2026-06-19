@@ -6,7 +6,11 @@
     "bench:wasm:opfs": "node wasm-bench/run-opfs-bench.cjs",
     "bench:wasm:opfs:mixed": "node wasm-bench/run-opfs-bench.cjs --profile mixed",
     "bench:wasm:opfs:range": "node wasm-bench/run-opfs-bench.cjs --profile range",
-    "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs"
+    "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs",
+    "bench:compare:data": "cargo run -p bench-data-tools -- --profiles all",
+    "bench:sqlite:build": "bash wasm-bench/build-sqlite-wasm.sh",
+    "bench:harness:build": "env -u NO_COLOR trunk build --config wasm-bench/harness/Trunk.toml --release",
+    "bench:compare": "pnpm run bench:wasm:build && pnpm run bench:sqlite:build && node wasm-bench/run-compare.cjs"
   },
   "devDependencies": {
     "playwright": "^1.58.2",
