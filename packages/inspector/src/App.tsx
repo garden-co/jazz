@@ -7,6 +7,7 @@ import { DevtoolsProvider } from "./contexts/devtools-context.js";
 import { InspectorRoutes } from "./routes.js";
 import { DbConfigForm, SchemaHashSelect } from "./components/db-config-form/index.js";
 import type { DbConfigFormValues } from "./components/db-config-form/index.js";
+import { normalizeSchemaHashInfos, type SchemaHashInfo } from "./utility/schema-hash-display.js";
 import styles from "./App.module.css";
 
 interface StoredConnection {
@@ -33,6 +34,9 @@ const DEFAULT_SERVER_URL = "https://v2.sync.jazz.tools/";
 
 type AppScreen = "form" | "schema" | "connections" | null;
 type ConnectionFormMode = "connect" | "edit";
+type SchemaHashesResult = Awaited<ReturnType<typeof fetchSchemaHashes>> & {
+  schemas?: SchemaHashInfo[];
+};
 
 export default function App() {
   const [initialState] = useState(() => {
@@ -55,8 +59,8 @@ export default function App() {
   const [connectionFormMode, setConnectionFormMode] = useState<ConnectionFormMode>("connect");
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
-  const [schemaHashes, setSchemaHashes] = useState<string[]>([]);
-  const [availableSchemaHashes, setAvailableSchemaHashes] = useState<string[]>([]);
+  const [schemaHashes, setSchemaHashes] = useState<SchemaHashInfo[]>([]);
+  const [availableSchemaHashes, setAvailableSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
   const [storedPermissions, setStoredPermissions] = useState<Awaited<
@@ -83,7 +87,7 @@ export default function App() {
     setConnectionStore(nextStore);
   };
 
-  const handleFormSubmit = (values: DbConfigFormValues, hashes: string[]) => {
+  const handleFormSubmit = (values: DbConfigFormValues, hashes: SchemaHashInfo[]) => {
     setFormValues(values);
     setSchemaHashes(hashes);
     setScreen("schema");
@@ -212,7 +216,7 @@ export default function App() {
 
     const run = async () => {
       try {
-        const [resolvedClient, { schema }, { hashes }, permissions] = await Promise.all([
+        const [resolvedClient, { schema }, schemaHashesResult, permissions] = await Promise.all([
           createJazzClient({
             appId: activeConnection.appId,
             serverUrl: activeConnection.serverUrl,
@@ -229,7 +233,7 @@ export default function App() {
           fetchSchemaHashes(activeConnection.serverUrl, {
             appId: activeConnection.appId,
             adminSecret: activeConnection.adminSecret,
-          }),
+          }) as Promise<SchemaHashesResult>,
           fetchStoredPermissions(activeConnection.serverUrl, {
             appId: activeConnection.appId,
             adminSecret: activeConnection.adminSecret,
@@ -249,7 +253,9 @@ export default function App() {
         });
         setWasmSchema(schema);
         setStoredPermissions(permissions);
-        setAvailableSchemaHashes(hashes);
+        setAvailableSchemaHashes(
+          normalizeSchemaHashInfos(schemaHashesResult.hashes, schemaHashesResult.schemas),
+        );
         setError(null);
         setIsSwitchingSchema(false);
       } catch (err) {
@@ -317,7 +323,7 @@ export default function App() {
   if (screen === "schema" && formValues) {
     return (
       <main className={styles.statePage}>
-        <SchemaHashSelect hashes={schemaHashes} onSelect={handleSchemaSelect} />
+        <SchemaHashSelect schemas={schemaHashes} onSelect={handleSchemaSelect} />
       </main>
     );
   }
