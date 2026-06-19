@@ -1,13 +1,13 @@
 use gloo_worker::{HandlerId, Worker, WorkerScope};
 
-use crate::types::{RunProfile, WorkerSmokeResult};
+use crate::types::{EngineRunResult, RunProfile, WorkerResult};
 
 pub struct BtreeWorker;
 
 impl Worker for BtreeWorker {
     type Input = RunProfile;
     type Message = ();
-    type Output = WorkerSmokeResult;
+    type Output = WorkerResult;
 
     fn create(_scope: &WorkerScope<Self>) -> Self {
         Self
@@ -18,10 +18,13 @@ impl Worker for BtreeWorker {
     fn received(&mut self, scope: &WorkerScope<Self>, msg: Self::Input, id: HandlerId) {
         scope.respond(
             id,
-            WorkerSmokeResult {
+            WorkerResult::Ok(EngineRunResult {
                 engine: "opfs_btree".to_string(),
                 profile: msg.profile,
-            },
+                record_count: 0,
+                phases: Vec::new(),
+                checksum: 0,
+            }),
         );
     }
 }

@@ -1,19 +1,19 @@
 use gloo_worker::{Spawnable, WorkerBridge};
 use opfs_btree_bench_harness::btree_worker::BtreeWorker;
 use opfs_btree_bench_harness::sqlite_worker::SqliteWorker;
-use opfs_btree_bench_harness::types::{RunProfile, WorkerSmokeResult};
+use opfs_btree_bench_harness::types::{RunProfile, WorkerResult};
 use yew::prelude::*;
 
 enum Msg {
     RunSmoke,
-    BtreeDone(WorkerSmokeResult),
-    SqliteDone(WorkerSmokeResult),
+    BtreeDone(WorkerResult),
+    SqliteDone(WorkerResult),
 }
 
 struct App {
     btree: WorkerBridge<BtreeWorker>,
     sqlite: WorkerBridge<SqliteWorker>,
-    rows: Vec<WorkerSmokeResult>,
+    rows: Vec<WorkerResult>,
 }
 
 impl Component for App {
@@ -60,10 +60,19 @@ impl Component for App {
                 <button type="button" onclick={ctx.link().callback(|_| Msg::RunSmoke)}>{"Run"}</button>
                 <ul>
                     { for self.rows.iter().map(|row| html! {
-                        <li>{format!("{} {}", row.engine, row.profile)}</li>
+                        <li>{format_worker_result(row)}</li>
                     }) }
                 </ul>
             </>
+        }
+    }
+}
+
+fn format_worker_result(result: &WorkerResult) -> String {
+    match result {
+        WorkerResult::Ok(result) => format!("{} {}", result.engine, result.profile),
+        WorkerResult::Err(error) => {
+            format!("{} {} failed: {}", error.engine, error.profile, error.error)
         }
     }
 }

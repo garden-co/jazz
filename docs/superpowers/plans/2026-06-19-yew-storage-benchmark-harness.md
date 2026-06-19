@@ -501,6 +501,18 @@ Run:
 
 ```bash
 cargo check -p opfs-btree --target wasm32-unknown-unknown
+LLVM_PREFIX=""
+for prefix in "$(brew --prefix llvm 2>/dev/null)" "$(brew --prefix llvm@20 2>/dev/null)"; do
+  if [ -x "$prefix/bin/clang" ] && "$prefix/bin/clang" --print-targets | grep -qi wasm32; then
+    LLVM_PREFIX="$prefix"
+    break
+  fi
+done
+test -n "$LLVM_PREFIX" || { echo "install Homebrew LLVM: brew install llvm"; exit 1; }
+
+CC_wasm32_unknown_unknown="$LLVM_PREFIX/bin/clang" \
+AR_wasm32_unknown_unknown="$LLVM_PREFIX/bin/llvm-ar" \
+CFLAGS_wasm32_unknown_unknown="-O3 -DSQLITE_THREADSAFE=0" \
 cargo check --manifest-path crates/opfs-btree/bench-sqlite/Cargo.toml --target wasm32-unknown-unknown
 ```
 
@@ -1373,6 +1385,18 @@ Run:
 ```bash
 cargo check --manifest-path crates/opfs-btree/wasm-bench/harness/Cargo.toml --target wasm32-unknown-unknown
 cargo check -p opfs-btree --target wasm32-unknown-unknown
+LLVM_PREFIX=""
+for prefix in "$(brew --prefix llvm 2>/dev/null)" "$(brew --prefix llvm@20 2>/dev/null)"; do
+  if [ -x "$prefix/bin/clang" ] && "$prefix/bin/clang" --print-targets | grep -qi wasm32; then
+    LLVM_PREFIX="$prefix"
+    break
+  fi
+done
+test -n "$LLVM_PREFIX" || { echo "install Homebrew LLVM: brew install llvm"; exit 1; }
+
+CC_wasm32_unknown_unknown="$LLVM_PREFIX/bin/clang" \
+AR_wasm32_unknown_unknown="$LLVM_PREFIX/bin/llvm-ar" \
+CFLAGS_wasm32_unknown_unknown="-O3 -DSQLITE_THREADSAFE=0" \
 cargo check --manifest-path crates/opfs-btree/bench-sqlite/Cargo.toml --target wasm32-unknown-unknown
 ```
 

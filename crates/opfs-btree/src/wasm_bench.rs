@@ -2,9 +2,10 @@
 
 use std::cell::Cell;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+use crate::bench_dataset::{Phase, PhaseKind, decode_kv, decode_ops};
 use crate::file::{OpfsIoCounters, opfs_io_counters_reset, opfs_io_counters_snapshot};
 use crate::{BTreeOptions, OpfsBTree, OpfsFile};
 
@@ -1119,4 +1120,165 @@ pub async fn bench_opfs_mixed_matrix(count: u32) -> Result<JsValue, JsValue> {
 
     serde_wasm_bindgen::to_value(&out)
         .map_err(|e| JsValue::from_str(&format!("serialize mixed benchmark matrix: {e}")))
+}
+
+// ── Dataset replay ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetPhaseResult {
+    pub phase: String,
+    pub op_count: u32,
+    pub elapsed_ms: f64,
+    pub ops_per_sec: f64,
+    pub checksum: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetRunResult {
+    pub engine: String,
+    pub profile: String,
+    pub record_count: u32,
+    pub phases: Vec<DatasetPhaseResult>,
+    pub checksum: u64,
+}
+
+pub async fn run_dataset_result(
+    kv_bytes: &[u8],
+    ops_bytes: &[u8],
+) -> Result<DatasetRunResult, JsValue> {
+    let data = decode_kv(kv_bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let phases = decode_ops(ops_bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let keys: Vec<&[u8]> = data.records.iter().map(|(k, _)| k.as_slice()).collect();
+    let vals: Vec<&[u8]> = data.records.iter().map(|(_, v)| v.as_slice()).collect();
+    let n = keys.len() as u32;
+
+    let namespace = "bench-dataset";
+    OpfsFile::destroy(namespace).await.ok();
+    let mut db = open_db(namespace).await?;
+
+    let mut overall: u64 = n as u64;
+    let mut phase_results = Vec::new();
+
+    for phase in &phases {
+        let started = high_res_now_ms();
+        let (new_db, op_count, checksum) = replay_phase(db, phase, &keys, &vals, namespace).await?;
+        db = new_db;
+        let elapsed = high_res_now_ms() - started;
+        overall = overall.wrapping_add(checksum);
+        phase_results.push(DatasetPhaseResult {
+            phase: phase.name.clone(),
+            op_count,
+            elapsed_ms: elapsed,
+            ops_per_sec: if elapsed > 0.0 {
+                (op_count as f64) / (elapsed / 1000.0)
+            } else {
+                0.0
+            },
+            checksum,
+        });
+    }
+
+    OpfsFile::destroy(namespace).await.ok();
+    Ok(DatasetRunResult {
+        engine: "opfs_btree".into(),
+        profile: data.profile,
+        record_count: n,
+        phases: phase_results,
+        checksum: overall,
+    })
+}
+
+async fn replay_phase(
+    mut db: OpfsBTree<OpfsFile>,
+    phase: &Phase,
+    keys: &[&[u8]],
+    vals: &[&[u8]],
+    namespace: &str,
+) -> Result<(OpfsBTree<OpfsFile>, u32, u64), JsValue> {
+    let n = keys.len() as u32;
+    let mut checksum: u64 = 0;
+    let mut ops: u32 = 0;
+    let map = |e: crate::BTreeError| JsValue::from_str(&e.to_string());
+
+    match phase.kind {
+        PhaseKind::LoadAll => {
+            for (k, v) in keys.iter().zip(vals.iter()) {
+                db.put(k, v).map_err(map)?;
+                ops += 1;
+            }
+            db.checkpoint().map_err(map)?;
+        }
+        PhaseKind::GetSeq => {
+            for k in keys.iter() {
+                if let Some(v) = db.get(k).map_err(map)? {
+                    checksum = checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
+                }
+                ops += 1;
+            }
+        }
+        PhaseKind::GetIndices | PhaseKind::ColdGetIndices => {
+            if phase.kind == PhaseKind::ColdGetIndices {
+                db.checkpoint().map_err(map)?;
+                // Drop `db` to release the OPFS SyncAccessHandle before opening a fresh
+                // handle — the browser allows only one SAH per file at a time.
+                drop(db);
+                db = open_db(namespace).await?;
+            }
+            for &idx in &phase.args {
+                let i = (idx % n.max(1)) as usize;
+                if let Some(v) = db.get(keys[i]).map_err(map)? {
+                    checksum = checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
+                }
+                ops += 1;
+            }
+        }
+        PhaseKind::UpdateIndices => {
+            for &idx in &phase.args {
+                let i = (idx % n.max(1)) as usize;
+                db.put(keys[i], vals[i]).map_err(map)?;
+                ops += 1;
+            }
+            db.checkpoint().map_err(map)?;
+        }
+        PhaseKind::RangeStarts => {
+            for &start in &phase.args {
+                let s = (start % n.max(1)) as usize;
+                let e = (s + RANGE_WINDOW_KEYS).min(keys.len().saturating_sub(1));
+                let rows = db
+                    .range(keys[s], keys[e], RANGE_RESULT_LIMIT)
+                    .map_err(map)?;
+                checksum = checksum.wrapping_add(rows.len() as u64);
+                ops += 1;
+            }
+        }
+        PhaseKind::Mixed => {
+            for &packed in &phase.args {
+                let op = packed >> 30;
+                let i = ((packed & 0x3FFF_FFFF) % n.max(1)) as usize;
+                match op {
+                    1 => {
+                        db.put(keys[i], vals[i]).map_err(map)?;
+                    }
+                    2 => {
+                        db.delete(keys[i]).map_err(map)?;
+                    }
+                    _ => {
+                        if let Some(v) = db.get(keys[i]).map_err(map)? {
+                            checksum =
+                                checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
+                        }
+                    }
+                }
+                ops += 1;
+            }
+            db.checkpoint().map_err(map)?;
+        }
+    }
+    Ok((db, ops, checksum))
+}
+
+#[wasm_bindgen]
+pub async fn bench_dataset_run(kv: &[u8], ops: &[u8]) -> Result<JsValue, JsValue> {
+    let result = run_dataset_result(kv, ops).await?;
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
