@@ -281,7 +281,7 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("edits cells in place with selectors and saves from the banner", async () => {
+  it("edits text cells in place and saves from the banner", async () => {
     renderGrid();
 
     const titleCell = screen.getByRole("gridcell", { name: "zeta" });
@@ -293,16 +293,6 @@ describe("TableDataGrid", () => {
     fireEvent.change(titleEditor, { target: { value: "zeta updated" } });
     fireEvent.blur(titleEditor);
 
-    const doneCell = getContainingCell(
-      screen.getByRole("checkbox", { name: "Toggle done for row-2" }),
-    );
-    expect(doneCell).not.toBeNull();
-    fireEvent.doubleClick(doneCell as HTMLElement);
-    const doneEditor = screen.getByLabelText("Edit done");
-    expect(doneEditor.tagName).toBe("SELECT");
-    fireEvent.change(doneEditor, { target: { value: "true" } });
-    fireEvent.blur(doneEditor);
-
     expect(screen.getByText("Queued")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -312,11 +302,23 @@ describe("TableDataGrid", () => {
         "row-2",
         expect.objectContaining({
           title: "zeta updated",
-          done: true,
         }),
       );
       expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
+  });
+
+  it("does not open an inline editor for boolean cells", () => {
+    renderGrid();
+
+    const doneCell = getContainingCell(
+      screen.getByRole("checkbox", { name: "Toggle done for row-2" }),
+    );
+    expect(doneCell).not.toBeNull();
+
+    fireEvent.doubleClick(doneCell as HTMLElement);
+
+    expect(screen.queryByLabelText("Edit done")).toBeNull();
   });
 
   it("opens select-backed editors when edit mode starts", () => {
@@ -596,11 +598,13 @@ describe("TableDataGrid", () => {
     fireEvent.change(titleEditor, { target: { value: "new todo" } });
     fireEvent.blur(titleEditor);
 
-    fireEvent.doubleClick(stagedCells[2] as HTMLElement);
-    const doneEditor = screen.getByLabelText("Edit done");
-    expect(doneEditor.tagName).toBe("SELECT");
-    fireEvent.change(doneEditor, { target: { value: "true" } });
-    fireEvent.blur(doneEditor);
+    const stagedRow = getContainingRow(screen.getByText("staged"));
+    expect(stagedRow).not.toBeNull();
+    fireEvent.click(
+      within(stagedRow as HTMLElement).getByRole("checkbox", {
+        name: "Toggle done for staged insert",
+      }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -635,11 +639,13 @@ describe("TableDataGrid", () => {
     fireEvent.blur(firstTitleEditor);
 
     stagedBadges = screen.getAllByText("staged");
-    firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
-    fireEvent.doubleClick(firstStagedCells[2] as HTMLElement);
-    const firstDoneEditor = screen.getByLabelText("Edit done");
-    fireEvent.change(firstDoneEditor, { target: { value: "true" } });
-    fireEvent.blur(firstDoneEditor);
+    const firstStagedRow = getContainingRow(stagedBadges[0] as HTMLElement);
+    expect(firstStagedRow).not.toBeNull();
+    fireEvent.click(
+      within(firstStagedRow as HTMLElement).getByRole("checkbox", {
+        name: "Toggle done for staged insert",
+      }),
+    );
 
     stagedBadges = screen.getAllByText("staged");
     let secondStagedCells = getCellsInRow(stagedBadges[1] as HTMLElement);
@@ -647,13 +653,6 @@ describe("TableDataGrid", () => {
     const secondTitleEditor = screen.getByLabelText("Edit title");
     fireEvent.change(secondTitleEditor, { target: { value: "second todo" } });
     fireEvent.blur(secondTitleEditor);
-
-    stagedBadges = screen.getAllByText("staged");
-    secondStagedCells = getCellsInRow(stagedBadges[1] as HTMLElement);
-    fireEvent.doubleClick(secondStagedCells[2] as HTMLElement);
-    const secondDoneEditor = screen.getByLabelText("Edit done");
-    fireEvent.change(secondDoneEditor, { target: { value: "false" } });
-    fireEvent.blur(secondDoneEditor);
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 

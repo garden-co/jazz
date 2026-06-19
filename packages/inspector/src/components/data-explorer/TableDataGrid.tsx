@@ -251,7 +251,7 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
     }
 
     edits[column.name] = {
-      text: "",
+      text: column.column_type.type === "Boolean" && !column.nullable ? "false" : "",
       isNull: column.nullable,
     };
   }
@@ -1113,12 +1113,9 @@ function QueuedCellEditor({
     </button>
   ) : null;
 
-  if (schemaColumn.column_type.type === "Enum" || schemaColumn.column_type.type === "Boolean") {
+  if (schemaColumn.column_type.type === "Enum") {
     const selectValue = draft.isNull ? "" : draft.text;
-    const predefinedValues =
-      schemaColumn.column_type.type === "Enum"
-        ? schemaColumn.column_type.variants
-        : ["true", "false"];
+    const predefinedValues = schemaColumn.column_type.variants;
 
     const selectEditor = (
       <select
@@ -1614,7 +1611,10 @@ function PlainTableView({
       const isIdColumn = column.id === "id";
       const schemaColumn = schemaColumnById.get(column.id);
       const isEditable =
-        !isIdColumn && schemaColumn && getFieldReadOnlyReason(schemaColumn) === null;
+        !isIdColumn &&
+        schemaColumn &&
+        schemaColumn.column_type.type !== "Boolean" &&
+        getFieldReadOnlyReason(schemaColumn) === null;
 
       return {
         key: column.id,
@@ -1878,6 +1878,7 @@ function PlainTableView({
         const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
         if (
           !schemaColumn ||
+          schemaColumn.column_type.type === "Boolean" ||
           getFieldReadOnlyReason(schemaColumn) !== null ||
           (rowId !== null && queuedDeletes.has(rowId))
         ) {
