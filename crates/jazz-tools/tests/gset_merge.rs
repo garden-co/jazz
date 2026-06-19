@@ -239,7 +239,7 @@ async fn concurrent_writes_converge_to_sorted_union() {
 }
 
 #[tokio::test]
-async fn concurrent_write_never_drops_a_peers_element() {
+async fn concurrent_writes_never_remove_a_shared_element() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
     let server = TestingServer::start_with_schema(schema.clone()).await;
@@ -247,23 +247,24 @@ async fn concurrent_write_never_drops_a_peers_element() {
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("alice-mono")
+        .with_user_id("alice-grow-only")
         .ready_on("docs", READY_TIMEOUT)
         .connect()
         .await;
     let bob = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
-        .with_user_id("bob-mono")
+        .with_user_id("bob-grow-only")
         .ready_on("docs", READY_TIMEOUT)
         .connect()
         .await;
 
-    let (doc_keep_first, _, _) = alice
-        .insert("docs", doc_values("a", &["base"]))
+    // Both replicas start synced to a doc that already contains "keep".
+    let (doc_alice_first, _, _) = alice
+        .insert("docs", doc_values("a", &["base", "keep"]))
         .expect("alice creates doc a");
-    let (doc_keep_last, _, _) = alice
-        .insert("docs", doc_values("b", &["base"]))
+    let (doc_bob_first, _, _) = alice
+        .insert("docs", doc_values("b", &["base", "keep"]))
         .expect("alice creates doc b");
 
     let query = QueryBuilder::new("docs").build();
@@ -277,50 +278,55 @@ async fn concurrent_write_never_drops_a_peers_element() {
     )
     .await;
 
-    let expected = vec!["base".to_string(), "keep".to_string(), "other".to_string()];
+    // Each concurrent write drops "keep" and adds its own tag. Grow-only keeps
+    // "keep" alive through the shared ancestor under either propagation order —
+    // neither contender carries it, so only ancestor union can preserve it.
+    let expected = vec![
+        "alice".to_string(),
+        "base".to_string(),
+        "bob".to_string(),
+        "keep".to_string(),
+    ];
 
-    // "keep" merged first, then bob's write that lacks it.
     merge_concurrently(
         &server,
-        doc_keep_first,
+        doc_alice_first,
         "tags",
         &alice,
-        tags_value(&["base", "keep"]),
+        tags_value(&["base", "alice"]),
         &bob,
-        tags_value(&["base", "other"]),
+        tags_value(&["base", "bob"]),
     )
     .await;
     assert_converges(
         &alice,
         &bob,
         &query,
-        doc_keep_first,
+        doc_alice_first,
         tags_of,
         expected.clone(),
-        "peer's element survives when merged first",
+        "alice-first order keeps the omitted shared element",
     )
     .await;
 
-    // The stronger case: bob's write lacking "keep" is merged first; "keep"
-    // must still survive when alice's concurrent write arrives afterwards.
     merge_concurrently(
         &server,
-        doc_keep_last,
+        doc_bob_first,
         "tags",
         &bob,
-        tags_value(&["base", "other"]),
+        tags_value(&["base", "bob"]),
         &alice,
-        tags_value(&["base", "keep"]),
+        tags_value(&["base", "alice"]),
     )
     .await;
     assert_converges(
         &alice,
         &bob,
         &query,
-        doc_keep_last,
+        doc_bob_first,
         tags_of,
         expected,
-        "peer's element survives when merged last",
+        "bob-first order keeps the omitted shared element",
     )
     .await;
 
