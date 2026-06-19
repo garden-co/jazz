@@ -137,6 +137,11 @@
   --rdg-row-selected-background-color: #17202b;
   --rdg-row-selected-hover-background-color: #1b2531;
   --rdg-cell-frozen-box-shadow: 2px 0 10px -6px rgba(0, 0, 0, 0.55);
+  scrollbar-width: none;
+}
+
+.dataGrid::-webkit-scrollbar {
+  display: none;
 }
 
 .dataGrid:focus-visible {
