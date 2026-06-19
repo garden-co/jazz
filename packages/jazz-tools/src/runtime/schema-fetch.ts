@@ -70,10 +70,55 @@ export interface FetchStoredSchemasOptions {
   adminSecret: string;
 }
 
+export interface StoredSchemaHash {
+  hash: string;
+  publishedAt: number | null;
+}
+
+interface SchemaHashesResponseBody {
+  hashes?: string[];
+  schemas?: Array<{
+    hash: string;
+    publishedAt?: number | null;
+  }>;
+}
+
+function isSchemaHashesResponseBody(value: unknown): value is SchemaHashesResponseBody {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as {
+    hashes?: unknown;
+    schemas?: unknown;
+  };
+
+  const hasValidHashes =
+    candidate.hashes === undefined ||
+    (Array.isArray(candidate.hashes) && candidate.hashes.every((hash) => typeof hash === "string"));
+  const hasValidSchemas =
+    candidate.schemas === undefined ||
+    (Array.isArray(candidate.schemas) &&
+      candidate.schemas.every((schema) => {
+        if (typeof schema !== "object" || schema === null) {
+          return false;
+        }
+        const entry = schema as { hash?: unknown; publishedAt?: unknown };
+        return (
+          typeof entry.hash === "string" &&
+          (entry.publishedAt === undefined ||
+            entry.publishedAt === null ||
+            (typeof entry.publishedAt === "number" && Number.isFinite(entry.publishedAt)))
+        );
+      }));
+
+  return hasValidHashes && hasValidSchemas;
+}
+
 export async function fetchSchemaHashes(
   serverUrl: string,
   options: FetchStoredSchemasOptions,
-): Promise<{ hashes: string[] }> {
+): Promise<{ hashes: string[]; schemas: StoredSchemaHash[] }> {
   const response = await fetch(appScopedUrl(serverUrl, options.appId, "schemas"), {
     method: "GET",
     headers: {
@@ -89,8 +134,20 @@ export async function fetchSchemaHashes(
     );
   }
 
-  const schemaHashesResponse = (await response.json()) as { hashes?: string[] };
-  return { hashes: schemaHashesResponse.hashes ?? [] };
+  const rawSchemaHashesResponse = (await response.json()) as unknown;
+  const schemaHashesResponse = isSchemaHashesResponseBody(rawSchemaHashesResponse)
+    ? rawSchemaHashesResponse
+    : {};
+  const schemas =
+    schemaHashesResponse.schemas?.map((schema) => ({
+      hash: schema.hash,
+      publishedAt: normalizePublishedAtEpochMilliseconds(schema.publishedAt),
+    })) ?? [];
+
+  return {
+    hashes: schemaHashesResponse.hashes ?? schemas.map((schema) => schema.hash),
+    schemas,
+  };
 }
 
 export interface PublishStoredSchemaOptions {

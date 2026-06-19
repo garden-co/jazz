@@ -32,7 +32,10 @@ describe("InspectorLayout", () => {
     mockUseStandaloneContext.mockReturnValue({
       onManageConnections,
       onReset: vi.fn(),
-      schemaHashes: ["hash-a", "hash-b"],
+      schemaHashes: [
+        { hash: "hash-a", publishedAt: null },
+        { hash: "hash-b", publishedAt: null },
+      ],
       selectedSchemaHash: "hash-a",
       onSelectSchema,
       isSwitchingSchema: false,
@@ -51,13 +54,37 @@ describe("InspectorLayout", () => {
     expect(screen.getByRole("link", { name: "Live Query" })).not.toBeNull();
   });
 
+  it("shortens schema hashes and includes upload time when available", () => {
+    mockUseStandaloneContext.mockReturnValue({
+      onManageConnections: vi.fn(),
+      onReset: vi.fn(),
+      schemaHashes: [
+        {
+          hash: "aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffff",
+          publishedAt: Date.UTC(2026, 5, 18, 19, 15),
+        },
+      ],
+      selectedSchemaHash: "aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffff",
+      onSelectSchema: vi.fn(),
+      isSwitchingSchema: false,
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer"]}>
+        <InspectorLayout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("option", { name: /aaaaaaaaaaaa - uploaded / })).not.toBeNull();
+  });
+
   it("calls manage handler when connections button is clicked", () => {
     const onManageConnections = vi.fn();
 
     mockUseStandaloneContext.mockReturnValue({
       onManageConnections,
       onReset: vi.fn(),
-      schemaHashes: ["hash-a"],
+      schemaHashes: [{ hash: "hash-a", publishedAt: null }],
       selectedSchemaHash: "hash-a",
       onSelectSchema: vi.fn(),
       isSwitchingSchema: false,
@@ -80,7 +107,10 @@ describe("InspectorLayout", () => {
     mockUseStandaloneContext.mockReturnValue({
       onManageConnections: vi.fn(),
       onReset: vi.fn(),
-      schemaHashes: ["hash-a", "hash-b"],
+      schemaHashes: [
+        { hash: "hash-a", publishedAt: null },
+        { hash: "hash-b", publishedAt: null },
+      ],
       selectedSchemaHash: "hash-a",
       onSelectSchema,
       isSwitchingSchema: false,
@@ -101,7 +131,7 @@ describe("InspectorLayout", () => {
     mockUseStandaloneContext.mockReturnValue({
       onManageConnections: vi.fn(),
       onReset: vi.fn(),
-      schemaHashes: ["hash-a"],
+      schemaHashes: [{ hash: "hash-a", publishedAt: null }],
       selectedSchemaHash: "hash-a",
       onSelectSchema: vi.fn(),
       isSwitchingSchema: true,

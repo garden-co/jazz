@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
+import {
+  formatSchemaHashOptionLabel,
+  type SchemaHashInfo,
+} from "../../utility/schema-hash-display.js";
 import styles from "./index.module.css";
 
 interface TablesPanelIconProps {
@@ -98,7 +102,7 @@ export function InspectorLayout() {
 }
 
 interface SchemaHashesSelectProps {
-  schemaHashes: string[];
+  schemaHashes: SchemaHashInfo[];
   selectedSchemaHash: string | null;
   onSelectSchema: (schemaHash: string) => void;
   isSwitchingSchema: boolean;
@@ -119,9 +123,9 @@ export function SchemaHashesSelect({
         onChange={(event) => onSelectSchema(event.target.value)}
         disabled={isSwitchingSchema || schemaHashes.length === 0}
       >
-        {schemaHashes.map((schemaHash) => (
-          <option key={schemaHash} value={schemaHash}>
-            {schemaHash}
+        {schemaHashes.map((schema) => (
+          <option key={schema.hash} value={schema.hash} title={schema.hash}>
+            {formatSchemaHashOptionLabel(schema)}
           </option>
         ))}
       </select>

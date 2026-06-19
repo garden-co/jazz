@@ -1,12 +1,16 @@
 import type { SubmitEvent } from "react";
+import {
+  formatSchemaHashOptionLabel,
+  type SchemaHashInfo,
+} from "../../utility/schema-hash-display.js";
 import styles from "./SchemaHashSelect.module.css";
 
 interface SchemaHashSelectProps {
-  hashes: string[];
+  schemas: SchemaHashInfo[];
   onSelect: (hash: string) => void;
 }
 
-export function SchemaHashSelect({ hashes, onSelect }: SchemaHashSelectProps) {
+export function SchemaHashSelect({ schemas, onSelect }: SchemaHashSelectProps) {
   const handleSubmit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -17,7 +21,7 @@ export function SchemaHashSelect({ hashes, onSelect }: SchemaHashSelectProps) {
     }
   };
 
-  if (hashes.length === 0) {
+  if (schemas.length === 0) {
     return (
       <section className={styles.card}>
         <h2 className={styles.title}>No schemas available</h2>
@@ -33,9 +37,9 @@ export function SchemaHashSelect({ hashes, onSelect }: SchemaHashSelectProps) {
         Schema hash
         <select name="schema-hash" required className={styles.select}>
           <option value="">—</option>
-          {hashes.map((hash) => (
-            <option key={hash} value={hash}>
-              {hash}
+          {schemas.map((schema) => (
+            <option key={schema.hash} value={schema.hash} title={schema.hash}>
+              {formatSchemaHashOptionLabel(schema)}
             </option>
           ))}
         </select>

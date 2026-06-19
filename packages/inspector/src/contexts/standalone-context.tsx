@@ -1,4 +1,5 @@
 import { createContext, useContext, type PropsWithChildren } from "react";
+import type { SchemaHashInfo } from "../utility/schema-hash-display.js";
 
 export interface StandaloneConnectionConfig {
   serverUrl: string;
@@ -8,7 +9,7 @@ export interface StandaloneConnectionConfig {
 
 interface StandaloneContextValue {
   onManageConnections: () => void;
-  schemaHashes: string[];
+  schemaHashes: SchemaHashInfo[];
   selectedSchemaHash: string | null;
   onSelectSchema: (schemaHash: string) => void;
   isSwitchingSchema: boolean;
