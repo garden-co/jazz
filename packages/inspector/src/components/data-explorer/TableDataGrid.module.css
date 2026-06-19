@@ -192,7 +192,8 @@
 .booleanCell {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
+  gap: 6px;
   inline-size: 100%;
   block-size: 100%;
   padding-inline-start: 8px;

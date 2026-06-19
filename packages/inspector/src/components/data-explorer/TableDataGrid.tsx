@@ -1661,6 +1661,26 @@ function PlainTableView({
                     });
                   }}
                 />
+                {schemaColumn.nullable ? (
+                  <button
+                    type="button"
+                    className={styles.inlineNullButton}
+                    aria-label={`Set ${column.accessorKey} to NULL for ${rowLabel}`}
+                    title="Set to NULL"
+                    onMouseDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      queueCellEdit(row, schemaColumn, {
+                        text: "",
+                        isNull: true,
+                      });
+                    }}
+                  >
+                    <CrossIcon className={styles.inlineNullIcon} />
+                  </button>
+                ) : null}
               </div>
             );
           }
@@ -1878,10 +1898,21 @@ function PlainTableView({
         const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
         if (
           !schemaColumn ||
-          schemaColumn.column_type.type === "Boolean" ||
           getFieldReadOnlyReason(schemaColumn) !== null ||
           (rowId !== null && queuedDeletes.has(rowId))
         ) {
+          event.preventGridDefault();
+          return;
+        }
+
+        if (schemaColumn.column_type.type === "Boolean") {
+          const rawValue = args.row?.row[schemaColumn.name];
+          if (schemaColumn.nullable && (rawValue === null || rawValue === undefined)) {
+            queueCellEdit(args.row, schemaColumn, {
+              text: "false",
+              isNull: false,
+            });
+          }
           event.preventGridDefault();
           return;
         }
