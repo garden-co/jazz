@@ -13,11 +13,13 @@ import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "
 import { useAll, useDb } from "jazz-tools/react";
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type Dispatch,
   type KeyboardEvent,
+  type RefObject,
   type SetStateAction,
 } from "react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
@@ -948,6 +950,32 @@ export function TableDataGrid() {
   );
 }
 
+/**
+ * Opens an enum's value selector when the cell enters edit mode
+ */
+function useOpenSelectorOnEnumEdit(
+  selectEditorRef: RefObject<HTMLSelectElement | null>,
+  schemaColumn: ColumnDescriptor,
+) {
+  useLayoutEffect(() => {
+    if (schemaColumn.column_type.type !== "Enum") {
+      return;
+    }
+
+    const select = selectEditorRef.current;
+    if (!select) {
+      return;
+    }
+
+    select.focus({ preventScroll: true });
+    try {
+      (select as HTMLSelectElement & { showPicker?: () => void }).showPicker?.();
+    } catch {
+      // Browsers may reject showPicker() without transient user activation.
+    }
+  }, [schemaColumn.column_type.type]);
+}
+
 function QueuedCellEditor({
   row,
   onRowChange,
@@ -959,6 +987,9 @@ function QueuedCellEditor({
   const [draft, setDraft] = useState<QueuedCellEdit>(() =>
     createQueuedCellEdit(schemaColumn, row.row[schemaColumn.name]),
   );
+  const selectEditorRef = useRef<HTMLSelectElement | null>(null);
+
+  useOpenSelectorOnEnumEdit(selectEditorRef, schemaColumn);
 
   const applyDraft = (nextDraft: QueuedCellEdit) => {
     setDraft(nextDraft);
@@ -1017,6 +1048,7 @@ function QueuedCellEditor({
 
     const selectEditor = (
       <select
+        ref={selectEditorRef}
         aria-label={`Edit ${schemaColumn.name}`}
         className={styles.inlineEditorSelect}
         autoFocus
