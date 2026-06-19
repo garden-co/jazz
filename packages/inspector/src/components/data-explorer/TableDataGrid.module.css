@@ -32,6 +32,20 @@
   cursor: not-allowed;
 }
 
+.iconButton {
+  justify-content: center;
+  inline-size: 31px;
+  block-size: 31px;
+  padding: 0;
+}
+
+.buttonIcon {
+  display: block;
+  inline-size: 15px;
+  block-size: 15px;
+  flex: 0 0 auto;
+}
+
 .primaryButton {
   border: 1px solid #294d78;
   background: #1b3552;
@@ -374,11 +388,16 @@
 }
 
 .actionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 28px;
+  block-size: 28px;
   border: 1px solid #293548;
   background: #161e29;
   color: #d7e1f1;
   border-radius: 4px;
-  padding: 5px 10px;
+  padding: 0;
   font-size: 12px;
   cursor: pointer;
 }
@@ -393,11 +412,16 @@
 }
 
 .dangerActionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 28px;
+  block-size: 28px;
   border: 1px solid #55333d;
   background: #311a21;
   color: #f1d6dc;
   border-radius: 4px;
-  padding: 5px 10px;
+  padding: 0;
   font-size: 12px;
   cursor: pointer;
 }

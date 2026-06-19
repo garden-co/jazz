@@ -186,8 +186,12 @@ describe("TableDataGrid", () => {
 
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
     expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
-    expect(screen.getByRole("link", { name: "Schema" })).not.toBeNull();
-    expect(screen.getByRole("button", { name: "Insert" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Schema" }).getAttribute("title")).toBe("Schema");
+    expect(screen.getByRole("button", { name: "Insert row" }).getAttribute("title")).toBe(
+      "Insert row",
+    );
+    const toolbarDeleteButton = screen.getByRole("button", { name: "Delete row(s)" });
+    expect(toolbarDeleteButton.getAttribute("title")).toBe("Delete row(s)");
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
@@ -579,7 +583,7 @@ describe("TableDataGrid", () => {
   it("appends a staged insert row and inserts it from the banner", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
 
     expect(screen.getByText("staged")).not.toBeNull();
     expect(screen.getByText("1 staged insert")).not.toBeNull();
@@ -617,8 +621,8 @@ describe("TableDataGrid", () => {
   it("queues multiple staged insert rows and inserts them from the banner", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
 
     expect(screen.getAllByText("staged")).toHaveLength(2);
     expect(screen.getByText("2 staged inserts")).not.toBeNull();
@@ -682,7 +686,7 @@ describe("TableDataGrid", () => {
   it("cancels a staged insert row", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
     expect(screen.getByText("staged")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel staged insert" }));
@@ -701,7 +705,7 @@ describe("TableDataGrid", () => {
     expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
     expect(getContainingRow(screen.getByText("row-1"))?.className).toContain("rowSelected");
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete row(s)" }));
 
     expect(screen.getByText("2 rows will be deleted")).not.toBeNull();
 
@@ -739,13 +743,13 @@ describe("TableDataGrid", () => {
   it("cancels staged insert rows included in a selected range", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
 
     const stagedBadges = screen.getAllByText("staged");
     fireEvent.click(stagedBadges[0] as HTMLElement);
     fireEvent.click(stagedBadges[1] as HTMLElement, { shiftKey: true });
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete row(s)" }));
 
     expect(screen.queryByText("staged")).toBeNull();
     expect(screen.queryByText("2 staged inserts")).toBeNull();
@@ -772,8 +776,15 @@ describe("TableDataGrid", () => {
   it("does not delete when a queued delete is undone", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete row-2" }));
-    fireEvent.click(screen.getByRole("button", { name: "Undo delete row-2" }));
+    const deleteButton = screen.getByRole("button", { name: "Delete row-2" });
+    expect(deleteButton.getAttribute("title")).toBe("Delete row");
+
+    fireEvent.click(deleteButton);
+
+    const undoButton = screen.getByRole("button", { name: "Undo delete row-2" });
+    expect(undoButton.getAttribute("title")).toBe("Undo");
+
+    fireEvent.click(undoButton);
 
     expect(screen.queryByText("1 row will be deleted")).toBeNull();
     expect(mockDelete).not.toHaveBeenCalled();

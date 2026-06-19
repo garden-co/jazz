@@ -867,27 +867,35 @@ export function TableDataGrid() {
         }}
         actions={
           <>
-            <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
-              Schema
+            <Link
+              to={`/data-explorer/${table}/schema`}
+              className={`${styles.secondaryButton} ${styles.iconButton}`}
+              aria-label="Schema"
+              title="Schema"
+            >
+              <CatalogIcon className={styles.buttonIcon} />
             </Link>
             <button
               type="button"
-              className={styles.secondaryButton}
+              className={`${styles.secondaryButton} ${styles.iconButton}`}
+              aria-label="Insert row"
+              title="Insert row"
               onClick={() => {
                 setQueuedSaveError(null);
                 setStagedInserts((current) => [...current, createStagedInsert(schemaColumns)]);
               }}
               disabled={isAnyMutationPending}
             >
-              Insert
+              <PlusIcon className={styles.buttonIcon} />
             </button>
             <button
               type="button"
-              className={styles.secondaryButton}
+              className={`${styles.secondaryButton} ${styles.iconButton}`}
+              aria-label="Delete row(s)"
+              title="Delete row(s)"
               onClick={handleQueueSelectedDeletes}
-              disabled={selectedVisibleRowIds.size === 0 || isAnyMutationPending}
             >
-              Delete
+              <TrashIcon className={styles.buttonIcon} />
             </button>
           </>
         }
@@ -1226,6 +1234,87 @@ function CrossIcon({ className }: { className?: string }) {
         d="M4.28 3.22 8 6.94l3.72-3.72 1.06 1.06L9.06 8l3.72 3.72-1.06 1.06L8 9.06l-3.72 3.72-1.06-1.06L6.94 8 3.22 4.28l1.06-1.06Z"
         fill="currentColor"
       />
+    </svg>
+  );
+}
+
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function TrashIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="m6 6 1 14h10l1-14" />
+      <path d="M10 11v5" />
+      <path d="M14 11v5" />
+    </svg>
+  );
+}
+
+function BackArrowIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+    >
+      <path d="m9 14-4-4 4-4" />
+      <path d="M5 10h9a5 5 0 0 1 0 10h-1" />
+    </svg>
+  );
+}
+
+function CatalogIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+    >
+      <path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-1.5Z" />
+      <path d="M8 7h6" />
+      <path d="M8 11h8" />
+      <path d="M8 15h5" />
     </svg>
   );
 }
@@ -1609,9 +1698,9 @@ function PlainTableView({
       name: "",
       sortable: false,
       resizable: false,
-      width: 126,
-      minWidth: 112,
-      maxWidth: 140,
+      width: 48,
+      minWidth: 44,
+      maxWidth: 56,
       headerCellClass: styles.actionsHeaderCell,
       cellClass: styles.actionsGridCell,
       renderCell: ({ row }) => {
@@ -1622,6 +1711,7 @@ function PlainTableView({
                 type="button"
                 className={styles.actionButton}
                 aria-label="Cancel staged insert"
+                title="Cancel"
                 onMouseDown={(event) => {
                   event.stopPropagation();
                 }}
@@ -1635,7 +1725,7 @@ function PlainTableView({
                   );
                 }}
               >
-                Cancel
+                <CrossIcon className={styles.buttonIcon} />
               </button>
             </div>
           );
@@ -1650,6 +1740,7 @@ function PlainTableView({
               type="button"
               className={isQueuedDelete ? styles.actionButton : styles.dangerActionButton}
               aria-label={isQueuedDelete ? `Undo delete ${rowId}` : `Delete ${rowId}`}
+              title={isQueuedDelete ? "Undo" : "Delete row"}
               onMouseDown={(event) => {
                 event.stopPropagation();
               }}
@@ -1658,7 +1749,11 @@ function PlainTableView({
                 toggleQueuedDelete(rowId);
               }}
             >
-              {isQueuedDelete ? "Undo" : "Delete"}
+              {isQueuedDelete ? (
+                <BackArrowIcon className={styles.buttonIcon} />
+              ) : (
+                <TrashIcon className={styles.buttonIcon} />
+              )}
             </button>
           </div>
         );
