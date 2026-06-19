@@ -54,3 +54,6 @@ data-multi/
 
 # Turborepo
 .turbo
+
+# Benchmark datasets (fetched + normalized; regenerate with bench-data-tools)
+/crates/opfs-btree/wasm-bench/bench-data/

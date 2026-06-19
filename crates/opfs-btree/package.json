@@ -8,7 +8,6 @@
     "bench:wasm:opfs:range": "node wasm-bench/run-opfs-bench.cjs --profile range",
     "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs",
     "bench:compare:data": "cd ../.. && cargo run -p bench-data-tools -- --profiles all",
-    "bench:sqlite:build": "bash wasm-bench/build-sqlite-wasm.sh",
     "bench:harness:assets": "node wasm-bench/prepare-harness-assets.cjs",
     "bench:harness:build": "node wasm-bench/with-wasm-llvm.cjs trunk build --config wasm-bench/harness/Trunk.toml --release",
     "bench:compare": "pnpm run bench:compare:data && pnpm run bench:harness:assets && pnpm run bench:harness:build && node wasm-bench/run-compare.cjs",

@@ -9,26 +9,12 @@ repository = "https://github.com/garden-co/jazz2"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-rocksdb = ["dep:rocksdb"]
-compare-native = ["dep:bf-tree", "rocksdb"]
-
 [dependencies]
 rustc-hash = "2"
 thiserror = "2"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bf-tree = { version = "0.4.8", optional = true }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
-  "lz4",
-], optional = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -48,11 +34,3 @@ web-sys = { version = "0.3", features = [
   "DomException",
 ] }
 
-[[bench]]
-name = "hot_paths"
-harness = false
-
-[[bench]]
-name = "compare_native"
-harness = false
-required-features = ["compare-native"]
