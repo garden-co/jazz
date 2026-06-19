@@ -3,15 +3,16 @@
 mod support;
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, ObjectId, QueryBuilder,
-    RowDescriptor, Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
+    QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
-use support::{TestingClient, wait_for_query};
+use support::{TestingClient, wait_for, wait_for_query};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -63,13 +64,89 @@ fn tags_of(row: &(ObjectId, Vec<Value>)) -> Option<Vec<String>> {
     }
 }
 
-/// Two replicas write disjoint tag sets concurrently; both converge to the
-/// union, in identical (sorted-by-encoded-value) order.
+/// Drives a deterministic concurrent merge instead of racing two writes.
 ///
-/// ```text
-/// alice ──tags=[seed,alice]──► server ◄──tags=[seed,bob]── bob
-///                       both query → [alice, bob, seed]
-/// ```
+/// `second` is blocked from receiving server traffic for the duration, so it
+/// writes without ever observing `first`'s update — a genuine concurrent write
+/// sharing the same ancestor — while the server is forced to process `first`'s
+/// write strictly before `second`'s. Flipping which client is `first` lets a
+/// test assert convergence is identical regardless of propagation order, with
+/// no dependence on the async scheduler.
+async fn merge_concurrently(
+    server: &TestingServer,
+    doc_id: ObjectId,
+    column: &str,
+    first: &JazzClient,
+    first_value: Value,
+    second: &JazzClient,
+    second_value: Value,
+) {
+    let blocked = server.block_messages_to(second.client_id().expect("second client id"));
+
+    let first_batch = first
+        .update(doc_id, vec![(column.to_string(), first_value)])
+        .expect("first replica writes");
+    first
+        .wait_for_batch(first_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("first write settles at the server before the second is sent");
+
+    let second_batch = second
+        .update(doc_id, vec![(column.to_string(), second_value)])
+        .expect("second replica writes");
+    blocked
+        .wait_until_buffered(
+            |payload| {
+                matches!(
+                    payload,
+                    SyncPayload::BatchFate { fate } if fate.batch_id() == second_batch
+                )
+            },
+            QUERY_TIMEOUT,
+        )
+        .await
+        .expect("server merges the second write while that replica is blocked");
+    blocked.unblock();
+    second
+        .wait_for_batch(second_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("second write settles after unblocking");
+}
+
+/// Wait until both replicas report `doc_id`'s column as `expected`.
+async fn assert_converges<T>(
+    a: &JazzClient,
+    b: &JazzClient,
+    query: &Query,
+    doc_id: ObjectId,
+    extract: fn(&(ObjectId, Vec<Value>)) -> Option<Vec<T>>,
+    expected: Vec<T>,
+    description: &str,
+) where
+    T: PartialEq,
+{
+    wait_for(QUERY_TIMEOUT, description, || async {
+        let a_rows = a
+            .query(query.clone(), Some(DurabilityTier::EdgeServer))
+            .await
+            .ok()?;
+        let b_rows = b
+            .query(query.clone(), Some(DurabilityTier::EdgeServer))
+            .await
+            .ok()?;
+        let a_val = a_rows
+            .iter()
+            .find(|row| row.0 == doc_id)
+            .and_then(extract)?;
+        let b_val = b_rows
+            .iter()
+            .find(|row| row.0 == doc_id)
+            .and_then(extract)?;
+        (a_val == expected && b_val == expected).then_some(())
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn concurrent_writes_converge_to_sorted_union() {
     let _suite_guard = lock_gset_suite().await;
@@ -91,9 +168,13 @@ async fn concurrent_writes_converge_to_sorted_union() {
         .connect()
         .await;
 
-    let (doc_id, _, _) = alice
-        .insert("docs", doc_values("d", &["seed"]))
-        .expect("alice creates doc");
+    // One doc per propagation order, each starting from the same `[seed]` base.
+    let (doc_alice_first, _, _) = alice
+        .insert("docs", doc_values("a", &["seed"]))
+        .expect("alice creates doc a");
+    let (doc_bob_first, _, _) = alice
+        .insert("docs", doc_values("b", &["seed"]))
+        .expect("alice creates doc b");
 
     let query = QueryBuilder::new("docs").build();
     wait_for_query(
@@ -101,78 +182,62 @@ async fn concurrent_writes_converge_to_sorted_union() {
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "bob sees alice's doc",
-        |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(()),
+        "bob sees both docs",
+        |rows| (rows.len() == 2).then_some(()),
     )
     .await;
 
-    let alice = Arc::new(alice);
-    let bob = Arc::new(bob);
-    let alice2 = Arc::clone(&alice);
-    let bob2 = Arc::clone(&bob);
-
-    let alice_handle = tokio::spawn(async move {
-        alice2
-            .update(
-                doc_id,
-                vec![("tags".to_string(), tags_value(&["seed", "alice"]))],
-            )
-            .expect("alice writes tags");
-    });
-    let bob_handle = tokio::spawn(async move {
-        bob2.update(
-            doc_id,
-            vec![("tags".to_string(), tags_value(&["seed", "bob"]))],
-        )
-        .expect("bob writes tags");
-    });
-    let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
-    alice_res.expect("alice task panicked");
-    bob_res.expect("bob task panicked");
-
     let expected = vec!["alice".to_string(), "bob".to_string(), "seed".to_string()];
-    support::wait_for(QUERY_TIMEOUT, "both converge to the sorted union", || {
-        let alice = Arc::clone(&alice);
-        let bob = Arc::clone(&bob);
-        let query = query.clone();
-        let expected = expected.clone();
-        async move {
-            let alice_rows = alice
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
-                .await
-                .ok()?;
-            let bob_rows = bob
-                .query(query, Some(DurabilityTier::EdgeServer))
-                .await
-                .ok()?;
-            if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                let alice_tags = tags_of(&alice_rows[0])?;
-                let bob_tags = tags_of(&bob_rows[0])?;
-                // Byte-identical ordering across replicas, equal to the canonical union.
-                if alice_tags == expected && bob_tags == expected {
-                    return Some(());
-                }
-            }
-            None
-        }
-    })
+
+    // Order A: the server merges alice's write before bob's.
+    merge_concurrently(
+        &server,
+        doc_alice_first,
+        "tags",
+        &alice,
+        tags_value(&["seed", "alice"]),
+        &bob,
+        tags_value(&["seed", "bob"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_alice_first,
+        tags_of,
+        expected.clone(),
+        "alice-first order converges to the sorted union",
+    )
     .await;
 
-    Arc::try_unwrap(alice)
-        .unwrap_or_else(|_| panic!("alice still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown alice");
-    Arc::try_unwrap(bob)
-        .unwrap_or_else(|_| panic!("bob still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown bob");
+    // Order B: reversed — bob's write reaches the server first, same result.
+    merge_concurrently(
+        &server,
+        doc_bob_first,
+        "tags",
+        &bob,
+        tags_value(&["seed", "bob"]),
+        &alice,
+        tags_value(&["seed", "alice"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_bob_first,
+        tags_of,
+        expected,
+        "bob-first order converges to the same sorted union",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
-/// Grow-only monotonicity: an element written by one replica is never dropped
-/// by a concurrent write from another that lacks it.
 #[tokio::test]
 async fn concurrent_write_never_drops_a_peers_element() {
     let _suite_guard = lock_gset_suite().await;
@@ -194,9 +259,12 @@ async fn concurrent_write_never_drops_a_peers_element() {
         .connect()
         .await;
 
-    let (doc_id, _, _) = alice
-        .insert("docs", doc_values("d", &["base"]))
-        .expect("alice creates doc");
+    let (doc_keep_first, _, _) = alice
+        .insert("docs", doc_values("a", &["base"]))
+        .expect("alice creates doc a");
+    let (doc_keep_last, _, _) = alice
+        .insert("docs", doc_values("b", &["base"]))
+        .expect("alice creates doc b");
 
     let query = QueryBuilder::new("docs").build();
     wait_for_query(
@@ -204,77 +272,60 @@ async fn concurrent_write_never_drops_a_peers_element() {
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "bob sees alice's doc",
-        |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(()),
+        "bob sees both docs",
+        |rows| (rows.len() == 2).then_some(()),
     )
     .await;
-
-    let alice = Arc::new(alice);
-    let bob = Arc::new(bob);
-    let alice2 = Arc::clone(&alice);
-    let bob2 = Arc::clone(&bob);
-
-    // Alice adds "keep"; Bob concurrently writes a set that lacks "keep".
-    let alice_handle = tokio::spawn(async move {
-        alice2
-            .update(
-                doc_id,
-                vec![("tags".to_string(), tags_value(&["base", "keep"]))],
-            )
-            .expect("alice writes tags");
-    });
-    let bob_handle = tokio::spawn(async move {
-        bob2.update(
-            doc_id,
-            vec![("tags".to_string(), tags_value(&["base", "other"]))],
-        )
-        .expect("bob writes tags");
-    });
-    let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
-    alice_res.expect("alice task panicked");
-    bob_res.expect("bob task panicked");
 
     let expected = vec!["base".to_string(), "keep".to_string(), "other".to_string()];
-    support::wait_for(
-        QUERY_TIMEOUT,
-        "peer's element survives the concurrent write",
-        || {
-            let alice = Arc::clone(&alice);
-            let bob = Arc::clone(&bob);
-            let query = query.clone();
-            let expected = expected.clone();
-            async move {
-                let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
-                let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
-                if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                    let alice_tags = tags_of(&alice_rows[0])?;
-                    let bob_tags = tags_of(&bob_rows[0])?;
-                    if alice_tags == expected && bob_tags == expected {
-                        return Some(());
-                    }
-                }
-                None
-            }
-        },
+
+    // "keep" merged first, then bob's write that lacks it.
+    merge_concurrently(
+        &server,
+        doc_keep_first,
+        "tags",
+        &alice,
+        tags_value(&["base", "keep"]),
+        &bob,
+        tags_value(&["base", "other"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_keep_first,
+        tags_of,
+        expected.clone(),
+        "peer's element survives when merged first",
     )
     .await;
 
-    Arc::try_unwrap(alice)
-        .unwrap_or_else(|_| panic!("alice still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown alice");
-    Arc::try_unwrap(bob)
-        .unwrap_or_else(|_| panic!("bob still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown bob");
+    // The stronger case: bob's write lacking "keep" is merged first; "keep"
+    // must still survive when alice's concurrent write arrives afterwards.
+    merge_concurrently(
+        &server,
+        doc_keep_last,
+        "tags",
+        &bob,
+        tags_value(&["base", "other"]),
+        &alice,
+        tags_value(&["base", "keep"]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_keep_last,
+        tags_of,
+        expected,
+        "peer's element survives when merged last",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
@@ -292,6 +343,13 @@ fn gset_float_schema() -> Schema {
         scores,
     ]));
     Schema::from([(TableName::new("docs"), docs)])
+}
+
+fn score_doc_values(name: &str, scores: &[f64]) -> HashMap<String, Value> {
+    HashMap::from([
+        ("name".to_string(), Value::Text(name.to_string())),
+        ("scores".to_string(), scores_value(scores)),
+    ])
 }
 
 fn scores_value(scores: &[f64]) -> Value {
@@ -315,9 +373,8 @@ fn scores_bits(row: &(ObjectId, Vec<Value>)) -> Option<Vec<u64>> {
 
 /// `-0.0` and `+0.0` are the same number but distinct bit patterns. The merge
 /// keys on the raw encoding, which never normalises them, so both survive and
-/// two replicas writing them in opposite orders still converge byte-identically
-/// — the failure mode the review flagged (replicas agreeing on membership but
-/// disagreeing on the stored bytes) cannot arise.
+/// replicas writing them in opposite orders converge byte-identically under
+/// either propagation order.
 #[tokio::test]
 async fn distinct_float_representations_converge_deterministically() {
     let _suite_guard = lock_gset_suite().await;
@@ -339,15 +396,12 @@ async fn distinct_float_representations_converge_deterministically() {
         .connect()
         .await;
 
-    let (doc_id, _, _) = alice
-        .insert(
-            "docs",
-            HashMap::from([
-                ("name".to_string(), Value::Text("d".to_string())),
-                ("scores".to_string(), scores_value(&[])),
-            ]),
-        )
-        .expect("alice creates doc");
+    let (doc_alice_first, _, _) = alice
+        .insert("docs", score_doc_values("a", &[]))
+        .expect("alice creates doc a");
+    let (doc_bob_first, _, _) = alice
+        .insert("docs", score_doc_values("b", &[]))
+        .expect("alice creates doc b");
 
     let query = QueryBuilder::new("docs").build();
     wait_for_query(
@@ -355,77 +409,57 @@ async fn distinct_float_representations_converge_deterministically() {
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "bob sees alice's doc",
-        |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(()),
+        "bob sees both docs",
+        |rows| (rows.len() == 2).then_some(()),
     )
     .await;
-
-    let alice = Arc::new(alice);
-    let bob = Arc::new(bob);
-    let alice2 = Arc::clone(&alice);
-    let bob2 = Arc::clone(&bob);
-
-    // Same two values, written in opposite orders by the two replicas.
-    let alice_handle = tokio::spawn(async move {
-        alice2
-            .update(
-                doc_id,
-                vec![("scores".to_string(), scores_value(&[0.0, -0.0]))],
-            )
-            .expect("alice writes scores");
-    });
-    let bob_handle = tokio::spawn(async move {
-        bob2.update(
-            doc_id,
-            vec![("scores".to_string(), scores_value(&[-0.0, 0.0]))],
-        )
-        .expect("bob writes scores");
-    });
-    let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
-    alice_res.expect("alice task panicked");
-    bob_res.expect("bob task panicked");
 
     // Both zeros retained (no normalising collision), in one canonical order.
     let expected = vec![0.0_f64.to_bits(), (-0.0_f64).to_bits()];
-    support::wait_for(
-        QUERY_TIMEOUT,
-        "both converge to identical float bit patterns",
-        || {
-            let alice = Arc::clone(&alice);
-            let bob = Arc::clone(&bob);
-            let query = query.clone();
-            let expected = expected.clone();
-            async move {
-                let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
-                let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
-                if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                    let alice_scores = scores_bits(&alice_rows[0])?;
-                    let bob_scores = scores_bits(&bob_rows[0])?;
-                    if alice_scores == expected && bob_scores == expected {
-                        return Some(());
-                    }
-                }
-                None
-            }
-        },
+
+    merge_concurrently(
+        &server,
+        doc_alice_first,
+        "scores",
+        &alice,
+        scores_value(&[0.0, -0.0]),
+        &bob,
+        scores_value(&[-0.0, 0.0]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_alice_first,
+        scores_bits,
+        expected.clone(),
+        "alice-first order keeps both zero representations",
     )
     .await;
 
-    Arc::try_unwrap(alice)
-        .unwrap_or_else(|_| panic!("alice still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown alice");
-    Arc::try_unwrap(bob)
-        .unwrap_or_else(|_| panic!("bob still shared"))
-        .shutdown()
-        .await
-        .expect("shutdown bob");
+    merge_concurrently(
+        &server,
+        doc_bob_first,
+        "scores",
+        &bob,
+        scores_value(&[-0.0, 0.0]),
+        &alice,
+        scores_value(&[0.0, -0.0]),
+    )
+    .await;
+    assert_converges(
+        &alice,
+        &bob,
+        &query,
+        doc_bob_first,
+        scores_bits,
+        expected,
+        "bob-first order converges to the same bit patterns",
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
