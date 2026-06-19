@@ -57,6 +57,11 @@ const mockWasmSchema = {
       { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
       { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
       { name: "blob", column_type: { type: "Bytea" }, nullable: true },
+      {
+        name: "status",
+        column_type: { type: "Enum", variants: ["open", "closed"] },
+        nullable: true,
+      },
     ],
   },
   users: {
@@ -107,6 +112,7 @@ describe("TableDataGrid", () => {
         meta: { done: true },
         owner_id: "owner-a",
         blob: new Uint8Array([1, 2]),
+        status: "open",
       },
       {
         id: "row-1",
@@ -115,6 +121,7 @@ describe("TableDataGrid", () => {
         meta: null,
         owner_id: "owner-b",
         blob: new Uint8Array([5, 6]),
+        status: "closed",
       },
     ];
     currentReferenceRowsByTable = {
@@ -296,6 +303,30 @@ describe("TableDataGrid", () => {
       );
       expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
+  });
+
+  it("opens select-backed editors when edit mode starts", () => {
+    const selectPrototype = HTMLSelectElement.prototype as HTMLSelectElement & {
+      showPicker?: () => void;
+    };
+    const originalShowPicker = selectPrototype.showPicker;
+    const showPicker = vi.fn();
+    selectPrototype.showPicker = showPicker;
+
+    try {
+      renderGrid();
+
+      fireEvent.doubleClick(screen.getByRole("gridcell", { name: "open" }));
+
+      expect(screen.getByLabelText("Edit status")).not.toBeNull();
+      expect(showPicker).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalShowPicker) {
+        selectPrototype.showPicker = originalShowPicker;
+      } else {
+        delete selectPrototype.showPicker;
+      }
+    }
   });
 
   it("preserves queued inline edits when the current row live-updates", async () => {
