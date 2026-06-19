@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunProfile {
     pub profile: String,
+    pub base_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -116,7 +116,10 @@ impl App {
 
         self.pending
             .insert(profile.clone(), PendingProfile::default());
-        let request = RunProfile { profile };
+        let request = RunProfile {
+            profile,
+            base_url: base_url(),
+        };
         self.btree.send(request.clone());
         self.sqlite.send(request);
     }
@@ -290,6 +293,12 @@ fn autorun_from_query() -> bool {
         .and_then(|params| params.get("autorun"))
         .as_deref()
         == Some("1")
+}
+
+fn base_url() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .unwrap_or_default()
 }
 
 fn export_automation_result(result: AutomationResult) {
