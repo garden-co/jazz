@@ -820,6 +820,11 @@ mod tests {
             hashes_json["hashes"][0].as_str(),
             Some(expected_hash.as_str())
         );
+        assert_eq!(
+            hashes_json["schemas"][0]["hash"].as_str(),
+            Some(expected_hash.as_str())
+        );
+        assert!(hashes_json["schemas"][0].get("publishedAt").is_some());
 
         let schema_response = app
             .clone()
