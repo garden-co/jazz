@@ -43,29 +43,15 @@ CC BY-SA 4.0 (© Wikipedia contributors, share-alike — kept isolated in its gz
 - `wasm-bindgen` CLI matching the crate: `cargo install wasm-bindgen-cli --version 0.2.125`.
 - Playwright's Chromium (`pnpm --dir crates/opfs-btree exec playwright install chromium`).
 
-Set the wasm C toolchain environment before building the harness or running the
-benchmark. Without it, Cargo can fall back to Apple's clang and fail with
+The package scripts run through `with-wasm-llvm.sh`, which discovers
+`brew --prefix llvm` or `brew --prefix llvm@20` and sets Cargo's wasm C
+toolchain environment before invoking Trunk. Without Homebrew LLVM installed,
+SQLite's C build will fall back to Apple's clang and fail with
 `No available targets are compatible with triple "wasm32-unknown-unknown"`.
-
-```bash
-LLVM_PREFIX=""
-for prefix in "$(brew --prefix llvm 2>/dev/null)" "$(brew --prefix llvm@20 2>/dev/null)"; do
-  if [ -x "$prefix/bin/clang" ] && "$prefix/bin/clang" --print-targets | grep -qi wasm32; then
-    LLVM_PREFIX="$prefix"
-    break
-  fi
-done
-test -n "$LLVM_PREFIX" || { echo "install Homebrew LLVM: brew install llvm"; exit 1; }
-
-CC_wasm32_unknown_unknown="$LLVM_PREFIX/bin/clang" \
-AR_wasm32_unknown_unknown="$LLVM_PREFIX/bin/llvm-ar" \
-CFLAGS_wasm32_unknown_unknown="-O3 -DSQLITE_THREADSAFE=0" \
-pnpm --dir crates/opfs-btree run bench:compare
-```
 
 ## Running
 
-With the environment above configured, the supported path is one command:
+The supported path is one command:
 
 ```bash
 # build the Yew harness + Rust workers, run headless Chromium,

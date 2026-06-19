@@ -2,9 +2,9 @@
   "name": "@jazz/opfs-btree",
   "private": true,
   "scripts": {
-    "bench:harness:build": "env -u NO_COLOR trunk build --config wasm-bench/Trunk.toml --release",
+    "bench:harness:build": "sh wasm-bench/with-wasm-llvm.sh trunk build --config wasm-bench/Trunk.toml --release",
     "bench:compare": "pnpm run bench:harness:build && node wasm-bench/run-compare.cjs",
-    "bench:compare:open": "env -u NO_COLOR trunk serve --config wasm-bench/Trunk.toml"
+    "bench:compare:open": "sh wasm-bench/with-wasm-llvm.sh trunk serve --config wasm-bench/Trunk.toml"
   },
   "devDependencies": {
     "playwright": "^1.58.2"
