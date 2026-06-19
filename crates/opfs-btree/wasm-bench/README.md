@@ -9,22 +9,20 @@ loop, so the comparison measures the storage engines, not calling convention.
   `src/wasm_bench.rs`), compiled into a Rust `gloo-worker`.
 - **SQLite** — `rusqlite` linked against [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs)
   with the [`sqlite-wasm-vfs`](https://crates.io/crates/sqlite-wasm-vfs)
-  **sahpool OPFS VFS**, compiled into a separate Rust `gloo-worker`
-  (`crates/opfs-btree/bench-sqlite/`).
+  **sahpool OPFS VFS** from the nested `sqlite/` package, compiled into a
+  separate Rust `gloo-worker`.
 
-The primary harness is a Yew/Trunk app under `wasm-bench/harness/`. It spawns
-two Rust workers, one per engine, over OPFS (sync access handles only exist in a
-Worker). A small Node launcher serves the built harness in headless Chromium,
-waits for the Yew app's automation result, and prints the table. The Yew app
-asserts both engines produce **identical checksums** before exposing successful
-results.
+The primary harness is the Yew/Trunk app in this directory. It spawns two Rust
+workers, one per engine, over OPFS (sync access handles only exist in a Worker).
+A small Node launcher serves the built harness in headless Chromium, waits for
+the Yew app's automation result, and prints the table. The Yew app asserts both
+engines produce **identical checksums** before exposing successful results.
 
 ## Datasets
 
 The benchmark consumes ready-to-run `.kv/.ops` fixtures committed under
-`harness/public/data/`. The original source datasets are also vendored under
-`datasets/` as gzipped files for provenance — no download or network access is
-needed.
+`public/data/`. The original source datasets are also vendored under `datasets/`
+as gzipped files for provenance — no download or network access is needed.
 
 | Profile     | Fixture files                   | Source                                                         | License                     |
 | ----------- | ------------------------------- | -------------------------------------------------------------- | --------------------------- |
@@ -88,10 +86,9 @@ results instead of the table). Example:
 pnpm --dir crates/opfs-btree run bench:compare -- --profiles objects
 ```
 
-Build output lives under `wasm-bench/harness/dist/` and
-`wasm-bench/harness/target/`. These are ignored and safe to delete. The
-`wasm-bench/harness/public/data/*.kv` and `*.ops` files are committed benchmark
-inputs and should stay in the tree.
+Build output lives under `wasm-bench/dist/` and `wasm-bench/target/`. These are
+ignored and safe to delete. The `wasm-bench/public/data/*.kv` and `*.ops` files
+are committed benchmark inputs and should stay in the tree.
 
 ## Interpreting output
 

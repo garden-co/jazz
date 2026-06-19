@@ -129,7 +129,7 @@ pub struct DatasetRunResult {
     pub checksum: u64,
 }
 
-const DB_PATH: &str = "bench-sqlite.db";
+const DB_PATH: &str = "sqlite.db";
 
 fn open_conn() -> Result<Connection, JsValue> {
     let conn = Connection::open(DB_PATH).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
@@ -326,10 +326,4 @@ pub async fn run_sqlite_dataset_result(kv: &[u8], ops: &[u8]) -> Result<DatasetR
         phases: phase_results,
         checksum: overall,
     })
-}
-
-#[wasm_bindgen]
-pub async fn run_sqlite_dataset(kv: &[u8], ops: &[u8]) -> Result<JsValue, JsValue> {
-    let out = run_sqlite_dataset_result(kv, ops).await?;
-    serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
