@@ -58,8 +58,8 @@ pub use query_manager::query::{Query, QueryBuilder};
 pub use query_manager::session::{Session, WriteContext};
 #[cfg(feature = "client")]
 pub use query_manager::types::{
-    ColumnType, OrderedRowDelta, Row, RowDelta, Schema, SchemaBuilder, TableName, TableSchema,
-    Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
+    RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema, Value,
 };
 #[cfg(feature = "client")]
 pub use row_histories::BatchId;

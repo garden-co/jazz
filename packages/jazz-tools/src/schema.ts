@@ -34,7 +34,7 @@ export interface JsonSqlType<Output = JsonValue> {
   __output?: Output;
 }
 export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
-export type ColumnMergeStrategy = "counter";
+export type ColumnMergeStrategy = "counter" | "g-set";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
 
 export function sqlTypeToString(sqlType: SqlType): string {

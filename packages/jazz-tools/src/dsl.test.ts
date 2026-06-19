@@ -257,6 +257,51 @@ describe("column merge strategy DSL", () => {
       "Counter merge strategy is only supported on non-nullable INTEGER columns.",
     );
   });
+
+  it("stores g-set merge strategy on array columns and exports it to wasm schema", () => {
+    resetCollectedState();
+    table("docs", {
+      tags: col.array(col.string()).merge("g-set"),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns).toEqual([
+      {
+        name: "tags",
+        sqlType: { kind: "ARRAY", element: "TEXT" },
+        nullable: false,
+        mergeStrategy: "g-set",
+      },
+    ]);
+
+    expect(schemaToWasm(schema)).toEqual({
+      docs: {
+        columns: [
+          {
+            name: "tags",
+            column_type: { type: "Array", element: { type: "Text" } },
+            nullable: false,
+            merge_strategy: "GSet",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects g-set merge strategy on non-array columns", () => {
+    expect(() => col.string().merge("g-set")).toThrow(
+      "g-set merge strategy is only supported on non-nullable ARRAY columns.",
+    );
+  });
+
+  it("rejects g-set merge strategy on nullable array columns in either chaining order", () => {
+    expect(() => col.array(col.string()).optional().merge("g-set")).toThrow(
+      "g-set merge strategy is only supported on non-nullable ARRAY columns.",
+    );
+    expect(() => col.array(col.string()).merge("g-set").optional()).toThrow(
+      "g-set merge strategy is only supported on non-nullable ARRAY columns.",
+    );
+  });
 });
 
 describe("ref DSL", () => {

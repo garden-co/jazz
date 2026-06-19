@@ -153,6 +153,7 @@ impl ColumnType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnMergeStrategy {
     Counter,
+    GSet,
 }
 
 /// Interned column name type.
@@ -281,6 +282,18 @@ impl ColumnDescriptor {
                 if self.nullable || self.column_type != ColumnType::Integer {
                     Err(format!(
                         "counter merge strategy is only supported on non-nullable INTEGER columns, got {} ({:?}, nullable={})",
+                        self.name_str(),
+                        self.column_type,
+                        self.nullable
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Some(ColumnMergeStrategy::GSet) => {
+                if self.nullable || !matches!(self.column_type, ColumnType::Array { .. }) {
+                    Err(format!(
+                        "g-set merge strategy is only supported on non-nullable ARRAY columns, got {} ({:?}, nullable={})",
                         self.name_str(),
                         self.column_type,
                         self.nullable

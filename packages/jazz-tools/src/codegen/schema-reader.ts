@@ -93,6 +93,8 @@ function columnMergeStrategyToWasm(
       return undefined;
     case "counter":
       return "Counter";
+    case "g-set":
+      return "GSet";
   }
 }
 
@@ -239,6 +241,12 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         throw new Error(
           "Counter merge strategy is only supported on non-nullable INTEGER columns.",
         );
+      }
+      if (
+        col.mergeStrategy === "g-set" &&
+        (col.nullable || typeof col.sqlType !== "object" || col.sqlType.kind !== "ARRAY")
+      ) {
+        throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
       }
       const descriptor: ColumnDescriptor = {
         name: col.name,
