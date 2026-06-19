@@ -27,7 +27,6 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "done" } });
     const operatorSelect = screen.getByLabelText("Operator");
     const booleanOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
@@ -64,7 +63,6 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     const columnSelect = screen.getByLabelText("Column");
     const columnNames = Array.from(columnSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
@@ -82,7 +80,6 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
     fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "gt" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "3" } });
@@ -97,7 +94,7 @@ describe("TableFilterBuilder", () => {
     });
   });
 
-  it("opens and closes the filter dialog via dialog methods", () => {
+  it("renders the inline filter panel by default", () => {
     const onClausesChange = vi.fn();
     const { container } = render(
       <TableFilterBuilder
@@ -107,14 +104,8 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    const dialog = container.querySelector("dialog");
-    expect(dialog?.hasAttribute("open")).toBe(false);
-
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
-    expect(dialog?.hasAttribute("open")).toBe(true);
-
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(dialog?.hasAttribute("open")).toBe(false);
+    expect(container.querySelector("dialog")).toBeNull();
+    expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
   });
 
   it("shows validation errors for invalid values", () => {
@@ -127,7 +118,6 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "done" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "not-boolean" } });
     fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
@@ -146,7 +136,6 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
     fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "isNull" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "false" } });
@@ -183,7 +172,7 @@ describe("TableFilterBuilder", () => {
     ]);
   });
 
-  it("shows compact AND summary when filters are active", () => {
+  it("shows active filters in the inline panel", () => {
     const onClausesChange = vi.fn();
     const clauses: TableFilterClause[] = [
       { id: "a", column: "title", operator: "contains", value: "alpha" },
@@ -197,7 +186,8 @@ describe("TableFilterBuilder", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Filter (2)" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /Filter/ })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /Remove filter on/ })[0]?.textContent).toBe("×");
     expect(screen.getAllByText("title contains alpha").length).toBeGreaterThan(0);
     expect(screen.getAllByText("count gt 1").length).toBeGreaterThan(0);
   });

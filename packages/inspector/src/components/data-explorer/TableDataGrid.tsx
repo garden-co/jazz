@@ -25,11 +25,7 @@ import {
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
-import {
-  TableFilterBuilder,
-  type TableFilterBuilderHandle,
-  type TableFilterClause,
-} from "./TableFilterBuilder.js";
+import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,
   getFieldReadOnlyReason,
@@ -615,7 +611,6 @@ export function TableDataGrid() {
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
-  const filterBuilderRef = useRef<TableFilterBuilderHandle | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const schemaColumnById = useMemo(
     () => new Map(schemaColumns.map((column) => [column.name, column])),
@@ -686,7 +681,6 @@ export function TableDataGrid() {
   const hasStagedInsert = stagedInsertEdits !== null;
   const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0 || hasStagedInsert;
   const isAnyMutationPending = isQueuedSavePending;
-  const filterButtonLabel = filters.length > 0 ? `Filter (${filters.length})` : "Filter";
   const gridAnimationScopeKey = useMemo(
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
     [builtQuery, gridColumns, table],
@@ -794,43 +788,32 @@ export function TableDataGrid() {
 
   return (
     <section className={styles.container}>
-      <header className={styles.header}>
-        <div className={styles.headerActions}>
-          <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
-            Schema
-          </Link>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={() => {
-              filterBuilderRef.current?.open();
-            }}
-          >
-            {filterButtonLabel}
-          </button>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={() => {
-              setQueuedSaveError(null);
-              setStagedInsertEdits(
-                (current) => current ?? createInitialStagedInsertEdits(schemaColumns),
-              );
-            }}
-            disabled={hasStagedInsert || isAnyMutationPending}
-          >
-            Insert
-          </button>
-        </div>
-      </header>
       <TableFilterBuilder
-        ref={filterBuilderRef}
         schemaColumns={schemaColumns}
         clauses={filters}
-        showTrigger={false}
         onClausesChange={(nextFilters) => {
           setFilters(nextFilters);
         }}
+        actions={
+          <>
+            <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
+              Schema
+            </Link>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => {
+                setQueuedSaveError(null);
+                setStagedInsertEdits(
+                  (current) => current ?? createInitialStagedInsertEdits(schemaColumns),
+                );
+              }}
+              disabled={hasStagedInsert || isAnyMutationPending}
+            >
+              Insert
+            </button>
+          </>
+        }
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
