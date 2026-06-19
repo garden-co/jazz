@@ -926,9 +926,11 @@ version = "0.0.0"
 dependencies = [
  "gloo-net 0.6.0",
  "gloo-worker 0.6.0",
+ "js-sys",
  "opfs-btree",
  "opfs-btree-bench-sqlite",
  "serde",
+ "serde-wasm-bindgen 0.6.5",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
