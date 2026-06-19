@@ -184,6 +184,16 @@ describe("TableDataGrid", () => {
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
+  it("renders null cell values with a marker", () => {
+    renderGrid();
+
+    const row = getContainingRow(screen.getByText("row-1"));
+    expect(row).not.toBeNull();
+
+    const nullMarker = within(row as HTMLElement).getByText("<null>");
+    expect(getContainingCell(nullMarker)).not.toBeNull();
+  });
+
   it("renders reference cells as links to the related table filtered by id", () => {
     renderGrid();
 

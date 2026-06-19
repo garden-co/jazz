@@ -36,8 +36,11 @@ import {
 import { buildRelationFilterHref } from "./relation-navigation.js";
 import styles from "./TableDataGrid.module.css";
 
+const NULL_CELL_MARKER = "<null>";
+
 function formatCellValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
+  if (value === null) return NULL_CELL_MARKER;
+  if (value === undefined) return "";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (typeof value === "object") return JSON.stringify(value);
@@ -1150,6 +1153,14 @@ function BooleanCellCheckbox({
   );
 }
 
+function NullCellMarker() {
+  return (
+    <div className={`${styles.cellContent} ${styles.nullCellMarker}`} title={NULL_CELL_MARKER}>
+      {NULL_CELL_MARKER}
+    </div>
+  );
+}
+
 function RelationCell({
   schema,
   relationTable,
@@ -1390,6 +1401,11 @@ function PlainTableView({
           }
 
           const rawValue = row.row[column.accessorKey];
+
+          if (rawValue === null) {
+            return <NullCellMarker />;
+          }
+
           const value = formatCellValue(rawValue);
 
           if (schemaColumn?.column_type.type === "Boolean") {
