@@ -9,14 +9,20 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import { Group, Panel, Separator } from "react-resizable-panels";
 import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type KeyboardEvent,
+  type SetStateAction,
+} from "react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
-import { RowMutationSidebar } from "./RowMutationSidebar.js";
 import {
   TableFilterBuilder,
   type TableFilterBuilderHandle,
@@ -57,11 +63,9 @@ const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
 const DATA_COLUMN_MAX_WIDTH = 360;
-const POINTER_SIDEBAR_OPEN_DELAY_MS = 180;
-
-interface MutationState {
-  mode: "insert";
-}
+const STAGED_INSERT_ROW_ID = "__jazz_inspector_staged_insert__";
+const NULL_SELECT_VALUE = "__jazz_inspector_null__";
+const ACTIONS_COLUMN_KEY = "__actions__";
 
 interface GridColumn {
   id: string;
@@ -80,6 +84,7 @@ interface AnimatedGridRow {
 
 interface QueuedCellEdit {
   text: string;
+  isNull: boolean;
 }
 
 type QueuedRowEdits = Record<string, QueuedCellEdit>;
@@ -88,6 +93,7 @@ interface EditableGridRow extends AnimatedGridRow {
   row: DynamicTableRow;
   sourceRow: DynamicTableRow;
   queuedEdits?: QueuedRowEdits;
+  isStagedInsert?: boolean;
 }
 
 function isColumnSortable(columnType: ColumnType): boolean {
@@ -199,35 +205,73 @@ function getRelationDisplayColumn(
   return tableColumns.find(isDisplayFriendlyColumn);
 }
 
-function getQueuedEditText(value: unknown): string {
-  return formatMutationFieldValue(value);
+function createQueuedCellEdit(column: ColumnDescriptor, value: unknown): QueuedCellEdit {
+  return {
+    text: formatMutationFieldValue(value),
+    isNull: column.nullable && (value === null || value === undefined),
+  };
 }
 
-function parseQueuedEditValue(column: ColumnDescriptor, text: string): unknown {
-  const trimmed = text.trim();
+function areQueuedCellEditsEqual(left: QueuedCellEdit, right: QueuedCellEdit): boolean {
+  return left.text === right.text && left.isNull === right.isNull;
+}
 
-  if (column.nullable) {
-    switch (column.column_type.type) {
-      case "Uuid":
-      case "Boolean":
-      case "Integer":
-      case "BigInt":
-      case "Double":
-      case "Timestamp":
-      case "Enum":
-      case "Json":
-      case "Array":
-      case "Row":
-        if (trimmed.length === 0) {
-          return null;
-        }
-        break;
-      default:
-        break;
+function parseQueuedEditValue(column: ColumnDescriptor, edit: QueuedCellEdit): unknown {
+  if (edit.isNull) {
+    if (!column.nullable) {
+      throw new Error("This column is not nullable.");
     }
+    return null;
   }
 
-  return parseMutationFieldValue(column.column_type, text);
+  return parseMutationFieldValue(column.column_type, edit.text);
+}
+
+function parseQueuedEditForColumn(column: ColumnDescriptor, edit: QueuedCellEdit): unknown {
+  try {
+    return parseQueuedEditValue(column, edit);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid value.";
+    throw new Error(`${column.name}: ${message}`);
+  }
+}
+
+function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): QueuedRowEdits {
+  const edits: QueuedRowEdits = {};
+
+  for (const column of schemaColumns) {
+    if (getFieldReadOnlyReason(column) !== null) {
+      continue;
+    }
+
+    edits[column.name] = {
+      text: "",
+      isNull: column.nullable,
+    };
+  }
+
+  return edits;
+}
+
+function buildQueuedInsertValues(
+  schemaColumns: ColumnDescriptor[],
+  stagedInsertEdits: QueuedRowEdits,
+): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+
+  for (const column of schemaColumns) {
+    if (getFieldReadOnlyReason(column) !== null) {
+      continue;
+    }
+
+    const edit = stagedInsertEdits[column.name] ?? {
+      text: "",
+      isNull: column.nullable,
+    };
+    values[column.name] = parseQueuedEditForColumn(column, edit);
+  }
+
+  return values;
 }
 
 function applyQueuedEditsToRow(
@@ -240,7 +284,7 @@ function applyQueuedEditsToRow(
 
   const nextRow = { ...row };
   for (const [columnId, queuedEdit] of Object.entries(queuedEdits)) {
-    nextRow[columnId] = queuedEdit.text;
+    nextRow[columnId] = queuedEdit.isNull ? null : queuedEdit.text;
   }
 
   return nextRow;
@@ -562,10 +606,8 @@ export function TableDataGrid() {
       { replace: true },
     );
   };
-  const [mutationState, setMutationState] = useState<MutationState | null>(null);
-  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
-  const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
   const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
+  const [stagedInsertEdits, setStagedInsertEdits] = useState<QueuedRowEdits | null>(null);
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
@@ -637,35 +679,14 @@ export function TableDataGrid() {
   }, [queuedEdits]);
   const queuedEditedRowCount = useMemo(() => Object.keys(queuedEdits).length, [queuedEdits]);
   const hasQueuedEdits = queuedEditCount > 0;
-  const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0;
-  const isAnyMutationPending = isSidebarMutationPending || isQueuedSavePending;
+  const hasStagedInsert = stagedInsertEdits !== null;
+  const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0 || hasStagedInsert;
+  const isAnyMutationPending = isQueuedSavePending;
   const filterButtonLabel = filters.length > 0 ? `Filter (${filters.length})` : "Filter";
   const gridAnimationScopeKey = useMemo(
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
     [builtQuery, gridColumns, table],
   );
-  const rowById = useMemo(() => {
-    return new Map(visibleRows.map((row) => [row.id, row]));
-  }, [visibleRows]);
-  const selectedRowValues = useMemo(() => {
-    if (!selectedRowId) {
-      return null;
-    }
-
-    const selectedRow = rowById.get(selectedRowId);
-    if (!selectedRow) {
-      return null;
-    }
-
-    return applyQueuedEditsToRow(selectedRow, queuedEdits[selectedRowId]);
-  }, [queuedEdits, rowById, selectedRowId]);
-  const insertRowValues = useMemo(() => {
-    const values: Record<string, unknown> = {};
-    for (const column of schemaColumns) {
-      values[column.name] = undefined;
-    }
-    return values;
-  }, [schemaColumns]);
   const tableProxy = useMemo(
     () =>
       ({
@@ -702,32 +723,9 @@ export function TableDataGrid() {
       { replace: true },
     );
   };
-  const handleSaveSelectedRow = async (updates: Record<string, unknown>): Promise<void> => {
-    if (!selectedRowId) {
-      return;
-    }
-
-    try {
-      setIsSidebarMutationPending(true);
-      await db.update(tableProxy, selectedRowId, updates).wait({
-        tier: mutationDurabilityTier,
-      });
-      setQueuedEdits((currentQueuedEdits) => {
-        if (!currentQueuedEdits[selectedRowId]) {
-          return currentQueuedEdits;
-        }
-
-        const nextQueuedEdits = { ...currentQueuedEdits };
-        delete nextQueuedEdits[selectedRowId];
-        return nextQueuedEdits;
-      });
-      setQueuedSaveError(null);
-    } finally {
-      setIsSidebarMutationPending(false);
-    }
-  };
   const handleDiscardQueuedEdits = (): void => {
     setQueuedEdits({});
+    setStagedInsertEdits(null);
     setQueuedDeletes(new Set());
     setQueuedSaveError(null);
   };
@@ -749,10 +747,14 @@ export function TableDataGrid() {
             if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
               continue;
             }
-            updates[columnId] = parseQueuedEditValue(schemaColumn, queuedEdit.text);
+            updates[columnId] = parseQueuedEditForColumn(schemaColumn, queuedEdit);
           }
           return { rowId, updates };
-        });
+        })
+        .filter(({ updates }) => Object.keys(updates).length > 0);
+      const insertValues = stagedInsertEdits
+        ? buildQueuedInsertValues(schemaColumns, stagedInsertEdits)
+        : null;
 
       await Promise.all([
         ...rowUpdates.map(({ rowId, updates }) =>
@@ -765,12 +767,17 @@ export function TableDataGrid() {
             tier: mutationDurabilityTier,
           }),
         ),
+        ...(insertValues
+          ? [
+              db.insert(tableProxy, insertValues).wait({
+                tier: mutationDurabilityTier,
+              }),
+            ]
+          : []),
       ]);
 
-      if (selectedRowId && queuedDeletes.has(selectedRowId)) {
-        setSelectedRowId(null);
-      }
       setQueuedEdits({});
+      setStagedInsertEdits(null);
       setQueuedDeletes(new Set());
     } catch (error) {
       setQueuedSaveError(
@@ -780,25 +787,6 @@ export function TableDataGrid() {
       setIsQueuedSavePending(false);
     }
   };
-
-  useEffect(() => {
-    if (selectedRowId && !rowById.has(selectedRowId)) {
-      setSelectedRowId(null);
-    }
-  }, [rowById, selectedRowId]);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      if (mutationState) {
-        setMutationState(null);
-      } else {
-        setSelectedRowId(null);
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [mutationState]);
 
   return (
     <section className={styles.container}>
@@ -820,9 +808,12 @@ export function TableDataGrid() {
             type="button"
             className={styles.secondaryButton}
             onClick={() => {
-              setMutationState({ mode: "insert" });
+              setQueuedSaveError(null);
+              setStagedInsertEdits(
+                (current) => current ?? createInitialStagedInsertEdits(schemaColumns),
+              );
             }}
-            disabled={hasQueuedChanges || isAnyMutationPending}
+            disabled={hasStagedInsert || isAnyMutationPending}
           >
             Insert
           </button>
@@ -838,49 +829,25 @@ export function TableDataGrid() {
         }}
       />
       <div className={styles.contentArea}>
-        <Group className={styles.contentPanels} orientation="horizontal">
-          <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
-            <div className={styles.gridFrame}>
-              <PlainTableView
-                rows={visibleRows}
-                gridColumns={gridColumns}
-                sorting={sorting}
-                schema={schema}
-                queryOptions={queryOptions}
-                schemaColumnById={schemaColumnById}
-                queuedEdits={queuedEdits}
-                queuedDeletes={queuedDeletes}
-                animationScopeKey={gridAnimationScopeKey}
-                onSortColumnsChange={handleSortColumnsChange}
-                onQueuedEditsChange={setQueuedEdits}
-                onQueuedSaveErrorChange={setQueuedSaveError}
-                onSelectedRowIdChange={setSelectedRowId}
-                onQueuedDeletesChange={setQueuedDeletes}
-              />
-            </div>
-          </Panel>
-          <Separator className={styles.resizeHandle} />
-          <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
-            <RowMutationSidebar
-              key={`edit:${selectedRowId ?? "empty"}`}
-              mode="edit"
-              tableName={table}
-              schemaColumns={schemaColumns}
-              targetRowId={selectedRowId}
-              rowValues={selectedRowValues}
-              onSave={handleSaveSelectedRow}
-              onDelete={async () => {
-                if (!selectedRowId) {
-                  return;
-                }
-                await db.delete(tableProxy, selectedRowId).wait({
-                  tier: mutationDurabilityTier,
-                });
-                setSelectedRowId(null);
-              }}
-            />
-          </Panel>
-        </Group>
+        <div className={styles.gridFrame}>
+          <PlainTableView
+            rows={visibleRows}
+            gridColumns={gridColumns}
+            sorting={sorting}
+            schema={schema}
+            queryOptions={queryOptions}
+            schemaColumnById={schemaColumnById}
+            queuedEdits={queuedEdits}
+            stagedInsertEdits={stagedInsertEdits}
+            queuedDeletes={queuedDeletes}
+            animationScopeKey={gridAnimationScopeKey}
+            onSortColumnsChange={handleSortColumnsChange}
+            onQueuedEditsChange={setQueuedEdits}
+            onStagedInsertEditsChange={setStagedInsertEdits}
+            onQueuedSaveErrorChange={setQueuedSaveError}
+            onQueuedDeletesChange={setQueuedDeletes}
+          />
+        </div>
       </div>
       <div className={styles.bottomRail}>
         {hasQueuedChanges || queuedSaveError ? (
@@ -902,6 +869,7 @@ export function TableDataGrid() {
                   {queuedDeletes.size} row{queuedDeletes.size === 1 ? "" : "s"} will be deleted
                 </span>
               ) : null}
+              {hasStagedInsert ? <span>1 staged insert</span> : null}
               {queuedSaveError ? (
                 <span className={styles.queuedBannerError}>{queuedSaveError}</span>
               ) : null}
@@ -974,47 +942,6 @@ export function TableDataGrid() {
           </div>
         </footer>
       </div>
-      {mutationState ? (
-        <div
-          className={styles.sidebarOverlay}
-          data-testid="row-mutation-overlay"
-          onClick={() => {
-            if (isSidebarMutationPending) return;
-            setMutationState(null);
-          }}
-        >
-          <div
-            className={styles.sidebarPanel}
-            onClick={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            <RowMutationSidebar
-              key="insert:new"
-              mode="insert"
-              tableName={table}
-              schemaColumns={schemaColumns}
-              targetRowId={null}
-              rowValues={insertRowValues}
-              onCancel={() => {
-                if (isSidebarMutationPending) return;
-                setMutationState(null);
-              }}
-              onSave={async (updates) => {
-                try {
-                  setIsSidebarMutationPending(true);
-                  await db.insert(tableProxy, updates).wait({
-                    tier: mutationDurabilityTier,
-                  });
-                  setMutationState(null);
-                } finally {
-                  setIsSidebarMutationPending(false);
-                }
-              }}
-            />
-          </div>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -1027,45 +954,86 @@ function QueuedCellEditor({
 }: RenderEditCellProps<EditableGridRow> & {
   schemaColumn: ColumnDescriptor;
 }) {
-  const value = getQueuedEditText(row.row[schemaColumn.name]);
+  const [draft, setDraft] = useState<QueuedCellEdit>(() =>
+    createQueuedCellEdit(schemaColumn, row.row[schemaColumn.name]),
+  );
 
-  const updateValue = (nextValue: string) => {
+  const applyDraft = (nextDraft: QueuedCellEdit) => {
+    setDraft(nextDraft);
     onRowChange(
       {
         ...row,
         row: {
           ...row.row,
-          [schemaColumn.name]: nextValue,
+          [schemaColumn.name]: nextDraft.isNull ? null : nextDraft.text,
         },
       },
-      false,
+      nextDraft.isNull,
     );
+  };
+  const updateText = (nextText: string) => {
+    applyDraft({ ...draft, text: nextText });
+  };
+  const updateNullState = (nextIsNull: boolean) => {
+    applyDraft({ ...draft, isNull: nextIsNull });
   };
   const commit = () => {
     onClose(true, false);
   };
+  const handleEditorKeyDown = (
+    event: KeyboardEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
+  ) => {
+    if (event.key === "Escape") {
+      onClose(false, false);
+    }
+  };
+  const nullToggle = schemaColumn.nullable ? (
+    <label className={styles.inlineNullToggle}>
+      <input
+        type="checkbox"
+        checked={draft.isNull}
+        aria-label={`Set ${schemaColumn.name} to NULL`}
+        onChange={(event) => {
+          updateNullState(event.target.checked);
+        }}
+      />
+      NULL
+    </label>
+  ) : null;
 
-  if (schemaColumn.column_type.type === "Enum") {
+  if (schemaColumn.column_type.type === "Enum" || schemaColumn.column_type.type === "Boolean") {
+    const selectValue = draft.isNull ? NULL_SELECT_VALUE : draft.text;
+    const predefinedValues =
+      schemaColumn.column_type.type === "Enum"
+        ? schemaColumn.column_type.variants
+        : ["true", "false"];
+
     return (
       <select
         aria-label={`Edit ${schemaColumn.name}`}
         className={styles.inlineEditorSelect}
         autoFocus
-        value={value}
+        value={selectValue}
         onChange={(event) => {
-          updateValue(event.target.value);
-        }}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            onClose(false, false);
+          if (event.target.value === NULL_SELECT_VALUE) {
+            applyDraft({ ...draft, isNull: true });
+          } else {
+            applyDraft({ text: event.target.value, isNull: false });
           }
         }}
+        onBlur={commit}
+        onKeyDown={handleEditorKeyDown}
       >
-        {schemaColumn.nullable ? <option value="">null</option> : null}
-        {schemaColumn.column_type.variants.map((variant) => (
-          <option key={variant} value={variant}>
-            {variant}
+        {!schemaColumn.nullable && draft.text.length === 0 ? (
+          <option value="">Select value</option>
+        ) : null}
+        {schemaColumn.nullable ? <option value={NULL_SELECT_VALUE}>NULL</option> : null}
+        {!draft.isNull && draft.text.length > 0 && !predefinedValues.includes(draft.text) ? (
+          <option value={draft.text}>{draft.text}</option>
+        ) : null}
+        {predefinedValues.map((predefinedValue) => (
+          <option key={predefinedValue} value={predefinedValue}>
+            {predefinedValue}
           </option>
         ))}
       </select>
@@ -1078,46 +1046,62 @@ function QueuedCellEditor({
     schemaColumn.column_type.type === "Row"
   ) {
     return (
-      <textarea
-        aria-label={`Edit ${schemaColumn.name}`}
-        className={styles.inlineEditorTextarea}
-        autoFocus
-        value={value}
-        onChange={(event) => {
-          updateValue(event.target.value);
-        }}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      <div
+        className={styles.inlineEditorStack}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
             commit();
           }
-          if (event.key === "Escape") {
-            onClose(false, false);
-          }
         }}
-      />
+      >
+        <textarea
+          aria-label={`Edit ${schemaColumn.name}`}
+          className={styles.inlineEditorTextarea}
+          autoFocus
+          value={draft.text}
+          disabled={draft.isNull}
+          onChange={(event) => {
+            updateText(event.target.value);
+          }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              commit();
+            }
+            handleEditorKeyDown(event);
+          }}
+        />
+        {nullToggle}
+      </div>
     );
   }
 
   return (
-    <input
-      aria-label={`Edit ${schemaColumn.name}`}
-      className={styles.inlineEditorInput}
-      autoFocus
-      value={value}
-      onChange={(event) => {
-        updateValue(event.target.value);
-      }}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
+    <div
+      className={styles.inlineEditorStack}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
           commit();
         }
-        if (event.key === "Escape") {
-          onClose(false, false);
-        }
       }}
-    />
+    >
+      <input
+        aria-label={`Edit ${schemaColumn.name}`}
+        className={styles.inlineEditorInput}
+        autoFocus
+        value={draft.text}
+        disabled={draft.isNull}
+        onChange={(event) => {
+          updateText(event.target.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commit();
+          }
+          handleEditorKeyDown(event);
+        }}
+      />
+      {nullToggle}
+    </div>
   );
 }
 
@@ -1231,12 +1215,13 @@ function PlainTableView({
   queryOptions,
   schemaColumnById,
   queuedEdits,
+  stagedInsertEdits,
   queuedDeletes,
   animationScopeKey,
   onSortColumnsChange,
   onQueuedEditsChange,
+  onStagedInsertEditsChange,
   onQueuedSaveErrorChange,
-  onSelectedRowIdChange,
   onQueuedDeletesChange,
 }: {
   rows: DynamicTableRow[];
@@ -1246,33 +1231,18 @@ function PlainTableView({
   queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
+  stagedInsertEdits: QueuedRowEdits | null;
   queuedDeletes: Set<string>;
   animationScopeKey: string;
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
+  onStagedInsertEditsChange: Dispatch<SetStateAction<QueuedRowEdits | null>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
-  onSelectedRowIdChange: (rowId: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
 }) {
-  const suppressNextSelectedCellChangeRef = useRef(false);
-  const pointerSidebarOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
-  const clearPendingSidebarOpen = (): void => {
-    const timeout = pointerSidebarOpenTimeoutRef.current;
-    if (timeout) {
-      clearTimeout(timeout);
-      pointerSidebarOpenTimeoutRef.current = null;
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      clearPendingSidebarOpen();
-    };
-  }, []);
-
   const editableRows = useMemo<EditableGridRow[]>(() => {
-    return animatedRows.map((entry) => {
+    const realRows = animatedRows.map((entry) => {
       const rowId = getGridRowId(entry.row);
       const rowQueuedEdits = queuedEdits[rowId];
 
@@ -1283,8 +1253,33 @@ function PlainTableView({
         queuedEdits: rowQueuedEdits,
       };
     });
-  }, [animatedRows, queuedEdits]);
+
+    if (!stagedInsertEdits) {
+      return realRows;
+    }
+
+    const stagedSourceRow: DynamicTableRow = { id: STAGED_INSERT_ROW_ID };
+    for (const column of gridColumns) {
+      if (column.id !== "id") {
+        stagedSourceRow[column.accessorKey] = undefined;
+      }
+    }
+
+    return [
+      ...realRows,
+      {
+        row: applyQueuedEditsToRow(stagedSourceRow, stagedInsertEdits),
+        sourceRow: stagedSourceRow,
+        queuedEdits: stagedInsertEdits,
+        isStagedInsert: true,
+      },
+    ];
+  }, [animatedRows, gridColumns, queuedEdits, stagedInsertEdits]);
   const rowClass = (row: EditableGridRow): string | undefined => {
+    if (row.isStagedInsert) {
+      return styles.rowStagedInsert;
+    }
+
     if (row.rowChangeState === "added") {
       return styles.rowAdded;
     }
@@ -1298,6 +1293,56 @@ function PlainTableView({
     }
 
     return undefined;
+  };
+  const queueCellEdit = (
+    row: EditableGridRow,
+    column: ColumnDescriptor,
+    nextEdit: QueuedCellEdit,
+  ): void => {
+    onQueuedSaveErrorChange(null);
+
+    if (row.isStagedInsert) {
+      onStagedInsertEditsChange((currentStagedInsertEdits) => {
+        if (!currentStagedInsertEdits) {
+          return currentStagedInsertEdits;
+        }
+
+        return {
+          ...currentStagedInsertEdits,
+          [column.name]: nextEdit,
+        };
+      });
+      return;
+    }
+
+    const rowId = getGridRowId(row.sourceRow);
+    const sourceEdit = createQueuedCellEdit(column, row.sourceRow[column.name]);
+
+    onQueuedEditsChange((currentQueuedEdits) => {
+      if (areQueuedCellEditsEqual(nextEdit, sourceEdit)) {
+        return removeQueuedCellEdit(currentQueuedEdits, rowId, column.name);
+      }
+
+      return {
+        ...currentQueuedEdits,
+        [rowId]: {
+          ...currentQueuedEdits[rowId],
+          [column.name]: nextEdit,
+        },
+      };
+    });
+  };
+  const toggleQueuedDelete = (rowId: string): void => {
+    onQueuedSaveErrorChange(null);
+    onQueuedDeletesChange((current) => {
+      const next = new Set(current);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
+      }
+      return next;
+    });
   };
   const renderers = useMemo<Renderers<EditableGridRow, unknown>>(
     () => ({
@@ -1323,9 +1368,7 @@ function PlainTableView({
       const isIdColumn = column.id === "id";
       const schemaColumn = schemaColumnById.get(column.id);
       const isEditable =
-        schemaColumn &&
-        getFieldReadOnlyReason(schemaColumn) === null &&
-        schemaColumn.column_type.type !== "Boolean";
+        !isIdColumn && schemaColumn && getFieldReadOnlyReason(schemaColumn) === null;
 
       return {
         key: column.id,
@@ -1342,34 +1385,28 @@ function PlainTableView({
             ? `${styles.dataGridCell} ${styles.cellUpdated}`
             : styles.dataGridCell,
         renderCell: ({ row }) => {
+          if (isIdColumn && row.isStagedInsert) {
+            return <span className={styles.stagedInsertBadge}>staged</span>;
+          }
+
           const rawValue = row.row[column.accessorKey];
           const value = formatCellValue(rawValue);
 
           if (schemaColumn?.column_type.type === "Boolean") {
             const rowId = getGridRowId(row.sourceRow);
+            const rowLabel = row.isStagedInsert ? "staged insert" : rowId;
             return (
               <div className={styles.booleanCell}>
                 <BooleanCellCheckbox
-                  label={`Toggle ${column.accessorKey} for ${rowId}`}
+                  label={`Toggle ${column.accessorKey} for ${rowLabel}`}
                   checked={rawValue === true || rawValue === "true"}
-                  indeterminate={schemaColumn.nullable && value.length === 0}
+                  indeterminate={
+                    schemaColumn.nullable && (rawValue === null || rawValue === undefined)
+                  }
                   onToggle={(checked) => {
-                    onQueuedSaveErrorChange(null);
-                    onQueuedEditsChange((currentQueuedEdits) => {
-                      const nextValueText = checked ? "true" : "false";
-                      const sourceValueText = getQueuedEditText(row.sourceRow[column.accessorKey]);
-
-                      if (nextValueText === sourceValueText) {
-                        return removeQueuedCellEdit(currentQueuedEdits, rowId, column.accessorKey);
-                      }
-
-                      return {
-                        ...currentQueuedEdits,
-                        [rowId]: {
-                          ...currentQueuedEdits[rowId],
-                          [column.accessorKey]: { text: nextValueText },
-                        },
-                      };
+                    queueCellEdit(row, schemaColumn, {
+                      text: checked ? "true" : "false",
+                      isNull: false,
                     });
                   }}
                 />
@@ -1405,51 +1442,100 @@ function PlainTableView({
       };
     });
 
-    return dataColumns;
+    const actionsColumn: Column<EditableGridRow> = {
+      key: ACTIONS_COLUMN_KEY,
+      name: "",
+      sortable: false,
+      resizable: false,
+      width: 126,
+      minWidth: 112,
+      maxWidth: 140,
+      headerCellClass: styles.actionsHeaderCell,
+      cellClass: styles.actionsGridCell,
+      renderCell: ({ row }) => {
+        if (row.isStagedInsert) {
+          return (
+            <div className={styles.actionsCellContent}>
+              <button
+                type="button"
+                className={styles.actionButton}
+                aria-label="Cancel staged insert"
+                onMouseDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onQueuedSaveErrorChange(null);
+                  onStagedInsertEditsChange(null);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          );
+        }
+
+        const rowId = getGridRowId(row.sourceRow);
+        const isQueuedDelete = queuedDeletes.has(rowId);
+
+        return (
+          <div className={styles.actionsCellContent}>
+            <button
+              type="button"
+              className={isQueuedDelete ? styles.actionButton : styles.dangerActionButton}
+              aria-label={isQueuedDelete ? `Undo delete ${rowId}` : `Delete ${rowId}`}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleQueuedDelete(rowId);
+              }}
+            >
+              {isQueuedDelete ? "Undo" : "Delete"}
+            </button>
+          </div>
+        );
+      },
+    };
+
+    return [...dataColumns, actionsColumn];
   }, [
     gridColumns,
-    onQueuedEditsChange,
+    onStagedInsertEditsChange,
     onQueuedSaveErrorChange,
+    queueCellEdit,
+    queuedDeletes,
     queryOptions,
     schema,
     schemaColumnById,
+    toggleQueuedDelete,
   ]);
   const handleRowsChange = (
     nextRows: EditableGridRow[],
     data: RowsChangeData<EditableGridRow>,
   ): void => {
     const columnId = String(data.column.key);
+    const schemaColumn = schemaColumnById.get(columnId);
+
+    if (!schemaColumn) {
+      return;
+    }
 
     onQueuedSaveErrorChange(null);
-    onQueuedEditsChange((currentQueuedEdits) => {
-      let nextQueuedEdits = currentQueuedEdits;
 
-      for (const rowIndex of data.indexes) {
-        const nextRow = nextRows[rowIndex];
-        if (!nextRow) {
-          continue;
-        }
-
-        const rowId = getGridRowId(nextRow.sourceRow);
-        const nextValueText = getQueuedEditText(nextRow.row[columnId]);
-        const sourceValueText = getQueuedEditText(nextRow.sourceRow[columnId]);
-
-        if (nextValueText === sourceValueText) {
-          nextQueuedEdits = removeQueuedCellEdit(nextQueuedEdits, rowId, columnId);
-          continue;
-        }
-
-        nextQueuedEdits = {
-          ...nextQueuedEdits,
-          [rowId]: {
-            ...nextQueuedEdits[rowId],
-            [columnId]: { text: nextValueText },
-          },
-        };
+    for (const rowIndex of data.indexes) {
+      const nextRow = nextRows[rowIndex];
+      if (!nextRow) {
+        continue;
       }
 
-      return nextQueuedEdits;
-    });
+      queueCellEdit(
+        nextRow,
+        schemaColumn,
+        createQueuedCellEdit(schemaColumn, nextRow.row[columnId]),
+      );
+    }
   };
 
   return (
@@ -1461,10 +1547,6 @@ function PlainTableView({
       sortColumns={sorting}
       onSortColumnsChange={onSortColumnsChange}
       onRowsChange={handleRowsChange}
-      onCellMouseDown={() => {
-        suppressNextSelectedCellChangeRef.current = true;
-        clearPendingSidebarOpen();
-      }}
       onCellKeyDown={(args, event) => {
         if (args.mode === "EDIT") {
           return;
@@ -1472,55 +1554,31 @@ function PlainTableView({
 
         if (event.key === "Backspace" || event.key === "Delete") {
           const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
-          if (rowId) {
-            event.preventGridDefault();
-            onQueuedDeletesChange((current) => {
-              const next = new Set(current);
-              if (next.has(rowId)) {
-                next.delete(rowId);
-              } else {
-                next.add(rowId);
-              }
-              return next;
-            });
+          if (!rowId) {
+            return;
+          }
+
+          event.preventGridDefault();
+          if (args.row?.isStagedInsert) {
+            onQueuedSaveErrorChange(null);
+            onStagedInsertEditsChange(null);
+          } else {
+            toggleQueuedDelete(rowId);
           }
         }
       }}
-      onCellClick={(args, event) => {
-        clearPendingSidebarOpen();
-        const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
-        if (rowId === null) {
-          onSelectedRowIdChange(null);
-          return;
-        }
-
-        if (event.detail > 1) {
-          return;
-        }
-
-        pointerSidebarOpenTimeoutRef.current = setTimeout(() => {
-          pointerSidebarOpenTimeoutRef.current = null;
-          onSelectedRowIdChange(rowId);
-        }, POINTER_SIDEBAR_OPEN_DELAY_MS);
-      }}
-      onSelectedCellChange={(args) => {
-        if (suppressNextSelectedCellChangeRef.current) {
-          suppressNextSelectedCellChangeRef.current = false;
-          return;
-        }
-
-        clearPendingSidebarOpen();
-        onSelectedRowIdChange(args.row ? getGridRowId(args.row.sourceRow) : null);
-      }}
       onCellDoubleClick={(args, event) => {
-        clearPendingSidebarOpen();
         const schemaColumn = schemaColumnById.get(String(args.column.key));
-        if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
+        const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
+        if (
+          !schemaColumn ||
+          getFieldReadOnlyReason(schemaColumn) !== null ||
+          (rowId !== null && queuedDeletes.has(rowId))
+        ) {
           event.preventGridDefault();
           return;
         }
 
-        suppressNextSelectedCellChangeRef.current = true;
         args.selectCell(true);
         event.preventGridDefault();
       }}
