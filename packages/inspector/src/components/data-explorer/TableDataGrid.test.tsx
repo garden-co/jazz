@@ -280,7 +280,11 @@ describe("TableDataGrid", () => {
   it("edits cells in place with selectors and saves from the banner", async () => {
     renderGrid();
 
-    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    const titleCell = screen.getByRole("gridcell", { name: "zeta" });
+    fireEvent.click(titleCell);
+    expect(getContainingRow(screen.getByText("zeta"))?.className).not.toContain("rowSelected");
+
+    fireEvent.doubleClick(titleCell);
     const titleEditor = screen.getByLabelText("Edit title");
     fireEvent.change(titleEditor, { target: { value: "zeta updated" } });
     fireEvent.blur(titleEditor);
@@ -684,6 +688,68 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel staged insert" }));
     expect(screen.queryByText("staged")).toBeNull();
     expect(screen.queryByText("1 staged insert")).toBeNull();
+  });
+
+  it("queues a shift-click selected row range for deletion", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).not.toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-1" }), { shiftKey: true });
+
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(screen.getByText("2 rows will be deleted")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockDelete).toHaveBeenCalledTimes(2);
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+      );
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        "row-1",
+      );
+      expect(mockDeleteWait).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("prevents browser text selection when shift-click range selection starts", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+
+    const defaultWasNotPrevented = fireEvent.mouseDown(
+      screen.getByRole("gridcell", { name: "row-1" }),
+      { shiftKey: true },
+    );
+
+    expect(defaultWasNotPrevented).toBe(false);
+  });
+
+  it("cancels staged insert rows included in a selected range", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+
+    const stagedBadges = screen.getAllByText("staged");
+    fireEvent.click(stagedBadges[0] as HTMLElement);
+    fireEvent.click(stagedBadges[1] as HTMLElement, { shiftKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.queryByText("2 staged inserts")).toBeNull();
+    expect(screen.queryByText("Queued")).toBeNull();
   });
 
   it("deletes a row when a queued delete is saved", async () => {

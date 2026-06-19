@@ -324,6 +324,14 @@
   background: rgba(30, 61, 82, 0.45);
 }
 
+.rowSelected :global(.rdg-cell) {
+  background: var(--rdg-row-selected-background-color);
+}
+
+.rowSelected .actionsGridCell {
+  background: var(--rdg-row-selected-background-color);
+}
+
 .stagedInsertBadge {
   display: inline-flex;
   align-items: center;

@@ -621,6 +621,7 @@ export function TableDataGrid() {
   };
   const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
   const [stagedInserts, setStagedInserts] = useState<StagedInsert[]>([]);
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
@@ -699,6 +700,25 @@ export function TableDataGrid() {
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
     [builtQuery, gridColumns, table],
   );
+  const selectableRowIds = useMemo(() => {
+    const rowIds = new Set<string>();
+    for (const row of visibleRows) {
+      rowIds.add(getGridRowId(row));
+    }
+    for (const stagedInsert of stagedInserts) {
+      rowIds.add(stagedInsert.id);
+    }
+    return rowIds;
+  }, [stagedInserts, visibleRows]);
+  const selectedVisibleRowIds = useMemo(() => {
+    const rowIds = new Set<string>();
+    for (const rowId of selectedRowIds) {
+      if (selectableRowIds.has(rowId)) {
+        rowIds.add(rowId);
+      }
+    }
+    return rowIds;
+  }, [selectableRowIds, selectedRowIds]);
   const tableProxy = useMemo(
     () =>
       ({
@@ -711,6 +731,10 @@ export function TableDataGrid() {
   );
   const startRow = pageIndex * pageSize;
   const endRow = startRow + visibleRows.length;
+
+  useEffect(() => {
+    setSelectedRowIds(new Set());
+  }, [gridAnimationScopeKey]);
 
   const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
     const nextSort =
@@ -740,6 +764,41 @@ export function TableDataGrid() {
     setStagedInserts([]);
     setQueuedDeletes(new Set());
     setQueuedSaveError(null);
+  };
+  const handleQueueSelectedDeletes = (): void => {
+    if (selectedVisibleRowIds.size === 0) {
+      return;
+    }
+
+    setQueuedSaveError(null);
+
+    const selectedStagedInsertIds = new Set(
+      stagedInserts
+        .filter((stagedInsert) => selectedVisibleRowIds.has(stagedInsert.id))
+        .map((stagedInsert) => stagedInsert.id),
+    );
+    if (selectedStagedInsertIds.size > 0) {
+      setStagedInserts((currentStagedInserts) =>
+        currentStagedInserts.filter(
+          (stagedInsert) => !selectedStagedInsertIds.has(stagedInsert.id),
+        ),
+      );
+    }
+
+    const selectedRealRowIds = visibleRows
+      .map((row) => getGridRowId(row))
+      .filter((rowId) => selectedVisibleRowIds.has(rowId));
+    if (selectedRealRowIds.length > 0) {
+      setQueuedDeletes((currentQueuedDeletes) => {
+        const nextQueuedDeletes = new Set(currentQueuedDeletes);
+        for (const rowId of selectedRealRowIds) {
+          nextQueuedDeletes.add(rowId);
+        }
+        return nextQueuedDeletes;
+      });
+    }
+
+    setSelectedRowIds(new Set());
   };
   const handleSaveQueuedEdits = async (): Promise<void> => {
     if (!hasQueuedChanges) {
@@ -822,6 +881,14 @@ export function TableDataGrid() {
             >
               Insert
             </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={handleQueueSelectedDeletes}
+              disabled={selectedVisibleRowIds.size === 0 || isAnyMutationPending}
+            >
+              Delete
+            </button>
           </>
         }
       />
@@ -836,11 +903,13 @@ export function TableDataGrid() {
             schemaColumnById={schemaColumnById}
             queuedEdits={queuedEdits}
             stagedInserts={stagedInserts}
+            selectedRowIds={selectedVisibleRowIds}
             queuedDeletes={queuedDeletes}
             animationScopeKey={gridAnimationScopeKey}
             onSortColumnsChange={handleSortColumnsChange}
             onQueuedEditsChange={setQueuedEdits}
             onStagedInsertsChange={setStagedInserts}
+            onSelectedRowIdsChange={setSelectedRowIds}
             onQueuedSaveErrorChange={setQueuedSaveError}
             onQueuedDeletesChange={setQueuedDeletes}
           />
@@ -1280,11 +1349,13 @@ function PlainTableView({
   schemaColumnById,
   queuedEdits,
   stagedInserts,
+  selectedRowIds,
   queuedDeletes,
   animationScopeKey,
   onSortColumnsChange,
   onQueuedEditsChange,
   onStagedInsertsChange,
+  onSelectedRowIdsChange,
   onQueuedSaveErrorChange,
   onQueuedDeletesChange,
 }: {
@@ -1296,14 +1367,17 @@ function PlainTableView({
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
   stagedInserts: StagedInsert[];
+  selectedRowIds: Set<string>;
   queuedDeletes: Set<string>;
   animationScopeKey: string;
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
   onStagedInsertsChange: Dispatch<SetStateAction<StagedInsert[]>>;
+  onSelectedRowIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
 }) {
+  const selectionAnchorRowIdRef = useRef<string | null>(null);
   const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
   const editableRows = useMemo<EditableGridRow[]>(() => {
     const realRows = animatedRows.map((entry) => {
@@ -1342,24 +1416,30 @@ function PlainTableView({
       }),
     ];
   }, [animatedRows, gridColumns, queuedEdits, stagedInserts]);
+
+  useEffect(() => {
+    selectionAnchorRowIdRef.current = null;
+  }, [animationScopeKey]);
+
   const rowClass = (row: EditableGridRow): string | undefined => {
+    const rowId = getGridRowId(row.sourceRow);
+    const rowClasses: string[] = [];
+
     if (row.isStagedInsert) {
-      return styles.rowStagedInsert;
+      rowClasses.push(styles.rowStagedInsert);
+    } else if (row.rowChangeState === "added") {
+      rowClasses.push(styles.rowAdded);
+    } else if (row.rowChangeState === "removed") {
+      rowClasses.push(styles.rowRemoved);
+    } else if (queuedDeletes.has(rowId)) {
+      rowClasses.push(styles.rowQueuedDelete);
     }
 
-    if (row.rowChangeState === "added") {
-      return styles.rowAdded;
+    if (selectedRowIds.has(rowId)) {
+      rowClasses.push(styles.rowSelected);
     }
 
-    if (row.rowChangeState === "removed") {
-      return styles.rowRemoved;
-    }
-
-    if (queuedDeletes.has(getGridRowId(row.sourceRow))) {
-      return styles.rowQueuedDelete;
-    }
-
-    return undefined;
+    return rowClasses.length > 0 ? rowClasses.join(" ") : undefined;
   };
   const queueCellEdit = (
     row: EditableGridRow,
@@ -1623,6 +1703,37 @@ function PlainTableView({
       );
     }
   };
+  const selectRowRange = (
+    row: EditableGridRow,
+    rowIndex: number,
+    isRangeSelection: boolean,
+  ): void => {
+    const rowId = getGridRowId(row.sourceRow);
+
+    if (!isRangeSelection) {
+      selectionAnchorRowIdRef.current = rowId;
+      return;
+    }
+
+    const anchorRowId = selectionAnchorRowIdRef.current ?? rowId;
+    const anchorRowIndex = editableRows.findIndex(
+      (editableRow) => getGridRowId(editableRow.sourceRow) === anchorRowId,
+    );
+    if (anchorRowIndex === -1) {
+      selectionAnchorRowIdRef.current = rowId;
+      onSelectedRowIdsChange(new Set([rowId]));
+      return;
+    }
+
+    const startRowIndex = Math.min(anchorRowIndex, rowIndex);
+    const endRowIndex = Math.max(anchorRowIndex, rowIndex);
+    const nextSelectedRowIds = new Set<string>();
+    for (const selectedRow of editableRows.slice(startRowIndex, endRowIndex + 1)) {
+      nextSelectedRowIds.add(getGridRowId(selectedRow.sourceRow));
+    }
+
+    onSelectedRowIdsChange(nextSelectedRowIds);
+  };
 
   return (
     <DataGrid
@@ -1630,9 +1741,18 @@ function PlainTableView({
       columns={columns}
       rows={editableRows}
       rowKeyGetter={(row) => getGridRowId(row.sourceRow)}
+      selectedRows={selectedRowIds}
       sortColumns={sorting}
       onSortColumnsChange={onSortColumnsChange}
       onRowsChange={handleRowsChange}
+      onCellMouseDown={(_args, event) => {
+        if (event.shiftKey) {
+          event.preventDefault();
+        }
+      }}
+      onCellClick={(args, event) => {
+        selectRowRange(args.row, args.rowIdx, event.shiftKey);
+      }}
       onCellKeyDown={(args, event) => {
         if (args.mode === "EDIT") {
           return;
