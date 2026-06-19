@@ -2,11 +2,6 @@
   "name": "@jazz/opfs-btree",
   "private": true,
   "scripts": {
-    "bench:wasm:build": "RUSTFLAGS='--cfg=web_sys_unstable_apis' wasm-pack build --target web --out-dir wasm-bench/pkg --release",
-    "bench:wasm:opfs": "node wasm-bench/run-opfs-bench.cjs",
-    "bench:wasm:opfs:mixed": "node wasm-bench/run-opfs-bench.cjs --profile mixed",
-    "bench:wasm:opfs:range": "node wasm-bench/run-opfs-bench.cjs --profile range",
-    "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs",
     "bench:compare:data": "cd ../.. && cargo run -p bench-data-tools -- --profiles all",
     "bench:harness:assets": "node wasm-bench/prepare-harness-assets.cjs",
     "bench:harness:build": "env -u NO_COLOR trunk build --config wasm-bench/harness/Trunk.toml --release",
@@ -14,7 +9,6 @@
     "bench:compare:open": "pnpm run bench:compare:data && pnpm run bench:harness:assets && env -u NO_COLOR trunk serve --config wasm-bench/harness/Trunk.toml"
   },
   "devDependencies": {
-    "playwright": "^1.58.2",
-    "wasm-pack": "^0.14.0"
+    "playwright": "^1.58.2"
   }
 }

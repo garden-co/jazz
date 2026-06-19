@@ -1,4 +1,4 @@
-# opfs-btree vs SQLite benchmark (in-process)
+# opfs-btree vs SQLite benchmark
 
 Raw key/value benchmark comparing `opfs-btree` against **SQLite** on real,
 openly-licensed data — with **both engines compiled to wasm and driven from
@@ -19,12 +19,6 @@ waits for the Yew app's automation result, and prints the table. The Yew app
 asserts both engines produce **identical checksums** before exposing successful
 results.
 
-## Why redb is excluded
-
-redb has no working `wasm32-unknown-unknown` / OPFS story and cannot run in a
-browser target. The static `.kv`/`.ops` files could feed a future native harness
-to measure redb there.
-
 ## Datasets
 
 Two datasets are **vendored (committed)** under `datasets/` as gzipped files — no
@@ -44,15 +38,13 @@ CC BY-SA 4.0 (© Wikipedia contributors, share-alike — kept isolated in its gz
 
 - Rust with the `wasm32-unknown-unknown` target.
 - **A clang with the WebAssembly backend** to compile SQLite's C amalgamation —
-  Apple's clang lacks it, so install Homebrew LLVM: `brew install llvm`. The
-  harness scripts find it automatically; **no emscripten needed**.
+  Apple's clang lacks it, so install Homebrew LLVM: `brew install llvm`.
 - `trunk` for the Yew harness.
 - `wasm-bindgen` CLI matching the crate: `cargo install wasm-bindgen-cli --version 0.2.125`.
-- `wasm-pack` and Playwright's Chromium (`pnpm --dir crates/opfs-btree exec playwright install chromium`).
+- Playwright's Chromium (`pnpm --dir crates/opfs-btree exec playwright install chromium`).
 
-If you run `cargo` directly against `bench-sqlite`, set the wasm C toolchain
-environment explicitly. The `bench:sqlite:build` helper does this for you, but
-plain `cargo check` otherwise falls back to Apple's clang and fails with
+Set the wasm C toolchain environment before building the harness or running the
+benchmark. Without it, Cargo can fall back to Apple's clang and fail with
 `No available targets are compatible with triple "wasm32-unknown-unknown"`.
 
 ```bash
@@ -68,10 +60,12 @@ test -n "$LLVM_PREFIX" || { echo "install Homebrew LLVM: brew install llvm"; exi
 CC_wasm32_unknown_unknown="$LLVM_PREFIX/bin/clang" \
 AR_wasm32_unknown_unknown="$LLVM_PREFIX/bin/llvm-ar" \
 CFLAGS_wasm32_unknown_unknown="-O3 -DSQLITE_THREADSAFE=0" \
-cargo check --manifest-path crates/opfs-btree/bench-sqlite/Cargo.toml --target wasm32-unknown-unknown
+pnpm --dir crates/opfs-btree run bench:compare
 ```
 
 ## Running
+
+With the environment above configured, the supported path is one command:
 
 ```bash
 # normalize data, build the Yew harness + Rust workers, run headless Chromium,
@@ -91,6 +85,11 @@ results instead of the table). Example:
 ```bash
 pnpm --dir crates/opfs-btree run bench:compare -- --profiles objects
 ```
+
+Generated benchmark data lives under `wasm-bench/bench-data/`, copied harness
+data under `wasm-bench/harness/public/data/`, and build output under
+`wasm-bench/harness/dist/` and `wasm-bench/harness/target/`. These are ignored
+and safe to delete.
 
 ## Interpreting output
 
