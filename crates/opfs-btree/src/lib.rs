@@ -1,3 +1,5 @@
+#[doc(hidden)]
+pub mod bench_dataset;
 mod checksum;
 mod db;
 mod error;
