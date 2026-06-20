@@ -1,0 +1,11 @@
+{
+  "name": "mini-sqlite-todo-yew",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "sh -c 'trap \"kill 0\" EXIT; cargo run --bin mini-sqlite-todo-yew-server & env -u NO_COLOR CC_wasm32_unknown_unknown=${CC_wasm32_unknown_unknown:-/opt/homebrew/opt/llvm@21/bin/clang} trunk serve --address 127.0.0.1'",
+    "dev:web": "env -u NO_COLOR CC_wasm32_unknown_unknown=${CC_wasm32_unknown_unknown:-/opt/homebrew/opt/llvm@21/bin/clang} trunk serve --address 127.0.0.1",
+    "dev:server": "cargo run --bin mini-sqlite-todo-yew-server",
+    "build": "env -u NO_COLOR CC_wasm32_unknown_unknown=${CC_wasm32_unknown_unknown:-/opt/homebrew/opt/llvm@21/bin/clang} trunk build"
+  }
+}
