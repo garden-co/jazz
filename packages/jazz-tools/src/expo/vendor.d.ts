@@ -11,6 +11,7 @@ declare module "web-streams-polyfill" {
 
 declare module "expo-crypto" {
   export function getRandomBytes(byteCount: number): Uint8Array;
+  export function getRandomValues<T extends ArrayBufferView>(typedArray: T): T;
 }
 
 declare module "expo-secure-store" {
