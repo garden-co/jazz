@@ -18,7 +18,7 @@ fn eng<E: ToString>(e: E) -> EngineError {
 fn open_conn() -> Result<Connection, EngineError> {
     let conn = Connection::open(DB_PATH).map_err(eng)?;
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;",
+        "PRAGMA page_size=16384; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768; PRAGMA temp_store=MEMORY;",
     )
     .map_err(eng)?;
     Ok(conn)
