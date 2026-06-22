@@ -1,5 +1,3 @@
-#[doc(hidden)]
-pub mod bench_dataset;
 mod checksum;
 mod db;
 mod error;
@@ -8,8 +6,6 @@ mod leaf_hint;
 mod page;
 mod superblock;
 mod wal;
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_bench;
 
 pub use db::{BTreeOptions, CheckpointState, OpfsBTree};
 pub use error::BTreeError;

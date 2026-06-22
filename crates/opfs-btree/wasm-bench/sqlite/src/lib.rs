@@ -7,6 +7,8 @@ use wasm_bindgen::JsCast;
 
 const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: i64 = 64;
+const MIN_MEASURABLE_MS: f64 = 10.0;
+const MAX_LOOP_ITERATIONS: u32 = 10_000;
 
 fn log(s: &str) {
     web_sys::console::log_1(&JsValue::from_str(s));
@@ -20,7 +22,7 @@ fn now_ms() -> f64 {
     f.call0(&perf).unwrap().as_f64().unwrap()
 }
 
-// ---- .kv/.ops decoder (mirrors opfs-btree/src/bench_dataset.rs) ----
+// ---- .kv/.ops decoder (mirrors ../src/bench_dataset.rs) ----
 
 #[derive(PartialEq, Clone, Copy)]
 enum PhaseKind {
@@ -304,14 +306,31 @@ pub async fn run_sqlite_dataset_result(kv: &[u8], ops: &[u8]) -> Result<DatasetR
         let started = now_ms();
         let (op_count, checksum, c) = replay_phase(conn, phase, &keys, &vals, n)?;
         conn = c;
-        let elapsed = now_ms() - started;
+        let mut elapsed = now_ms() - started;
+        let mut total_ops = op_count;
+
+        if matches!(
+            phase.kind,
+            PhaseKind::GetSeq | PhaseKind::GetIndices | PhaseKind::RangeStarts
+        ) && elapsed < MIN_MEASURABLE_MS
+        {
+            let mut iterations = 1u32;
+            while elapsed < MIN_MEASURABLE_MS && iterations < MAX_LOOP_ITERATIONS {
+                let (ops2, _, c) = replay_phase(conn, phase, &keys, &vals, n)?;
+                conn = c;
+                total_ops = total_ops.saturating_add(ops2);
+                elapsed = now_ms() - started;
+                iterations += 1;
+            }
+        }
+
         overall = overall.wrapping_add(checksum);
         phase_results.push(DatasetPhaseResult {
             phase: phase.name.clone(),
-            op_count,
+            op_count: total_ops,
             elapsed_ms: elapsed,
             ops_per_sec: if elapsed > 0.0 {
-                (op_count as f64) / (elapsed / 1000.0)
+                (total_ops as f64) / (elapsed / 1000.0)
             } else {
                 0.0
             },
