@@ -29,8 +29,11 @@ web-sys = { version = "0.3", features = [
   "FileSystemDirectoryHandle",
   "FileSystemFileHandle",
   "FileSystemGetFileOptions",
-  "FileSystemSyncAccessHandle",
-  "FileSystemReadWriteOptions",
+  "FileSystemCreateWritableOptions",
+  "FileSystemWritableFileStream",
+  "WritableStream",
+  "File",
+  "Blob",
   "DomException",
 ] }
 

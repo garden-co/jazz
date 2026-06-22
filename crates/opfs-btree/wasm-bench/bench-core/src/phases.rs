@@ -159,7 +159,7 @@ impl Phase {
 /// `(op_count, checksum)`. Phase bracketing (`begin_phase`/`end_phase`) and
 /// cold reopen are handled by the [`runner`](crate::runner); this is purely the
 /// operation loop, so the semantics of each phase read top-to-bottom here.
-pub fn replay<E: BenchEngine>(
+pub async fn replay<E: BenchEngine>(
     engine: &mut E,
     phase: &Phase,
     args: &[u32],
@@ -179,26 +179,26 @@ pub fn replay<E: BenchEngine>(
     match phase.kind() {
         PhaseKind::Load => {
             for (k, v) in keys.iter().zip(vals.iter()) {
-                engine.put(k, v)?;
+                engine.put(k, v).await?;
                 ops += 1;
             }
         }
         PhaseKind::GetSeq => {
             for k in keys {
-                fold(engine.get(k)?);
+                fold(engine.get(k).await?);
                 ops += 1;
             }
         }
         PhaseKind::GetRandom | PhaseKind::GetSkewed | PhaseKind::ColdGetRandom => {
             for &raw in args {
-                fold(engine.get(keys[idx(raw)])?);
+                fold(engine.get(keys[idx(raw)]).await?);
                 ops += 1;
             }
         }
         PhaseKind::UpdateRandom => {
             for &raw in args {
                 let i = idx(raw);
-                engine.put(keys[i], vals[i])?;
+                engine.put(keys[i], vals[i]).await?;
                 ops += 1;
             }
         }
@@ -206,7 +206,7 @@ pub fn replay<E: BenchEngine>(
             for &raw in args {
                 let s = idx(raw);
                 let e = (s + RANGE_WINDOW_KEYS as usize).min(keys.len().saturating_sub(1));
-                let rows = engine.range(keys[s], keys[e], RANGE_RESULT_LIMIT)?;
+                let rows = engine.range(keys[s], keys[e], RANGE_RESULT_LIMIT).await?;
                 checksum = checksum.wrapping_add(rows as u64);
                 ops += 1;
             }
@@ -216,9 +216,9 @@ pub fn replay<E: BenchEngine>(
                 let op = packed >> 30;
                 let i = idx(packed & 0x3FFF_FFFF);
                 match op {
-                    1 => engine.put(keys[i], vals[i])?,
-                    2 => engine.delete(keys[i])?,
-                    _ => fold(engine.get(keys[i])?),
+                    1 => engine.put(keys[i], vals[i]).await?,
+                    2 => engine.delete(keys[i]).await?,
+                    _ => fold(engine.get(keys[i]).await?),
                 }
                 ops += 1;
             }

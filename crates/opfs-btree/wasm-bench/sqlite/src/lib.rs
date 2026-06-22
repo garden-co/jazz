@@ -51,7 +51,7 @@ impl SqliteEngine {
 }
 
 impl BenchEngine for SqliteEngine {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError> {
+    async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError> {
         self.conn()
             .prepare_cached("INSERT OR REPLACE INTO kv(k,v) VALUES(?1,?2)")
             .map_err(eng)?
@@ -60,7 +60,7 @@ impl BenchEngine for SqliteEngine {
         Ok(())
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError> {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError> {
         let mut stmt = self
             .conn()
             .prepare_cached("SELECT v FROM kv WHERE k=?1")
@@ -72,7 +72,7 @@ impl BenchEngine for SqliteEngine {
         }
     }
 
-    fn delete(&mut self, key: &[u8]) -> Result<(), EngineError> {
+    async fn delete(&mut self, key: &[u8]) -> Result<(), EngineError> {
         self.conn()
             .prepare_cached("DELETE FROM kv WHERE k=?1")
             .map_err(eng)?
@@ -81,7 +81,7 @@ impl BenchEngine for SqliteEngine {
         Ok(())
     }
 
-    fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
+    async fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
         let mut stmt = self
             .conn()
             .prepare_cached("SELECT v FROM kv WHERE k>=?1 AND k<?2 ORDER BY k LIMIT ?3")
@@ -93,11 +93,11 @@ impl BenchEngine for SqliteEngine {
         Ok(rows)
     }
 
-    fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
+    async fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
         self.conn().execute_batch("BEGIN").map_err(eng)
     }
 
-    fn end_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
+    async fn end_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
         self.conn().execute_batch("COMMIT").map_err(eng)
     }
 

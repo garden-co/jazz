@@ -25,31 +25,32 @@ impl std::error::Error for EngineError {}
 
 /// A key/value store driven by the shared benchmark runner.
 ///
-/// Operations are synchronous (both real engines use synchronous OPFS access
-/// handles); only [`reopen`](BenchEngine::reopen) is async because it reopens
-/// the underlying file.
+/// All operations are async: the b-tree now drives the *asynchronous* OPFS
+/// File System Access APIs (`getFile()` / `createWritable()`), so every read
+/// and write is a future. SQLite's operations are synchronous and complete
+/// immediately when awaited.
 #[allow(async_fn_in_trait)]
 pub trait BenchEngine {
     /// Insert or overwrite `key`.
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError>;
+    async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError>;
 
     /// Look up `key`, returning the first byte of its value if present. The
     /// runner folds this byte into the cross-engine checksum, so engines must
     /// agree on it for identical data.
-    fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError>;
+    async fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError>;
 
     /// Delete `key` (a no-op if absent).
-    fn delete(&mut self, key: &[u8]) -> Result<(), EngineError>;
+    async fn delete(&mut self, key: &[u8]) -> Result<(), EngineError>;
 
     /// Count the rows in `[lo, hi)`, up to `limit`.
-    fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError>;
+    async fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError>;
 
     /// Open a phase. SQLite begins a transaction here; the b-tree does nothing.
-    fn begin_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError>;
+    async fn begin_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError>;
 
     /// Close a phase. SQLite commits; the b-tree checkpoints after write
     /// phases. Called inside the timed region, so durability cost is measured.
-    fn end_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError>;
+    async fn end_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError>;
 
     /// Drop and reopen the store *without* wiping it, giving a cold cache while
     /// the data persists. Used by the cold-read phase.

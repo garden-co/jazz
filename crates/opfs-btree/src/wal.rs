@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::file::SyncFile;
+use crate::file::AsyncFile;
 use crate::page::PageId;
 use crate::{BTreeError, checksum};
 
@@ -64,7 +64,7 @@ pub(crate) struct WalFrameRef<'a> {
     pub(crate) raw: &'a [u8],
 }
 
-pub(crate) fn append_commit<F: SyncFile>(
+pub(crate) async fn append_commit<F: AsyncFile>(
     file: &F,
     page_size: usize,
     start_page_id: PageId,
@@ -80,11 +80,13 @@ pub(crate) fn append_commit<F: SyncFile>(
     let required_len = required_pages
         .checked_mul(page_size as u64)
         .ok_or_else(|| BTreeError::Io("WAL file byte length overflow".to_string()))?;
-    file.truncate(required_len)?;
+    file.truncate(required_len).await?;
 
     let header = header.with_frame_count(frame_count);
     let mut writer = PageRunWriter::new(file, page_size, start_page_id);
-    writer.push(&encode_wal_header_page(page_size, header)?)?;
+    writer
+        .push(&encode_wal_header_page(page_size, header)?)
+        .await?;
 
     for frame in frames {
         let meta = encode_wal_frame_meta_page(
@@ -94,20 +96,22 @@ pub(crate) fn append_commit<F: SyncFile>(
             frame.is_freelist,
             frame.raw,
         )?;
-        writer.push(&meta)?;
-        writer.push(frame.raw)?;
+        writer.push(&meta).await?;
+        writer.push(frame.raw).await?;
     }
 
-    writer.push(&encode_wal_commit_page(
-        page_size,
-        header.generation,
-        frame_count,
-    )?)?;
-    writer.flush_run()?;
+    writer
+        .push(&encode_wal_commit_page(
+            page_size,
+            header.generation,
+            frame_count,
+        )?)
+        .await?;
+    writer.flush_run().await?;
     Ok(wal_pages)
 }
 
-pub(crate) fn read_commit<F: SyncFile>(
+pub(crate) async fn read_commit<F: AsyncFile>(
     file: &F,
     page_size: usize,
     start_page_id: PageId,
@@ -120,11 +124,12 @@ pub(crate) fn read_commit<F: SyncFile>(
         persisted_pages,
         batch_wal_replay_reads(),
     )
+    .await
 }
 
 // `batched` is cfg-selected in production (see `batch_wal_replay_reads`) but
 // kept as a parameter so native tests can exercise the batched reader too.
-fn read_commit_with_mode<F: SyncFile>(
+async fn read_commit_with_mode<F: AsyncFile>(
     file: &F,
     page_size: usize,
     start_page_id: PageId,
@@ -132,13 +137,14 @@ fn read_commit_with_mode<F: SyncFile>(
     batched: bool,
 ) -> Result<Option<(WalHeader, Vec<WalFrame>, PageId)>, BTreeError> {
     let mut reader = if batched {
-        WalPageReader::Batched(PageRunReader::new(file, page_size, persisted_pages)?)
+        WalPageReader::Batched(PageRunReader::new(file, page_size, persisted_pages).await?)
     } else {
         WalPageReader::PerPage { file, page_size }
     };
     reader.limit_to(start_page_id + 1);
-    let Some(header) = decode_wal_header_page(&reader.page(start_page_id)?, page_size)? else {
-        truncate_tail(file, page_size, start_page_id)?;
+    let Some(header) = decode_wal_header_page(&reader.page(start_page_id).await?, page_size)?
+    else {
+        truncate_tail(file, page_size, start_page_id).await?;
         return Ok(None);
     };
     let frame_count = usize::try_from(header.frame_count)
@@ -152,7 +158,7 @@ fn read_commit_with_mode<F: SyncFile>(
         .checked_add(wal_pages)
         .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
     if next_cursor > persisted_pages {
-        truncate_tail(file, page_size, start_page_id)?;
+        truncate_tail(file, page_size, start_page_id).await?;
         return Ok(None);
     }
     reader.limit_to(next_cursor);
@@ -161,14 +167,14 @@ fn read_commit_with_mode<F: SyncFile>(
     let mut cursor = start_page_id + 1;
     for _ in 0..frame_count {
         let Some((page_id, is_blob, is_freelist, expected_checksum)) =
-            decode_wal_frame_meta_page(&reader.page(cursor)?, page_size)?
+            decode_wal_frame_meta_page(&reader.page(cursor).await?, page_size)?
         else {
-            truncate_tail(file, page_size, start_page_id)?;
+            truncate_tail(file, page_size, start_page_id).await?;
             return Ok(None);
         };
-        let raw = reader.page(cursor + 1)?.into_owned();
+        let raw = reader.page(cursor + 1).await?.into_owned();
         if checksum::hash(&raw) != expected_checksum {
-            truncate_tail(file, page_size, start_page_id)?;
+            truncate_tail(file, page_size, start_page_id).await?;
             return Ok(None);
         }
         frames.push(WalFrame {
@@ -180,8 +186,12 @@ fn read_commit_with_mode<F: SyncFile>(
         cursor += 2;
     }
 
-    if !decode_wal_commit_page(&reader.page(cursor)?, header.generation, header.frame_count)? {
-        truncate_tail(file, page_size, start_page_id)?;
+    if !decode_wal_commit_page(
+        &reader.page(cursor).await?,
+        header.generation,
+        header.frame_count,
+    )? {
+        truncate_tail(file, page_size, start_page_id).await?;
         return Ok(None);
     }
     Ok(Some((header, frames, next_cursor)))
@@ -201,12 +211,12 @@ fn commit_page_count(
 /// Page source for `read_commit_with_mode`: either the run-buffered reader or
 /// direct per-page reads, behind one `Cow`-returning interface so the replay
 /// loop has a single control flow.
-enum WalPageReader<'a, F: SyncFile> {
+enum WalPageReader<'a, F: AsyncFile> {
     Batched(PageRunReader<'a, F>),
     PerPage { file: &'a F, page_size: usize },
 }
 
-impl<'a, F: SyncFile> WalPageReader<'a, F> {
+impl<'a, F: AsyncFile> WalPageReader<'a, F> {
     /// Caps batched reads at `end_page_id` so the run prefetch never reads
     /// past what the caller has validated. Per-page reads need no cap; they
     /// only ever touch the requested page.
@@ -216,24 +226,26 @@ impl<'a, F: SyncFile> WalPageReader<'a, F> {
         }
     }
 
-    fn page(&mut self, page_id: PageId) -> Result<Cow<'_, [u8]>, BTreeError> {
+    async fn page(&mut self, page_id: PageId) -> Result<Cow<'_, [u8]>, BTreeError> {
         match self {
-            WalPageReader::Batched(reader) => reader.page(page_id).map(Cow::Borrowed),
+            WalPageReader::Batched(reader) => reader.page(page_id).await.map(Cow::Borrowed),
             WalPageReader::PerPage { file, page_size } => {
-                read_raw_page_at(*file, *page_size, page_id).map(Cow::Owned)
+                read_raw_page_at(*file, *page_size, page_id)
+                    .await
+                    .map(Cow::Owned)
             }
         }
     }
 }
 
-fn read_raw_page_at<F: SyncFile>(
+async fn read_raw_page_at<F: AsyncFile>(
     file: &F,
     page_size: usize,
     page_id: PageId,
 ) -> Result<Vec<u8>, BTreeError> {
     let offset = page_offset(page_id, page_size, "raw page read offset overflow")?;
     let mut raw = vec![0u8; page_size];
-    file.read_exact_at(offset, &mut raw)?;
+    file.read_exact_at(offset, &mut raw).await?;
     Ok(raw)
 }
 
@@ -257,14 +269,14 @@ const WRITE_RUN_PAGES: usize = 64;
 /// Accumulates consecutive WAL pages and writes them to the backing file in
 /// runs of up to WRITE_RUN_PAGES, so a commit costs one write call per run
 /// instead of one per page.
-struct PageRunWriter<'a, F: SyncFile> {
+struct PageRunWriter<'a, F: AsyncFile> {
     file: &'a F,
     page_size: usize,
     next_page_id: PageId,
     buf: Vec<u8>,
 }
 
-impl<'a, F: SyncFile> PageRunWriter<'a, F> {
+impl<'a, F: AsyncFile> PageRunWriter<'a, F> {
     fn new(file: &'a F, page_size: usize, start_page_id: PageId) -> Self {
         Self {
             file,
@@ -274,7 +286,7 @@ impl<'a, F: SyncFile> PageRunWriter<'a, F> {
         }
     }
 
-    fn push(&mut self, raw: &[u8]) -> Result<(), BTreeError> {
+    async fn push(&mut self, raw: &[u8]) -> Result<(), BTreeError> {
         if raw.len() != self.page_size {
             return Err(BTreeError::Corrupt(format!(
                 "WAL page raw length {} does not match page size {}",
@@ -288,18 +300,18 @@ impl<'a, F: SyncFile> PageRunWriter<'a, F> {
                 self.page_size,
                 "WAL write offset overflow",
             )?;
-            self.file.write_all_at(offset, raw)?;
+            self.file.write_all_at(offset, raw).await?;
             self.next_page_id += 1;
             return Ok(());
         }
         self.buf.extend_from_slice(raw);
         if self.buf.len() >= wal_write_run_pages() * self.page_size {
-            self.flush_run()?;
+            self.flush_run().await?;
         }
         Ok(())
     }
 
-    fn flush_run(&mut self) -> Result<(), BTreeError> {
+    async fn flush_run(&mut self) -> Result<(), BTreeError> {
         if self.buf.is_empty() {
             return Ok(());
         }
@@ -308,7 +320,7 @@ impl<'a, F: SyncFile> PageRunWriter<'a, F> {
             self.page_size,
             "WAL write offset overflow",
         )?;
-        self.file.write_all_at(offset, &self.buf)?;
+        self.file.write_all_at(offset, &self.buf).await?;
         self.next_page_id += (self.buf.len() / self.page_size) as u64;
         self.buf.clear();
         Ok(())
@@ -330,7 +342,7 @@ fn wal_write_run_pages() -> usize {
 /// Serves WAL page reads from a buffered run of up to READ_RUN_PAGES pages,
 /// so sequential replay does one backing-file read per run instead of one
 /// (freshly allocated) read per page.
-struct PageRunReader<'a, F: SyncFile> {
+struct PageRunReader<'a, F: AsyncFile> {
     file: &'a F,
     page_size: usize,
     file_end_page_id: PageId,
@@ -341,9 +353,9 @@ struct PageRunReader<'a, F: SyncFile> {
     buf_page_count: u64,
 }
 
-impl<'a, F: SyncFile> PageRunReader<'a, F> {
-    fn new(file: &'a F, page_size: usize, persisted_pages: u64) -> Result<Self, BTreeError> {
-        let file_pages = file.len()? / page_size as u64;
+impl<'a, F: AsyncFile> PageRunReader<'a, F> {
+    async fn new(file: &'a F, page_size: usize, persisted_pages: u64) -> Result<Self, BTreeError> {
+        let file_pages = file.len().await? / page_size as u64;
         let file_end_page_id = persisted_pages.min(file_pages);
         Ok(Self {
             file,
@@ -360,7 +372,7 @@ impl<'a, F: SyncFile> PageRunReader<'a, F> {
         self.end_page_id = end_page_id.min(self.file_end_page_id);
     }
 
-    fn page(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
+    async fn page(&mut self, page_id: PageId) -> Result<&[u8], BTreeError> {
         if page_id >= self.end_page_id {
             return Err(BTreeError::Io(format!(
                 "unexpected eof: WAL page {} beyond readable end {}",
@@ -368,13 +380,13 @@ impl<'a, F: SyncFile> PageRunReader<'a, F> {
             )));
         }
         if page_id < self.buf_first_page || page_id >= self.buf_first_page + self.buf_page_count {
-            self.fill(page_id)?;
+            self.fill(page_id).await?;
         }
         let start = (page_id - self.buf_first_page) as usize * self.page_size;
         Ok(&self.buf[start..start + self.page_size])
     }
 
-    fn fill(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+    async fn fill(&mut self, page_id: PageId) -> Result<(), BTreeError> {
         if page_id >= self.end_page_id {
             return Err(BTreeError::Io(format!(
                 "unexpected eof: WAL page {} beyond readable end {}",
@@ -385,14 +397,16 @@ impl<'a, F: SyncFile> PageRunReader<'a, F> {
         let len = run as usize * self.page_size;
         self.buf.resize(len, 0);
         let offset = page_offset(page_id, self.page_size, "raw page read offset overflow")?;
-        self.file.read_exact_at(offset, &mut self.buf[..len])?;
+        self.file
+            .read_exact_at(offset, &mut self.buf[..len])
+            .await?;
         self.buf_first_page = page_id;
         self.buf_page_count = run;
         Ok(())
     }
 }
 
-fn truncate_tail<F: SyncFile>(
+async fn truncate_tail<F: AsyncFile>(
     file: &F,
     page_size: usize,
     start_page_id: PageId,
@@ -400,7 +414,7 @@ fn truncate_tail<F: SyncFile>(
     let len = start_page_id
         .checked_mul(page_size as u64)
         .ok_or_else(|| BTreeError::Io("WAL truncate length overflow".to_string()))?;
-    file.truncate(len)
+    file.truncate(len).await
 }
 
 fn page_offset(
@@ -594,7 +608,7 @@ fn write_u64_at(raw: &mut [u8], offset: usize, value: u64) -> Result<(), BTreeEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::MemoryFile;
+    use crate::file::{MemoryFile, block_on};
 
     const PAGE_SIZE: usize = 4 * 1024;
     const START_PAGE_ID: PageId = 2;
@@ -623,15 +637,25 @@ mod tests {
             },
         ];
 
-        let pages_written =
-            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        let pages_written = block_on(append_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            header(),
+            &frames,
+        ))
+        .expect("append WAL");
 
         assert_eq!(pages_written, 6);
         let persisted_pages = START_PAGE_ID + pages_written;
-        let (read_header, read_frames, next_cursor) =
-            read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
-                .expect("read WAL")
-                .expect("commit present");
+        let (read_header, read_frames, next_cursor) = block_on(read_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            persisted_pages,
+        ))
+        .expect("read WAL")
+        .expect("commit present");
 
         assert_eq!(read_header.generation, 7);
         assert_eq!(read_header.root_page_id, 3);
@@ -661,16 +685,27 @@ mod tests {
             })
             .collect();
 
-        let pages_written =
-            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        let pages_written = block_on(append_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            header(),
+            &frames,
+        ))
+        .expect("append WAL");
         assert_eq!(pages_written, 82);
 
         let persisted_pages = START_PAGE_ID + pages_written;
         for batched in [false, true] {
-            let (_, read_frames, next_cursor) =
-                read_commit_with_mode(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages, batched)
-                    .expect("read WAL")
-                    .expect("commit present");
+            let (_, read_frames, next_cursor) = block_on(read_commit_with_mode(
+                &file,
+                PAGE_SIZE,
+                START_PAGE_ID,
+                persisted_pages,
+                batched,
+            ))
+            .expect("read WAL")
+            .expect("commit present");
 
             assert_eq!(next_cursor, persisted_pages);
             assert_eq!(read_frames.len(), 40);
@@ -693,18 +728,28 @@ mod tests {
             is_freelist: false,
             raw: &page,
         }];
-        let pages_written =
-            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        let pages_written = block_on(append_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            header(),
+            &frames,
+        ))
+        .expect("append WAL");
         let truncated_pages = START_PAGE_ID + pages_written - 1;
-        file.truncate(truncated_pages * PAGE_SIZE as u64)
-            .expect("truncate commit page");
+        block_on(file.truncate(truncated_pages * PAGE_SIZE as u64)).expect("truncate commit page");
 
-        let result =
-            read_commit(&file, PAGE_SIZE, START_PAGE_ID, truncated_pages).expect("read torn WAL");
+        let result = block_on(read_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            truncated_pages,
+        ))
+        .expect("read torn WAL");
 
         assert!(result.is_none());
         assert_eq!(
-            file.len().expect("file len"),
+            block_on(file.len()).expect("file len"),
             START_PAGE_ID * PAGE_SIZE as u64
         );
     }
@@ -719,19 +764,29 @@ mod tests {
             is_freelist: false,
             raw: &page,
         }];
-        let pages_written =
-            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        let pages_written = block_on(append_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            header(),
+            &frames,
+        ))
+        .expect("append WAL");
         let persisted_pages = START_PAGE_ID + pages_written;
         let frame_page_offset = (START_PAGE_ID + 2) * PAGE_SIZE as u64;
-        file.write_all_at(frame_page_offset, &[9])
-            .expect("corrupt frame data");
+        block_on(file.write_all_at(frame_page_offset, &[9])).expect("corrupt frame data");
 
-        let result = read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
-            .expect("read corrupt WAL");
+        let result = block_on(read_commit(
+            &file,
+            PAGE_SIZE,
+            START_PAGE_ID,
+            persisted_pages,
+        ))
+        .expect("read corrupt WAL");
 
         assert!(result.is_none());
         assert_eq!(
-            file.len().expect("file len"),
+            block_on(file.len()).expect("file len"),
             START_PAGE_ID * PAGE_SIZE as u64
         );
     }

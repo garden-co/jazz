@@ -48,18 +48,18 @@ pub async fn run<E: BenchEngine>(
         if kind.is_cold() {
             engine.reopen().await?;
         }
-        engine.begin_phase(kind)?;
-        let (op_count, checksum) = replay(engine, phase, &args, &keys, &vals)?;
-        engine.end_phase(kind)?;
+        engine.begin_phase(kind).await?;
+        let (op_count, checksum) = replay(engine, phase, &args, &keys, &vals).await?;
+        engine.end_phase(kind).await?;
         let mut elapsed = now_ms() - started;
         let mut total_ops = op_count;
 
         if kind.is_retryable_read() && elapsed < MIN_MEASURABLE_MS {
             let mut iterations = 1u32;
             while elapsed < MIN_MEASURABLE_MS && iterations < MAX_LOOP_ITERATIONS {
-                engine.begin_phase(kind)?;
-                let (ops2, _) = replay(engine, phase, &args, &keys, &vals)?;
-                engine.end_phase(kind)?;
+                engine.begin_phase(kind).await?;
+                let (ops2, _) = replay(engine, phase, &args, &keys, &vals).await?;
+                engine.end_phase(kind).await?;
                 total_ops = total_ops.saturating_add(ops2);
                 elapsed = now_ms() - started;
                 iterations += 1;

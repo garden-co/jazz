@@ -49,44 +49,47 @@ impl BtreeEngine {
 
 async fn open_db() -> Result<OpfsBTree<OpfsFile>, EngineError> {
     let file = OpfsFile::open(NAMESPACE).await.map_err(err)?;
-    OpfsBTree::open(file, benchmark_options()).map_err(err)
+    OpfsBTree::open(file, benchmark_options())
+        .await
+        .map_err(err)
 }
 
 impl BenchEngine for BtreeEngine {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError> {
-        self.db().put(key, value).map_err(err)
+    async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError> {
+        self.db().put(key, value).await.map_err(err)
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError> {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError> {
         Ok(self
             .db()
             .get(key)
+            .await
             .map_err(err)?
             .map(|v| v.first().copied().unwrap_or(0)))
     }
 
-    fn delete(&mut self, key: &[u8]) -> Result<(), EngineError> {
-        self.db().delete(key).map_err(err)
+    async fn delete(&mut self, key: &[u8]) -> Result<(), EngineError> {
+        self.db().delete(key).await.map_err(err)
     }
 
-    fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
-        Ok(self.db().range(lo, hi, limit).map_err(err)?.len())
+    async fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
+        Ok(self.db().range(lo, hi, limit).await.map_err(err)?.len())
     }
 
-    fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
+    async fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
         Ok(())
     }
 
-    fn end_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError> {
+    async fn end_phase(&mut self, kind: PhaseKind) -> Result<(), EngineError> {
         if kind.is_write() {
-            self.db().checkpoint().map_err(err)?;
+            self.db().checkpoint().await.map_err(err)?;
         }
         Ok(())
     }
 
     async fn reopen(&mut self) -> Result<(), EngineError> {
         if let Some(db) = self.db.as_mut() {
-            db.checkpoint().map_err(err)?;
+            db.checkpoint().await.map_err(err)?;
         }
         // Drop the current handle before reopening; data persists on disk.
         self.db = None;

@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
-use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
+use opfs_btree::{AsyncFile, BTreeError, BTreeOptions, MemoryFile, OpfsBTree};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -50,55 +50,65 @@ pub(super) enum AnyFile {
     Opfs(OpfsFile),
 }
 
-impl SyncFile for AnyFile {
-    fn len(&self) -> Result<u64, BTreeError> {
+impl AsyncFile for AnyFile {
+    async fn len(&self) -> Result<u64, BTreeError> {
         match self {
-            Self::Memory(file) => file.len(),
+            Self::Memory(file) => file.len().await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Std(file) => file.len(),
+            Self::Std(file) => file.len().await,
             #[cfg(target_arch = "wasm32")]
-            Self::Opfs(file) => file.len(),
+            Self::Opfs(file) => file.len().await,
         }
     }
 
-    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+    async fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
         match self {
-            Self::Memory(file) => file.read_exact_at(offset, buf),
+            Self::Memory(file) => file.read_exact_at(offset, buf).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Std(file) => file.read_exact_at(offset, buf),
+            Self::Std(file) => file.read_exact_at(offset, buf).await,
             #[cfg(target_arch = "wasm32")]
-            Self::Opfs(file) => file.read_exact_at(offset, buf),
+            Self::Opfs(file) => file.read_exact_at(offset, buf).await,
         }
     }
 
-    fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+    async fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
         match self {
-            Self::Memory(file) => file.write_all_at(offset, buf),
+            Self::Memory(file) => file.write_all_at(offset, buf).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Std(file) => file.write_all_at(offset, buf),
+            Self::Std(file) => file.write_all_at(offset, buf).await,
             #[cfg(target_arch = "wasm32")]
-            Self::Opfs(file) => file.write_all_at(offset, buf),
+            Self::Opfs(file) => file.write_all_at(offset, buf).await,
         }
     }
 
-    fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+    async fn truncate(&self, len: u64) -> Result<(), BTreeError> {
         match self {
-            Self::Memory(file) => file.truncate(len),
+            Self::Memory(file) => file.truncate(len).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Std(file) => file.truncate(len),
+            Self::Std(file) => file.truncate(len).await,
             #[cfg(target_arch = "wasm32")]
-            Self::Opfs(file) => file.truncate(len),
+            Self::Opfs(file) => file.truncate(len).await,
         }
     }
 
-    fn flush(&self) -> Result<(), BTreeError> {
+    async fn flush(&self) -> Result<(), BTreeError> {
         match self {
-            Self::Memory(file) => file.flush(),
+            Self::Memory(file) => file.flush().await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Std(file) => file.flush(),
+            Self::Std(file) => file.flush().await,
             #[cfg(target_arch = "wasm32")]
-            Self::Opfs(file) => file.flush(),
+            Self::Opfs(file) => file.flush().await,
         }
+    }
+
+    async fn open_sibling(&self, suffix: &str) -> Result<Self, BTreeError> {
+        Ok(match self {
+            Self::Memory(file) => Self::Memory(file.open_sibling(suffix).await?),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Std(file) => Self::Std(file.open_sibling(suffix).await?),
+            #[cfg(target_arch = "wasm32")]
+            Self::Opfs(file) => Self::Opfs(file.open_sibling(suffix).await?),
+        })
     }
 }
 

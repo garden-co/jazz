@@ -14,4 +14,4 @@ pub use error::BTreeError;
 pub use file::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file::StdFile;
-pub use file::{MemoryFile, SyncFile};
+pub use file::{AsyncFile, MemoryFile};
