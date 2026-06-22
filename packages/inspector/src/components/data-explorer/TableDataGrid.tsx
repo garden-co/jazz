@@ -9,7 +9,7 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
+import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import {
   useEffect,
@@ -244,6 +244,49 @@ function parseQueuedEditForColumn(column: ColumnDescriptor, edit: QueuedCellEdit
 
 function hasColumnDefault(column: ColumnDescriptor): boolean {
   return Object.prototype.hasOwnProperty.call(column, "default");
+}
+
+function unwrapDefaultValue(defaultValue: Value, columnType: ColumnType): unknown {
+  switch (defaultValue.type) {
+    case "Null":
+      return null;
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+    case "Text":
+    case "Timestamp":
+    case "Uuid":
+      return columnType.type === "Json"
+        ? JSON.parse(String(defaultValue.value))
+        : defaultValue.value;
+    case "Bytea":
+      return new Uint8Array(defaultValue.value);
+    case "Array": {
+      if (columnType.type !== "Array") {
+        throw new Error("Array default does not match column type.");
+      }
+
+      return defaultValue.value.map((innerValue) =>
+        unwrapDefaultValue(innerValue, columnType.element),
+      );
+    }
+    case "Row":
+      // Row-valued defaults are not valid for schema columns.
+      return "";
+  }
+}
+
+function getInitialStagedInsertCellValue(column: ColumnDescriptor): unknown {
+  if (column.default !== undefined) {
+    return unwrapDefaultValue(column.default, column.column_type);
+  }
+
+  if (column.nullable) {
+    return null;
+  }
+
+  return undefined;
 }
 
 function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): QueuedRowEdits {
@@ -1500,8 +1543,9 @@ function PlainTableView({
       ...stagedInserts.map((stagedInsert) => {
         const stagedSourceRow: DynamicTableRow = { id: stagedInsert.id };
         for (const column of gridColumns) {
-          if (column.id !== "id") {
-            stagedSourceRow[column.accessorKey] = undefined;
+          const schemaColumn = schemaColumnById.get(column.id);
+          if (schemaColumn) {
+            stagedSourceRow[column.accessorKey] = getInitialStagedInsertCellValue(schemaColumn);
           }
         }
 
@@ -1514,7 +1558,7 @@ function PlainTableView({
         };
       }),
     ];
-  }, [animatedRows, gridColumns, queuedEdits, stagedInserts]);
+  }, [animatedRows, gridColumns, queuedEdits, schemaColumnById, stagedInserts]);
 
   useEffect(() => {
     selectionAnchorRowIdRef.current = null;
