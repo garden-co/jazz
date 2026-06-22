@@ -4,6 +4,7 @@ import {
   DataGrid,
   Row,
   type Column,
+  type DataGridHandle,
   type RenderEditCellProps,
   type Renderers,
   type RowsChangeData,
@@ -681,6 +682,7 @@ export function TableDataGrid() {
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
+  const [pendingScrollToRowId, setPendingScrollToRowId] = useState<string | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const schemaColumnById = useMemo(
     () => new Map(schemaColumns.map((column) => [column.name, column])),
@@ -938,7 +940,9 @@ export function TableDataGrid() {
               title="Insert row"
               onClick={() => {
                 setQueuedSaveError(null);
-                setStagedInserts((current) => [...current, createStagedInsert(schemaColumns)]);
+                const stagedInsert = createStagedInsert(schemaColumns);
+                setStagedInserts((current) => [...current, stagedInsert]);
+                setPendingScrollToRowId(stagedInsert.id);
               }}
               disabled={isAnyMutationPending}
             >
@@ -969,6 +973,7 @@ export function TableDataGrid() {
             stagedInserts={stagedInserts}
             selectedRowIds={selectedVisibleRowIds}
             queuedDeletes={queuedDeletes}
+            pendingScrollToRowId={pendingScrollToRowId}
             animationScopeKey={gridAnimationScopeKey}
             onSortColumnsChange={handleSortColumnsChange}
             onQueuedEditsChange={setQueuedEdits}
@@ -976,6 +981,7 @@ export function TableDataGrid() {
             onSelectedRowIdsChange={setSelectedRowIds}
             onQueuedSaveErrorChange={setQueuedSaveError}
             onQueuedDeletesChange={setQueuedDeletes}
+            onPendingScrollToRowIdChange={setPendingScrollToRowId}
           />
         </div>
       </div>
@@ -1493,6 +1499,7 @@ function PlainTableView({
   stagedInserts,
   selectedRowIds,
   queuedDeletes,
+  pendingScrollToRowId,
   animationScopeKey,
   onSortColumnsChange,
   onQueuedEditsChange,
@@ -1500,6 +1507,7 @@ function PlainTableView({
   onSelectedRowIdsChange,
   onQueuedSaveErrorChange,
   onQueuedDeletesChange,
+  onPendingScrollToRowIdChange,
 }: {
   rows: DynamicTableRow[];
   gridColumns: GridColumn[];
@@ -1511,6 +1519,7 @@ function PlainTableView({
   stagedInserts: StagedInsert[];
   selectedRowIds: Set<string>;
   queuedDeletes: Set<string>;
+  pendingScrollToRowId: string | null;
   animationScopeKey: string;
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
@@ -1518,8 +1527,10 @@ function PlainTableView({
   onSelectedRowIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
+  onPendingScrollToRowIdChange: (value: string | null) => void;
 }) {
   const selectionAnchorRowIdRef = useRef<string | null>(null);
+  const dataGridRef = useRef<DataGridHandle | null>(null);
   const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
   const editableRows = useMemo<EditableGridRow[]>(() => {
     const realRows = animatedRows.map((entry) => {
@@ -1563,6 +1574,22 @@ function PlainTableView({
   useEffect(() => {
     selectionAnchorRowIdRef.current = null;
   }, [animationScopeKey]);
+
+  useLayoutEffect(() => {
+    if (!pendingScrollToRowId) {
+      return;
+    }
+
+    const rowIndex = editableRows.findIndex(
+      (row) => getGridRowId(row.sourceRow) === pendingScrollToRowId,
+    );
+    if (rowIndex === -1) {
+      return;
+    }
+
+    dataGridRef.current?.scrollToCell({ rowIdx: rowIndex });
+    onPendingScrollToRowIdChange(null);
+  }, [editableRows, onPendingScrollToRowIdChange, pendingScrollToRowId]);
 
   const rowClass = (row: EditableGridRow): string | undefined => {
     const rowId = getGridRowId(row.sourceRow);
@@ -1909,6 +1936,7 @@ function PlainTableView({
 
   return (
     <DataGrid
+      ref={dataGridRef}
       className={`${styles.dataGrid} rdg-dark`}
       columns={columns}
       rows={editableRows}
