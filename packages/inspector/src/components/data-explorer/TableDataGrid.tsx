@@ -1911,6 +1911,7 @@ function PlainTableView({
 
     if (!isRangeSelection) {
       selectionAnchorRowIdRef.current = rowId;
+      onSelectedRowIdsChange(new Set([rowId]));
       return;
     }
 
