@@ -135,14 +135,22 @@ A table per (profile, phase): `btree_ms`/`sqlite_ms` (wall-clock) and
 checksums diverge — a clean run means both engines did identical, verified work.
 
 Single-run, in-browser numbers — directional, not statistically rigorous (no
-warmup/averaging yet, expect ±~20%). Typical shape: **reads are roughly a tie**
-(opfs-btree ~1.5×), while **opfs-btree leads on writes** (~3× bulk load, ~15–25×
-random updates). One subtlety that matters: SQLite read phases are wrapped in a
-transaction — without it, per-statement autocommit dominates and makes reads look
-~100× slower than they are.
+warmup/averaging yet, expect ±~20%). Typical shape (against the page-size-tuned
+SQLite baseline): **reads are roughly a tie** — SQLite can even edge ahead on a
+few scan/cold phases — while **opfs-btree leads on writes** (bulk load ~2–9×,
+random updates and mixed ~6–13×). One subtlety that matters: SQLite read phases
+are wrapped in a transaction — without it, per-statement autocommit dominates and
+makes reads look ~100× slower than they are.
 
 ## Configuration parity
 
-Both engines use a 32 MB cache. SQLite: WAL, `synchronous=NORMAL`, a
-`WITHOUT ROWID` k/v table, reads/writes batched per phase in one transaction.
-opfs-btree checkpoints after each write phase.
+Both engines use a 32 MB cache and a **16 KB page size**. SQLite: WAL,
+`synchronous=NORMAL`, `temp_store=MEMORY`, a `WITHOUT ROWID` k/v table,
+reads/writes batched per phase in one transaction. opfs-btree checkpoints after
+each write phase.
+
+The SQLite page size is set to match opfs-btree's: the sahpool OPFS VFS has high
+per-I/O-call overhead, so matching the 16 KB page granularity (rather than
+SQLite's 4 KB default) roughly halves its total time here — the fair baseline to
+compare against. `locking_mode=EXCLUSIVE` was measured and made it _slower_, so
+it is deliberately not used.
