@@ -1,12 +1,12 @@
-//! Canonical static-file format shared by the benchmark data tools (producer)
-//! and the in-browser engine drivers (consumers). Pure byte (de)serialization;
-//! no I/O.
+//! The `.kv` record fixture format: real-world key/value data (Met objects,
+//! Wikipedia wikitext) committed under `public/data/` and fetched by each
+//! worker at runtime. Pure byte (de)serialization, no I/O.
+//!
+//! The synthetic *operation streams* are no longer stored on disk — they are
+//! declared in [`crate::benchmarks`] and generated deterministically at
+//! runtime, so only the irreproducible real data lives as a fixture here.
 
 const KV_MAGIC: &[u8; 6] = b"JZKV1\0";
-const OPS_MAGIC: &[u8; 6] = b"JZOP1\0";
-
-pub const RANGE_WINDOW_KEYS: u32 = 128;
-pub const RANGE_RESULT_LIMIT: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueEncoding {
@@ -30,50 +30,6 @@ impl ValueEncoding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseKind {
-    LoadAll,
-    GetSeq,
-    GetIndices,
-    RangeStarts,
-    UpdateIndices,
-    Mixed,
-    ColdGetIndices,
-}
-
-impl PhaseKind {
-    fn to_u8(self) -> u8 {
-        match self {
-            PhaseKind::LoadAll => 0,
-            PhaseKind::GetSeq => 1,
-            PhaseKind::GetIndices => 2,
-            PhaseKind::RangeStarts => 3,
-            PhaseKind::UpdateIndices => 4,
-            PhaseKind::Mixed => 5,
-            PhaseKind::ColdGetIndices => 6,
-        }
-    }
-    fn from_u8(b: u8) -> Result<Self, FormatError> {
-        Ok(match b {
-            0 => PhaseKind::LoadAll,
-            1 => PhaseKind::GetSeq,
-            2 => PhaseKind::GetIndices,
-            3 => PhaseKind::RangeStarts,
-            4 => PhaseKind::UpdateIndices,
-            5 => PhaseKind::Mixed,
-            6 => PhaseKind::ColdGetIndices,
-            other => return Err(FormatError::BadPhaseKind(other)),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Phase {
-    pub name: String,
-    pub kind: PhaseKind,
-    pub args: Vec<u32>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvDataset {
     pub profile: String,
@@ -87,7 +43,6 @@ pub enum FormatError {
     BadMagic,
     Truncated,
     BadEncoding(u8),
-    BadPhaseKind(u8),
 }
 
 impl core::fmt::Display for FormatError {
@@ -121,10 +76,6 @@ impl<'a> Reader<'a> {
     }
     fn u8(&mut self) -> Result<u8, FormatError> {
         Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> Result<u16, FormatError> {
-        let b = self.take(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
     }
     fn u32(&mut self) -> Result<u32, FormatError> {
         let b = self.take(4)?;
@@ -183,41 +134,6 @@ pub fn decode_kv(bytes: &[u8]) -> Result<KvDataset, FormatError> {
     })
 }
 
-pub fn encode_ops(phases: &[Phase]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(OPS_MAGIC);
-    out.extend_from_slice(&(phases.len() as u16).to_le_bytes());
-    for p in phases {
-        put_str(&mut out, &p.name);
-        out.push(p.kind.to_u8());
-        put_u32(&mut out, p.args.len() as u32);
-        for &a in &p.args {
-            put_u32(&mut out, a);
-        }
-    }
-    out
-}
-
-pub fn decode_ops(bytes: &[u8]) -> Result<Vec<Phase>, FormatError> {
-    let mut r = Reader::new(bytes);
-    if r.take(6)? != OPS_MAGIC {
-        return Err(FormatError::BadMagic);
-    }
-    let phase_count = r.u16()? as usize;
-    let mut phases = Vec::with_capacity(phase_count);
-    for _ in 0..phase_count {
-        let name = r.str()?;
-        let kind = PhaseKind::from_u8(r.u8()?)?;
-        let arg_count = r.u32()? as usize;
-        let mut args = Vec::with_capacity(arg_count);
-        for _ in 0..arg_count {
-            args.push(r.u32()?);
-        }
-        phases.push(Phase { name, kind, args });
-    }
-    Ok(phases)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,27 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn ops_round_trips() {
-        let phases = vec![
-            Phase {
-                name: "load".into(),
-                kind: PhaseKind::LoadAll,
-                args: vec![],
-            },
-            Phase {
-                name: "get_skewed".into(),
-                kind: PhaseKind::GetIndices,
-                args: vec![3, 1, 3, 0],
-            },
-        ];
-        let bytes = encode_ops(&phases);
-        let decoded = decode_ops(&bytes).expect("decode ops");
-        assert_eq!(decoded, phases);
-    }
-
-    #[test]
     fn decode_rejects_bad_magic() {
         assert!(decode_kv(b"nope").is_err());
-        assert!(decode_ops(b"nope").is_err());
     }
 }

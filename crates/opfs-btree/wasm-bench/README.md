@@ -5,12 +5,17 @@ openly-licensed data — with **both engines compiled to wasm and driven from
 Rust, in-process**, persisting to OPFS. There is no JavaScript in either query
 loop, so the comparison measures the storage engines, not calling convention.
 
-- **opfs-btree** — the Rust engine itself (`run_dataset_result` in
-  `src/btree_engine.rs`), compiled into a Rust `gloo-worker`.
+- **opfs-btree** — the Rust engine itself, wrapped as a `BenchEngine` in
+  `src/btree_engine.rs`, compiled into a Rust `gloo-worker`.
 - **SQLite** — `rusqlite` linked against [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs)
   with the [`sqlite-wasm-vfs`](https://crates.io/crates/sqlite-wasm-vfs)
-  **sahpool OPFS VFS** from the nested `sqlite/` package, compiled into a
-  separate Rust `gloo-worker`.
+  **sahpool OPFS VFS** from the nested `sqlite/` package, wrapped as a
+  `BenchEngine`, compiled into a separate Rust `gloo-worker`.
+
+Both engines implement one small trait (`BenchEngine`) from the shared
+`bench-core` crate; the workload, phase semantics, timing, and checksum all live
+there once (see [Workload](#workload)), so each engine file is just the trait
+impl.
 
 The primary harness is the Yew/Trunk app in this directory. It spawns two Rust
 workers, one per engine, over OPFS (sync access handles only exist in a Worker).
@@ -18,17 +23,32 @@ A small Node launcher serves the built harness in headless Chromium, waits for
 the Yew app's automation result, and prints the table. The Yew app asserts both
 engines produce **identical checksums** before exposing successful results.
 
+## Workload
+
+The benchmarks are **declared in code** in `bench-core/src/benchmarks.rs`: each
+profile lists its `.kv` data fixture, a fixed RNG seed, and an ordered list of
+phases (`Load`, `GetRandom`, `Mixed { get, put, del }`, `ColdGetRandom`, …). At
+runtime each phase expands to a deterministic operation stream from the seed, so
+both engines replay byte-for-byte identical operations — which is what makes the
+cross-engine checksum comparison meaningful. To add or tune a benchmark, edit
+`benchmarks.rs`; no fixtures to regenerate.
+
+Each phase's _semantics_ (what `get_skewed` or `mixed_70_20_10` actually does)
+are written once in `bench-core/src/phases.rs`. `bench-core` is unit-tested on
+native against an in-memory engine (`cargo test -p opfs-btree-bench-core`).
+
 ## Datasets
 
-The benchmark consumes ready-to-run `.kv/.ops` fixtures committed under
-`public/data/` — no download or network access is needed to run it. The
-fixtures were derived from the public sources below; the raw source data is not
-vendored in the tree.
+The real key/value data is committed as ready-to-run `.kv` fixtures under
+`public/data/` — no download or network access is needed to run the benchmark.
+The fixtures were derived from the public sources below; the raw source data is
+not vendored in the tree. (The synthetic operation streams used to be committed
+as `.ops` files; they now live in `benchmarks.rs`.)
 
-| Profile     | Fixture files                   | Source                                                         | License                     |
-| ----------- | ------------------------------- | -------------------------------------------------------------- | --------------------------- |
-| `objects`   | `objects.kv`, `objects.ops`     | [The Met Open Access](https://github.com/metmuseum/openaccess) | **CC0 1.0** (public domain) |
-| `wikipedia` | `wikipedia.kv`, `wikipedia.ops` | [Wikipedia](https://en.wikipedia.org/) article wikitext        | **CC BY-SA 4.0**            |
+| Profile     | Data fixture   | Source                                                         | License                     |
+| ----------- | -------------- | -------------------------------------------------------------- | --------------------------- |
+| `objects`   | `objects.kv`   | [The Met Open Access](https://github.com/metmuseum/openaccess) | **CC0 1.0** (public domain) |
+| `wikipedia` | `wikipedia.kv` | [Wikipedia](https://en.wikipedia.org/) article wikitext        | **CC BY-SA 4.0**            |
 
 `objects` = Met museum-object metadata (medium structured records, ~900 B).
 `wikipedia` = real article wikitext (large text values), exercising the
@@ -57,7 +77,7 @@ curl -G https://en.wikipedia.org/w/api.php \
   --data-urlencode titles='John Wyndham'
 ```
 
-The committed `.kv/.ops` fixtures are derived from these sources (CSV rows /
+The committed `.kv` fixtures are derived from these sources (CSV rows /
 `{title, text}` JSONL → key/value records); the exact record selection used to
 build them is not scripted in the tree.
 
@@ -100,8 +120,8 @@ pnpm --dir crates/opfs-btree run bench:compare -- --profiles objects
 ```
 
 Build output lives under `wasm-bench/dist/` and `wasm-bench/target/`. These are
-ignored and safe to delete. The `wasm-bench/public/data/*.kv` and `*.ops` files
-are committed benchmark inputs and should stay in the tree.
+ignored and safe to delete. The `wasm-bench/public/data/*.kv` files are
+committed benchmark inputs and should stay in the tree.
 
 ## Interpreting output
 

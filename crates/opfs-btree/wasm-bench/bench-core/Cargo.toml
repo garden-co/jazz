@@ -1,0 +1,12 @@
+[package]
+name = "opfs-btree-bench-core"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Shared workload declaration, phase semantics, and engine contract for the opfs-btree browser benchmark."
+
+[lib]
+name = "bench_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

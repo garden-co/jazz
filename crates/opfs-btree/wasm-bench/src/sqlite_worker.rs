@@ -1,9 +1,8 @@
 use gloo_worker::{HandlerId, Worker, WorkerScope};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::fetch::fetch_dataset;
 #[cfg(feature = "sqlite-worker")]
-use crate::types::PhaseResult;
+use crate::fetch::fetch_data;
 use crate::types::{EngineRunResult, RunProfile, WorkerFailure, WorkerResult};
 
 pub struct SqliteWorker;
@@ -30,32 +29,36 @@ impl Worker for SqliteWorker {
         let profile = request.profile.clone();
         let scope = scope.clone();
         spawn_local(async move {
-            let result = async {
-                let (kv, ops) = fetch_dataset(&base_url, &profile).await?;
-                run_sqlite_dataset(&kv, &ops).await
-            }
-            .await;
+            let result = run_sqlite_dataset(&base_url, &profile).await;
             scope.send_message((id, request, result));
         });
     }
 }
 
 #[cfg(feature = "sqlite-worker")]
-async fn run_sqlite_dataset(kv: &[u8], ops: &[u8]) -> Result<EngineRunResult, String> {
-    let result = wasm_sqlite::run_sqlite_dataset_result(kv, ops)
+async fn run_sqlite_dataset(base_url: &str, profile: &str) -> Result<EngineRunResult, String> {
+    let benchmark =
+        bench_core::benchmark(profile).ok_or_else(|| format!("unknown profile: {profile}"))?;
+    let kv = fetch_data(base_url, &benchmark.kv_fixture).await?;
+    let dataset = bench_core::decode_kv(&kv).map_err(|e| e.to_string())?;
+    let mut engine = wasm_sqlite::SqliteEngine::open()
         .await
-        .map_err(js_error)?;
-    Ok(convert_sqlite_result(result))
+        .map_err(|e| e.to_string())?;
+    let result = bench_core::run(
+        &mut engine,
+        "sqlite_inproc",
+        &benchmark,
+        &dataset,
+        &crate::clock::now_ms,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result.into())
 }
 
 #[cfg(not(feature = "sqlite-worker"))]
-async fn run_sqlite_dataset(_kv: &[u8], _ops: &[u8]) -> Result<EngineRunResult, String> {
+async fn run_sqlite_dataset(_base_url: &str, _profile: &str) -> Result<EngineRunResult, String> {
     Err("sqlite worker was built without the sqlite-worker feature".to_string())
-}
-
-#[cfg(feature = "sqlite-worker")]
-fn js_error(value: wasm_bindgen::JsValue) -> String {
-    value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
 fn result_to_worker_output(
@@ -70,26 +73,5 @@ fn result_to_worker_output(
             profile,
             error,
         }),
-    }
-}
-
-#[cfg(feature = "sqlite-worker")]
-fn convert_sqlite_result(result: wasm_sqlite::DatasetRunResult) -> EngineRunResult {
-    EngineRunResult {
-        engine: result.engine,
-        profile: result.profile,
-        record_count: result.record_count,
-        phases: result
-            .phases
-            .into_iter()
-            .map(|phase| PhaseResult {
-                phase: phase.phase,
-                op_count: phase.op_count,
-                elapsed_ms: phase.elapsed_ms,
-                ops_per_sec: phase.ops_per_sec,
-                checksum: phase.checksum,
-            })
-            .collect(),
-        checksum: result.checksum,
     }
 }

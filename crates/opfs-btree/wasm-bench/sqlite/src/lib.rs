@@ -1,348 +1,111 @@
+//! The SQLite side of the benchmark: a [`BenchEngine`] over an in-process
+//! `rusqlite` connection backed by the OPFS sahpool VFS. All workload, timing,
+//! and checksum logic lives in `bench-core`; this file only maps the contract
+//! onto SQLite, keeping its native idioms (one transaction per phase, cached
+//! prepared statements) so the comparison stays faithful.
+
+use bench_core::{BenchEngine, EngineError, PhaseKind};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use sqlite_wasm_rs as ffi; // force-links the sqlite3 C symbols
-use sqlite_wasm_vfs::sahpool::{install as install_opfs_sahpool, OpfsSAHPoolCfg};
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
-
-const RANGE_WINDOW_KEYS: usize = 128;
-const RANGE_RESULT_LIMIT: i64 = 64;
-const MIN_MEASURABLE_MS: f64 = 10.0;
-const MAX_LOOP_ITERATIONS: u32 = 10_000;
-
-fn log(s: &str) {
-    web_sys::console::log_1(&JsValue::from_str(s));
-}
-
-fn now_ms() -> f64 {
-    let g = js_sys::global();
-    let perf = js_sys::Reflect::get(&g, &JsValue::from_str("performance")).unwrap();
-    let now = js_sys::Reflect::get(&perf, &JsValue::from_str("now")).unwrap();
-    let f: js_sys::Function = now.dyn_into().unwrap();
-    f.call0(&perf).unwrap().as_f64().unwrap()
-}
-
-// ---- .kv/.ops decoder (mirrors ../src/bench_dataset.rs) ----
-
-#[derive(PartialEq, Clone, Copy)]
-enum PhaseKind {
-    LoadAll,
-    GetSeq,
-    GetIndices,
-    RangeStarts,
-    UpdateIndices,
-    Mixed,
-    ColdGetIndices,
-}
-
-struct Phase {
-    name: String,
-    kind: PhaseKind,
-    args: Vec<u32>,
-}
-
-struct Reader<'a> {
-    b: &'a [u8],
-    p: usize,
-}
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> &'a [u8] {
-        let s = &self.b[self.p..self.p + n];
-        self.p += n;
-        s
-    }
-    fn u8(&mut self) -> u8 {
-        self.take(1)[0]
-    }
-    fn u16(&mut self) -> u16 {
-        let b = self.take(2);
-        u16::from_le_bytes([b[0], b[1]])
-    }
-    fn u32(&mut self) -> u32 {
-        let b = self.take(4);
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    }
-    fn s(&mut self) -> String {
-        let n = self.u8() as usize;
-        String::from_utf8_lossy(self.take(n)).into_owned()
-    }
-}
-
-fn decode_kv(bytes: &[u8]) -> (String, Vec<(Vec<u8>, Vec<u8>)>) {
-    let mut r = Reader { b: bytes, p: 0 };
-    assert_eq!(r.take(6), b"JZKV1\0", "bad kv magic");
-    let profile = r.s();
-    let _source = r.s();
-    let _enc = r.u8();
-    let count = r.u32() as usize;
-    let mut recs = Vec::with_capacity(count);
-    for _ in 0..count {
-        let kl = r.u32() as usize;
-        let k = r.take(kl).to_vec();
-        let vl = r.u32() as usize;
-        let v = r.take(vl).to_vec();
-        recs.push((k, v));
-    }
-    (profile, recs)
-}
-
-fn decode_ops(bytes: &[u8]) -> Vec<Phase> {
-    let mut r = Reader { b: bytes, p: 0 };
-    assert_eq!(r.take(6), b"JZOP1\0", "bad ops magic");
-    let pc = r.u16() as usize;
-    let mut out = Vec::with_capacity(pc);
-    for _ in 0..pc {
-        let name = r.s();
-        let kind = match r.u8() {
-            0 => PhaseKind::LoadAll,
-            1 => PhaseKind::GetSeq,
-            2 => PhaseKind::GetIndices,
-            3 => PhaseKind::RangeStarts,
-            4 => PhaseKind::UpdateIndices,
-            5 => PhaseKind::Mixed,
-            6 => PhaseKind::ColdGetIndices,
-            other => panic!("bad phase kind {other}"),
-        };
-        let ac = r.u32() as usize;
-        let mut args = Vec::with_capacity(ac);
-        for _ in 0..ac {
-            args.push(r.u32());
-        }
-        out.push(Phase { name, kind, args });
-    }
-    out
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatasetPhaseResult {
-    pub phase: String,
-    pub op_count: u32,
-    pub elapsed_ms: f64,
-    pub ops_per_sec: f64,
-    pub checksum: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatasetRunResult {
-    pub engine: String,
-    pub profile: String,
-    pub record_count: u32,
-    pub phases: Vec<DatasetPhaseResult>,
-    pub checksum: u64,
-}
+use sqlite_wasm_vfs::sahpool::{OpfsSAHPoolCfg, install as install_opfs_sahpool};
 
 const DB_PATH: &str = "sqlite.db";
 
-fn open_conn() -> Result<Connection, JsValue> {
-    let conn = Connection::open(DB_PATH).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
+fn eng<E: ToString>(e: E) -> EngineError {
+    EngineError::new(e.to_string())
+}
+
+fn open_conn() -> Result<Connection, EngineError> {
+    let conn = Connection::open(DB_PATH).map_err(eng)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;",
     )
-    .map_err(|e| JsValue::from_str(&format!("pragma: {e}")))?;
+    .map_err(eng)?;
     Ok(conn)
 }
 
-/// Replays one phase against rusqlite, returning (ops, checksum, conn). Mirrors
-/// the opfs-btree replay so per-phase checksums match.
-fn replay_phase(
-    conn: Connection,
-    phase: &Phase,
-    keys: &[&[u8]],
-    vals: &[&[u8]],
-    n: u32,
-) -> Result<(u32, u64, Connection), JsValue> {
-    let mut checksum: u64 = 0;
-    let mut ops: u32 = 0;
-    let idx = |raw: u32| -> usize { (raw % n.max(1)) as usize };
-    let err = |c: &str, e: rusqlite::Error| JsValue::from_str(&format!("{c}: {e}"));
-
-    let mut conn = conn;
-    match phase.kind {
-        PhaseKind::LoadAll => {
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut st = conn
-                    .prepare("INSERT OR REPLACE INTO kv(k,v) VALUES(?1,?2)")
-                    .map_err(|e| err("prep", e))?;
-                for i in 0..keys.len() {
-                    st.execute((keys[i], vals[i])).map_err(|e| err("ins", e))?;
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-        PhaseKind::GetSeq => {
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut st = conn
-                    .prepare("SELECT v FROM kv WHERE k=?1")
-                    .map_err(|e| err("prep", e))?;
-                for i in 0..keys.len() {
-                    if let Ok(v) = st.query_row([keys[i]], |r| r.get::<_, Vec<u8>>(0)) {
-                        checksum = checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
-                    }
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-        PhaseKind::GetIndices | PhaseKind::ColdGetIndices => {
-            if phase.kind == PhaseKind::ColdGetIndices {
-                drop(conn);
-                conn = open_conn()?;
-            }
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut st = conn
-                    .prepare("SELECT v FROM kv WHERE k=?1")
-                    .map_err(|e| err("prep", e))?;
-                for &raw in &phase.args {
-                    if let Ok(v) = st.query_row([keys[idx(raw)]], |r| r.get::<_, Vec<u8>>(0)) {
-                        checksum = checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
-                    }
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-        PhaseKind::UpdateIndices => {
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut st = conn
-                    .prepare("INSERT OR REPLACE INTO kv(k,v) VALUES(?1,?2)")
-                    .map_err(|e| err("prep", e))?;
-                for &raw in &phase.args {
-                    let i = idx(raw);
-                    st.execute((keys[i], vals[i])).map_err(|e| err("upd", e))?;
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-        PhaseKind::RangeStarts => {
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut st = conn
-                    .prepare("SELECT v FROM kv WHERE k>=?1 AND k<?2 ORDER BY k LIMIT ?3")
-                    .map_err(|e| err("prep", e))?;
-                for &raw in &phase.args {
-                    let s = idx(raw);
-                    let e = (s + RANGE_WINDOW_KEYS).min(keys.len().saturating_sub(1));
-                    let rows = st
-                        .query_map(
-                            rusqlite::params![keys[s], keys[e], RANGE_RESULT_LIMIT],
-                            |_| Ok(()),
-                        )
-                        .map_err(|er| err("range", er))?
-                        .count();
-                    checksum = checksum.wrapping_add(rows as u64);
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-        PhaseKind::Mixed => {
-            conn.execute_batch("BEGIN").map_err(|e| err("begin", e))?;
-            {
-                let mut put = conn
-                    .prepare("INSERT OR REPLACE INTO kv(k,v) VALUES(?1,?2)")
-                    .map_err(|e| err("prep", e))?;
-                let mut del = conn
-                    .prepare("DELETE FROM kv WHERE k=?1")
-                    .map_err(|e| err("prep", e))?;
-                let mut get = conn
-                    .prepare("SELECT v FROM kv WHERE k=?1")
-                    .map_err(|e| err("prep", e))?;
-                for &packed in &phase.args {
-                    let op = packed >> 30;
-                    let i = idx(packed & 0x3FFF_FFFF);
-                    match op {
-                        1 => {
-                            put.execute((keys[i], vals[i]))
-                                .map_err(|e| err("mput", e))?;
-                        }
-                        2 => {
-                            del.execute([keys[i]]).map_err(|e| err("mdel", e))?;
-                        }
-                        _ => {
-                            if let Ok(v) = get.query_row([keys[i]], |r| r.get::<_, Vec<u8>>(0)) {
-                                checksum =
-                                    checksum.wrapping_add(v.first().copied().unwrap_or(0) as u64);
-                            }
-                        }
-                    }
-                    ops += 1;
-                }
-            }
-            conn.execute_batch("COMMIT").map_err(|e| err("commit", e))?;
-        }
-    }
-    Ok((ops, checksum, conn))
+pub struct SqliteEngine {
+    // `Option` so a cold reopen can drop (close) the connection before opening a
+    // fresh one, giving a cold page cache while the data persists in OPFS.
+    conn: Option<Connection>,
 }
 
-pub async fn run_sqlite_dataset_result(kv: &[u8], ops: &[u8]) -> Result<DatasetRunResult, JsValue> {
-    let (profile, records) = decode_kv(kv);
-    let phases = decode_ops(ops);
-    let keys: Vec<&[u8]> = records.iter().map(|(k, _)| k.as_slice()).collect();
-    let vals: Vec<&[u8]> = records.iter().map(|(_, v)| v.as_slice()).collect();
-    let n = keys.len() as u32;
+impl SqliteEngine {
+    /// Install the OPFS VFS and open a fresh, empty `WITHOUT ROWID` k/v table.
+    pub async fn open() -> Result<Self, EngineError> {
+        install_opfs_sahpool::<ffi::WasmOsCallback>(&OpfsSAHPoolCfg::default(), true)
+            .await
+            .map_err(|e| EngineError::new(format!("install sahpool: {e:?}")))?;
 
-    log(&format!(
-        "[sqlite] {profile}: install sahpool + open ({n} records)"
-    ));
-    install_opfs_sahpool::<ffi::WasmOsCallback>(&OpfsSAHPoolCfg::default(), true)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("install sahpool: {e:?}")))?;
-
-    let mut conn = open_conn()?;
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS kv; CREATE TABLE kv(k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;",
-    )
-    .map_err(|e| JsValue::from_str(&format!("create: {e}")))?;
-
-    let mut overall = n as u64;
-    let mut phase_results = Vec::new();
-    for phase in &phases {
-        let started = now_ms();
-        let (op_count, checksum, c) = replay_phase(conn, phase, &keys, &vals, n)?;
-        conn = c;
-        let mut elapsed = now_ms() - started;
-        let mut total_ops = op_count;
-
-        if matches!(
-            phase.kind,
-            PhaseKind::GetSeq | PhaseKind::GetIndices | PhaseKind::RangeStarts
-        ) && elapsed < MIN_MEASURABLE_MS
-        {
-            let mut iterations = 1u32;
-            while elapsed < MIN_MEASURABLE_MS && iterations < MAX_LOOP_ITERATIONS {
-                let (ops2, _, c) = replay_phase(conn, phase, &keys, &vals, n)?;
-                conn = c;
-                total_ops = total_ops.saturating_add(ops2);
-                elapsed = now_ms() - started;
-                iterations += 1;
-            }
-        }
-
-        overall = overall.wrapping_add(checksum);
-        phase_results.push(DatasetPhaseResult {
-            phase: phase.name.clone(),
-            op_count: total_ops,
-            elapsed_ms: elapsed,
-            ops_per_sec: if elapsed > 0.0 {
-                (total_ops as f64) / (elapsed / 1000.0)
-            } else {
-                0.0
-            },
-            checksum,
-        });
+        let conn = open_conn()?;
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS kv; CREATE TABLE kv(k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID;",
+        )
+        .map_err(eng)?;
+        Ok(Self { conn: Some(conn) })
     }
 
-    Ok(DatasetRunResult {
-        engine: "sqlite_inproc".into(),
-        profile,
-        record_count: n,
-        phases: phase_results,
-        checksum: overall,
-    })
+    fn conn(&self) -> &Connection {
+        self.conn.as_ref().expect("sqlite engine is open")
+    }
+}
+
+impl BenchEngine for SqliteEngine {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), EngineError> {
+        self.conn()
+            .prepare_cached("INSERT OR REPLACE INTO kv(k,v) VALUES(?1,?2)")
+            .map_err(eng)?
+            .execute((key, value))
+            .map_err(eng)?;
+        Ok(())
+    }
+
+    fn get(&mut self, key: &[u8]) -> Result<Option<u8>, EngineError> {
+        let mut stmt = self
+            .conn()
+            .prepare_cached("SELECT v FROM kv WHERE k=?1")
+            .map_err(eng)?;
+        match stmt.query_row([key], |row| row.get::<_, Vec<u8>>(0)) {
+            Ok(v) => Ok(Some(v.first().copied().unwrap_or(0))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(eng(e)),
+        }
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), EngineError> {
+        self.conn()
+            .prepare_cached("DELETE FROM kv WHERE k=?1")
+            .map_err(eng)?
+            .execute([key])
+            .map_err(eng)?;
+        Ok(())
+    }
+
+    fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
+        let mut stmt = self
+            .conn()
+            .prepare_cached("SELECT v FROM kv WHERE k>=?1 AND k<?2 ORDER BY k LIMIT ?3")
+            .map_err(eng)?;
+        let rows = stmt
+            .query_map(rusqlite::params![lo, hi, limit as i64], |_| Ok(()))
+            .map_err(eng)?
+            .count();
+        Ok(rows)
+    }
+
+    fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
+        self.conn().execute_batch("BEGIN").map_err(eng)
+    }
+
+    fn end_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
+        self.conn().execute_batch("COMMIT").map_err(eng)
+    }
+
+    async fn reopen(&mut self) -> Result<(), EngineError> {
+        // Drop (close) the current connection before reopening; the OPFS-backed
+        // database file persists, but the new connection starts cache-cold.
+        self.conn = None;
+        self.conn = Some(open_conn()?);
+        Ok(())
+    }
 }
