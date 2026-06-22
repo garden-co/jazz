@@ -1,7 +1,9 @@
 import { useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
-import { useDevtoolsContext } from "../../contexts/devtools-context.js";
+import type { QueryPropagation } from "jazz-tools";
+import { useDevtoolsContext, type InspectorRuntime } from "../../contexts/devtools-context.js";
+import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import styles from "./index.module.css";
 
 const TABLES_SIDEBAR_SIZE_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesSidebarSize";
@@ -13,38 +15,65 @@ interface DataExplorerOutletContext {
   isTablesPanelOpen: boolean;
 }
 
-function getStoredTablesSidebarSize(): number {
-  try {
-    const rawSize = localStorage.getItem(TABLES_SIDEBAR_SIZE_STORAGE_KEY);
-    if (rawSize === null) {
-      return TABLES_SIDEBAR_DEFAULT_SIZE;
-    }
-
-    const storedSize = Number(rawSize);
-    if (
-      Number.isFinite(storedSize) &&
-      storedSize >= TABLES_SIDEBAR_MIN_SIZE &&
-      storedSize <= TABLES_SIDEBAR_MAX_SIZE
-    ) {
-      return storedSize;
-    }
-  } catch {
-    // Ignore storage failures and keep the layout usable.
-  }
-
-  return TABLES_SIDEBAR_DEFAULT_SIZE;
+function isTablesSidebarSize(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= TABLES_SIDEBAR_MIN_SIZE &&
+    value <= TABLES_SIDEBAR_MAX_SIZE
+  );
 }
 
-function saveTablesSidebarSize(size: number): void {
-  if (!Number.isFinite(size) || size < TABLES_SIDEBAR_MIN_SIZE || size > TABLES_SIDEBAR_MAX_SIZE) {
-    return;
-  }
+interface TablesSidebarProps {
+  tableNames: string[];
+  selectedTableName?: string;
+  runtime: InspectorRuntime;
+  queryPropagation: QueryPropagation;
+  onQueryPropagationChange: (value: QueryPropagation) => void;
+}
 
-  try {
-    localStorage.setItem(TABLES_SIDEBAR_SIZE_STORAGE_KEY, String(size));
-  } catch {
-    // Ignore storage failures and keep resizing responsive.
-  }
+function TablesSidebar({
+  tableNames,
+  selectedTableName,
+  runtime,
+  queryPropagation,
+  onQueryPropagationChange,
+}: TablesSidebarProps) {
+  return (
+    <aside className={styles.sidebar}>
+      <div className={styles.sidebarHeader}>
+        <h2 className={styles.sidebarTitle}>Tables</h2>
+        {runtime === "extension" ? (
+          <label className={styles.propagationSwitch}>
+            <span className={styles.propagationLabel}>Local-only</span>
+            <input
+              type="checkbox"
+              checked={queryPropagation === "local-only"}
+              onChange={(event) => {
+                onQueryPropagationChange(event.target.checked ? "local-only" : "full");
+              }}
+              aria-label="Toggle query propagation between local-only and full"
+            />
+          </label>
+        ) : null}
+      </div>
+      <ul className={styles.tableList}>
+        {tableNames.map((tableName) => (
+          <li key={tableName}>
+            <NavLink
+              to={`/data-explorer/${tableName}/data`}
+              className={`${styles.tableLink} ${
+                selectedTableName === tableName ? styles.tableLinkActive : ""
+              }`}
+              aria-label={`View ${tableName} data`}
+            >
+              {tableName}
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
 }
 
 export function DataExplorer() {
@@ -59,62 +88,50 @@ export function DataExplorer() {
   const { table } = useParams();
 
   const tableNames = useMemo(() => Object.keys(schema ?? {}).sort(), [schema]);
-  const defaultTablesSidebarSize = useMemo(getStoredTablesSidebarSize, []);
+  const [tablesSidebarSize, setTablesSidebarSize] = useLocalStorageState(
+    TABLES_SIDEBAR_SIZE_STORAGE_KEY,
+    TABLES_SIDEBAR_DEFAULT_SIZE,
+    { isValid: isTablesSidebarSize },
+  );
 
   return (
-    <Group className={styles.layout} orientation="horizontal">
+    <Group
+      key={isTablesPanelOpen ? "tables-panel-open" : "tables-panel-closed"}
+      className={styles.layout}
+      orientation="horizontal"
+      onLayoutChanged={(layout) => {
+        const nextTablesSidebarSize = layout["tables-panel"];
+        if (isTablesSidebarSize(nextTablesSidebarSize)) {
+          setTablesSidebarSize(nextTablesSidebarSize);
+        }
+      }}
+    >
       {isTablesPanelOpen ? (
         <>
           <Panel
             id="tables-panel"
             className={styles.sidebarPanel}
-            defaultSize={`${defaultTablesSidebarSize}%`}
+            defaultSize={`${tablesSidebarSize}%`}
             minSize={`${TABLES_SIDEBAR_MIN_SIZE}%`}
             maxSize={`${TABLES_SIDEBAR_MAX_SIZE}%`}
-            onResize={(panelSize, _id, previousPanelSize) => {
-              if (previousPanelSize === undefined) {
-                return;
-              }
-
-              saveTablesSidebarSize(panelSize.asPercentage);
-            }}
           >
-            <aside className={styles.sidebar}>
-              <div className={styles.sidebarHeader}>
-                <h2 className={styles.sidebarTitle}>Tables</h2>
-                {runtime === "extension" ? (
-                  <label className={styles.propagationSwitch}>
-                    <span className={styles.propagationLabel}>Local-only</span>
-                    <input
-                      type="checkbox"
-                      checked={queryPropagation === "local-only"}
-                      onChange={(event) => {
-                        setQueryPropagation(event.target.checked ? "local-only" : "full");
-                      }}
-                      aria-label="Toggle query propagation between local-only and full"
-                    />
-                  </label>
-                ) : null}
-              </div>
-              <ul className={styles.tableList}>
-                {tableNames.map((tableName) => (
-                  <li key={tableName}>
-                    <NavLink
-                      to={`/data-explorer/${tableName}/data`}
-                      className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}
-                      aria-label={`View ${tableName} data`}
-                    >
-                      {tableName}
-                    </NavLink>
-                  </li>
-                ))}
-              </ul>
-            </aside>
+            <TablesSidebar
+              tableNames={tableNames}
+              selectedTableName={table}
+              runtime={runtime}
+              queryPropagation={queryPropagation}
+              onQueryPropagationChange={setQueryPropagation}
+            />
           </Panel>
           <Separator className={styles.resizeHandle} />
         </>
       ) : null}
-      <Panel id="data-explorer-content" className={styles.contentPanel} minSize="40%">
+      <Panel
+        id="data-explorer-content"
+        className={styles.contentPanel}
+        defaultSize={isTablesPanelOpen ? undefined : "100%"}
+        minSize={isTablesPanelOpen ? "40%" : "100%"}
+      >
         <main className={styles.content}>
           {!table ? (
             <section className={styles.emptyState}>
