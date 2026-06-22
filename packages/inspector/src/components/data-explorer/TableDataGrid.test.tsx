@@ -165,12 +165,9 @@ describe("TableDataGrid", () => {
   it("renders schema-derived columns and reactive rows", () => {
     renderGrid();
 
-    expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
-    const header = screen.getByRole("heading", { name: "todos" }).closest("header");
-    expect(header).not.toBeNull();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Filter" })).not.toBeNull();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Insert" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Filter" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Insert" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();

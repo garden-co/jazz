@@ -56,6 +56,7 @@ export {
   type PublishStoredPermissionsOptions,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
+  type StoredSchemaHash,
   type StoredPermissionsResponse,
 } from "./schema-fetch.js";
 export {

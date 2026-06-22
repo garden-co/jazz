@@ -803,7 +803,6 @@ export function TableDataGrid() {
   return (
     <section className={styles.container}>
       <header className={styles.header}>
-        <h2 className={styles.title}>{table}</h2>
         <div className={styles.headerActions}>
           <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
             Schema

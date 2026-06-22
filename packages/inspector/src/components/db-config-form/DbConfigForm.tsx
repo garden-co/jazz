@@ -1,5 +1,9 @@
 import { fetchSchemaHashes } from "jazz-tools";
 import { useEffect, useState, type FormEvent } from "react";
+import {
+  normalizeSchemaHashInfos,
+  type SchemaHashInfo,
+} from "../../utility/schema-hash-display.js";
 import styles from "./DbConfigForm.module.css";
 
 export interface DbConfigFormValues {
@@ -11,8 +15,12 @@ export interface DbConfigFormValues {
   branch: string;
 }
 
+type SchemaHashesResult = Awaited<ReturnType<typeof fetchSchemaHashes>> & {
+  schemas?: SchemaHashInfo[];
+};
+
 interface DbConfigFormProps {
-  onSubmit: (values: DbConfigFormValues, hashes: string[]) => void;
+  onSubmit: (values: DbConfigFormValues, schemas: SchemaHashInfo[]) => void;
   initialValues?: Partial<DbConfigFormValues>;
   mode?: "connect" | "edit";
   title?: string;
@@ -61,11 +69,11 @@ export function DbConfigForm({
     };
 
     try {
-      const { hashes } = await fetchSchemaHashes(values.serverUrl, {
+      const { hashes, schemas } = (await fetchSchemaHashes(values.serverUrl, {
         appId: values.appId,
         adminSecret: values.adminSecret,
-      });
-      onSubmit(values, hashes);
+      })) as SchemaHashesResult;
+      onSubmit(values, normalizeSchemaHashInfos(hashes, schemas));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setErrorMessage(message);
