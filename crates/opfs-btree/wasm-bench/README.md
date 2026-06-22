@@ -112,6 +112,11 @@ For manual inspection:
 pnpm --dir crates/opfs-btree run bench:compare:open
 ```
 
+Both commands build `--release`. This matters: SQLite's C core is always
+optimized (it comes prebuilt from `sqlite-wasm-rs`, independent of the Rust
+profile), so a debug build compiles only opfs-btree's Rust unoptimized and makes
+it look 10×+ slower than it is. Never read perf numbers from a debug build.
+
 **Runner flags:** `--profiles objects,wikipedia` (default both), `--json` (raw
 results instead of the table). Example:
 
