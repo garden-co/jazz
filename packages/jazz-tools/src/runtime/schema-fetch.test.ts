@@ -107,6 +107,7 @@ describe("schema-fetch", () => {
     expect(result.hashes).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ]);
+    expect(result.schemas).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/schemas");
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
@@ -115,6 +116,39 @@ describe("schema-fetch", () => {
         "X-Jazz-Admin-Secret": "admin-secret",
       },
     });
+  });
+
+  it("fetches schema hash upload metadata when present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        hashes: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        schemas: [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            publishedAt: 1_744_011_200_000_000,
+          },
+        ],
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchSchemaHashes("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+    });
+
+    expect(result.hashes).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]);
+    expect(result.schemas).toEqual([
+      {
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        publishedAt: 1_744_011_200_000,
+      },
+    ]);
   });
 
   it("fetches the requested schema hash when provided", async () => {

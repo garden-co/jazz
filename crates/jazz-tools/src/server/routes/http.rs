@@ -25,8 +25,17 @@ use super::utils::{
 };
 
 #[derive(Debug, Serialize)]
-pub(super) struct SchemaHashesResponse {
+#[serde(rename_all = "camelCase")]
+pub(super) struct SchemaSummary {
+    hash: String,
+    published_at: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SchemaSummaryResponse {
+    #[deprecated(note = "Use `schemas` instead")]
     hashes: Vec<String>,
+    schemas: Vec<SchemaSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,7 +370,7 @@ pub(super) async fn schema_handler(
 pub(super) async fn schema_hashes_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Result<Json<SchemaSummaryResponse>, Response> {
     let admin_secret = headers
         .get("X-Jazz-Admin-Secret")
         .and_then(|v| v.to_str().ok());
@@ -369,7 +378,7 @@ pub(super) async fn schema_hashes_handler(
     match validate_admin_secret(admin_secret, &state.auth_config) {
         Ok(()) => {}
         Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+            return Err((status, Json(ErrorResponse::unauthorized(msg))).into_response());
         }
     }
 
@@ -383,25 +392,46 @@ pub(super) async fn schema_hashes_handler(
         )
         .await
         {
-            Ok(response) => response,
-            Err(error) => error.into_response(),
+            Ok(response) => Err(response),
+            Err(error) => Err(error.into_response()),
         };
     }
 
     match state.runtime.known_schema_hashes() {
         Ok(hashes) => {
-            let body = SchemaHashesResponse {
+            let mut schemas = Vec::with_capacity(hashes.len());
+            for hash in &hashes {
+                let published_at = match state.runtime.schema_published_at(hash) {
+                    Ok(timestamp) => timestamp,
+                    Err(err) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse::internal(format!(
+                                "failed to read schema publish timestamp: {err}"
+                            ))),
+                        )
+                            .into_response());
+                    }
+                };
+                schemas.push(SchemaSummary {
+                    hash: hash.to_string(),
+                    published_at,
+                });
+            }
+            #[allow(deprecated)]
+            let body = SchemaSummaryResponse {
                 hashes: hashes.iter().map(ToString::to_string).collect(),
+                schemas,
             };
-            Json(body).into_response()
+            Ok(Json(body))
         }
-        Err(err) => (
+        Err(err) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "failed to read schema hashes: {err}"
             ))),
         )
-            .into_response(),
+            .into_response()),
     }
 }
 
