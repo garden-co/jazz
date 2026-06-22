@@ -2,6 +2,7 @@ mod checksum;
 mod db;
 mod error;
 mod file;
+mod free_bitmap;
 mod leaf_hint;
 mod page;
 mod superblock;
