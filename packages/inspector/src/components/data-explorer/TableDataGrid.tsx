@@ -242,11 +242,15 @@ function parseQueuedEditForColumn(column: ColumnDescriptor, edit: QueuedCellEdit
   }
 }
 
+function hasColumnDefault(column: ColumnDescriptor): boolean {
+  return Object.prototype.hasOwnProperty.call(column, "default");
+}
+
 function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): QueuedRowEdits {
   const edits: QueuedRowEdits = {};
 
   for (const column of schemaColumns) {
-    if (getFieldReadOnlyReason(column) !== null) {
+    if (getFieldReadOnlyReason(column) !== null || hasColumnDefault(column)) {
       continue;
     }
 
@@ -277,10 +281,19 @@ function buildQueuedInsertValues(
       continue;
     }
 
-    const edit = queuedInsertEdits[column.name] ?? {
-      text: "",
-      isNull: column.nullable,
-    };
+    const edit = queuedInsertEdits[column.name];
+    if (!edit) {
+      if (hasColumnDefault(column)) {
+        continue;
+      }
+
+      values[column.name] = parseQueuedEditForColumn(column, {
+        text: "",
+        isNull: column.nullable,
+      });
+      continue;
+    }
+
     values[column.name] = parseQueuedEditForColumn(column, edit);
   }
 
