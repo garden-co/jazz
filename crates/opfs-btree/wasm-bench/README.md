@@ -6,7 +6,7 @@ Rust, in-process**, persisting to OPFS. There is no JavaScript in either query
 loop, so the comparison measures the storage engines, not calling convention.
 
 - **opfs-btree** — the Rust engine itself (`run_dataset_result` in
-  `src/wasm_bench.rs`), compiled into a Rust `gloo-worker`.
+  `src/btree_engine.rs`), compiled into a Rust `gloo-worker`.
 - **SQLite** — `rusqlite` linked against [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs)
   with the [`sqlite-wasm-vfs`](https://crates.io/crates/sqlite-wasm-vfs)
   **sahpool OPFS VFS** from the nested `sqlite/` package, compiled into a
@@ -21,8 +21,9 @@ engines produce **identical checksums** before exposing successful results.
 ## Datasets
 
 The benchmark consumes ready-to-run `.kv/.ops` fixtures committed under
-`public/data/`. The original source datasets are also vendored under `datasets/`
-as gzipped files for provenance — no download or network access is needed.
+`public/data/` — no download or network access is needed to run it. The
+fixtures were derived from the public sources below; the raw source data is not
+vendored in the tree.
 
 | Profile     | Fixture files                   | Source                                                         | License                     |
 | ----------- | ------------------------------- | -------------------------------------------------------------- | --------------------------- |
@@ -32,7 +33,33 @@ as gzipped files for provenance — no download or network access is needed.
 `objects` = Met museum-object metadata (medium structured records, ~900 B).
 `wikipedia` = real article wikitext (large text values), exercising the
 large-value path. The Met data is CC0 (no obligation); the Wikipedia text is
-CC BY-SA 4.0 (© Wikipedia contributors, share-alike — kept isolated in its gz).
+CC BY-SA 4.0 (© Wikipedia contributors, share-alike).
+
+### Re-downloading the source data
+
+`objects` — the Met's full object catalogue is a single git-LFS CSV in the
+openaccess repo:
+
+```bash
+curl -L https://media.githubusercontent.com/media/metmuseum/openaccess/master/MetObjects.csv -o MetObjects.csv
+```
+
+`wikipedia` — article wikitext comes from the MediaWiki API (`prop=revisions`,
+`rvprop=content`), one record per article. Example for a single title:
+
+```bash
+curl -G https://en.wikipedia.org/w/api.php \
+  --data-urlencode action=query \
+  --data-urlencode format=json \
+  --data-urlencode prop=revisions \
+  --data-urlencode rvslots=main \
+  --data-urlencode rvprop=content \
+  --data-urlencode titles='John Wyndham'
+```
+
+The committed `.kv/.ops` fixtures are derived from these sources (CSV rows /
+`{title, text}` JSONL → key/value records); the exact record selection used to
+build them is not scripted in the tree.
 
 ## Prerequisites
 

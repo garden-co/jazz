@@ -6,12 +6,14 @@ use wasm_bindgen::prelude::*;
 use crate::bench_dataset::{
     Phase, PhaseKind, RANGE_RESULT_LIMIT, RANGE_WINDOW_KEYS, decode_kv, decode_ops,
 };
-use crate::{BTreeOptions, OpfsBTree, OpfsFile};
+use opfs_btree::{BTreeOptions, OpfsBTree, OpfsFile};
 
 const BENCH_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const BENCH_OVERFLOW_THRESHOLD: usize = 4 * 1024;
 const BENCH_PIN_INTERNAL_PAGES: bool = true;
 const BENCH_READ_COALESCE_PAGES: usize = 4;
+const MIN_MEASURABLE_MS: f64 = 10.0;
+const MAX_LOOP_ITERATIONS: u32 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetPhaseResult {
@@ -89,14 +91,32 @@ pub async fn run_dataset_result(
         let started = now_ms();
         let (new_db, op_count, checksum) = replay_phase(db, phase, &keys, &vals, namespace).await?;
         db = new_db;
-        let elapsed = now_ms() - started;
+        let mut elapsed = now_ms() - started;
+        let mut total_ops = op_count;
+
+        if matches!(
+            phase.kind,
+            PhaseKind::GetSeq | PhaseKind::GetIndices | PhaseKind::RangeStarts
+        ) && elapsed < MIN_MEASURABLE_MS
+        {
+            let mut iterations = 1u32;
+            while elapsed < MIN_MEASURABLE_MS && iterations < MAX_LOOP_ITERATIONS {
+                let (new_db, ops2, _) =
+                    replay_phase(db, phase, &keys, &vals, namespace).await?;
+                db = new_db;
+                total_ops = total_ops.saturating_add(ops2);
+                elapsed = now_ms() - started;
+                iterations += 1;
+            }
+        }
+
         overall = overall.wrapping_add(checksum);
         phase_results.push(DatasetPhaseResult {
             phase: phase.name.clone(),
-            op_count,
+            op_count: total_ops,
             elapsed_ms: elapsed,
             ops_per_sec: if elapsed > 0.0 {
-                (op_count as f64) / (elapsed / 1000.0)
+                (total_ops as f64) / (elapsed / 1000.0)
             } else {
                 0.0
             },
@@ -124,7 +144,7 @@ async fn replay_phase(
     let n = keys.len() as u32;
     let mut checksum: u64 = 0;
     let mut ops: u32 = 0;
-    let map = |e: crate::BTreeError| JsValue::from_str(&e.to_string());
+    let map = |e: opfs_btree::BTreeError| JsValue::from_str(&e.to_string());
 
     match phase.kind {
         PhaseKind::LoadAll => {

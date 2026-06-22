@@ -30,7 +30,7 @@ impl Worker for BtreeWorker {
         spawn_local(async move {
             let result = async {
                 let (kv, ops) = fetch_dataset(&base_url, &profile).await?;
-                let result = opfs_btree::wasm_bench::run_dataset_result(&kv, &ops)
+                let result = crate::btree_engine::run_dataset_result(&kv, &ops)
                     .await
                     .map_err(js_error)?;
                 Ok(convert_btree_result(result))
@@ -60,7 +60,7 @@ fn result_to_worker_output(
     }
 }
 
-fn convert_btree_result(result: opfs_btree::wasm_bench::DatasetRunResult) -> EngineRunResult {
+fn convert_btree_result(result: crate::btree_engine::DatasetRunResult) -> EngineRunResult {
     EngineRunResult {
         engine: result.engine,
         profile: result.profile,
