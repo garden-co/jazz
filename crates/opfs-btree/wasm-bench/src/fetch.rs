@@ -1,10 +1,9 @@
 use gloo_net::http::Request;
 
-pub async fn fetch_dataset(base_url: &str, profile: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+/// Fetch a committed fixture (e.g. `objects.kv`) served under `/data/`.
+pub async fn fetch_data(base_url: &str, fixture: &str) -> Result<Vec<u8>, String> {
     let base_url = base_url.trim_end_matches('/');
-    let kv = fetch_bytes(&format!("{base_url}/data/{profile}.kv")).await?;
-    let ops = fetch_bytes(&format!("{base_url}/data/{profile}.ops")).await?;
-    Ok((kv, ops))
+    fetch_bytes(&format!("{base_url}/data/{fixture}")).await
 }
 
 async fn fetch_bytes(path: &str) -> Result<Vec<u8>, String> {

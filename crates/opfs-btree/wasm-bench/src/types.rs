@@ -24,6 +24,28 @@ pub struct EngineRunResult {
     pub checksum: u64,
 }
 
+impl From<bench_core::DatasetRunResult> for EngineRunResult {
+    fn from(result: bench_core::DatasetRunResult) -> Self {
+        EngineRunResult {
+            engine: result.engine,
+            profile: result.profile,
+            record_count: result.record_count,
+            phases: result
+                .phases
+                .into_iter()
+                .map(|phase| PhaseResult {
+                    phase: phase.phase,
+                    op_count: phase.op_count,
+                    elapsed_ms: phase.elapsed_ms,
+                    ops_per_sec: phase.ops_per_sec,
+                    checksum: phase.checksum,
+                })
+                .collect(),
+            checksum: result.checksum,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkerFailure {
     pub engine: String,

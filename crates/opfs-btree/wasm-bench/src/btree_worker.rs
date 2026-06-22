@@ -1,8 +1,10 @@
 use gloo_worker::{HandlerId, Worker, WorkerScope};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::fetch::fetch_dataset;
-use crate::types::{EngineRunResult, PhaseResult, RunProfile, WorkerFailure, WorkerResult};
+use crate::btree_engine::BtreeEngine;
+use crate::clock::now_ms;
+use crate::fetch::fetch_data;
+use crate::types::{EngineRunResult, RunProfile, WorkerFailure, WorkerResult};
 
 pub struct BtreeWorker;
 
@@ -28,21 +30,21 @@ impl Worker for BtreeWorker {
         let profile = request.profile.clone();
         let scope = scope.clone();
         spawn_local(async move {
-            let result = async {
-                let (kv, ops) = fetch_dataset(&base_url, &profile).await?;
-                let result = crate::btree_engine::run_dataset_result(&kv, &ops)
-                    .await
-                    .map_err(js_error)?;
-                Ok(convert_btree_result(result))
-            }
-            .await;
+            let result = run_btree_dataset(&base_url, &profile).await;
             scope.send_message((id, request, result));
         });
     }
 }
 
-fn js_error(value: wasm_bindgen::JsValue) -> String {
-    value.as_string().unwrap_or_else(|| format!("{value:?}"))
+async fn run_btree_dataset(base_url: &str, profile: &str) -> Result<EngineRunResult, String> {
+    let benchmark = bench_core::benchmark(profile).ok_or_else(|| format!("unknown profile: {profile}"))?;
+    let kv = fetch_data(base_url, &benchmark.kv_fixture).await?;
+    let dataset = bench_core::decode_kv(&kv).map_err(|e| e.to_string())?;
+    let mut engine = BtreeEngine::open().await.map_err(|e| e.to_string())?;
+    let result = bench_core::run(&mut engine, "opfs_btree", &benchmark, &dataset, &now_ms)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.into())
 }
 
 fn result_to_worker_output(
@@ -57,25 +59,5 @@ fn result_to_worker_output(
             profile,
             error,
         }),
-    }
-}
-
-fn convert_btree_result(result: crate::btree_engine::DatasetRunResult) -> EngineRunResult {
-    EngineRunResult {
-        engine: result.engine,
-        profile: result.profile,
-        record_count: result.record_count,
-        phases: result
-            .phases
-            .into_iter()
-            .map(|phase| PhaseResult {
-                phase: phase.phase,
-                op_count: phase.op_count,
-                elapsed_ms: phase.elapsed_ms,
-                ops_per_sec: phase.ops_per_sec,
-                checksum: phase.checksum,
-            })
-            .collect(),
-        checksum: result.checksum,
     }
 }
