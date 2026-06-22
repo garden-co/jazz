@@ -21,6 +21,7 @@ fn benchmark_options() -> BTreeOptions {
         overflow_threshold: BENCH_OVERFLOW_THRESHOLD,
         pin_internal_pages: BENCH_PIN_INTERNAL_PAGES,
         read_coalesce_pages: BENCH_READ_COALESCE_PAGES,
+        compress_overflow: true,
     }
 }
 

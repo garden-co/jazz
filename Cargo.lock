@@ -2486,6 +2486,7 @@ name = "opfs-btree"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "lz4_flex",
  "rustc-hash",
  "serde",
  "serde-wasm-bindgen 0.6.5",

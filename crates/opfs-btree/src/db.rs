@@ -42,6 +42,9 @@ pub struct BTreeOptions {
     pub overflow_threshold: usize,
     pub pin_internal_pages: bool,
     pub read_coalesce_pages: usize,
+    /// Compress overflow values (lz4) before writing the extent. Falls back to
+    /// storing raw bytes when compression would not shrink the value.
+    pub compress_overflow: bool,
 }
 
 impl Default for BTreeOptions {
@@ -52,6 +55,7 @@ impl Default for BTreeOptions {
             overflow_threshold: DEFAULT_OVERFLOW_THRESHOLD,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            compress_overflow: true,
         }
     }
 }
@@ -129,11 +133,37 @@ struct SplitResult {
 
 type KvPair = (Vec<u8>, Vec<u8>);
 
+// How an overflow value will be written, decided once and shared by the build
+// and reuse paths.
+struct PreparedOverflow<'a> {
+    /// Bytes to write across the extent (compressed or raw).
+    stored: Cow<'a, [u8]>,
+    /// Logical value length recorded in the leaf cell.
+    total_len: u32,
+    /// On-disk byte count; equals `stored.len()`.
+    stored_len: u32,
+    /// Whether `stored` is lz4-compressed.
+    compressed: bool,
+}
+
+impl PreparedOverflow<'_> {
+    fn cell(&self, head_page_id: PageId) -> ValueCell {
+        ValueCell::Overflow {
+            head_page_id,
+            total_len: self.total_len,
+            stored_len: self.stored_len,
+            compressed: self.compressed,
+        }
+    }
+}
+
 enum StagedValue {
     Inline(Vec<u8>),
     Overflow {
         head_page_id: PageId,
-        total_len: usize,
+        total_len: u32,
+        stored_len: u32,
+        compressed: bool,
     },
 }
 
@@ -231,8 +261,10 @@ impl<F: SyncFile> OpfsBTree<F> {
             Some(ValueCellRef::Overflow {
                 head_page_id,
                 total_len,
+                stored_len,
+                compressed,
             }) => self
-                .read_overflow_value(head_page_id, total_len as usize)
+                .read_overflow_value(head_page_id, stored_len, total_len, compressed)
                 .map(Some),
         }
     }
@@ -246,7 +278,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         .entered();
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
-            let value_cell = self.build_value_cell(value)?;
+            let value_cell = self.build_value_cell_for_existing(None, value)?.0;
             let leaf = Page::Leaf {
                 entries: vec![(key.to_vec(), value_cell)],
                 next: None,
@@ -282,7 +314,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     if let Some(old_overflow) = old_overflow {
                         self.free_overflow_extent(
                             old_overflow.head_page_id,
-                            old_overflow.total_len as usize,
+                            old_overflow.stored_len as usize,
                         )?;
                     }
                     return Ok(());
@@ -373,9 +405,13 @@ impl<F: SyncFile> OpfsBTree<F> {
                     ValueCellRef::Overflow {
                         head_page_id,
                         total_len,
+                        stored_len,
+                        compressed,
                     } => StagedValue::Overflow {
                         head_page_id,
-                        total_len: total_len as usize,
+                        total_len,
+                        stored_len,
+                        compressed,
                     },
                 };
                 staged.push((key.to_vec(), staged_value));
@@ -388,7 +424,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                     StagedValue::Overflow {
                         head_page_id,
                         total_len,
-                    } => self.read_overflow_value(head_page_id, total_len)?,
+                        stored_len,
+                        compressed,
+                    } => {
+                        self.read_overflow_value(head_page_id, stored_len, total_len, compressed)?
+                    }
                 };
                 out.push((key, value));
                 if out.len() == limit {
@@ -401,6 +441,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             current = next;
         }
 
+        // The loop may not run when there is no leaf at `start`; otherwise,
+        // keep the final scanned page as the next pagination hint.
         if let Some(page_id) = last_scanned {
             self.remember_leaf_hint_if_not_mru(page_id)?;
         }
@@ -537,17 +579,18 @@ impl<F: SyncFile> OpfsBTree<F> {
                     if value.len() <= self.options.overflow_threshold {
                         (ValueCell::Inline(value.to_vec()), None)
                     } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
-                        (self.build_value_cell(value)?, None)
+                        (self.build_value_cell_for_existing(None, value)?.0, None)
                     } else {
                         let existing_overflow = {
                             let raw = self.raw_page_bytes(page_id)?;
                             match raw_leaf_find_value(raw, self.options.page_size, key)? {
                                 Some(ValueCellRef::Overflow {
                                     head_page_id,
-                                    total_len,
+                                    stored_len,
+                                    ..
                                 }) => Some(OverflowRef {
                                     head_page_id,
-                                    total_len,
+                                    stored_len,
                                 }),
                                 _ => None,
                             }
@@ -575,7 +618,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                         {
                             self.free_overflow_extent(
                                 old_overflow.head_page_id,
-                                old_overflow.total_len as usize,
+                                old_overflow.stored_len as usize,
                             )?;
                         }
                         return Ok(None);
@@ -718,7 +761,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                         if let Some(old_overflow) = old_overflow {
                             self.free_overflow_extent(
                                 old_overflow.head_page_id,
-                                old_overflow.total_len as usize,
+                                old_overflow.stored_len as usize,
                             )?;
                         }
                         Ok(true)
@@ -733,7 +776,36 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
+    // Reads an overflow value, transparently decompressing when the extent was
+    // stored compressed. `stored_len` is the on-disk byte count (drives the page
+    // count); `total_len` is the logical length returned to the caller.
     fn read_overflow_value(
+        &mut self,
+        head_page_id: PageId,
+        stored_len: u32,
+        total_len: u32,
+        compressed: bool,
+    ) -> Result<Vec<u8>, BTreeError> {
+        let stored = self.read_overflow_stored(head_page_id, stored_len as usize)?;
+        if !compressed {
+            return Ok(stored);
+        }
+        let value = lz4_flex::decompress(&stored, total_len as usize)
+            .map_err(|err| BTreeError::Corrupt(format!("overflow decompress failed: {err}")))?;
+        if value.len() != total_len as usize {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow decompressed length mismatch: expected {}, found {}",
+                total_len,
+                value.len()
+            )));
+        }
+        Ok(value)
+    }
+
+    // Assembles `expected_len` bytes (the on-disk/stored length) from the extent
+    // starting at `head_page_id`, using a direct file read for large clean
+    // extents and the page cache otherwise.
+    fn read_overflow_stored(
         &mut self,
         head_page_id: PageId,
         expected_len: usize,
@@ -857,20 +929,23 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn free_value_cell(&mut self, value: ValueCell) -> Result<(), BTreeError> {
         if let ValueCell::Overflow {
             head_page_id,
-            total_len,
+            stored_len,
+            ..
         } = value
         {
-            self.free_overflow_extent(head_page_id, total_len as usize)?;
+            self.free_overflow_extent(head_page_id, stored_len as usize)?;
         }
         Ok(())
     }
 
+    // `stored_len` is the on-disk byte count of the extent (compressed when
+    // applicable), which determines how many pages it occupies.
     fn free_overflow_extent(
         &mut self,
         head_page_id: PageId,
-        total_len: usize,
+        stored_len: usize,
     ) -> Result<(), BTreeError> {
-        let page_count = overflow_pages_for_len(total_len, self.options.page_size);
+        let page_count = overflow_pages_for_len(stored_len, self.options.page_size);
 
         for idx in 0..page_count {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
@@ -942,19 +1017,47 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    fn build_value_cell(&mut self, value: &[u8]) -> Result<ValueCell, BTreeError> {
-        if value.len() <= self.options.overflow_threshold {
-            return Ok(ValueCell::Inline(value.to_vec()));
-        }
-
-        let max_chunk = self.options.page_size;
-
+    // Decides how an overflow value is stored: lz4-compressed when enabled and
+    // the result shrinks, otherwise raw. Returns the stored bytes plus the
+    // metadata recorded in the leaf cell.
+    fn prepare_overflow_stored<'a>(
+        &self,
+        value: &'a [u8],
+    ) -> Result<PreparedOverflow<'a>, BTreeError> {
         let total_len = u32::try_from(value.len())
             .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
-        let page_count = overflow_pages_for_len(value.len(), max_chunk);
-        let head_page_id = self.alloc_extent_pages(page_count)?;
+        let (stored, compressed) = if self.options.compress_overflow {
+            let compressed = lz4_flex::compress(value);
+            if compressed.len() < value.len() {
+                (Cow::Owned(compressed), true)
+            } else {
+                // Incompressible data (already-compressed media, random bytes):
+                // store raw so we never expand the extent.
+                (Cow::Borrowed(value), false)
+            }
+        } else {
+            (Cow::Borrowed(value), false)
+        };
+        let stored_len = u32::try_from(stored.len())
+            .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
+        Ok(PreparedOverflow {
+            stored,
+            total_len,
+            stored_len,
+            compressed,
+        })
+    }
 
-        let mut remaining = value;
+    // Writes `stored` across the contiguous extent at `head_page_id`, one page
+    // per chunk (the final page is zero-padded).
+    fn write_overflow_extent(
+        &mut self,
+        head_page_id: PageId,
+        stored: &[u8],
+    ) -> Result<(), BTreeError> {
+        let max_chunk = self.options.page_size;
+        let page_count = overflow_pages_for_len(stored.len(), max_chunk);
+        let mut remaining = stored;
         for idx in 0..page_count {
             let consume = remaining.len().min(max_chunk);
             let chunk = &remaining[..consume];
@@ -966,13 +1069,13 @@ impl<F: SyncFile> OpfsBTree<F> {
             let raw = build_blob_page(chunk, self.options.page_size)?;
             self.set_dirty_blob_page(page_id, raw);
         }
-
-        Ok(ValueCell::Overflow {
-            head_page_id,
-            total_len,
-        })
+        Ok(())
     }
 
+    // Builds the value cell for `value`, reusing `existing_overflow`'s extent in
+    // place when the (post-compression) value fits within it. Passing `None`
+    // always allocates a fresh extent. The returned page id is the reused extent
+    // head, if any, so the caller can avoid freeing it.
     fn build_value_cell_for_existing(
         &mut self,
         existing_overflow: Option<OverflowRef>,
@@ -981,47 +1084,42 @@ impl<F: SyncFile> OpfsBTree<F> {
         if value.len() <= self.options.overflow_threshold {
             return Ok((ValueCell::Inline(value.to_vec()), None));
         }
+
+        let prepared = self.prepare_overflow_stored(value)?;
+        let max_chunk = self.options.page_size;
+        let needed_pages = overflow_pages_for_len(prepared.stored.len(), max_chunk);
+
+        // The reuse decision is on the stored (post-compression) page counts, so
+        // a value that compresses smaller can keep reusing the existing extent.
         if let Some(existing) = existing_overflow {
-            let max_chunk = self.options.page_size;
-            let existing_pages = overflow_pages_for_len(existing.total_len as usize, max_chunk);
-            let needed_pages = overflow_pages_for_len(value.len(), max_chunk);
+            let existing_pages = overflow_pages_for_len(existing.stored_len as usize, max_chunk);
             if needed_pages <= existing_pages {
                 let cell =
-                    self.rewrite_overflow_extent(existing.head_page_id, existing_pages, value)?;
+                    self.rewrite_overflow_extent(existing.head_page_id, existing_pages, &prepared)?;
                 return Ok((cell, Some(existing.head_page_id)));
             }
         }
-        Ok((self.build_value_cell(value)?, None))
+
+        let head_page_id = self.alloc_extent_pages(needed_pages)?;
+        self.write_overflow_extent(head_page_id, &prepared.stored)?;
+        Ok((prepared.cell(head_page_id), None))
     }
 
     fn rewrite_overflow_extent(
         &mut self,
         head_page_id: PageId,
         existing_pages: usize,
-        value: &[u8],
+        prepared: &PreparedOverflow<'_>,
     ) -> Result<ValueCell, BTreeError> {
         let max_chunk = self.options.page_size;
-
-        let total_len = u32::try_from(value.len())
-            .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
-        let needed_pages = value.len().div_ceil(max_chunk).max(1);
+        let needed_pages = overflow_pages_for_len(prepared.stored.len(), max_chunk);
         if needed_pages > existing_pages {
             return Err(BTreeError::Corrupt(
                 "overflow extent rewrite requires additional pages".to_string(),
             ));
         }
 
-        let mut remaining = value;
-        for idx in 0..needed_pages {
-            let consume = remaining.len().min(max_chunk);
-            let chunk = &remaining[..consume];
-            remaining = &remaining[consume..];
-            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
-                BTreeError::Corrupt("overflow extent page id overflow".to_string())
-            })?;
-            let raw = build_blob_page(chunk, self.options.page_size)?;
-            self.set_dirty_blob_page(page_id, raw);
-        }
+        self.write_overflow_extent(head_page_id, &prepared.stored)?;
 
         for idx in needed_pages..existing_pages {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
@@ -1031,10 +1129,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.add_free_page(page_id);
         }
 
-        Ok(ValueCell::Overflow {
-            head_page_id,
-            total_len,
-        })
+        Ok(prepared.cell(head_page_id))
     }
 
     fn find_leaf_page_id(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
@@ -2140,6 +2235,8 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            // Overflow mechanics tests assert page counts on raw value sizes.
+            compress_overflow: false,
         }
     }
 
@@ -2150,6 +2247,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            compress_overflow: false,
         }
     }
 
@@ -2544,6 +2642,82 @@ mod tests {
             !tree.free_bitmap.is_empty(),
             "shrinking overflow value should return tail pages to free list"
         );
+    }
+
+    fn compress_options() -> BTreeOptions {
+        let mut options = small_options();
+        options.compress_overflow = true;
+        options
+    }
+
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        let mut state = 0x1234_5678u32;
+        for b in out.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (state >> 24) as u8;
+        }
+        out
+    }
+
+    fn total_pages_for(options: BTreeOptions, value: &[u8]) -> u64 {
+        let mut tree = OpfsBTree::open(MemoryFile::new(), options).expect("open tree");
+        tree.put(b"k", value).expect("put");
+        tree.total_pages
+    }
+
+    #[test]
+    fn compressed_overflow_round_trips_and_uses_fewer_pages() {
+        let value = vec![7u8; 100_000]; // far above the overflow threshold, all equal
+        let mut tree = OpfsBTree::open(MemoryFile::new(), compress_options()).expect("open tree");
+        tree.put(b"k", &value).expect("put");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(value.clone()));
+
+        let raw_pages = total_pages_for(small_options(), &value);
+        assert!(
+            tree.total_pages < raw_pages,
+            "compression should shrink the extent: {} vs {}",
+            tree.total_pages,
+            raw_pages
+        );
+    }
+
+    #[test]
+    fn incompressible_overflow_round_trips_without_expanding() {
+        let value = pseudo_random_bytes(50_000);
+        let mut tree = OpfsBTree::open(MemoryFile::new(), compress_options()).expect("open tree");
+        tree.put(b"k", &value).expect("put");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(value.clone()));
+
+        // The raw fallback must never use more pages than storing uncompressed.
+        let raw_pages = total_pages_for(small_options(), &value);
+        assert_eq!(
+            tree.total_pages, raw_pages,
+            "incompressible value should fall back to raw storage"
+        );
+    }
+
+    #[test]
+    fn compressed_overflow_survives_checkpoint_and_reopen() {
+        let file = MemoryFile::new();
+        let value = vec![9u8; 80_000];
+        {
+            let mut tree = OpfsBTree::open(file.clone(), compress_options()).expect("open tree");
+            tree.put(b"k", &value).expect("put");
+            tree.checkpoint().expect("checkpoint");
+        }
+        let mut tree = OpfsBTree::open(file, compress_options()).expect("reopen tree");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(value));
+    }
+
+    #[test]
+    fn compressed_overflow_update_round_trips() {
+        let mut tree = OpfsBTree::open(MemoryFile::new(), compress_options()).expect("open tree");
+        let v1 = vec![1u8; 90_000];
+        let v2 = vec![2u8; 60_000];
+        tree.put(b"k", &v1).expect("put v1");
+        tree.put(b"k", &v2).expect("put v2");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(v2));
     }
 
     #[test]
@@ -2979,6 +3153,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            compress_overflow: false,
         };
         let mut tree = OpfsBTree::open(file, options).expect("open tree");
         let max_cached = tree.max_cached_pages();

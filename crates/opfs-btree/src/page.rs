@@ -27,7 +27,13 @@ pub(crate) enum ValueCell {
     Inline(Vec<u8>),
     Overflow {
         head_page_id: PageId,
+        /// Logical value length returned to the caller.
         total_len: u32,
+        /// Bytes actually written across the extent (compressed length, or the
+        /// logical length when stored uncompressed). Drives the page count.
+        stored_len: u32,
+        /// Whether the stored bytes are lz4-compressed.
+        compressed: bool,
     },
 }
 
@@ -37,13 +43,18 @@ pub(crate) enum ValueCellRef<'a> {
     Overflow {
         head_page_id: PageId,
         total_len: u32,
+        stored_len: u32,
+        compressed: bool,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OverflowRef {
     pub head_page_id: PageId,
-    pub total_len: u32,
+    /// On-disk byte count of the extent; used to compute its page count when
+    /// freeing or reusing it. (The logical length lives on `ValueCell`, which is
+    /// where reads need it; freeing/reuse only care about physical pages.)
+    pub stored_len: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -981,7 +992,8 @@ fn encoded_payload_len(page: &Page) -> Result<usize, BTreeError> {
                     ValueCell::Inline(bytes) => bytes.len().checked_add(5).ok_or_else(|| {
                         BTreeError::InvalidOptions("inline value too large".to_string())
                     })?,
-                    ValueCell::Overflow { .. } => 13,
+                    // tag(1) + head(8) + flag(1) + stored_len(4) + total_len(4)
+                    ValueCell::Overflow { .. } => 18,
                 };
                 len = len
                     .checked_add(key.len())
@@ -1071,11 +1083,37 @@ fn parse_leaf_value_cell<'a>(
             Ok(ValueCellRef::Inline(value))
         }
         1 => {
+            // Legacy uncompressed overflow: the stored bytes are the value
+            // itself, so the stored and logical lengths coincide.
             let head_page_id = take_u64(payload, cursor, "overflow head")?;
             let total_len = take_u32(payload, cursor, "overflow length")?;
             Ok(ValueCellRef::Overflow {
                 head_page_id,
                 total_len,
+                stored_len: total_len,
+                compressed: false,
+            })
+        }
+        2 => {
+            let head_page_id = take_u64(payload, cursor, "overflow head")?;
+            let flag = take_u8(payload, cursor, "overflow flag")?;
+            let stored_len = take_u32(payload, cursor, "overflow stored length")?;
+            let total_len = take_u32(payload, cursor, "overflow length")?;
+            let compressed = match flag {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "invalid overflow compression flag {}",
+                        flag
+                    )));
+                }
+            };
+            Ok(ValueCellRef::Overflow {
+                head_page_id,
+                total_len,
+                stored_len,
+                compressed,
             })
         }
         _ => Err(BTreeError::Corrupt(format!(
@@ -1092,9 +1130,13 @@ fn decode_leaf_value_cell_at(payload: &[u8], value_offset: usize) -> Result<Valu
         ValueCellRef::Overflow {
             head_page_id,
             total_len,
+            stored_len,
+            compressed,
         } => Ok(ValueCell::Overflow {
             head_page_id,
             total_len,
+            stored_len,
+            compressed,
         }),
     }
 }
@@ -1136,9 +1178,13 @@ fn encode_leaf_value_cell_ref(
         ValueCellRef::Overflow {
             head_page_id,
             total_len,
+            stored_len,
+            compressed,
         } => {
-            out.push(1);
+            out.push(2);
             out.extend_from_slice(&head_page_id.to_le_bytes());
+            out.push(if compressed { 1 } else { 0 });
+            out.extend_from_slice(&stored_len.to_le_bytes());
             out.extend_from_slice(&total_len.to_le_bytes());
             Ok(())
         }
@@ -1151,9 +1197,13 @@ fn value_cell_as_ref(value: &ValueCell) -> ValueCellRef<'_> {
         ValueCell::Overflow {
             head_page_id,
             total_len,
+            stored_len,
+            compressed,
         } => ValueCellRef::Overflow {
             head_page_id: *head_page_id,
             total_len: *total_len,
+            stored_len: *stored_len,
+            compressed: *compressed,
         },
     }
 }
@@ -1163,10 +1213,11 @@ fn overflow_from_value_ref(value: ValueCellRef<'_>) -> Option<OverflowRef> {
         ValueCellRef::Inline(_) => None,
         ValueCellRef::Overflow {
             head_page_id,
-            total_len,
+            stored_len,
+            ..
         } => Some(OverflowRef {
             head_page_id,
-            total_len,
+            stored_len,
         }),
     }
 }
@@ -1588,6 +1639,27 @@ fn take_bytes<'a>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_overflow_tag_decodes_as_uncompressed() {
+        // A pre-compression cell: tag 1, head u64, total_len u32.
+        let mut payload = vec![1u8];
+        payload.extend_from_slice(&77u64.to_le_bytes());
+        payload.extend_from_slice(&1024u32.to_le_bytes());
+
+        let mut cursor = 0;
+        let cell = parse_leaf_value_cell(&payload, &mut cursor).expect("parse legacy overflow");
+        assert_eq!(
+            cell,
+            ValueCellRef::Overflow {
+                head_page_id: 77,
+                total_len: 1024,
+                stored_len: 1024,
+                compressed: false,
+            }
+        );
+        assert_eq!(cursor, 13, "legacy overflow cell is 13 bytes");
+    }
+
     fn sample_leaf_page(next: Option<PageId>) -> Vec<u8> {
         encode_page(
             &Page::Leaf {
@@ -1696,6 +1768,8 @@ mod tests {
                             ValueCell::Overflow {
                                 head_page_id: 500 + i as PageId,
                                 total_len: 9000,
+                                stored_len: 9000,
+                                compressed: false,
                             }
                         } else {
                             ValueCell::Inline(vec![7u8; 10 + i])
@@ -1732,6 +1806,8 @@ mod tests {
                     ValueCell::Overflow {
                         head_page_id: 44,
                         total_len: 999,
+                        stored_len: 999,
+                        compressed: false,
                     },
                 ),
             ],
@@ -1880,6 +1956,8 @@ mod tests {
                     ValueCell::Overflow {
                         head_page_id: 77,
                         total_len: 1024,
+                        stored_len: 1024,
+                        compressed: false,
                     },
                 )],
                 next: None,
@@ -1894,7 +1972,7 @@ mod tests {
             RawLeafDeleteResult::Deleted {
                 old_overflow: Some(OverflowRef {
                     head_page_id: 77,
-                    total_len: 1024,
+                    stored_len: 1024,
                 }),
                 is_empty: true,
             }
