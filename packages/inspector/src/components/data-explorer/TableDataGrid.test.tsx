@@ -290,7 +290,7 @@ describe("TableDataGrid", () => {
 
     const titleCell = screen.getByRole("gridcell", { name: "zeta" });
     fireEvent.click(titleCell);
-    expect(getContainingRow(screen.getByText("zeta"))?.className).not.toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("zeta"))?.className).toContain("rowSelected");
 
     fireEvent.doubleClick(titleCell);
     const titleEditor = screen.getByLabelText("Edit title");
@@ -765,11 +765,23 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("1 staged insert")).toBeNull();
   });
 
+  it("selects only the clicked row on plain cell clicks", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).not.toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-1" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).not.toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).toContain("rowSelected");
+  });
+
   it("queues a shift-click selected row range for deletion", async () => {
     renderGrid();
 
     fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
-    expect(getContainingRow(screen.getByText("row-2"))?.className).not.toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
 
     fireEvent.click(screen.getByRole("gridcell", { name: "row-1" }), { shiftKey: true });
 
