@@ -68,7 +68,7 @@ const mockWasmSchema = {
         name: "status",
         column_type: { type: "Enum", variants: ["open", "closed"] },
         nullable: false,
-        default: "open",
+        default: { type: "Text", value: "open" },
       },
     ],
   },
@@ -654,6 +654,14 @@ describe("TableDataGrid", () => {
     expect(screen.queryByRole("heading", { name: "Insert row" })).toBeNull();
 
     const stagedCells = getCellsInRowContaining("staged");
+    const initialStagedRow = getContainingRow(screen.getByText("staged"));
+    expect(initialStagedRow).not.toBeNull();
+    const statusCell = stagedCells[7];
+    expect(statusCell).not.toBeUndefined();
+    expect(within(statusCell as HTMLElement).getByText("open")).not.toBeNull();
+    expect(within(initialStagedRow as HTMLElement).getAllByText("<null>").length).toBeGreaterThan(
+      0,
+    );
 
     fireEvent.doubleClick(stagedCells[1] as HTMLElement);
     const titleEditor = screen.getByLabelText("Edit title");
