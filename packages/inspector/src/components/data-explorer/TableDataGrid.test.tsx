@@ -67,7 +67,8 @@ const mockWasmSchema = {
       {
         name: "status",
         column_type: { type: "Enum", variants: ["open", "closed"] },
-        nullable: true,
+        nullable: false,
+        default: "open",
       },
     ],
   },
@@ -681,6 +682,8 @@ describe("TableDataGrid", () => {
       );
       expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
     });
+
+    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
   it("queues multiple staged insert rows and inserts them from the banner", async () => {
