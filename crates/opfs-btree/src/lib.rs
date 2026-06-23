@@ -6,8 +6,6 @@ mod leaf_hint;
 mod page;
 mod superblock;
 mod wal;
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_bench;
 
 pub use db::{BTreeOptions, CheckpointState, OpfsBTree};
 pub use error::BTreeError;
