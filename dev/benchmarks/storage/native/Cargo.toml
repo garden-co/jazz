@@ -12,6 +12,10 @@ harness = false
 [dev-dependencies]
 bench-core = { package = "jazz-storage-bench-core", path = "../bench-core" }
 criterion = "0.5"
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"] }
+redb = "4.1"
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3"
