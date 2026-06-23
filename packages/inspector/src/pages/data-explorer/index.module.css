@@ -59,6 +59,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
   padding: 12px 12px 8px;
 }
 
@@ -66,11 +67,15 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   font-size: 11px;
   color: #8996a8;
 }
 
 .propagationLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-transform: none;
   letter-spacing: normal;
 }
@@ -94,6 +99,10 @@
 .tableLink {
   flex: 1 1 auto;
   display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-decoration: none;
   color: #8d9ab0;
   border-radius: 6px;
