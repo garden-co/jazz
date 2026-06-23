@@ -28,6 +28,7 @@ export interface JazzRnRuntimeBinding {
   disconnect(): void;
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
+  composeBranchName?(userBranch: string): string;
   delete_(objectId: string, writeContextJson: string | undefined): string;
   getSchemaHash(): string;
   insert(
@@ -382,6 +383,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   getSchemaHash(): string {
     return this.binding.getSchemaHash();
+  }
+
+  composeBranchName(userBranch: string): string {
+    if (!this.binding.composeBranchName) {
+      throw new Error("Branch composition is not available in this React Native runtime");
+    }
+    return this.binding.composeBranchName(userBranch);
   }
 
   close(): void {

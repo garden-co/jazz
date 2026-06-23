@@ -34,6 +34,7 @@ export declare class NapiRuntime {
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
   getSchema(): any
   getSchemaHash(): string
+  composeBranchName(userBranch: string): string
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void

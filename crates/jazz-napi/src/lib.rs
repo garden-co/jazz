@@ -826,6 +826,19 @@ impl NapiRuntime {
         Ok(SchemaHash::compute(schema).to_string())
     }
 
+    #[napi(js_name = "composeBranchName")]
+    pub fn compose_branch_name(&self, user_branch: String) -> napi::Result<String> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core
+            .schema_manager()
+            .compose_branch_name(&user_branch)
+            .as_str()
+            .to_string())
+    }
+
     #[napi]
     pub fn flush(&self) -> napi::Result<()> {
         let core = self

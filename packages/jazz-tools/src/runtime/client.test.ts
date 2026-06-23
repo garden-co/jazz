@@ -90,6 +90,7 @@ function makeFakeRuntime() {
     rollbackBatch: vi.fn<Runtime["rollbackBatch"]>(() => false),
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
+    composeBranchName: vi.fn((userBranch: string) => `dev-hash-${userBranch}`),
     close: vi.fn(),
   } satisfies Runtime;
 

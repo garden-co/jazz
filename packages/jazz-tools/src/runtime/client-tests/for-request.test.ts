@@ -205,6 +205,7 @@ describe("JazzClient runtime helpers", () => {
       unsubscribe: () => {},
       getSchema: () => ({}),
       getSchemaHash: () => "schema-hash",
+      composeBranchName: (userBranch: string) => `dev-schema-${userBranch}`,
     };
 
     const JazzClientCtor = JazzClient as unknown as {

@@ -1983,6 +1983,16 @@ impl WasmRuntime {
         SchemaHash::compute(schema).to_string()
     }
 
+    /// Compose a raw user branch name for the current environment and schema.
+    #[wasm_bindgen(js_name = composeBranchName)]
+    pub fn compose_branch_name(&self, user_branch: &str) -> String {
+        let core = self.core.borrow();
+        core.schema_manager()
+            .compose_branch_name(user_branch)
+            .as_str()
+            .to_string()
+    }
+
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
     #[wasm_bindgen(js_name = __debugSchemaState)]
     pub fn debug_schema_state(&self) -> Result<JsValue, JsError> {

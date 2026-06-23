@@ -31,6 +31,10 @@ export interface WasmRow {
 
 export type FFIRow = WasmRow;
 
+export interface RuntimeBranchComposer {
+  composeBranchName(userBranch: string): string;
+}
+
 export type RowAdded = 0;
 export type RowRemoved = 1;
 export type RowUpdated = 2;

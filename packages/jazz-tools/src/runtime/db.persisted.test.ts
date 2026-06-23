@@ -112,6 +112,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
     );
     expect(pending.batchId).toBe("batch-insert");
     expect(pending.value).toEqual({
@@ -151,8 +152,9 @@ describe("Db write handles", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
     );
-    expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined);
+    expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined, undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
@@ -208,6 +210,7 @@ describe("Db write handles", () => {
       undefined,
       session,
       "alice@writer",
+      undefined,
     );
     expect(update).toHaveBeenCalledWith(
       "todo-2",
@@ -217,8 +220,9 @@ describe("Db write handles", () => {
       undefined,
       session,
       "alice@writer",
+      undefined,
     );
-    expect(deleteRow).toHaveBeenCalledWith("todo-2", undefined, session, "alice@writer");
+    expect(deleteRow).toHaveBeenCalledWith("todo-2", undefined, session, "alice@writer", undefined);
     expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",

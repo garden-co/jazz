@@ -18,6 +18,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     ),
     executeSubscription: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
+    composeBranchName: vi.fn((userBranch: string) => `dev-schema-${userBranch}`),
     waitForBatch: vi.fn(async () => undefined),
     beginBatch: vi.fn((batchMode) => `batch-${batchMode}`),
     rollbackBatch: vi.fn(() => true),

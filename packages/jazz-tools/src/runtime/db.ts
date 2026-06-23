@@ -2262,6 +2262,7 @@ export class Db {
       options,
       context?.session,
       context?.attribution,
+      branchId,
     );
     return this.wrapWriteWait(
       inserted.mapValue((row) =>
@@ -2345,7 +2346,7 @@ export class Db {
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.update(id, updates, options, context?.session, context?.attribution),
+      client.update(id, updates, options, context?.session, context?.attribution, branchId),
     );
   }
 
@@ -2366,7 +2367,9 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema, branchId);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
+    return this.wrapWriteWait(
+      client.delete(id, options, context?.session, context?.attribution, branchId),
+    );
   }
 
   /**
@@ -2548,8 +2551,8 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     const rows =
       context || usesRelationTraversal
-        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
-        : await client.query(wasmQuery, queryOptions);
+        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session, branchId)
+        : await client.query(wasmQuery, queryOptions, undefined, branchId);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
