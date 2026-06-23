@@ -3,8 +3,8 @@ use std::{cmp::Ordering, ops::Bound};
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
-    Schema, SchemaHash, TableName, TupleDescriptor, Value,
+    BranchPolicies, ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor,
+    RowPolicyMode, Schema, SchemaHash, TableName, TupleDescriptor, Value,
 };
 use crate::schema_manager::{
     SchemaContext, translate_column_for_index, translate_table_name_to_schema,
@@ -460,6 +460,7 @@ impl QueryGraph {
             session,
             schema_context,
             row_policy_mode,
+            &BranchPolicies::default(),
         )
     }
 
@@ -535,6 +536,7 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
+        branch_policies: &BranchPolicies,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
         // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
@@ -692,14 +694,17 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+            let policy_node = PolicyFilterNode::new_with_options(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_for_policy,
-                row_policy_mode,
+                crate::query_manager::graph_nodes::policy_filter::PolicyFilterOptions::for_branch(
+                    branch_for_policy,
+                )
+                .with_row_policy_mode(row_policy_mode)
+                .with_branch_policies(branch_policies.clone()),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -962,6 +967,24 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
     ) -> Result<Self, QueryCompileError> {
+        Self::try_compile_with_schema_context_and_branch_policies(
+            query,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+            &BranchPolicies::default(),
+        )
+    }
+
+    pub fn try_compile_with_schema_context_and_branch_policies(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
+        branch_policies: &BranchPolicies,
+    ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
                 .all_branch_names()
@@ -994,6 +1017,7 @@ impl QueryGraph {
             session,
             schema_context,
             row_policy_mode,
+            branch_policies,
         )
         .ok_or_else(|| {
             QueryCompileError::InvalidPlan(

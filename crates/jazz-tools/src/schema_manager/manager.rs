@@ -1543,7 +1543,10 @@ impl SchemaManager {
 
         let authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
         self.query_manager
-            .set_authorization_schema(authorization_schema);
+            .set_authorization_schema_with_branch_policies(
+                authorization_schema,
+                bundle.branch_policies.clone(),
+            );
         true
     }
 

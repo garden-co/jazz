@@ -692,8 +692,8 @@ impl QueryGraph {
                         .unwrap_or_default();
 
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
-                        // Use process_with_context if the policy has INHERITS clauses
-                        let delta = if policy_node.has_inherits() {
+                        // Use process_with_context if the policy needs storage-backed context.
+                        let delta = if policy_node.needs_context() {
                             policy_node.process_with_context(
                                 input_delta,
                                 storage,

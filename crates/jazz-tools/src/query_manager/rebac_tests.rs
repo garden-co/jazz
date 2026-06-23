@@ -467,6 +467,7 @@ fn enqueue_inherited_insert(
 /// Test that valid INHERITS chains (no cycles) pass validation.
 
 /// Test that bounded self-referential INHERITS is accepted by cycle validation.
+mod branch_policies;
 mod inheritance_validation;
 mod inherited_policies;
 mod insert_policies;

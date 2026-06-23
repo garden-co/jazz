@@ -14,6 +14,7 @@ use crate::sync_manager::{
 };
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
+use super::permission_routing::{PermissionRoute, bind_branch_refs, policy_for_operation};
 use super::policy::{ComplexClause, Operation, PolicyExpr};
 use super::policy_graph::{PolicyGraph, PolicyGraphBuildOptions};
 use super::session::Session;
@@ -537,10 +538,28 @@ impl QueryManager {
         let tip_provenance = row.row_provenance();
 
         let table_name = TableName::new(&table);
-        let Some(select_policy) = auth_schema
-            .get(&table_name)
-            .and_then(|table_schema| table_schema.policies.select_policy())
-        else {
+        let branch_select_policy = match self.resolve_branch_route(
+            &table_name,
+            branch_name.as_str(),
+            Operation::Select,
+            storage,
+            session,
+        ) {
+            PermissionRoute::Normal => None,
+            PermissionRoute::Branch { policy, context } => {
+                let Some(select_policy) = policy_for_operation(policy, Operation::Select) else {
+                    return false;
+                };
+                Some(bind_branch_refs(select_policy, &context))
+            }
+            PermissionRoute::NoBranchPolicy | PermissionRoute::Deny => return false,
+        };
+
+        let Some(select_policy) = branch_select_policy.as_ref().or_else(|| {
+            auth_schema
+                .get(&table_name)
+                .and_then(|table_schema| table_schema.policies.select_policy())
+        }) else {
             return !self.row_policy_mode.denies_missing_explicit_policy()
                 && auth_schema.contains_key(&table_name);
         };
@@ -985,6 +1004,7 @@ impl QueryManager {
                 session_for_policy.clone(),
                 &subscription_context,
                 compile_row_policy_mode,
+                &self.authorization_branch_policies,
             );
 
             let Ok(mut graph) = graph else {

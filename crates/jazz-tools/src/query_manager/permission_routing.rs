@@ -1,19 +1,23 @@
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::{Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::relation_ir::{PredicateExpr, RelExpr, ValueRef};
+use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, TableName, TablePolicies, Value,
+    BranchPolicies, ComposedBranchName, Row, RowDescriptor, RowPolicyMode, Schema, TableName,
+    TablePolicies, Value,
 };
 use crate::row_format::decode_row;
 use crate::storage::Storage;
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct ResolvedBranchRow<'a> {
     pub table_name: &'a TableName,
     pub row_id: ObjectId,
     pub descriptor: &'a RowDescriptor,
-    pub content: &'a [u8],
+    pub content: Vec<u8>,
 }
 
 impl ResolvedBranchRow<'_> {
@@ -23,7 +27,7 @@ impl ResolvedBranchRow<'_> {
             .columns
             .iter()
             .position(|descriptor| descriptor.name.as_str() == column)?;
-        decode_row(self.descriptor, self.content)
+        decode_row(self.descriptor, &self.content)
             .ok()?
             .get(index)
             .cloned()
@@ -281,31 +285,140 @@ impl QueryManager {
         target_table: &TableName,
         branch: &str,
         op: Operation,
-        storage: &'a impl Storage,
+        storage: &'a dyn Storage,
+        session: Option<&'a Session>,
     ) -> PermissionRoute<'a> {
-        if branch == "main" || branch == self.current_branch() {
-            return PermissionRoute::Normal;
+        resolve_branch_route_with_policies(
+            self.authorization_schema
+                .as_deref()
+                .unwrap_or(self.schema.as_ref()),
+            &self.authorization_branch_policies,
+            target_table,
+            branch,
+            op,
+            storage,
+            session,
+        )
+    }
+}
+
+pub(crate) fn resolve_branch_route_with_policies<'a>(
+    schema: &'a Schema,
+    branch_policies: &'a BranchPolicies,
+    target_table: &TableName,
+    branch: &str,
+    op: Operation,
+    storage: &dyn Storage,
+    session: Option<&'a Session>,
+) -> PermissionRoute<'a> {
+    if branch == "main" {
+        return PermissionRoute::Normal;
+    }
+
+    let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
+        return PermissionRoute::Deny;
+    };
+
+    if composed.user_branch == "main" {
+        return PermissionRoute::Normal;
+    }
+
+    let Ok(row_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
+        return PermissionRoute::Deny;
+    };
+    let row_id = ObjectId::from_uuid(row_uuid);
+    let Some(session) = session else {
+        return PermissionRoute::Deny;
+    };
+    let main_branch = ComposedBranchName::new(&composed.env, composed.schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    for (backing_table, policies_by_target) in branch_policies {
+        let Some(target_policy) = policies_by_target.get(target_table) else {
+            continue;
+        };
+        let Some(backing_schema) = schema.get(backing_table) else {
+            continue;
+        };
+        let Ok(Some(backing_row)) =
+            storage.load_visible_region_row(backing_table.as_str(), &main_branch, row_id)
+        else {
+            continue;
+        };
+        if backing_row.is_hard_deleted() {
+            continue;
         }
 
-        let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
+        let Some(backing_read_policy) = backing_schema.policies.select_policy() else {
             return PermissionRoute::Deny;
         };
+        let row = Row::new(
+            row_id,
+            backing_row.data.to_vec(),
+            backing_row.batch_id(),
+            backing_row.row_provenance(),
+        );
+        let mut evaluator =
+            PolicyContextEvaluator::new(schema, session, &main_branch, RowPolicyMode::Enforcing);
+        let mut visited_referencing = HashSet::new();
+        let mut row_loader = |related_id: ObjectId, table_hint: Option<TableName>| {
+            let table = table_hint?;
+            let row = storage
+                .load_visible_region_row(table.as_str(), &main_branch, related_id)
+                .ok()??;
+            Some(crate::query_manager::types::LoadedRow::new(
+                row.data.clone(),
+                row.row_provenance(),
+                [(related_id, BranchName::new(&main_branch))]
+                    .into_iter()
+                    .collect(),
+                row.batch_id(),
+            ))
+        };
 
-        if composed.user_branch == "main" {
-            return PermissionRoute::Normal;
+        if !evaluator.evaluate_row_access(
+            Operation::Select,
+            &row,
+            &backing_schema.columns,
+            backing_table.as_str(),
+            Some(backing_read_policy),
+            storage,
+            &mut row_loader,
+            0,
+            &mut visited_referencing,
+        ) {
+            return PermissionRoute::Deny;
         }
 
-        let Ok(_row_uuid) = uuid::Uuid::parse_str(&composed.user_branch) else {
-            return PermissionRoute::Deny;
-        };
+        if policy_for_operation(target_policy, op).is_none() {
+            return PermissionRoute::NoBranchPolicy;
+        }
 
-        let _ = (target_table, op, storage);
-        // TODO(task5): QueryManager currently does not retain the decoded
-        // CurrentPermissionsSummary.branch_policies map. Once the call sites pass
-        // or expose that summary, resolve the backing row id from user_branch,
-        // load the backing row, gate it on normal readability, and return
-        // PermissionRoute::Branch or NoBranchPolicy.
-        PermissionRoute::Deny
+        return PermissionRoute::Branch {
+            policy: target_policy,
+            context: ResolvedBranchRow {
+                table_name: backing_table,
+                row_id,
+                descriptor: &backing_schema.columns,
+                content: row.data.to_vec(),
+            },
+        };
+    }
+
+    PermissionRoute::Deny
+}
+
+pub(crate) fn policy_for_operation(
+    policies: &TablePolicies,
+    operation: Operation,
+) -> Option<&PolicyExpr> {
+    match operation {
+        Operation::Select => policies.select_policy(),
+        Operation::Insert => policies.insert_policy(),
+        Operation::Update => policies.update_using_policy(),
+        Operation::Delete => policies.effective_delete_using(),
     }
 }
 
@@ -338,7 +451,7 @@ mod tests {
             table_name: &table_name,
             row_id,
             descriptor: &descriptor,
-            content: &content,
+            content,
         };
         let expr = PolicyExpr::And(vec![
             PolicyExpr::Cmp {

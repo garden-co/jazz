@@ -29,9 +29,9 @@ use super::query::Query;
 use super::session::Session;
 use super::settlement_eval_cache::SettlementEvalCache;
 use super::types::{
-    ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, Tuple, Value,
-    build_ordered_delta_with_post_ids,
+    BranchPolicies, ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row,
+    RowDelta, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, Tuple,
+    Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -491,6 +491,7 @@ pub struct QueryManager {
     pub(super) schema: Arc<Schema>,
     pub(super) row_policy_mode: RowPolicyMode,
     pub(super) authorization_schema: Option<Arc<Schema>>,
+    pub(super) authorization_branch_policies: BranchPolicies,
     pub(super) authorization_schema_required: bool,
     pub(super) authorization_context_cache: HashMap<(String, String), Arc<SchemaContext>>,
 
@@ -644,6 +645,7 @@ impl QueryManager {
             schema: Arc::new(Schema::new()),
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             authorization_schema: None,
+            authorization_branch_policies: BranchPolicies::default(),
             authorization_schema_required: false,
             authorization_context_cache: HashMap::new(),
             pending_catalogue_updates: Vec::new(),
@@ -702,6 +704,7 @@ impl QueryManager {
         } else {
             None
         };
+        self.authorization_branch_policies = BranchPolicies::default();
         self.authorization_context_cache.clear();
         self.authorization_schema_required = false;
         self.write_table_cache.clear();
@@ -717,7 +720,16 @@ impl QueryManager {
     }
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
+        self.set_authorization_schema_with_branch_policies(schema, BranchPolicies::default());
+    }
+
+    pub fn set_authorization_schema_with_branch_policies(
+        &mut self,
+        schema: Schema,
+        branch_policies: BranchPolicies,
+    ) {
         self.authorization_schema = Some(Arc::new(schema));
+        self.authorization_branch_policies = branch_policies;
         self.authorization_context_cache.clear();
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
@@ -799,13 +811,15 @@ impl QueryManager {
         session: Option<Session>,
         schema_context: &SchemaContext,
         row_policy_mode: RowPolicyMode,
+        branch_policies: &BranchPolicies,
     ) -> Result<QueryGraph, QueryCompileError> {
-        QueryGraph::try_compile_with_schema_context(
+        QueryGraph::try_compile_with_schema_context_and_branch_policies(
             query,
             schema,
             session,
             schema_context,
             row_policy_mode,
+            branch_policies,
         )
     }
 
@@ -930,6 +944,7 @@ impl QueryManager {
         let current_schema = self.schema.clone();
         let current_schema_context = self.schema_context.clone();
         let authorization_schema = self.authorization_schema.clone();
+        let authorization_branch_policies = self.authorization_branch_policies.clone();
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
@@ -970,6 +985,7 @@ impl QueryManager {
                     sub.session.clone(),
                     &current_schema_context,
                     compile_row_policy_mode,
+                    &authorization_branch_policies,
                 ) {
                     Ok(new_graph) => {
                         let policy_context_tables =
@@ -1069,6 +1085,7 @@ impl QueryManager {
                 session,
                 &subscription_context,
                 RowPolicyMode::PermissiveLocal,
+                &self.authorization_branch_policies,
             ) {
                 Ok(new_graph) => {
                     let branches = Self::resolved_server_query_branches(

@@ -11,13 +11,16 @@ use crate::query_manager::encoding::column_is_null;
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
+use crate::query_manager::permission_routing::{
+    PermissionRoute, bind_branch_refs, policy_for_operation, resolve_branch_route_with_policies,
+};
 use crate::query_manager::policy::{
     Operation, PolicyExpr, evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
-    TupleElement,
+    BranchPolicies, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple,
+    TupleDelta, TupleElement,
 };
 
 use crate::storage::Storage;
@@ -41,6 +44,7 @@ pub struct PolicyFilterNode {
     /// Branch name for index lookups.
     branch: String,
     row_policy_mode: RowPolicyMode,
+    branch_policies: BranchPolicies,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
     /// Current tuples that pass the policy.
@@ -62,6 +66,7 @@ pub(crate) struct PolicyFilterOptions {
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
     policy_operation: Operation,
+    branch_policies: BranchPolicies,
 }
 
 impl PolicyFilterOptions {
@@ -95,7 +100,15 @@ impl Default for PolicyFilterOptions {
             initial_depth: 0,
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             policy_operation: Operation::Select,
+            branch_policies: BranchPolicies::default(),
         }
+    }
+}
+
+impl PolicyFilterOptions {
+    pub(crate) fn with_branch_policies(mut self, branch_policies: BranchPolicies) -> Self {
+        self.branch_policies = branch_policies;
+        self
     }
 }
 
@@ -219,6 +232,7 @@ impl PolicyFilterNode {
             table_name,
             branch: options.branch,
             row_policy_mode: options.row_policy_mode,
+            branch_policies: options.branch_policies,
             initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
@@ -232,6 +246,10 @@ impl PolicyFilterNode {
     /// Returns true if this policy contains clauses requiring context evaluation.
     pub fn has_inherits(&self) -> bool {
         self.has_inherits
+    }
+
+    pub fn needs_context(&self) -> bool {
+        self.has_inherits || (!self.branch_policies.is_empty() && self.branch != "main")
     }
 
     /// Returns tables that can affect policy outcome for this node.
@@ -368,6 +386,25 @@ impl PolicyFilterNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
+        let policy = match resolve_branch_route_with_policies(
+            &self.schema,
+            &self.branch_policies,
+            &TableName::new(&self.table_name),
+            &self.branch,
+            self.policy_operation,
+            io,
+            Some(&self.session),
+        ) {
+            PermissionRoute::Normal => self.policy.clone(),
+            PermissionRoute::Branch { policy, context } => {
+                let Some(operation_policy) = policy_for_operation(policy, self.policy_operation)
+                else {
+                    return false;
+                };
+                bind_branch_refs(operation_policy, &context)
+            }
+            PermissionRoute::NoBranchPolicy | PermissionRoute::Deny => return false,
+        };
         let mut evaluator = PolicyContextEvaluator::new(
             &self.schema,
             &self.session,
@@ -380,7 +417,7 @@ impl PolicyFilterNode {
             row,
             &self.descriptor,
             &self.table_name,
-            Some(&self.policy),
+            Some(&policy),
             io,
             row_loader,
             self.initial_depth,
