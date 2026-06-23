@@ -1,0 +1,17 @@
+[package]
+name = "jazz-storage-native-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Criterion benchmarks comparing native storage engines with the shared Jazz storage workload."
+
+[[bench]]
+name = "native_storage_engines"
+harness = false
+
+[dev-dependencies]
+bench-core = { package = "jazz-storage-bench-core", path = "../bench-core" }
+criterion = "0.5"
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+tempfile = "3"

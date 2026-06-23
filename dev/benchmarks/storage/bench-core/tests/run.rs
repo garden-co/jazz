@@ -11,7 +11,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use bench_core::{
-    Benchmark, BenchEngine, EngineError, KvDataset, Phase, PhaseKind, ValueEncoding, run,
+    BenchEngine, Benchmark, EngineError, KvDataset, Phase, PhaseKind, ValueEncoding, run,
 };
 
 /// An in-memory `BenchEngine`. `reopen` keeps the data (cold cache is a no-op
@@ -34,11 +34,7 @@ impl BenchEngine for MemEngine {
         Ok(())
     }
     fn range(&mut self, lo: &[u8], hi: &[u8], limit: usize) -> Result<usize, EngineError> {
-        Ok(self
-            .map
-            .range(lo.to_vec()..hi.to_vec())
-            .take(limit)
-            .count())
+        Ok(self.map.range(lo.to_vec()..hi.to_vec()).take(limit).count())
     }
     fn begin_phase(&mut self, _kind: PhaseKind) -> Result<(), EngineError> {
         Ok(())
@@ -161,7 +157,15 @@ fn is_deterministic_across_runs() {
     let a = run_once();
     let b = run_once();
     assert_eq!(a.checksum, b.checksum);
-    let a_phases: Vec<(String, u64)> = a.phases.iter().map(|p| (p.phase.clone(), p.checksum)).collect();
-    let b_phases: Vec<(String, u64)> = b.phases.iter().map(|p| (p.phase.clone(), p.checksum)).collect();
+    let a_phases: Vec<(String, u64)> = a
+        .phases
+        .iter()
+        .map(|p| (p.phase.clone(), p.checksum))
+        .collect();
+    let b_phases: Vec<(String, u64)> = b
+        .phases
+        .iter()
+        .map(|p| (p.phase.clone(), p.checksum))
+        .collect();
     assert_eq!(a_phases, b_phases);
 }

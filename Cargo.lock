@@ -1749,6 +1749,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-storage-bench-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "jazz-storage-native-bench"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "jazz-storage-bench-core",
+ "rusqlite",
+ "rust-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 dependencies = [

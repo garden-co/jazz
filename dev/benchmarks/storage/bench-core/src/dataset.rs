@@ -1,6 +1,6 @@
 //! The `.kv` record fixture format: real-world key/value data (Met objects,
-//! Wikipedia wikitext) committed under `public/data/` and fetched by each
-//! worker at runtime. Pure byte (de)serialization, no I/O.
+//! Wikipedia wikitext) committed under `dev/benchmarks/storage/data/`.
+//! Pure byte (de)serialization, no I/O.
 //!
 //! The synthetic *operation streams* are no longer stored on disk — they are
 //! declared in [`crate::benchmarks`] and generated deterministically at
