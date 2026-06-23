@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 
 use crate::BTreeError;
 use crate::file::SyncFile;
+use crate::free_bitmap::FreeBitmap;
 use crate::leaf_hint::{LEAF_HINT_SLOTS, LeafHintCache};
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
@@ -115,8 +116,7 @@ pub struct OpfsBTree<F: SyncFile> {
     dirty_pages: OpfsSet<PageId>,
     wal_pages: OpfsSet<PageId>,
     freelist_dirty: bool,
-    free_pages: Vec<PageId>,
-    free_set: OpfsSet<PageId>,
+    free_bitmap: FreeBitmap,
     freelist_meta_pages: Vec<PageId>,
     leaf_hints: LeafHintCache,
 }
@@ -166,8 +166,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             dirty_pages: OpfsSet::default(),
             wal_pages: OpfsSet::default(),
             freelist_dirty: false,
-            free_pages: Vec::new(),
-            free_set: OpfsSet::default(),
+            free_bitmap: FreeBitmap::default(),
             freelist_meta_pages: Vec::new(),
             leaf_hints: LeafHintCache::default(),
         };
@@ -1327,7 +1326,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         if let Some(max_live) = self.pages.keys().max().copied() {
             max_page_id = max_page_id.max(max_live);
         }
-        if let Some(max_free) = self.free_set.iter().max().copied() {
+        if let Some(max_free) = self.free_bitmap.highest() {
             max_page_id = max_page_id.max(max_free);
         }
         if let Some(max_freelist) = freelist_pages.iter().map(|(id, _)| *id).max() {
@@ -1496,8 +1495,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         self.total_pages = header.total_pages;
         self.root_page_id = (header.root_page_id != 0).then_some(header.root_page_id);
-        self.free_pages.clear();
-        self.free_set.clear();
+        self.free_bitmap.clear();
         self.freelist_meta_pages.clear();
 
         for frame in frames {
@@ -1631,11 +1629,9 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         self.sanitize_free_pages();
 
-        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
-        free_ids.sort_unstable();
-
+        let total_free = self.free_bitmap.len();
         let capacity = freelist_ids_per_page(self.options.page_size)?;
-        if capacity == 0 && !free_ids.is_empty() {
+        if capacity == 0 && total_free != 0 {
             return Err(BTreeError::InvalidOptions(
                 "page size too small for freelist pages".to_string(),
             ));
@@ -1645,27 +1641,25 @@ impl<F: SyncFile> OpfsBTree<F> {
         while meta_count
             .checked_mul(capacity)
             .ok_or_else(|| BTreeError::Io("freelist capacity overflow".to_string()))?
-            < free_ids.len().saturating_sub(meta_count)
+            < total_free.saturating_sub(meta_count)
         {
             meta_count += 1;
         }
 
+        // The meta pages that host the freelist come off the top of the free
+        // set; taking them in place leaves the remaining (lower) ids still free
+        // in the bitmap, so no clear-and-reinsert is needed.
         let mut meta_page_ids = Vec::with_capacity(meta_count);
         for _ in 0..meta_count {
-            let page_id = free_ids.pop().ok_or_else(|| {
+            let page_id = self.free_bitmap.take_highest().ok_or_else(|| {
                 BTreeError::Corrupt("freelist meta page allocation underflow".to_string())
             })?;
             meta_page_ids.push(page_id);
         }
         meta_page_ids.sort_unstable();
 
-        let remaining_free = free_ids;
-        self.free_set.clear();
-        self.free_pages.clear();
-        for page_id in &remaining_free {
-            self.free_set.insert(*page_id);
-            self.free_pages.push(*page_id);
-        }
+        // The bitmap already yields ids in ascending order, so no sort here.
+        let remaining_free: Vec<PageId> = self.free_bitmap.iter().collect();
 
         self.freelist_meta_pages = meta_page_ids.clone();
         let head_page_id = *meta_page_ids.first().unwrap_or(&0);
@@ -1692,22 +1686,31 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn sanitize_free_pages(&mut self) {
-        let live_page_ids: OpfsSet<PageId> = self.pages.keys().copied().collect();
-        self.free_set.retain(|page_id| {
-            *page_id >= 2 && *page_id < self.total_pages && !live_page_ids.contains(page_id)
-        });
-
-        self.free_pages.clear();
-        self.free_pages.extend(self.free_set.iter().copied());
-        self.free_pages.sort_unstable();
+        // Pages 0 and 1 are reserved; ids at or beyond total_pages do not exist
+        // yet; and a page currently resident in the cache is live, not free.
+        self.free_bitmap.remove(0);
+        self.free_bitmap.remove(1);
+        self.free_bitmap.retain_below(self.total_pages);
+        // Drop any free id that is actually live. Scan the free set (usually
+        // small, often empty on write-heavy workloads) rather than the page
+        // cache, which is frequently much larger.
+        let live_free: Vec<PageId> = self
+            .free_bitmap
+            .iter()
+            .filter(|page_id| self.pages.contains_key(page_id))
+            .collect();
+        for page_id in live_free {
+            self.free_bitmap.remove(page_id);
+        }
+        // Removing high live/out-of-range ids can leave empty trailing words.
+        self.free_bitmap.trim_trailing_empty_words();
     }
 
     fn alloc_page(&mut self) -> PageId {
-        while let Some(page_id) = self.free_pages.pop() {
-            if self.claim_free_page(page_id) {
-                tracing::trace!(page_id, reused = true, "alloc_page");
-                return page_id;
-            }
+        if let Some(page_id) = self.free_bitmap.take_highest() {
+            self.freelist_dirty = true;
+            tracing::trace!(page_id, reused = true, "alloc_page");
+            return page_id;
         }
 
         let page_id = self.total_pages;
@@ -1726,38 +1729,15 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(self.alloc_page());
         }
 
-        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
-        free_ids.sort_unstable();
-        let mut run_start = 0u64;
-        let mut run_len = 0usize;
-        let mut prev = 0u64;
-        for id in free_ids {
-            if run_len == 0 {
-                run_start = id;
-                run_len = 1;
-            } else if id == prev.saturating_add(1) {
-                run_len = run_len.saturating_add(1);
-            } else {
-                run_start = id;
-                run_len = 1;
-            }
-            prev = id;
-
-            if run_len >= page_count {
-                for i in 0..page_count {
-                    let page_id = run_start.checked_add(i as u64).ok_or_else(|| {
-                        BTreeError::Corrupt("extent free-run page id overflow".to_string())
-                    })?;
-                    self.claim_free_page(page_id);
-                }
-                tracing::trace!(
-                    head_page_id = run_start,
-                    page_count,
-                    reused = true,
-                    "alloc_extent_pages"
-                );
-                return Ok(run_start);
-            }
+        if let Some(run_start) = self.free_bitmap.take_run(page_count) {
+            self.freelist_dirty = true;
+            tracing::trace!(
+                head_page_id = run_start,
+                page_count,
+                reused = true,
+                "alloc_extent_pages"
+            );
+            return Ok(run_start);
         }
 
         let start = self.total_pages;
@@ -1804,14 +1784,13 @@ impl<F: SyncFile> OpfsBTree<F> {
         if page_id < 2 {
             return;
         }
-        if self.free_set.insert(page_id) {
-            self.free_pages.push(page_id);
+        if self.free_bitmap.insert(page_id) {
             self.freelist_dirty = true;
         }
     }
 
     fn claim_free_page(&mut self, page_id: PageId) -> bool {
-        if self.free_set.remove(&page_id) {
+        if self.free_bitmap.remove(page_id) {
             self.freelist_dirty = true;
             true
         } else {
@@ -2542,7 +2521,7 @@ mod tests {
             "same-page-count overflow update should reuse existing extent pages"
         );
         assert!(
-            tree.free_set.is_empty(),
+            tree.free_bitmap.is_empty(),
             "reuse path should not free overflow pages when page count is unchanged"
         );
     }
@@ -2562,7 +2541,7 @@ mod tests {
         assert_eq!(tree.get(b"k").expect("get k"), Some(value_small));
         assert_eq!(tree.total_pages, total_pages_before);
         assert!(
-            !tree.free_set.is_empty(),
+            !tree.free_bitmap.is_empty(),
             "shrinking overflow value should return tail pages to free list"
         );
     }
@@ -3093,7 +3072,7 @@ mod tests {
 
         let allocated = tree.alloc_page_near(10);
         assert_eq!(allocated, 11, "expected +1 neighbor to be selected first");
-        assert!(!tree.free_set.contains(&11));
+        assert!(!tree.free_bitmap.contains(11));
     }
 
     #[test]
