@@ -134,13 +134,51 @@ impl FreeBitmap {
     /// long is free. `count` must be >= 1.
     pub(crate) fn take_run(&mut self, count: usize) -> Option<PageId> {
         let run_start = self.find_run(count)?;
-        // `find_run` just confirmed every bit in the run is set, so each
-        // `remove` succeeds and the count stays accurate.
-        for offset in 0..count as u64 {
-            self.remove(run_start + offset);
-        }
+        self.remove_run(run_start, count);
         self.trim_trailing_empty_words();
         Some(run_start)
+    }
+
+    /// Clears the `count` consecutive free bits starting at `start` using
+    /// word-level masking: at most one masked write per 64-page span the run
+    /// touches, instead of one `remove` (with its own `locate` + bounds check)
+    /// per page. Callers must have confirmed the whole range is free, as
+    /// `take_run` does via `find_run`; `free_count` is decremented by the
+    /// number of bits actually cleared.
+    fn remove_run(&mut self, start: PageId, count: usize) {
+        debug_assert!(count >= 1);
+        let last = start + count as u64 - 1;
+        let start_word = (start / BITS_PER_WORD) as usize;
+        let last_word = (last / BITS_PER_WORD) as usize;
+
+        // Bits at or above `start` within the first touched word.
+        let from_start = u64::MAX << (start % BITS_PER_WORD);
+        // Bits at or below `last` within the last touched word.
+        let last_bit = last % BITS_PER_WORD;
+        let through_last = if last_bit == BITS_PER_WORD - 1 {
+            u64::MAX
+        } else {
+            (1u64 << (last_bit + 1)) - 1
+        };
+
+        if start_word == last_word {
+            self.clear_masked(start_word, from_start & through_last);
+        } else {
+            self.clear_masked(start_word, from_start);
+            for word in start_word + 1..last_word {
+                self.clear_masked(word, u64::MAX);
+            }
+            self.clear_masked(last_word, through_last);
+        }
+    }
+
+    /// Clears the bits selected by `mask` in `words[word]`, keeping
+    /// `free_count` in sync with the bits actually removed.
+    #[inline]
+    fn clear_masked(&mut self, word: usize, mask: u64) {
+        let cleared = (self.words[word] & mask).count_ones() as usize;
+        self.words[word] &= !mask;
+        self.free_count -= cleared;
     }
 
     /// Clears every free bit for a page id `>= limit`.
@@ -275,6 +313,27 @@ mod tests {
         assert!(!bm.contains(10) && !bm.contains(11) && !bm.contains(12));
         assert_eq!(bm.iter().collect::<Vec<_>>(), vec![2, 3, 20]);
         assert_eq!(bm.take_run(3), None);
+    }
+
+    #[test]
+    fn take_run_clears_a_run_spanning_multiple_words() {
+        let mut bm = FreeBitmap::default();
+        // A 130-page run starting mid-word at 60, crossing two word
+        // boundaries (60..190 spans words 0, 1, and 2).
+        for id in 60u64..190 {
+            bm.insert(id);
+        }
+        // A couple of free pages on either side that must survive untouched.
+        bm.insert(2);
+        bm.insert(200);
+        assert_eq!(bm.len(), 132);
+
+        assert_eq!(bm.take_run(130), Some(60));
+        assert_eq!(bm.len(), 2);
+        assert_eq!(bm.iter().collect::<Vec<_>>(), vec![2, 200]);
+        for id in 60u64..190 {
+            assert!(!bm.contains(id), "page {id} should be allocated");
+        }
     }
 
     #[test]
