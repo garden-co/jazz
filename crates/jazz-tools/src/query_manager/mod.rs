@@ -6,6 +6,7 @@ pub mod index;
 pub mod indices;
 pub mod magic_columns;
 pub mod manager;
+pub mod permission_routing;
 pub mod policy;
 pub mod policy_counters;
 pub mod policy_graph;
