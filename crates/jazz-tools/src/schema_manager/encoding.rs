@@ -20,7 +20,7 @@ use super::lens::{LensOp, LensTransform};
 const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
-const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
+const PERMISSIONS_BUNDLE_VERSION: u8 = 3;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1009,6 +1009,7 @@ const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
+const POLICY_VALUE_BRANCH_REF: u8 = 3;
 
 fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
     encode_operation_policy(buf, &policies.select);
@@ -1076,14 +1077,94 @@ pub fn decode_permissions(
     Ok(permissions)
 }
 
+pub fn encode_branch_policies(
+    branch_policies: &crate::query_manager::types::BranchPolicies,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(PERMISSIONS_VERSION);
+
+    let mut backing_entries: Vec<_> = branch_policies.iter().collect();
+    backing_entries.sort_by_key(|(name, _)| name.as_str());
+    write_u32(&mut buf, backing_entries.len() as u32);
+
+    for (backing_table, table_policies) in backing_entries {
+        write_string(&mut buf, backing_table.as_str());
+        let mut table_entries: Vec<_> = table_policies.iter().collect();
+        table_entries.sort_by_key(|(name, _)| name.as_str());
+        write_u32(&mut buf, table_entries.len() as u32);
+        for (table_name, policies) in table_entries {
+            write_string(&mut buf, table_name.as_str());
+            encode_table_policies(&mut buf, policies);
+        }
+    }
+
+    buf
+}
+
+pub fn decode_branch_policies(
+    data: &[u8],
+) -> Result<crate::query_manager::types::BranchPolicies, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    if version != PERMISSIONS_VERSION {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_VERSION,
+        });
+    }
+
+    let mut offset = 1;
+    let backing_count = read_u32(data, &mut offset)?;
+    let mut branch_policies = HashMap::new();
+
+    for _ in 0..backing_count {
+        let backing_table = TableName::new(read_string(data, &mut offset, "backing_table")?);
+        let table_count = read_u32(data, &mut offset)?;
+        let mut table_policies = HashMap::new();
+        for _ in 0..table_count {
+            let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
+            let policies = decode_table_policies(data, &mut offset)?;
+            table_policies.insert(table_name, policies);
+        }
+        branch_policies.insert(backing_table, table_policies);
+    }
+
+    Ok(branch_policies)
+}
+
 pub fn encode_permissions_bundle(
     schema_hash: SchemaHash,
     version: u64,
     parent_bundle_object_id: Option<ObjectId>,
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Vec<u8> {
+    encode_permissions_bundle_with_branch_policies(
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        permissions,
+        &crate::query_manager::types::BranchPolicies::default(),
+    )
+}
+
+pub fn encode_permissions_bundle_with_branch_policies(
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    permissions: &HashMap<TableName, TablePolicies>,
+    branch_policies: &crate::query_manager::types::BranchPolicies,
+) -> Vec<u8> {
     let encoded_permissions = encode_permissions(permissions);
-    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len());
+    let encoded_branch_policies = encode_branch_policies(branch_policies);
+    let mut buf = Vec::with_capacity(
+        1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len() + 4 + encoded_branch_policies.len(),
+    );
     buf.push(PERMISSIONS_BUNDLE_VERSION);
     buf.extend_from_slice(schema_hash.as_bytes());
     write_u64(&mut buf, version);
@@ -1096,6 +1177,8 @@ pub fn encode_permissions_bundle(
     }
     write_u32(&mut buf, encoded_permissions.len() as u32);
     buf.extend_from_slice(&encoded_permissions);
+    write_u32(&mut buf, encoded_branch_policies.len() as u32);
+    buf.extend_from_slice(&encoded_branch_policies);
     buf
 }
 
@@ -1104,6 +1187,7 @@ type DecodedPermissionsBundle = (
     u64,
     Option<ObjectId>,
     HashMap<TableName, TablePolicies>,
+    crate::query_manager::types::BranchPolicies,
 );
 
 pub fn decode_permissions_bundle(
@@ -1119,7 +1203,8 @@ pub fn decode_permissions_bundle(
     let version = data[0];
     match version {
         1 => decode_permissions_bundle_v1(data),
-        PERMISSIONS_BUNDLE_VERSION => decode_permissions_bundle_v2(data),
+        2 => decode_permissions_bundle_v2(data),
+        PERMISSIONS_BUNDLE_VERSION => decode_permissions_bundle_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: PERMISSIONS_BUNDLE_VERSION,
@@ -1139,7 +1224,13 @@ fn decode_permissions_bundle_v1(
     let payload_len = read_u32(data, &mut offset)? as usize;
     let payload = read_bytes(data, &mut offset, payload_len)?;
     let permissions = decode_permissions(payload)?;
-    Ok((schema_hash, 1, None, permissions))
+    Ok((
+        schema_hash,
+        1,
+        None,
+        permissions,
+        crate::query_manager::types::BranchPolicies::default(),
+    ))
 }
 
 fn decode_permissions_bundle_v2(
@@ -1167,7 +1258,50 @@ fn decode_permissions_bundle_v2(
     let payload_len = read_u32(data, &mut offset)? as usize;
     let payload = read_bytes(data, &mut offset, payload_len)?;
     let permissions = decode_permissions(payload)?;
-    Ok((schema_hash, version, parent_bundle_object_id, permissions))
+    Ok((
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        permissions,
+        crate::query_manager::types::BranchPolicies::default(),
+    ))
+}
+
+fn decode_permissions_bundle_v3(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let version = read_u64(data, &mut offset)?;
+    let has_parent = read_u8(data, &mut offset)? != 0;
+    let parent_bundle_object_id = if has_parent {
+        let parent_uuid =
+            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid parent permissions bundle object id: {err}"),
+                }
+            })?;
+        Some(ObjectId::from_uuid(parent_uuid))
+    } else {
+        None
+    };
+    let payload_len = read_u32(data, &mut offset)? as usize;
+    let payload = read_bytes(data, &mut offset, payload_len)?;
+    let permissions = decode_permissions(payload)?;
+    let branch_payload_len = read_u32(data, &mut offset)? as usize;
+    let branch_payload = read_bytes(data, &mut offset, branch_payload_len)?;
+    let branch_policies = decode_branch_policies(branch_payload)?;
+    Ok((
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        permissions,
+        branch_policies,
+    ))
 }
 
 pub fn encode_permissions_head(
@@ -1652,6 +1786,10 @@ fn encode_policy_value(buf: &mut Vec<u8>, value: &PolicyValue) {
                 write_string(buf, part);
             }
         }
+        PolicyValue::BranchRef(column) => {
+            buf.push(POLICY_VALUE_BRANCH_REF);
+            write_string(buf, column);
+        }
     }
 }
 
@@ -1669,6 +1807,10 @@ fn decode_policy_value(
                 path.push(read_string(data, offset, "policy_session_ref_path")?);
             }
             Ok(PolicyValue::SessionRef(path))
+        }
+        POLICY_VALUE_BRANCH_REF => {
+            let column = read_string(data, offset, "policy_branch_ref_column")?;
+            Ok(PolicyValue::BranchRef(column))
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
@@ -2525,13 +2667,64 @@ mod tests {
 
         let encoded =
             encode_permissions_bundle(schema_hash, version, parent_bundle_object_id, &permissions);
-        let (decoded_hash, decoded_version, decoded_parent_bundle_object_id, decoded_permissions) =
-            decode_permissions_bundle(&encoded).expect("bundle should decode");
+        let (
+            decoded_hash,
+            decoded_version,
+            decoded_parent_bundle_object_id,
+            decoded_permissions,
+            decoded_branch_policies,
+        ) = decode_permissions_bundle(&encoded).expect("bundle should decode");
 
         assert_eq!(decoded_hash, schema_hash);
         assert_eq!(decoded_version, version);
         assert_eq!(decoded_parent_bundle_object_id, parent_bundle_object_id);
         assert_eq!(decoded_permissions, permissions);
+        assert_eq!(
+            decoded_branch_policies,
+            crate::query_manager::types::BranchPolicies::default()
+        );
+    }
+
+    #[test]
+    fn permissions_bundle_roundtrip_preserves_branch_policies() {
+        let schema_hash = SchemaHash::from_bytes([8; 32]);
+        let version = 8;
+        let permissions = HashMap::from([(
+            TableName::new("projects"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let branch_policies = HashMap::from([(
+            TableName::new("project_branches"),
+            HashMap::from([(
+                TableName::new("tasks"),
+                TablePolicies::new().with_select(PolicyExpr::Cmp {
+                    column: "project_id".to_string(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::BranchRef("projectId".to_string()),
+                }),
+            )]),
+        )]);
+
+        let encoded = encode_permissions_bundle_with_branch_policies(
+            schema_hash,
+            version,
+            None,
+            &permissions,
+            &branch_policies,
+        );
+        let (
+            decoded_hash,
+            decoded_version,
+            decoded_parent_bundle_object_id,
+            decoded_permissions,
+            decoded_branch_policies,
+        ) = decode_permissions_bundle(&encoded).expect("bundle should decode");
+
+        assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded_parent_bundle_object_id, None);
+        assert_eq!(decoded_permissions, permissions);
+        assert_eq!(decoded_branch_policies, branch_policies);
     }
 
     #[test]

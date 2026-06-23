@@ -23,7 +23,7 @@ pub enum CmpOp {
     Ge,
 }
 
-/// A value in a policy expression - either a literal or a session reference.
+/// A value in a policy expression - either a literal, session reference, or branch reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "PolicyValueSerde", into = "PolicyValueSerde")]
 pub enum PolicyValue {
@@ -31,6 +31,8 @@ pub enum PolicyValue {
     Literal(Value),
     /// Reference to a session variable, e.g., ["user_id"] or ["claims", "teams"].
     SessionRef(Vec<String>),
+    /// Reference to a backing branch row column, e.g. `$branch.projectId`.
+    BranchRef(String),
 }
 
 /// Reserved session path prefix used to encode outer-row references in correlated EXISTS clauses.
@@ -197,6 +199,7 @@ pub enum PolicyExpr {
 enum PolicyValueSerde {
     Literal { value: Value },
     SessionRef { path: Vec<String> },
+    BranchRef { column: String },
 }
 
 impl From<PolicyValueSerde> for PolicyValue {
@@ -204,6 +207,7 @@ impl From<PolicyValueSerde> for PolicyValue {
         match value {
             PolicyValueSerde::Literal { value } => PolicyValue::Literal(value),
             PolicyValueSerde::SessionRef { path } => PolicyValue::SessionRef(path),
+            PolicyValueSerde::BranchRef { column } => PolicyValue::BranchRef(column),
         }
     }
 }
@@ -213,6 +217,7 @@ impl From<PolicyValue> for PolicyValueSerde {
         match value {
             PolicyValue::Literal(value) => PolicyValueSerde::Literal { value },
             PolicyValue::SessionRef(path) => PolicyValueSerde::SessionRef { path },
+            PolicyValue::BranchRef(column) => PolicyValueSerde::BranchRef { column },
         }
     }
 }
@@ -1059,6 +1064,8 @@ fn resolve_policy_value(value: &PolicyValue, session: &Session) -> Option<Value>
     match value {
         PolicyValue::Literal(v) => Some(v.clone()),
         PolicyValue::SessionRef(path) => resolve_session_value(path, session),
+        // resolved later by permission_routing::bind_branch_refs
+        PolicyValue::BranchRef(_) => None,
     }
 }
 
@@ -1113,6 +1120,8 @@ pub fn bind_outer_row_refs(
                         PolicyValue::SessionRef(path.clone())
                     }
                 }
+                // resolved later by permission_routing::bind_branch_refs
+                PolicyValue::BranchRef(column) => PolicyValue::BranchRef(column.clone()),
             };
 
             Some(PolicyExpr::Cmp {
@@ -1154,6 +1163,8 @@ pub fn bind_outer_row_refs(
                         PolicyValue::SessionRef(path.clone())
                     }
                 }
+                // resolved later by permission_routing::bind_branch_refs
+                PolicyValue::BranchRef(column) => PolicyValue::BranchRef(column.clone()),
             };
             Some(PolicyExpr::Contains {
                 column: column.clone(),
@@ -1194,6 +1205,8 @@ pub fn bind_outer_row_refs(
                             Some(PolicyValue::SessionRef(path.clone()))
                         }
                     }
+                    // resolved later by permission_routing::bind_branch_refs
+                    PolicyValue::BranchRef(column) => Some(PolicyValue::BranchRef(column.clone())),
                 })
                 .collect::<Option<Vec<_>>>()?;
             Some(PolicyExpr::InList {
@@ -1297,6 +1310,8 @@ pub fn bind_relation_refs(
                 let resolved = resolve_session_value(path, session)?;
                 Some(ValueRef::Literal(resolved))
             }
+            // resolved later by permission_routing::bind_branch_refs
+            ValueRef::BranchRef(column) => Some(ValueRef::BranchRef(column.clone())),
             ValueRef::OuterColumn(column) => {
                 let resolved = resolve_outer_col(
                     &column.column,
@@ -2133,6 +2148,17 @@ mod tests {
             session,
             Some(row_id),
         )
+    }
+
+    #[test]
+    fn branch_ref_policy_value_roundtrips_through_serde() {
+        // INTERNAL TEST (justified): BranchRef has no public API surface until
+        // permission_routing enforcement lands (Tasks 4-6). This pins the serde shape.
+        let value = PolicyValue::BranchRef("projectId".to_string());
+        let serialized = serde_json::to_value(&value).unwrap();
+        let back: PolicyValue = serde_json::from_value(serialized).unwrap();
+
+        assert_eq!(value, back);
     }
 
     #[test]

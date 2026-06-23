@@ -315,6 +315,26 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .map_err(|error| RuntimeError::WriteError(error.to_string()))
     }
 
+    pub fn publish_permissions_bundle_with_branch_policies(
+        &self,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        permissions: std::collections::HashMap<
+            crate::query_manager::types::TableName,
+            crate::query_manager::types::TablePolicies,
+        >,
+        branch_policies: crate::query_manager::types::BranchPolicies,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.publish_permissions_bundle_with_branch_policies(
+            schema_hash,
+            permissions,
+            branch_policies,
+            expected_parent_bundle_object_id,
+        )
+        .map_err(|error| RuntimeError::WriteError(error.to_string()))
+    }
+
     pub fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().current_permissions_head())

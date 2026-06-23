@@ -20,8 +20,8 @@ use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, Quer
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
-    Value,
+    BranchPolicies, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash,
+    TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
@@ -34,8 +34,8 @@ use super::auto_lens::generate_lens;
 use super::context::{SchemaContext, SchemaError};
 use super::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
-    decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
-    encode_permissions_head, encode_schema,
+    decode_schema, encode_lens_transform, encode_permissions,
+    encode_permissions_bundle_with_branch_policies, encode_permissions_head, encode_schema,
 };
 use super::lens::Lens;
 use super::types::AppId;
@@ -46,6 +46,7 @@ struct PermissionsBundleState {
     version: u64,
     parent_bundle_object_id: Option<ObjectId>,
     permissions: HashMap<TableName, TablePolicies>,
+    branch_policies: BranchPolicies,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub struct PermissionsHeadSummary {
 pub struct CurrentPermissionsSummary {
     pub head: PermissionsHeadSummary,
     pub permissions: HashMap<TableName, TablePolicies>,
+    pub branch_policies: BranchPolicies,
 }
 
 #[derive(Clone, Debug)]
@@ -733,6 +735,7 @@ impl SchemaManager {
         Some(CurrentPermissionsSummary {
             head,
             permissions: bundle.permissions.clone(),
+            branch_policies: bundle.branch_policies.clone(),
         })
     }
 
@@ -1021,11 +1024,12 @@ impl SchemaManager {
         let bundle_metadata = self.permissions_bundle_metadata();
         let head_object_id = self.permissions_head_object_id();
         let head_metadata = self.permissions_head_metadata();
-        let bundle_content = encode_permissions_bundle(
+        let bundle_content = encode_permissions_bundle_with_branch_policies(
             bundle.schema_hash,
             bundle.version,
             bundle.parent_bundle_object_id,
             &bundle.permissions,
+            &bundle.branch_policies,
         );
         let bundle_timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
         self.catalogue_publish_timestamps
@@ -1064,6 +1068,23 @@ impl SchemaManager {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, SchemaError> {
+        self.publish_permissions_bundle_with_branch_policies(
+            storage,
+            schema_hash,
+            permissions,
+            BranchPolicies::default(),
+            expected_parent_bundle_object_id,
+        )
+    }
+
+    pub fn publish_permissions_bundle_with_branch_policies<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        branch_policies: BranchPolicies,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, SchemaError> {
         let current_parent_bundle_object_id = self
             .current_permissions_head
             .map(|head| head.bundle_object_id);
@@ -1078,6 +1099,7 @@ impl SchemaManager {
             && head.schema_hash == schema_hash
             && let Some(existing) = self.known_permissions_bundles.get(&head.bundle_object_id)
             && existing.permissions == permissions
+            && existing.branch_policies == branch_policies
         {
             return Ok(Some(self.permissions_head_object_id()));
         }
@@ -1091,6 +1113,7 @@ impl SchemaManager {
             version,
             parent_bundle_object_id: current_parent_bundle_object_id,
             permissions,
+            branch_policies,
         };
         let bundle_object_id = self.permissions_bundle_object_id(&bundle_state);
         self.known_permissions_bundles
@@ -1154,11 +1177,12 @@ impl SchemaManager {
     fn permissions_bundle_object_id(&self, bundle: &PermissionsBundleState) -> ObjectId {
         let mut identity =
             format!("jazz-catalogue-permissions-bundle:{}:", self.app_id.uuid()).into_bytes();
-        identity.extend_from_slice(&encode_permissions_bundle(
+        identity.extend_from_slice(&encode_permissions_bundle_with_branch_policies(
             bundle.schema_hash,
             bundle.version,
             bundle.parent_bundle_object_id,
             &bundle.permissions,
+            &bundle.branch_policies,
         ));
         ObjectId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &identity))
     }
@@ -1316,7 +1340,7 @@ impl SchemaManager {
             return Ok(());
         }
 
-        let (schema_hash, version, parent_bundle_object_id, permissions) =
+        let (schema_hash, version, parent_bundle_object_id, permissions, branch_policies) =
             decode_permissions_bundle(content)
                 .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
         self.known_permissions_bundles.insert(
@@ -1326,6 +1350,7 @@ impl SchemaManager {
                 version,
                 parent_bundle_object_id,
                 permissions,
+                branch_policies,
             },
         );
 
@@ -1402,6 +1427,7 @@ impl SchemaManager {
                 version: 1,
                 parent_bundle_object_id: None,
                 permissions,
+                branch_policies: BranchPolicies::default(),
             },
         );
         let head = PermissionsHeadState {
@@ -2537,6 +2563,7 @@ mod tests {
             version: 3,
             parent_bundle_object_id: Some(ObjectId::new()),
             permissions: permissions.clone(),
+            branch_policies: BranchPolicies::default(),
         };
         let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
         let head = PermissionsHeadState {
@@ -2565,7 +2592,7 @@ mod tests {
             .process_catalogue_update(
                 bundle_object_id,
                 &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(
+                &crate::schema_manager::encoding::encode_permissions_bundle(
                     schema_hash,
                     bundle.version,
                     bundle.parent_bundle_object_id,
@@ -2608,6 +2635,7 @@ mod tests {
             version: 1,
             parent_bundle_object_id: None,
             permissions: permissions.clone(),
+            branch_policies: BranchPolicies::default(),
         };
         let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
 
@@ -2652,7 +2680,7 @@ mod tests {
             .process_catalogue_update(
                 bundle_object_id,
                 &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(
+                &crate::schema_manager::encoding::encode_permissions_bundle(
                     schema_hash,
                     bundle.version,
                     bundle.parent_bundle_object_id,

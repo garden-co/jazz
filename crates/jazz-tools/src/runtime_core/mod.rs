@@ -707,12 +707,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, crate::schema_manager::SchemaError> {
-        let id = self.schema_manager.publish_permissions_bundle(
-            &mut self.storage,
+        self.publish_permissions_bundle_with_branch_policies(
             schema_hash,
             permissions,
+            crate::query_manager::types::BranchPolicies::default(),
             expected_parent_bundle_object_id,
-        )?;
+        )
+    }
+
+    pub fn publish_permissions_bundle_with_branch_policies(
+        &mut self,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        branch_policies: crate::query_manager::types::BranchPolicies,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, crate::schema_manager::SchemaError> {
+        let id = self
+            .schema_manager
+            .publish_permissions_bundle_with_branch_policies(
+                &mut self.storage,
+                schema_hash,
+                permissions,
+                branch_policies,
+                expected_parent_bundle_object_id,
+            )?;
         if id.is_some() {
             self.mark_storage_write_pending_flush();
             self.refresh_transport_catalogue_state_hash();

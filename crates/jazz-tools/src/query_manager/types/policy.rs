@@ -5,6 +5,7 @@ use crate::query_manager::relation_ir::{
     ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RowPolicyMode {
@@ -68,6 +69,8 @@ pub struct TablePolicies {
     pub update: OperationPolicy,
     pub delete: OperationPolicy,
 }
+
+pub type BranchPolicies = HashMap<TableName, HashMap<TableName, TablePolicies>>;
 
 impl TablePolicies {
     /// Create empty policies.
@@ -326,6 +329,7 @@ pub mod policy_expr {
     pub enum PolicyValueInput {
         Literal(Value),
         Session(Vec<String>),
+        Branch(String),
     }
 
     impl From<PolicyValueInput> for PolicyValue {
@@ -333,6 +337,7 @@ pub mod policy_expr {
             match value {
                 PolicyValueInput::Literal(value) => PolicyValue::Literal(value),
                 PolicyValueInput::Session(path) => PolicyValue::SessionRef(path),
+                PolicyValueInput::Branch(column) => PolicyValue::BranchRef(column),
             }
         }
     }
@@ -342,6 +347,7 @@ pub mod policy_expr {
             match value {
                 PolicyValue::Literal(value) => PolicyValueInput::Literal(value),
                 PolicyValue::SessionRef(path) => PolicyValueInput::Session(path),
+                PolicyValue::BranchRef(column) => PolicyValueInput::Branch(column),
             }
         }
     }
@@ -396,6 +402,10 @@ pub mod policy_expr {
 
     pub fn session(path: impl IntoSessionPath) -> PolicyValueInput {
         PolicyValueInput::Session(path.into_session_path())
+    }
+
+    pub fn branch(column: impl Into<String>) -> PolicyValueInput {
+        PolicyValueInput::Branch(column.into())
     }
 
     pub fn literal(value: impl Into<Value>) -> PolicyValueInput {
