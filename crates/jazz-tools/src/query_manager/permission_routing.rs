@@ -46,6 +46,52 @@ pub enum PermissionRoute<'a> {
     Deny,
 }
 
+pub(crate) struct RoutedWritePolicies {
+    pub using: Option<PolicyExpr>,
+    pub with_check: Option<PolicyExpr>,
+}
+
+pub(crate) fn branch_write_policies_from_route(
+    route: PermissionRoute<'_>,
+    operation: Operation,
+) -> Result<Option<RoutedWritePolicies>, ()> {
+    match route {
+        PermissionRoute::Normal => Ok(None),
+        PermissionRoute::NoBranchPolicy | PermissionRoute::Deny => Err(()),
+        PermissionRoute::Branch { policy, context } => {
+            let policies = match operation {
+                Operation::Insert => RoutedWritePolicies {
+                    using: None,
+                    with_check: policy
+                        .insert_policy()
+                        .map(|expr| bind_branch_refs(expr, &context)),
+                },
+                Operation::Update => RoutedWritePolicies {
+                    using: policy
+                        .update_using_policy()
+                        .map(|expr| bind_branch_refs(expr, &context)),
+                    with_check: policy
+                        .update_check_policy()
+                        .map(|expr| bind_branch_refs(expr, &context)),
+                },
+                Operation::Delete => RoutedWritePolicies {
+                    using: policy
+                        .effective_delete_using()
+                        .map(|expr| bind_branch_refs(expr, &context)),
+                    with_check: None,
+                },
+                Operation::Select => return Ok(None),
+            };
+
+            if policies.using.is_none() && policies.with_check.is_none() {
+                Err(())
+            } else {
+                Ok(Some(policies))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PolicyEvalRefs<'a> {
     pub row_id: Option<ObjectId>,

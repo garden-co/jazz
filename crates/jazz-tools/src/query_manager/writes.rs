@@ -21,6 +21,7 @@ use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
     WriteTableCacheEntry,
 };
+use super::permission_routing::{RoutedWritePolicies, branch_write_policies_from_route};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
@@ -28,6 +29,12 @@ use super::types::{
     ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
     TableName, Value,
 };
+
+type BranchWriteAuthorizationContext = (
+    std::sync::Arc<Schema>,
+    std::sync::Arc<crate::schema_manager::SchemaContext>,
+    RoutedWritePolicies,
+);
 
 pub struct RowBranchWrite<'a> {
     pub table: &'a str,
@@ -718,7 +725,57 @@ impl QueryManager {
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
+            if let Some((auth_schema, auth_context, branch_policies)) = self
+                .branch_write_authorization_context(
+                    storage,
+                    table_name,
+                    branch,
+                    session,
+                    Operation::Update,
+                )?
+            {
+                if let Some(policy) = branch_policies.using.as_ref()
+                    && !self.evaluate_current_authorization_policy_for_content(
+                        storage,
+                        id,
+                        branch,
+                        table_name,
+                        policy,
+                        old_data_for_policy,
+                        old_provenance_for_policy,
+                        session,
+                        Operation::Update,
+                        &auth_schema,
+                        &auth_context,
+                    )
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
+
+                if let Some(policy) = branch_policies.with_check.as_ref()
+                    && !self.evaluate_current_authorization_policy_for_content(
+                        storage,
+                        id,
+                        branch,
+                        table_name,
+                        policy,
+                        &new_data,
+                        new_provenance,
+                        session,
+                        Operation::Update,
+                        &auth_schema,
+                        &auth_context,
+                    )
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
+            } else if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
                 let Some(auth_table_schema) = auth_schema.get(&table_name) else {
@@ -1097,7 +1154,40 @@ impl QueryManager {
         }
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
+            if let Some((auth_schema, auth_context, branch_policies)) = self
+                .branch_write_authorization_context(
+                    storage,
+                    table_name,
+                    branch,
+                    session,
+                    Operation::Insert,
+                )?
+            {
+                let Some(policy) = branch_policies.with_check.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                };
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    object_id,
+                    branch,
+                    table_name,
+                    policy,
+                    &data,
+                    &provenance,
+                    session,
+                    Operation::Insert,
+                    &auth_schema,
+                    &auth_context,
+                ) {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+            } else if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
                 let allowed = auth_schema
@@ -1328,6 +1418,50 @@ impl QueryManager {
         self.local_subscription_uses_explicit_authorization(session)
             .then(|| self.authorization_schema_for_branch(&BranchName::new(branch)))
             .flatten()
+    }
+
+    pub(super) fn branch_write_policies_for_operation(
+        &self,
+        storage: &dyn Storage,
+        table_name: TableName,
+        branch: &str,
+        session: &Session,
+        operation: Operation,
+    ) -> Result<Option<RoutedWritePolicies>, QueryError> {
+        if self.authorization_branch_policies.is_empty() {
+            return Ok(None);
+        }
+
+        branch_write_policies_from_route(
+            self.resolve_branch_route(&table_name, branch, operation, storage, Some(session)),
+            operation,
+        )
+        .map_err(|_| QueryError::PolicyDenied {
+            table: table_name,
+            operation,
+        })
+    }
+
+    fn branch_write_authorization_context(
+        &mut self,
+        storage: &dyn Storage,
+        table_name: TableName,
+        branch: &str,
+        session: &Session,
+        operation: Operation,
+    ) -> Result<Option<BranchWriteAuthorizationContext>, QueryError> {
+        let Some((auth_schema, auth_context)) =
+            self.authorization_schema_for_branch(&BranchName::new(branch))
+        else {
+            return Ok(None);
+        };
+        let Some(policies) = self
+            .branch_write_policies_for_operation(storage, table_name, branch, session, operation)?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some((auth_schema, auth_context, policies)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2046,7 +2180,40 @@ impl QueryManager {
         let using_policy = table_write.delete_using_policy.as_deref();
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) =
+            if let Some((auth_schema, auth_context, branch_policies)) = self
+                .branch_write_authorization_context(
+                    storage,
+                    table_name,
+                    branch,
+                    session,
+                    Operation::Delete,
+                )?
+            {
+                let Some(policy) = branch_policies.using.as_ref() else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
+                if !self.evaluate_current_authorization_policy_for_content(
+                    storage,
+                    id,
+                    branch,
+                    table_name,
+                    policy,
+                    old_data_for_policy,
+                    old_provenance_for_policy,
+                    session,
+                    Operation::Delete,
+                    &auth_schema,
+                    &auth_context,
+                ) {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                }
+            } else if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
                 let Some(auth_table_schema) = auth_schema.get(&table_name) else {

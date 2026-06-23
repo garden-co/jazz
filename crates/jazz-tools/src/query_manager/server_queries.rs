@@ -1697,30 +1697,71 @@ impl QueryManager {
             return;
         }
 
-        let policy = match check.operation {
-            Operation::Insert => auth_table_schema.policies.insert_policy(),
-            Operation::Update => unreachable!(),
-            Operation::Delete => auth_table_schema.policies.effective_delete_using(),
-            Operation::Select => {
-                self.sync_manager.approve_permission_check(storage, check);
+        let branch_write_policies = match self.branch_write_policies_for_operation(
+            storage,
+            auth_table_name,
+            branch_name.as_str(),
+            &check.session,
+            check.operation,
+        ) {
+            Ok(policies) => policies,
+            Err(_) => {
+                let reason = format!(
+                    "{:?} denied by branch policy on table {}",
+                    check.operation, write_table_name.0
+                );
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
             }
         };
 
-        let policy = match policy {
-            Some(p) => p,
-            None => {
-                if self.row_policy_mode.denies_missing_explicit_policy() {
-                    let reason = format!(
-                        "{:?} denied on table {} - missing explicit policy",
-                        check.operation, write_table_name.0
-                    );
-                    self.sync_manager
-                        .reject_permission_check(storage, check, reason);
-                } else {
+        let policy = if let Some(branch_write_policies) = branch_write_policies {
+            let policy = match check.operation {
+                Operation::Insert => branch_write_policies.with_check,
+                Operation::Update => unreachable!(),
+                Operation::Delete => branch_write_policies.using,
+                Operation::Select => {
                     self.sync_manager.approve_permission_check(storage, check);
+                    return;
                 }
+            };
+            let Some(policy) = policy else {
+                let reason = format!(
+                    "{:?} denied on table {} - missing explicit branch policy",
+                    check.operation, write_table_name.0
+                );
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
                 return;
+            };
+            Cow::Owned(policy)
+        } else {
+            let policy = match check.operation {
+                Operation::Insert => auth_table_schema.policies.insert_policy(),
+                Operation::Update => unreachable!(),
+                Operation::Delete => auth_table_schema.policies.effective_delete_using(),
+                Operation::Select => {
+                    self.sync_manager.approve_permission_check(storage, check);
+                    return;
+                }
+            };
+
+            match policy {
+                Some(p) => Cow::Borrowed(p),
+                None => {
+                    if self.row_policy_mode.denies_missing_explicit_policy() {
+                        let reason = format!(
+                            "{:?} denied on table {} - missing explicit policy",
+                            check.operation, write_table_name.0
+                        );
+                        self.sync_manager
+                            .reject_permission_check(storage, check, reason);
+                    } else {
+                        self.sync_manager.approve_permission_check(storage, check);
+                    }
+                    return;
+                }
             }
         };
 
@@ -1781,7 +1822,7 @@ impl QueryManager {
                 object_id,
                 branch_name,
                 table_name: auth_table_name,
-                policy,
+                policy: policy.as_ref(),
                 content,
                 provenance: &provenance,
                 session: &check.session,
@@ -1849,6 +1890,137 @@ impl QueryManager {
             check.old_content = Some(previous_row.data.to_vec());
         }
 
+        let source_branch_schema_map = self.branch_schema_map.clone();
+        let old_provenance =
+            self.current_row_provenance(storage, object_id, branch_name, Some(&write_table_name));
+        let new_provenance = Self::payload_row_provenance(&check.payload);
+
+        let branch_write_policies = match self.branch_write_policies_for_operation(
+            storage,
+            auth_table_name,
+            branch_name.as_str(),
+            &check.session,
+            Operation::Update,
+        ) {
+            Ok(policies) => policies,
+            Err(_) => {
+                let reason = format!(
+                    "Update denied by branch policy on table {}",
+                    write_table_name.0
+                );
+                self.sync_manager
+                    .reject_permission_check(storage, check, reason);
+                return;
+            }
+        };
+
+        if let Some(branch_write_policies) = branch_write_policies {
+            if let Some(using) = branch_write_policies.using.as_ref() {
+                let old_content = match check.old_content.as_ref() {
+                    Some(c) if !c.is_empty() => c,
+                    _ => {
+                        let reason = format!(
+                            "Update denied by branch USING policy on table {} - no old content",
+                            write_table_name.0
+                        );
+                        self.sync_manager
+                            .reject_permission_check(storage, check, reason);
+                        return;
+                    }
+                };
+                let Some(old_provenance) = old_provenance.as_ref() else {
+                    let reason = format!(
+                        "Update denied by branch USING policy on table {} - missing old provenance",
+                        write_table_name.0
+                    );
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
+                    return;
+                };
+
+                if !self.evaluate_authorization_policy(
+                    storage,
+                    AuthorizationPolicyRequest {
+                        object_id,
+                        branch_name,
+                        table_name: auth_table_name,
+                        policy: using,
+                        content: old_content,
+                        provenance: old_provenance,
+                        session: &check.session,
+                        auth_schema,
+                        auth_context,
+                        source_branch_schema_map: &source_branch_schema_map,
+                        operation: Operation::Update,
+                        settlement_eval_cache: None,
+                    },
+                ) {
+                    let reason = format!(
+                        "Update denied by branch USING policy on table {}",
+                        write_table_name.0
+                    );
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
+                    return;
+                }
+            }
+
+            if let Some(with_check) = branch_write_policies.with_check.as_ref() {
+                let new_content = match check.new_content.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        self.sync_manager.reject_permission_check(
+                            storage,
+                            check,
+                            format!(
+                                "Update denied by branch WITH CHECK policy on table {} - missing new content",
+                                write_table_name.0
+                            ),
+                        );
+                        return;
+                    }
+                };
+                let Some(new_provenance) = new_provenance.as_ref() else {
+                    let reason = format!(
+                        "Update denied by branch WITH CHECK policy on table {} - missing new provenance",
+                        write_table_name.0
+                    );
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
+                    return;
+                };
+
+                if !self.evaluate_authorization_policy(
+                    storage,
+                    AuthorizationPolicyRequest {
+                        object_id,
+                        branch_name,
+                        table_name: auth_table_name,
+                        policy: with_check,
+                        content: new_content,
+                        provenance: new_provenance,
+                        session: &check.session,
+                        auth_schema,
+                        auth_context,
+                        source_branch_schema_map: &source_branch_schema_map,
+                        operation: Operation::Update,
+                        settlement_eval_cache: None,
+                    },
+                ) {
+                    let reason = format!(
+                        "Update denied by branch WITH CHECK policy on table {}",
+                        write_table_name.0
+                    );
+                    self.sync_manager
+                        .reject_permission_check(storage, check, reason);
+                    return;
+                }
+            }
+
+            self.sync_manager.approve_permission_check(storage, check);
+            return;
+        }
+
         let Some(table_schema) = auth_schema.get(&auth_table_name) else {
             self.sync_manager.reject_permission_check(
                 storage,
@@ -1862,10 +2034,6 @@ impl QueryManager {
         };
         let using_policy = table_schema.policies.update_using_policy();
         let check_policy = table_schema.policies.update_check_policy();
-        let source_branch_schema_map = self.branch_schema_map.clone();
-        let old_provenance =
-            self.current_row_provenance(storage, object_id, branch_name, Some(&write_table_name));
-        let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
             if self.row_policy_mode.denies_missing_explicit_policy() {

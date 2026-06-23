@@ -25,7 +25,7 @@ use crate::query_manager::encoding::encode_row;
 use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
     SchemaHash, TableName, TableSchema, Value, permissions, policy_expr as pe,
