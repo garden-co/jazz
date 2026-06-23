@@ -21,6 +21,18 @@ function getContainingRow(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="row"], tr') ?? null;
 }
 
+function getCellsInRowContaining(text: string): HTMLElement[] {
+  const row = getContainingRow(screen.getByText(text));
+  expect(row).not.toBeNull();
+  return within(row as HTMLElement).getAllByRole("gridcell");
+}
+
+function getCellsInRow(element: HTMLElement): HTMLElement[] {
+  const row = getContainingRow(element);
+  expect(row).not.toBeNull();
+  return within(row as HTMLElement).getAllByRole("gridcell");
+}
+
 function getLastTodosQuery(): { _build: () => string } {
   return [...mockUseAll.mock.calls]
     .reverse()
@@ -48,9 +60,16 @@ const mockWasmSchema = {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "maybe_done", column_type: { type: "Boolean" }, nullable: true },
       { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
       { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
       { name: "blob", column_type: { type: "Bytea" }, nullable: true },
+      {
+        name: "status",
+        column_type: { type: "Enum", variants: ["open", "closed"] },
+        nullable: false,
+        default: { type: "Text", value: "open" },
+      },
     ],
   },
   users: {
@@ -98,17 +117,21 @@ describe("TableDataGrid", () => {
         id: "row-2",
         title: "zeta",
         done: false,
+        maybe_done: null,
         meta: { done: true },
         owner_id: "owner-a",
         blob: new Uint8Array([1, 2]),
+        status: "open",
       },
       {
         id: "row-1",
         title: "alpha",
         done: true,
+        maybe_done: true,
         meta: null,
         owner_id: "owner-b",
         blob: new Uint8Array([5, 6]),
+        status: "closed",
       },
     ];
     currentReferenceRowsByTable = {
@@ -166,8 +189,13 @@ describe("TableDataGrid", () => {
     renderGrid();
 
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
-    expect(screen.getByRole("button", { name: "Filter" })).not.toBeNull();
-    expect(screen.getByRole("button", { name: "Insert" })).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Schema" }).getAttribute("title")).toBe("Schema");
+    expect(screen.getByRole("button", { name: "Insert row" }).getAttribute("title")).toBe(
+      "Insert row",
+    );
+    const toolbarDeleteButton = screen.getByRole("button", { name: "Delete row(s)" });
+    expect(toolbarDeleteButton.getAttribute("title")).toBe("Delete row(s)");
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
@@ -176,6 +204,16 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
+  });
+
+  it("renders null cell values with a marker", () => {
+    renderGrid();
+
+    const row = getContainingRow(screen.getByText("row-1"));
+    expect(row).not.toBeNull();
+
+    const nullMarker = within(row as HTMLElement).getByText("<null>");
+    expect(getContainingCell(nullMarker)).not.toBeNull();
   });
 
   it("renders reference cells as links to the related table filtered by id", () => {
@@ -195,14 +233,6 @@ describe("TableDataGrid", () => {
         value: "owner-a",
       },
     ]);
-  });
-
-  it("keeps the edit sidebar visible even when no row is selected", () => {
-    renderGrid();
-
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-    expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
-    expect(screen.getAllByRole("separator")).toHaveLength(1);
   });
 
   it("updates query sorting when a sortable column header is clicked", () => {
@@ -241,7 +271,6 @@ describe("TableDataGrid", () => {
   it("adds a where clause and compiles it into query conditions", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
     fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "contains" } });
     fireEvent.change(screen.getByLabelText("Value"), { target: { value: "alpha" } });
@@ -256,24 +285,20 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("opens row edit sidebar and updates editable fields", async () => {
+  it("edits text cells in place and saves from the banner", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    const titleCell = screen.getByRole("gridcell", { name: "zeta" });
+    fireEvent.click(titleCell);
+    expect(getContainingRow(screen.getByText("zeta"))?.className).toContain("rowSelected");
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
-    });
+    fireEvent.doubleClick(titleCell);
+    const titleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(titleEditor, { target: { value: "zeta updated" } });
+    fireEvent.blur(titleEditor);
 
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-    expect(screen.getByText("Read-only: binary field")).not.toBeNull();
-
-    fireEvent.change(screen.getByLabelText("title"), { target: { value: "zeta updated" } });
-    const doneField = screen.getByLabelText("done field");
-    fireEvent.change(within(doneField).getByRole("combobox"), { target: { value: "true" } });
-    const ownerField = screen.getByLabelText("owner_id field");
-    fireEvent.change(within(ownerField).getByRole("textbox"), { target: { value: "owner-c" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByText("Queued")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledWith(
@@ -281,78 +306,149 @@ describe("TableDataGrid", () => {
         "row-2",
         expect.objectContaining({
           title: "zeta updated",
-          done: true,
-          owner_id: "owner-c",
         }),
       );
       expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
-  it("preserves unsaved edits when the current row live-updates", async () => {
-    const { rerender } = renderGrid();
-
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
-    });
-
-    fireEvent.change(screen.getByLabelText("title"), { target: { value: "local draft" } });
-
-    currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
-    rerender(renderGridUi());
-
-    expect((screen.getByLabelText("title") as HTMLInputElement).value).toBe("local draft");
-  });
-
-  it("uses the same editable sidebar for selected rows and saves changes from it", async () => {
+  it("does not open an inline editor for boolean cells", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    const doneCell = getContainingCell(
+      screen.getByRole("checkbox", { name: "Toggle done for row-2" }),
+    );
+    expect(doneCell).not.toBeNull();
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
-    });
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-    expect(screen.getAllByRole("separator")).toHaveLength(1);
-    expect(screen.getByDisplayValue("zeta")).not.toBeNull();
-    const doneField = screen.getByLabelText("done field");
-    expect((within(doneField).getByRole("combobox") as HTMLSelectElement).value).toBe("false");
+    fireEvent.doubleClick(doneCell as HTMLElement);
 
-    fireEvent.change(screen.getByLabelText("title"), { target: { value: "selected row edit" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.queryByLabelText("Edit done")).toBeNull();
+  });
+
+  it("shows a checkbox for nullable boolean null cells after double click", async () => {
+    renderGrid();
+
+    const row = getContainingRow(screen.getByText("row-2"));
+    expect(row).not.toBeNull();
+    const nullMarker = within(row as HTMLElement).getByText("<null>");
+    const nullCell = getContainingCell(nullMarker);
+    expect(nullCell).not.toBeNull();
+
+    fireEvent.doubleClick(nullCell as HTMLElement);
+
+    const maybeDoneCheckbox = within(
+      getContainingRow(screen.getByText("row-2")) as HTMLElement,
+    ).getByRole("checkbox", { name: "Toggle maybe_done for row-2" });
+    expect((maybeDoneCheckbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
         expect.objectContaining({
-          title: "selected row edit",
-          done: false,
-          meta: { done: true },
-          owner_id: "owner-a",
+          maybe_done: false,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
-  it("clears the selected row on escape while keeping the edit sidebar visible", async () => {
+  it("sets nullable boolean cells back to NULL from the cross action", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    const maybeDoneCheckbox = screen.getByRole("checkbox", {
+      name: "Toggle maybe_done for row-1",
+    });
+    expect((maybeDoneCheckbox as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Set maybe_done to NULL for row-1" }));
+
+    expect(
+      within(getContainingRow(screen.getByText("row-1")) as HTMLElement).getAllByText("<null>")
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-1",
+        expect.objectContaining({
+          maybe_done: null,
+        }),
+      );
+    });
+  });
+
+  it("opens select-backed editors when edit mode starts", () => {
+    const selectPrototype = HTMLSelectElement.prototype as HTMLSelectElement & {
+      showPicker?: () => void;
+    };
+    const originalShowPicker = selectPrototype.showPicker;
+    const showPicker = vi.fn();
+    selectPrototype.showPicker = showPicker;
+
+    try {
+      renderGrid();
+
+      fireEvent.doubleClick(screen.getByRole("gridcell", { name: "open" }));
+
+      expect(screen.getByLabelText("Edit status")).not.toBeNull();
+      expect(showPicker).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalShowPicker) {
+        selectPrototype.showPicker = originalShowPicker;
+      } else {
+        Reflect.deleteProperty(selectPrototype, "showPicker");
+      }
+    }
+  });
+
+  it("preserves queued inline edits when the current row live-updates", async () => {
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    const editor = screen.getByLabelText("Edit title");
+    fireEvent.change(editor, { target: { value: "local draft" } });
+    fireEvent.blur(editor);
+
+    currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
+    rerender(renderGridUi());
+
+    expect(screen.getByText("local draft")).not.toBeNull();
+    expect(screen.queryByText("server pushed update")).toBeNull();
+  });
+
+  it("sets nullable columns to NULL from the inline editor action", async () => {
+    renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: '{"done":true}' }));
+    expect(screen.queryByRole("checkbox", { name: "Set meta to NULL" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Set meta to NULL" }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Edit meta")).toBeNull();
     });
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    expect(
+      within(getContainingRow(screen.getByText("row-2")) as HTMLElement).getAllByText("<null>")
+        .length,
+    ).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-      expect(screen.queryByDisplayValue("row-2")).toBeNull();
-      expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({
+          meta: null,
+        }),
+      );
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -548,18 +644,39 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("row-2")).toBeNull();
   });
 
-  it("opens insert sidebar and inserts a new row", async () => {
+  it("appends a staged insert row and inserts it from the banner", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
 
-    expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
-    expect(screen.getByDisplayValue("auto-generated")).not.toBeNull();
+    expect(screen.getByText("staged")).not.toBeNull();
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "Insert row" })).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("title"), { target: { value: "new todo" } });
-    const doneField = screen.getByLabelText("done field");
-    fireEvent.change(within(doneField).getByRole("combobox"), { target: { value: "true" } });
-    fireEvent.click(screen.getAllByRole("button", { name: "Insert" })[1] as Element);
+    const stagedCells = getCellsInRowContaining("staged");
+    const initialStagedRow = getContainingRow(screen.getByText("staged"));
+    expect(initialStagedRow).not.toBeNull();
+    const statusCell = stagedCells[7];
+    expect(statusCell).not.toBeUndefined();
+    expect(within(statusCell as HTMLElement).getByText("open")).not.toBeNull();
+    expect(within(initialStagedRow as HTMLElement).getAllByText("<null>").length).toBeGreaterThan(
+      0,
+    );
+
+    fireEvent.doubleClick(stagedCells[1] as HTMLElement);
+    const titleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(titleEditor, { target: { value: "new todo" } });
+    fireEvent.blur(titleEditor);
+
+    const stagedRow = getContainingRow(screen.getByText("staged"));
+    expect(stagedRow).not.toBeNull();
+    fireEvent.click(
+      within(stagedRow as HTMLElement).getByRole("checkbox", {
+        name: "Toggle done for staged insert",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(mockInsert).toHaveBeenCalledWith(
@@ -568,35 +685,167 @@ describe("TableDataGrid", () => {
           title: "new todo",
           done: true,
           meta: null,
+          owner_id: null,
         }),
       );
       expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
     });
+
+    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
-  it("closes sidebar when clicking outside", () => {
+  it("queues multiple staged insert rows and inserts them from the banner", async () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
-    expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
 
-    fireEvent.click(screen.getByTestId("row-mutation-overlay"));
-    expect(screen.queryByRole("heading", { name: "Insert row" })).toBeNull();
-  });
+    expect(screen.getAllByText("staged")).toHaveLength(2);
+    expect(screen.getByText("2 staged inserts")).not.toBeNull();
 
-  it("deletes a row when delete is confirmed", async () => {
-    renderGrid();
+    let stagedBadges = screen.getAllByText("staged");
+    let firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
+    fireEvent.doubleClick(firstStagedCells[1] as HTMLElement);
+    const firstTitleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(firstTitleEditor, { target: { value: "first todo" } });
+    fireEvent.blur(firstTitleEditor);
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    stagedBadges = screen.getAllByText("staged");
+    const firstStagedRow = getContainingRow(stagedBadges[0] as HTMLElement);
+    expect(firstStagedRow).not.toBeNull();
+    fireEvent.click(
+      within(firstStagedRow as HTMLElement).getByRole("checkbox", {
+        name: "Toggle done for staged insert",
+      }),
+    );
+
+    stagedBadges = screen.getAllByText("staged");
+    let secondStagedCells = getCellsInRow(stagedBadges[1] as HTMLElement);
+    fireEvent.doubleClick(secondStagedCells[1] as HTMLElement);
+    const secondTitleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(secondTitleEditor, { target: { value: "second todo" } });
+    fireEvent.blur(secondTitleEditor);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
+      expect(mockInsert).toHaveBeenCalledTimes(2);
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        expect.objectContaining({
+          title: "first todo",
+          done: true,
+          meta: null,
+          owner_id: null,
+        }),
+      );
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        expect.objectContaining({
+          title: "second todo",
+          done: false,
+          meta: null,
+          owner_id: null,
+        }),
+      );
+      expect(mockInsertWait).toHaveBeenCalledTimes(2);
     });
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(screen.getByText("Delete this row?")).not.toBeNull();
+  it("cancels a staged insert row", () => {
+    renderGrid();
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    expect(screen.getByText("staged")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel staged insert" }));
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.queryByText("1 staged insert")).toBeNull();
+  });
+
+  it("selects only the clicked row on plain cell clicks", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).not.toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-1" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).not.toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).toContain("rowSelected");
+  });
+
+  it("queues a shift-click selected row range for deletion", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-1" }), { shiftKey: true });
+
+    expect(getContainingRow(screen.getByText("row-2"))?.className).toContain("rowSelected");
+    expect(getContainingRow(screen.getByText("row-1"))?.className).toContain("rowSelected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete row(s)" }));
+
+    expect(screen.getByText("2 rows will be deleted")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockDelete).toHaveBeenCalledTimes(2);
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+      );
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        "row-1",
+      );
+      expect(mockDeleteWait).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("prevents browser text selection when shift-click range selection starts", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "row-2" }));
+
+    const defaultWasNotPrevented = fireEvent.mouseDown(
+      screen.getByRole("gridcell", { name: "row-1" }),
+      { shiftKey: true },
+    );
+
+    expect(defaultWasNotPrevented).toBe(false);
+  });
+
+  it("cancels staged insert rows included in a selected range", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+
+    const stagedBadges = screen.getAllByText("staged");
+    fireEvent.click(stagedBadges[0] as HTMLElement);
+    fireEvent.click(stagedBadges[1] as HTMLElement, { shiftKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Delete row(s)" }));
+
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.queryByText("2 staged inserts")).toBeNull();
+    expect(screen.queryByText("Queued")).toBeNull();
+  });
+
+  it("deletes a row when a queued delete is saved", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete row-2" }));
+    expect(screen.getByText("1 row will be deleted")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(mockDelete).toHaveBeenCalledWith(
@@ -607,18 +856,20 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("does not delete when delete is canceled", async () => {
+  it("does not delete when a queued delete is undone", () => {
     renderGrid();
 
-    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+    const deleteButton = screen.getByRole("button", { name: "Delete row-2" });
+    expect(deleteButton.getAttribute("title")).toBe("Delete row");
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
-    });
+    fireEvent.click(deleteButton);
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    fireEvent.click(screen.getByRole("button", { name: "No" }));
+    const undoButton = screen.getByRole("button", { name: "Undo delete row-2" });
+    expect(undoButton.getAttribute("title")).toBe("Undo");
 
+    fireEvent.click(undoButton);
+
+    expect(screen.queryByText("1 row will be deleted")).toBeNull();
     expect(mockDelete).not.toHaveBeenCalled();
   });
 });

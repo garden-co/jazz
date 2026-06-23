@@ -1,36 +1,11 @@
 .container {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
   background: transparent;
   padding: 0;
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding-left: 12px;
-  padding-right: 12px;
-
-  padding-bottom: 8px;
-}
-
-.headerActions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.title {
-  margin: 0;
-  font-size: 18px;
-  text-transform: capitalize;
-  color: #eff3f8;
 }
 
 .secondaryButton {
@@ -55,6 +30,20 @@
 .secondaryButton:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.iconButton {
+  justify-content: center;
+  inline-size: 31px;
+  block-size: 31px;
+  padding: 0;
+}
+
+.buttonIcon {
+  display: block;
+  inline-size: 15px;
+  block-size: 15px;
+  flex: 0 0 auto;
 }
 
 .primaryButton {
@@ -132,56 +121,6 @@
   overflow: hidden;
 }
 
-.contentPanels,
-.gridPanel,
-.detailsPanel {
-  min-width: 0;
-  min-height: 0;
-}
-
-.resizeHandle {
-  position: relative;
-  width: 1px;
-  flex: 0 0 6px;
-  cursor: col-resize;
-  background: transparent;
-}
-
-.resizeHandle::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0px;
-  width: 1px;
-  background: #232c3a;
-  transition: background 140ms ease;
-}
-
-.resizeHandle:hover::after,
-.resizeHandle[data-resize-handle-state="drag"]::after {
-  background: #345273;
-}
-
-.sidebarOverlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 7;
-  background: rgba(7, 12, 20, 0.22);
-}
-
-.sidebarPanel {
-  margin-left: auto;
-  width: min(560px, 38vw);
-  min-width: 420px;
-  max-width: 100%;
-  height: 100%;
-  box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
-}
-
 .dataGrid {
   block-size: 100%;
   min-block-size: 0;
@@ -198,6 +137,11 @@
   --rdg-row-selected-background-color: #17202b;
   --rdg-row-selected-hover-background-color: #1b2531;
   --rdg-cell-frozen-box-shadow: 2px 0 10px -6px rgba(0, 0, 0, 0.55);
+  scrollbar-width: none;
+}
+
+.dataGrid::-webkit-scrollbar {
+  display: none;
 }
 
 .dataGrid:focus-visible {
@@ -239,10 +183,17 @@
   white-space: nowrap;
 }
 
+.nullCellMarker {
+  color: #8995a8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
 .booleanCell {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
+  gap: 6px;
   inline-size: 100%;
   block-size: 100%;
   padding-inline-start: 8px;
@@ -292,17 +243,63 @@
   min-block-size: 30px;
 }
 
+.inlineEditorInput {
+  border: 0;
+  background: transparent;
+}
+
 .inlineEditorTextarea {
   min-block-size: 88px;
   padding: 8px;
   resize: vertical;
 }
 
-.inlineEditorInput:focus,
+.inlineEditorStack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.inlineEditorStack .inlineEditorTextarea {
+  block-size: auto;
+}
+
+.inlineNullButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 30px;
+  block-size: 30px;
+  border: 0;
+  background: transparent;
+  color: #9badc5;
+  padding: 0;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.inlineNullButton:hover {
+  color: #e3ebf6;
+}
+
+.inlineNullIcon {
+  inline-size: 14px;
+  block-size: 14px;
+}
+
 .inlineEditorSelect:focus,
 .inlineEditorTextarea:focus {
   outline: 1px solid #55b5bf;
   border-color: #55b5bf;
+}
+
+.inlineEditorInput:focus {
+  outline: none;
+  border: 0;
+  box-shadow: none;
 }
 
 .booleanCellCheckbox {
@@ -338,6 +335,35 @@
   background: rgba(200, 60, 60, 0.12);
 }
 
+.rowStagedInsert :global(.rdg-cell) {
+  background: rgba(73, 142, 183, 0.12);
+  box-shadow: inset 0 1px 0 rgba(100, 180, 220, 0.18);
+}
+
+.rowStagedInsert .actionsGridCell {
+  background: rgba(30, 61, 82, 0.45);
+}
+
+.rowSelected :global(.rdg-cell) {
+  background: var(--rdg-row-selected-background-color);
+}
+
+.rowSelected .actionsGridCell {
+  background: var(--rdg-row-selected-background-color);
+}
+
+.stagedInsertBadge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #31536d;
+  border-radius: 4px;
+  background: #162a39;
+  color: #b8d8ed;
+  padding: 3px 7px;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .cellUpdated {
   animation: cellPulse 1.2s ease-out;
 }
@@ -368,11 +394,16 @@
 }
 
 .actionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 28px;
+  block-size: 28px;
   border: 1px solid #293548;
   background: #161e29;
   color: #d7e1f1;
   border-radius: 4px;
-  padding: 5px 10px;
+  padding: 0;
   font-size: 12px;
   cursor: pointer;
 }
@@ -387,11 +418,16 @@
 }
 
 .dangerActionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 28px;
+  block-size: 28px;
   border: 1px solid #55333d;
   background: #311a21;
   color: #f1d6dc;
   border-radius: 4px;
-  padding: 5px 10px;
+  padding: 0;
   font-size: 12px;
   cursor: pointer;
 }

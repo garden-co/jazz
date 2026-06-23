@@ -1,11 +1,13 @@
-import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
+import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import styles from "./index.module.css";
+
+const TABLES_PANEL_OPEN_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesPanelOpen";
 
 interface TablesPanelIconProps {
   direction: "open" | "close";
@@ -34,7 +36,10 @@ function TablesPanelIcon({ direction }: TablesPanelIconProps) {
 export function InspectorLayout() {
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
-  const [isTablesPanelOpen, setIsTablesPanelOpen] = useState(true);
+  const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
+    TABLES_PANEL_OPEN_STORAGE_KEY,
+    true,
+  );
 
   const isDataExplorerRoute = location.pathname.startsWith("/data-explorer");
 
