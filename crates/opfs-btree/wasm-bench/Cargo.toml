@@ -1,5 +1,5 @@
 [workspace]
-members = ["bench-core"]
+members = ["sqlite"]
 
 [package]
 name = "opfs-btree-bench-harness"
@@ -27,7 +27,7 @@ default = []
 sqlite-worker = ["dep:wasm-sqlite"]
 
 [dependencies]
-bench-core = { package = "opfs-btree-bench-core", path = "bench-core" }
+bench-core = { package = "jazz-storage-bench-core", path = "../../../dev/benchmarks/storage/bench-core" }
 wasm-sqlite = { package = "opfs-btree-wasm-sqlite", path = "sqlite", optional = true }
 gloo-net = "0.6"
 gloo-worker = "0.6"

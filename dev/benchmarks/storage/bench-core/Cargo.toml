@@ -1,9 +1,9 @@
 [package]
-name = "opfs-btree-bench-core"
+name = "jazz-storage-bench-core"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Shared workload declaration, phase semantics, and engine contract for the opfs-btree browser benchmark."
+description = "Shared workload declaration, phase semantics, and engine contract for storage benchmarks."
 
 [lib]
 name = "bench_core"

@@ -11,13 +11,14 @@
 //! `Benchmark::new(...)` and commit its `<profile>.kv` fixture.
 
 use crate::phases::Phase;
+use crate::rng::SplitMix64;
 
 /// One benchmark profile: which data to load and which phases to run over it.
 #[derive(Debug, Clone)]
 pub struct Benchmark {
     /// Profile name, matched against the worker request and shown in results.
     pub profile: String,
-    /// `.kv` fixture filename under `public/data/`.
+    /// `.kv` fixture filename under `dev/benchmarks/storage/data/`.
     pub kv_fixture: String,
     /// Fixed seed for this profile's operation streams (kept stable so runs are
     /// comparable over time).
@@ -38,6 +39,19 @@ impl Benchmark {
     pub fn phase(mut self, phase: Phase) -> Self {
         self.phases.push(phase);
         self
+    }
+
+    /// Expand a phase using the same per-phase RNG stream as the shared runner.
+    pub fn phase_args(&self, phase_index: usize, record_count: u32) -> Vec<u32> {
+        let mut rng = self.phase_rng(phase_index);
+        self.phases[phase_index].gen_args(record_count, &mut rng)
+    }
+
+    fn phase_rng(&self, phase_index: usize) -> SplitMix64 {
+        SplitMix64::new(
+            self.seed
+                .wrapping_add((phase_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        )
     }
 }
 
