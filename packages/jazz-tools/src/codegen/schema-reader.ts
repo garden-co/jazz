@@ -102,6 +102,9 @@ function clonePolicyValue(value: DslPolicyValue): PolicyValue {
   if (value.type === "SessionRef") {
     return { type: "SessionRef", path: [...value.path] };
   }
+  if (value.type === "BranchRef") {
+    return { type: "BranchRef", column: value.column };
+  }
   return { type: "Literal", value: literalToWasmValue(value.value) };
 }
 

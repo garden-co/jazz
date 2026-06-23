@@ -1,4 +1,5 @@
 import type {
+  BranchPolicies as WasmBranchPolicies,
   OperationPolicy as WasmOperationPolicy,
   PolicyExpr as WasmPolicyExpr,
   PolicyValue as WasmPolicyValue,
@@ -16,7 +17,16 @@ import type {
   TablePolicies,
 } from "./schema.js";
 
-export type CompiledPermissionsMap = Record<string, TablePolicies>;
+export type BranchPoliciesMap = Record<string, Record<string, TablePolicies>>;
+export type CompiledPermissionsMap = Record<string, TablePolicies> & {
+  branchPolicies?: BranchPoliciesMap;
+};
+export type WasmPermissionsMap = Record<string, WasmTablePolicies> & {
+  branch_policies?: WasmBranchPolicies;
+};
+export type WasmSchemaWithBranchPolicies = WasmSchema & {
+  branch_policies?: WasmBranchPolicies;
+};
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
 
 export interface MissingExplicitPolicyDiagnostic {
@@ -146,7 +156,7 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
 }
 
 function normalizePolicyValueForWasm(value: PolicyValue): WasmPolicyValue {
-  if (value.type === "SessionRef") {
+  if (value.type === "SessionRef" || value.type === "BranchRef") {
     return value;
   }
   return {
@@ -410,18 +420,69 @@ function normalizeOperationPolicyForWasm(
   return normalized;
 }
 
+function normalizeBranchPoliciesForWasm(
+  branchPolicies?: BranchPoliciesMap,
+): WasmBranchPolicies | undefined {
+  if (!branchPolicies) {
+    return undefined;
+  }
+
+  const normalized: WasmBranchPolicies = {};
+  for (const [backingTable, policiesByTable] of Object.entries(branchPolicies)) {
+    normalized[backingTable] = {};
+    for (const [tableName, tablePolicies] of Object.entries(policiesByTable)) {
+      normalized[backingTable]![tableName] = {
+        select: normalizeOperationPolicyForWasm(tablePolicies.select),
+        insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
+        update: normalizeOperationPolicyForWasm(tablePolicies.update),
+        delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
+      };
+    }
+  }
+
+  return normalized;
+}
+
 function validatePermissionTables(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
 ): void {
   const knownTables = new Set(schemaTableNames);
-  const unknownTables = Object.keys(compiledPermissions).filter(
-    (tableName) => !knownTables.has(tableName),
-  );
+  const unknownTables = Object.keys(compiledPermissions).filter((tableName) => {
+    if (tableName === "branchPolicies") {
+      return false;
+    }
+    return !knownTables.has(tableName);
+  });
 
   if (unknownTables.length > 0) {
     throw new Error(
       `permissions.ts defines permissions for unknown table(s): ${unknownTables.join(", ")}.`,
+    );
+  }
+
+  const branchPolicies = compiledPermissions.branchPolicies;
+  if (!branchPolicies) {
+    return;
+  }
+
+  const unknownBranchTables = new Set<string>();
+  for (const [backingTable, policiesByTable] of Object.entries(branchPolicies)) {
+    if (!knownTables.has(backingTable)) {
+      unknownBranchTables.add(backingTable);
+    }
+    for (const tableName of Object.keys(policiesByTable)) {
+      if (!knownTables.has(tableName)) {
+        unknownBranchTables.add(tableName);
+      }
+    }
+  }
+
+  if (unknownBranchTables.size > 0) {
+    throw new Error(
+      `permissions.ts defines branch permissions for unknown table(s): ${[
+        ...unknownBranchTables,
+      ].join(", ")}.`,
     );
   }
 }
@@ -489,15 +550,22 @@ export function collectMissingExplicitPolicyDiagnostics(
 
 export function normalizePermissionsForWasm(
   compiledPermissions: CompiledPermissionsMap,
-): Record<string, WasmTablePolicies> {
-  const normalized: Record<string, WasmTablePolicies> = {};
+): WasmPermissionsMap {
+  const normalized: WasmPermissionsMap = {};
   for (const [tableName, tablePolicies] of Object.entries(compiledPermissions)) {
+    if (tableName === "branchPolicies") {
+      continue;
+    }
     normalized[tableName] = {
       select: normalizeOperationPolicyForWasm(tablePolicies.select),
       insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
       update: normalizeOperationPolicyForWasm(tablePolicies.update),
       delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
     };
+  }
+  const branchPolicies = normalizeBranchPoliciesForWasm(compiledPermissions.branchPolicies);
+  if (branchPolicies) {
+    normalized.branch_policies = branchPolicies;
   }
   return normalized;
 }
@@ -529,16 +597,22 @@ export function mergePermissionsIntoSchema(
 export function mergePermissionsIntoWasmSchema(
   schema: WasmSchema,
   compiledPermissions: CompiledPermissionsMap,
-): WasmSchema {
+): WasmSchemaWithBranchPolicies {
   validatePermissionTables(Object.keys(schema), compiledPermissions);
   const normalizedPermissions = normalizePermissionsForWasm(compiledPermissions);
 
-  const merged: WasmSchema = {};
+  const merged: WasmSchemaWithBranchPolicies = {};
   for (const [tableName, table] of Object.entries(schema)) {
+    if (tableName === "branch_policies") {
+      continue;
+    }
     merged[tableName] = {
       ...table,
       policies: normalizedPermissions[tableName] ?? table.policies,
     };
+  }
+  if (normalizedPermissions.branch_policies) {
+    merged.branch_policies = normalizedPermissions.branch_policies;
   }
   return merged;
 }

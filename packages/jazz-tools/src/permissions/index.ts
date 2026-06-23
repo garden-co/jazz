@@ -2080,7 +2080,7 @@ function toPolicyValue(value: unknown, options: { allowRowRefs: boolean }): Poli
     return {
       type: "BranchRef",
       column: value.column,
-    } as unknown as PolicyValue;
+    };
   }
   return { type: "Literal", value };
 }

@@ -102,7 +102,8 @@ export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
 
 export type PolicyValue =
   | { type: "Literal"; value: Value }
-  | { type: "SessionRef"; path: string[] };
+  | { type: "SessionRef"; path: string[] }
+  | { type: "BranchRef"; column: string };
 
 export type PolicyLiteralValue = Value;
 
@@ -151,6 +152,8 @@ export interface TableSchema {
   indexed_columns?: string[];
   policies?: TablePolicies;
 }
+
+export type BranchPolicies = Record<string, Record<string, TablePolicies>>;
 
 export type Schema = Record<string, TableSchema>;
 
