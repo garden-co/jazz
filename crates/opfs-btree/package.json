@@ -2,14 +2,11 @@
   "name": "@jazz/opfs-btree",
   "private": true,
   "scripts": {
-    "bench:wasm:build": "RUSTFLAGS='--cfg=web_sys_unstable_apis' wasm-pack build --target web --out-dir wasm-bench/pkg --release",
-    "bench:wasm:opfs": "node wasm-bench/run-opfs-bench.cjs",
-    "bench:wasm:opfs:mixed": "node wasm-bench/run-opfs-bench.cjs --profile mixed",
-    "bench:wasm:opfs:range": "node wasm-bench/run-opfs-bench.cjs --profile range",
-    "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs"
+    "bench:harness:build": "sh wasm-bench/with-wasm-llvm.sh trunk build --config wasm-bench/Trunk.toml --release",
+    "bench:compare": "pnpm run bench:harness:build && node wasm-bench/run-compare.cjs",
+    "bench:compare:open": "sh wasm-bench/with-wasm-llvm.sh trunk serve --config wasm-bench/Trunk.toml --release"
   },
   "devDependencies": {
-    "playwright": "^1.58.2",
-    "wasm-pack": "^0.14.0"
+    "playwright": "^1.58.2"
   }
 }
