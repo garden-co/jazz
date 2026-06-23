@@ -245,7 +245,7 @@ export interface QueryBuilder<T> {
   readonly _rowType: T;
 }
 
-export type QueryOptions = QueryExecutionOptions;
+export type QueryOptions = QueryExecutionOptions & { branch?: string };
 export type DbBranchView = Pick<Db, "all" | "insert" | "update" | "delete">;
 
 type DbRuntimeOperationContext = {
@@ -2666,7 +2666,8 @@ export class Db {
     session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
-    const client = this.getClient(query._schema);
+    const { branch, ...executionOptions } = options ?? {};
+    const client = this.getClient(query._schema, branch);
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
     );
@@ -2709,7 +2710,7 @@ export class Db {
       callback(typedDelta);
     };
 
-    const queryOptions = ordinaryDbQueryOptions(options);
+    const queryOptions = ordinaryDbQueryOptions(executionOptions);
     const context = this.getRuntimeOperationContext();
     let unsubscribed = false;
     let subId: number | null = null;
@@ -2717,7 +2718,13 @@ export class Db {
 
     const startSubscription = () => {
       if (unsubscribed) return;
-      subId = client.subscribe(wasmQuery, handleDelta, queryOptions, context?.session ?? session);
+      subId = client.subscribe(
+        wasmQuery,
+        handleDelta,
+        queryOptions,
+        context?.session ?? session,
+        branch,
+      );
       traceId = this.registerActiveQuerySubscriptionTrace(
         wasmQuery,
         builtQuery.table,

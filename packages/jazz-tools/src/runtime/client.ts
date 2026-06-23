@@ -1114,11 +1114,12 @@ export class JazzClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
     session?: Session,
+    targetBranch?: string,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
-    const queryJson = resolveQueryJson(query);
+    const queryJson = this.resolveQueryJsonForBranch(query, targetBranch);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
