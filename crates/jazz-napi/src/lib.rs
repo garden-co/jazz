@@ -398,6 +398,7 @@ fn build_napi_runtime(
     let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         schema,
+        runtime_schema.branch_policies,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,

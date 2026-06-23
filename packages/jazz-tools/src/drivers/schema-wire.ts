@@ -12,6 +12,7 @@ interface RuntimeSchemaEnvelope {
   __jazzRuntimeSchema: 1;
   schema: WasmSchema;
   loadedPolicyBundle: boolean;
+  branchPolicies?: unknown;
 }
 
 interface SerializeRuntimeSchemaOptions {
@@ -55,11 +56,15 @@ export function serializeRuntimeSchema(
   schema: WasmSchema,
   options?: SerializeRuntimeSchemaOptions,
 ): string {
+  const branchPolicies = (schema as { branch_policies?: unknown }).branch_policies;
   const envelope: RuntimeSchemaEnvelope = {
     __jazzRuntimeSchema: 1,
     schema,
     loadedPolicyBundle: options?.loadedPolicyBundle ?? false,
   };
+  if (branchPolicies !== undefined) {
+    envelope.branchPolicies = branchPolicies;
+  }
   return JSON.stringify(envelope, runtimeSchemaJsonReplacer);
 }
 

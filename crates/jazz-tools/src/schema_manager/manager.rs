@@ -174,6 +174,7 @@ impl SchemaManager {
         Self::new_with_policy_mode(
             sync_manager,
             schema,
+            BranchPolicies::default(),
             app_id,
             env,
             user_branch,
@@ -184,6 +185,7 @@ impl SchemaManager {
     pub fn new_with_policy_mode(
         sync_manager: SyncManager,
         schema: Schema,
+        branch_policies: BranchPolicies,
         app_id: AppId,
         env: &str,
         user_branch: &str,
@@ -203,6 +205,10 @@ impl SchemaManager {
             user_branch,
             row_policy_mode,
         );
+        if !branch_policies.is_empty() {
+            query_manager
+                .set_authorization_schema_with_branch_policies(schema.clone(), branch_policies);
+        }
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
