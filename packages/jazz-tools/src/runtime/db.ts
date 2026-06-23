@@ -246,6 +246,7 @@ export interface QueryBuilder<T> {
 }
 
 export type QueryOptions = QueryExecutionOptions;
+export type DbBranchView = Pick<Db, "all" | "insert" | "update" | "delete">;
 
 type DbRuntimeOperationContext = {
   session?: Session;
@@ -1153,7 +1154,7 @@ export class Db {
    * In worker mode, the first call per schema also initializes the
    * WorkerBridge (async). Subsequent calls are sync.
    */
-  protected getClient(schema: WasmSchema): JazzClient {
+  protected getClient(schema: WasmSchema, userBranch?: string): JazzClient {
     if (!this.runtimeModule) {
       throw new Error("Db runtime module is not initialized for this Db implementation");
     }
@@ -1165,15 +1166,20 @@ export class Db {
 
     // Use the canonical schema JSON as the client cache key, but memoize it by
     // schema identity so write-heavy paths don't stringify the same schema per row.
-    const key = getRuntimeSchemaCacheKey(runtimeSchema);
-    this.reportBrokerSchemaReady(key);
+    const schemaKey = getRuntimeSchemaCacheKey(runtimeSchema);
+    const effectiveUserBranch = userBranch ?? this.config.userBranch ?? "main";
+    const key =
+      effectiveUserBranch === (this.config.userBranch ?? "main")
+        ? schemaKey
+        : `${schemaKey}::branch:${encodeURIComponent(effectiveUserBranch)}`;
+    this.reportBrokerSchemaReady(schemaKey);
 
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
       const usesDurablePeer = this.worker !== null || this.brokerClient !== null;
 
       const client = this.runtimeModule.createClient({
-        config: { ...this.config },
+        config: { ...this.config, userBranch: effectiveUserBranch },
         schema: runtimeSchema,
         hasWorker: usesDurablePeer,
         useBinaryEncoding: usesDurablePeer,
@@ -2208,6 +2214,23 @@ export class Db {
     };
   }
 
+  branch(branchId: string): DbBranchView {
+    return {
+      all: <T>(query: QueryBuilder<T>, options?: QueryOptions) =>
+        this.allOnBranch(branchId, query, options),
+      insert: <T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions) =>
+        this.insertOnBranch(branchId, table, data, options),
+      update: <T, Init>(
+        table: TableProxy<T, Init>,
+        id: string,
+        data: Partial<Init>,
+        options?: UpdateOptions,
+      ) => this.updateOnBranch(branchId, table, id, data, options),
+      delete: <T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions) =>
+        this.deleteOnBranch(branchId, table, id, options),
+    };
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    *
@@ -2218,7 +2241,16 @@ export class Db {
    * @returns Write result containing the inserted row
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
-    const client = this.getClient(table._schema);
+    return this.insertOnBranch(undefined, table, data, options);
+  }
+
+  private insertOnBranch<T, Init>(
+    branchId: string | undefined,
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): WriteResult<T> {
+    const client = this.getClient(table._schema, branchId);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
@@ -2298,7 +2330,17 @@ export class Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
-    const client = this.getClient(table._schema);
+    return this.updateOnBranch(undefined, table, id, data, options);
+  }
+
+  private updateOnBranch<T, Init>(
+    branchId: string | undefined,
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema, branchId);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
@@ -2313,7 +2355,16 @@ export class Db {
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
-    const client = this.getClient(table._schema);
+    return this.deleteOnBranch(undefined, table, id, options);
+  }
+
+  private deleteOnBranch<T, Init>(
+    branchId: string | undefined,
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema, branchId);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
   }
@@ -2461,19 +2512,32 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const client = this.getClient(query._schema);
+    return this.allOnBranch(undefined, query, options);
+  }
+
+  private async allOnBranch<T>(
+    branchId: string | undefined,
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T[]> {
+    const client = this.getClient(query._schema, branchId);
+    const scopedQuery = query;
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
     );
-    const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const builderJson = scopedQuery._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), scopedQuery._table);
     const planningSchema = resolveSchemaWithTable(
-      query._schema,
+      scopedQuery._schema,
       runtimeSchema.get,
       builtQuery.table,
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const outputSchema = resolveSchemaWithTable(
+      scopedQuery._schema,
+      runtimeSchema.get,
+      outputTable,
+    );
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions);
     const wasmQuery = translateQuery(builderJson, planningSchema);
