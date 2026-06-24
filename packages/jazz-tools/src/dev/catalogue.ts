@@ -2,11 +2,7 @@ import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promise
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
-import type {
-  ColumnDescriptor,
-  ColumnType as WasmColumnType,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
 import { loadWasmModule } from "../runtime/client.js";
@@ -26,6 +22,15 @@ import {
 } from "../runtime/schema-fetch.js";
 import type { Lens, SqlType } from "../schema.js";
 import { toValue } from "../runtime/value-converter.js";
+import { renderMigrationStub } from "./migrations.js";
+import {
+  columnTypeSignature,
+  normalizeSchemaHashInput,
+  shortSchemaHash,
+  wasmSchemasEqual,
+} from "./schema-utils.js";
+
+export { shortSchemaHash };
 
 export type CatalogueEvent =
   | { type: "schema-loaded"; schemaFile: string }
@@ -112,6 +117,89 @@ export interface DeployOptions extends CatalogueProjectOptions {
   noVerify?: boolean;
 }
 
+interface ValidateProjectOptions {
+  schemaDir: string;
+}
+
+interface ValidateProjectResult {
+  schemaFile: string;
+  permissionsFile?: string;
+  tableCount: number;
+  warnings: string[];
+}
+
+interface ExportSchemaOptions {
+  schemaDir: string;
+  migrationsDir?: string;
+  schemaHash?: string;
+  appId?: string;
+  serverUrl?: string;
+  adminSecret?: string;
+}
+
+interface ExportSchemaResult {
+  schema: WasmSchema;
+  hash: string;
+  snapshotPath: string | null;
+}
+
+interface CurrentSchemaHashOptions {
+  schemaDir: string;
+}
+
+interface CurrentSchemaHashResult {
+  schemaFile: string;
+  hash: string;
+}
+
+interface CreateMigrationOptions {
+  appId?: string;
+  serverUrl?: string;
+  adminSecret?: string;
+  migrationsDir: string;
+  schemaDir: string;
+  fromHash?: string;
+  toHash?: string;
+  name?: string;
+}
+
+type CreateMigrationResult =
+  | {
+      status: "initial-snapshot";
+      snapshotPath: string;
+    }
+  | {
+      status: "unchanged";
+    }
+  | {
+      status: "migration-not-required";
+      fromHash: string;
+      toHash: string;
+      snapshotPath: string | null;
+    }
+  | {
+      status: "generated";
+      filePath: string;
+      fromHash: string;
+      toHash: string;
+      needsRename: boolean;
+      snapshotPath: string | null;
+    };
+
+interface PermissionsStatusOptions {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  schemaDir: string;
+}
+
+interface PermissionsStatusResult {
+  schemaFile: string;
+  permissionsFile: string;
+  localSchemaHash: string;
+  head: StoredPermissionsHead | null;
+}
+
 function emit(options: { onEvent?: (event: CatalogueEvent) => void }, event: CatalogueEvent): void {
   options.onEvent?.(event);
 }
@@ -138,6 +226,70 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
   return compiled as LoadedSchemaProject & {
     permissions: NonNullable<LoadedSchemaProject["permissions"]>;
     permissionsFile: string;
+  };
+}
+
+export async function validateProject(
+  options: ValidateProjectOptions,
+): Promise<ValidateProjectResult> {
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  return {
+    schemaFile: compiled.schemaFile,
+    permissionsFile: compiled.permissionsFile,
+    tableCount: compiled.schema.tables.length,
+    warnings: collectMissingExplicitPolicyDiagnostics(
+      compiled.schema.tables.map((table) => table.name),
+      compiled.permissions,
+    ).map((diagnostic) => diagnostic.message),
+  };
+}
+
+export async function exportSchema(options: ExportSchemaOptions): Promise<ExportSchemaResult> {
+  if (options.schemaHash) {
+    return resolveExportedSchemaByHash({ ...options, schemaHash: options.schemaHash });
+  }
+
+  const currentSchema = await loadCurrentSchema(options.schemaDir);
+  return {
+    ...currentSchema,
+    snapshotPath: await ensureLocalSnapshot(
+      options.schemaDir,
+      options.migrationsDir,
+      currentSchema,
+    ),
+  };
+}
+
+export async function getCurrentSchemaHash(
+  options: CurrentSchemaHashOptions,
+): Promise<CurrentSchemaHashResult> {
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  return {
+    schemaFile: compiled.schemaFile,
+    hash: await computeSchemaHash(compiled.wasmSchema),
+  };
+}
+
+export async function getPermissionsStatus(
+  options: PermissionsStatusOptions,
+): Promise<PermissionsStatusResult> {
+  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  const localSchemaHash = await resolveStoredStructuralSchemaHashOrThrow(
+    options.appId,
+    options.serverUrl,
+    options.adminSecret,
+    compiled.wasmSchema,
+  );
+  const { head } = await fetchPermissionsHead(options.serverUrl, {
+    appId: options.appId,
+    adminSecret: options.adminSecret,
+  });
+
+  return {
+    schemaFile: compiled.schemaFile,
+    permissionsFile: compiled.permissionsFile,
+    localSchemaHash,
+    head,
   };
 }
 
@@ -171,7 +323,12 @@ export async function pushSchema(options: PushSchemaOptions): Promise<PushSchema
 
 /**
  * Publishes permissions to a known schema.
+ *
+ * The target schema must already be identified by `options.schemaHash`.
  * @throws when no `permissions.ts` file exists.
+ *
+ * @param options - Project, server, admin credentials, and schema hash for the permissions push.
+ * @returns The previous and new permissions heads.
  */
 export async function pushPermissions(
   options: PushPermissionsOptions,
@@ -206,25 +363,11 @@ export async function pushPermissions(
   };
 }
 
-const SHORT_SCHEMA_HASH_LENGTH = 12;
-
-export function normalizeSchemaHashInput(hash: string, label: string): string {
-  const normalized = hash.trim().toLowerCase();
-  if (!/^[0-9a-f]{12,64}$/.test(normalized)) {
-    throw new Error(`${label} must be a 12-64 character lowercase hex schema hash.`);
-  }
-  return normalized;
-}
-
-export function shortSchemaHash(hash: string): string {
-  return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
-}
-
 function hashMatchesFullSchema(hash: string, fullHash: string): boolean {
   return fullHash.startsWith(normalizeSchemaHashInput(hash, "schema hash"));
 }
 
-export function resolveKnownSchemaHash(
+function resolveKnownSchemaHash(
   hash: string,
   label: string,
   knownHashes: readonly string[],
@@ -265,12 +408,12 @@ function snapshotsDirForMigrations(migrationsDir: string): string {
   return join(migrationsDir, "snapshots");
 }
 
-export interface ResolvedSchemaInput {
+interface ResolvedSchemaInput {
   hash: string;
   schema: WasmSchema;
 }
 
-export interface SnapshotEntry {
+interface SnapshotEntry {
   hash: string;
   fileName: string;
   filePath: string;
@@ -297,7 +440,7 @@ async function readSnapshotEntry(dir: string, fileName: string): Promise<Snapsho
   };
 }
 
-export async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
+async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
   if (!(await pathExists(dir))) {
     return [];
   }
@@ -308,17 +451,15 @@ export async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]>
   );
 }
 
-export async function listSnapshotEntriesForMigrations(
-  migrationsDir: string,
-): Promise<SnapshotEntry[]> {
+async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
   return listSnapshotEntries(snapshotsDirForMigrations(migrationsDir));
 }
 
-export function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
+function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
   return `${timestamp}-${shortSchemaHash(hash)}.json`;
 }
 
-export function createTimestamp(now: Date = new Date()): string {
+function createTimestamp(now: Date = new Date()): string {
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   const day = String(now.getUTCDate()).padStart(2, "0");
@@ -328,7 +469,7 @@ export function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
-export function createSnapshotTimestampFromPublishedAt(
+function createSnapshotTimestampFromPublishedAt(
   publishedAt: number | null | undefined,
   fallbackNow: Date = new Date(),
 ): string {
@@ -339,7 +480,7 @@ export function createSnapshotTimestampFromPublishedAt(
   return createTimestamp(new Date(publishedAt));
 }
 
-export async function writeSnapshotSchemaForMigrations(
+async function writeSnapshotSchemaForMigrations(
   migrationsDir: string,
   fileName: string,
   schema: WasmSchema,
@@ -351,6 +492,150 @@ export async function writeSnapshotSchemaForMigrations(
   return filePath;
 }
 
+function defaultMigrationsDir(schemaDir: string): string {
+  return join(schemaDir, "migrations");
+}
+
+function resolvedMigrationsDir(schemaDir: string, migrationsDir?: string): string {
+  return migrationsDir ?? defaultMigrationsDir(schemaDir);
+}
+
+function snapshotsDir(schemaDir: string, migrationsDir?: string): string {
+  return snapshotsDirForMigrations(resolvedMigrationsDir(schemaDir, migrationsDir));
+}
+
+async function listLocalSnapshotEntries(
+  schemaDir: string,
+  migrationsDir?: string,
+): Promise<SnapshotEntry[]> {
+  return listSnapshotEntries(snapshotsDir(schemaDir, migrationsDir));
+}
+
+async function resolveLocalSnapshotEntry(
+  schemaDir: string,
+  migrationsDir: string | undefined,
+  hash: string,
+  label: string,
+): Promise<SnapshotEntry | null> {
+  return resolveSnapshotEntry(snapshotsDir(schemaDir, migrationsDir), hash, label);
+}
+
+async function loadLocalSnapshotSchema(
+  schemaDir: string,
+  migrationsDir: string | undefined,
+  hash: string,
+  label: string,
+): Promise<ResolvedSchemaInput | null> {
+  const entry = await resolveLocalSnapshotEntry(schemaDir, migrationsDir, hash, label);
+  if (!entry) {
+    return null;
+  }
+
+  return {
+    hash: entry.hash,
+    schema: entry.schema,
+  };
+}
+
+async function writeSnapshotSchema(
+  schemaDir: string,
+  migrationsDir: string | undefined,
+  hash: string,
+  schema: WasmSchema,
+  timestamp: string = createTimestamp(),
+): Promise<string> {
+  const dir = snapshotsDir(schemaDir, migrationsDir);
+  await mkdir(dir, { recursive: true });
+  const filePath = join(dir, snapshotFilename(hash, timestamp));
+  await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
+  return filePath;
+}
+
+async function ensureLocalSnapshot(
+  schemaDir: string,
+  migrationsDir: string | undefined,
+  schema: ResolvedSchemaInput,
+): Promise<string | null> {
+  const entries = await listLocalSnapshotEntries(schemaDir, migrationsDir);
+  if (entries.some((entry) => entry.hash === schema.hash)) {
+    return null;
+  }
+
+  return writeSnapshotSchema(schemaDir, migrationsDir, schema.hash, schema.schema);
+}
+
+function requireServerValue(value: string | undefined, kind: "serverUrl" | "adminSecret"): string {
+  if (value) {
+    return value;
+  }
+
+  if (kind === "serverUrl") {
+    throw new Error(
+      "Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL (or a framework-prefixed form such as VITE_JAZZ_SERVER_URL).",
+    );
+  }
+
+  throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
+}
+
+function requireAppId(appId: string | undefined): string {
+  if (appId) {
+    return appId;
+  }
+
+  throw new Error(
+    "Missing app ID. Pass an <appId> positional argument or set JAZZ_APP_ID (or a framework-prefixed form such as VITE_JAZZ_APP_ID).",
+  );
+}
+
+async function resolveExportedSchemaByHash(
+  options: ExportSchemaOptions & { schemaHash: string },
+): Promise<ExportSchemaResult> {
+  const schemaHash = normalizeSchemaHashInput(options.schemaHash, "schema hash");
+  const local = await loadLocalSnapshotSchema(
+    options.schemaDir,
+    options.migrationsDir,
+    schemaHash,
+    "schema hash",
+  );
+  if (local) {
+    return {
+      ...local,
+      snapshotPath: null,
+    };
+  }
+
+  const serverUrl = requireServerValue(options.serverUrl, "serverUrl");
+  const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
+  const appId = requireAppId(options.appId);
+  const resolvedHash =
+    schemaHash.length === 64
+      ? schemaHash
+      : resolveKnownSchemaHash(
+          schemaHash,
+          "schema hash",
+          (await fetchSchemaHashes(serverUrl, { appId, adminSecret })).hashes,
+        );
+  const storedSchema = await fetchStoredWasmSchema(serverUrl, {
+    appId,
+    adminSecret,
+    schemaHash: resolvedHash,
+  });
+  const snapshotPath = await writeSnapshotSchema(
+    options.schemaDir,
+    options.migrationsDir,
+    resolvedHash,
+    storedSchema.schema,
+    createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
+  );
+
+  return {
+    hash: resolvedHash,
+    schema: storedSchema.schema,
+    snapshotPath,
+  };
+}
+
 let wasmModulePromise: Promise<any> | null = null;
 
 async function loadCatalogueWasmModule(): Promise<any> {
@@ -360,7 +645,7 @@ async function loadCatalogueWasmModule(): Promise<any> {
   return wasmModulePromise;
 }
 
-export async function computeSchemaHash(schema: WasmSchema): Promise<string> {
+async function computeSchemaHash(schema: WasmSchema): Promise<string> {
   const wasmModule = await loadCatalogueWasmModule();
   const runtime = new wasmModule.WasmRuntime(
     JSON.stringify(schema),
@@ -378,58 +663,6 @@ export async function computeSchemaHash(schema: WasmSchema): Promise<string> {
       runtime.free();
     }
   }
-}
-
-export function columnTypeSignature(columnType: WasmColumnType): string {
-  return JSON.stringify(columnType);
-}
-
-function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean {
-  return (
-    left.name === right.name &&
-    left.nullable === right.nullable &&
-    left.references === right.references &&
-    left.merge_strategy === right.merge_strategy &&
-    columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
-  );
-}
-
-function indexedColumnsEqual(
-  left: readonly string[] | undefined,
-  right: readonly string[] | undefined,
-): boolean {
-  if (!left && !right) {
-    return true;
-  }
-  if (!left || !right || left.length !== right.length) {
-    return false;
-  }
-
-  const leftColumns = [...left].sort();
-  const rightColumns = [...right].sort();
-  return leftColumns.every((column, index) => column === rightColumns[index]);
-}
-
-export function tableSchemasEqual(
-  left: WasmSchema[string] | undefined,
-  right: WasmSchema[string] | undefined,
-): boolean {
-  if (!left || !right) {
-    return false;
-  }
-
-  if (left.columns.length !== right.columns.length) {
-    return false;
-  }
-
-  if (!indexedColumnsEqual(left.indexed_columns, right.indexed_columns)) {
-    return false;
-  }
-
-  const leftColumns = [...left.columns].sort((a, b) => a.name.localeCompare(b.name));
-  const rightColumns = [...right.columns].sort((a, b) => a.name.localeCompare(b.name));
-
-  return leftColumns.every((column, index) => columnsEqual(column, rightColumns[index]!));
 }
 
 function tableSchemasRequireRowTransform(
@@ -467,23 +700,7 @@ function tableSchemasRequireRowTransform(
   });
 }
 
-function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
-  const leftTableNames = Object.keys(left).sort();
-  const rightTableNames = Object.keys(right).sort();
-
-  if (leftTableNames.length !== rightTableNames.length) {
-    return false;
-  }
-
-  return leftTableNames.every((tableName, index) => {
-    if (tableName !== rightTableNames[index]) {
-      return false;
-    }
-    return tableSchemasEqual(left[tableName], right[tableName]);
-  });
-}
-
-export async function resolveStoredStructuralSchemaHash(
+async function resolveStoredStructuralSchemaHash(
   appId: string,
   serverUrl: string,
   adminSecret: string,
@@ -502,7 +719,23 @@ export async function resolveStoredStructuralSchemaHash(
   return match?.hash ?? null;
 }
 
-export function schemaTransitionRequiresRowTransform(
+async function resolveStoredStructuralSchemaHashOrThrow(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<string> {
+  const hash = await resolveStoredStructuralSchemaHash(appId, serverUrl, adminSecret, wasmSchema);
+  if (!hash) {
+    throw new Error(
+      "No stored structural schema matches the local schema.ts. Publish the structural schema before pushing permissions.",
+    );
+  }
+
+  return hash;
+}
+
+function schemaTransitionRequiresRowTransform(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
 ): boolean {
@@ -522,6 +755,222 @@ export function schemaTransitionRequiresRowTransform(
   return fromTableNames.some((tableName) =>
     tableSchemasRequireRowTransform(fromSchema[tableName], toSchema[tableName]),
   );
+}
+
+function normalizeMigrationName(name: string): string {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (normalized.length === 0) {
+    throw new Error(
+      "Migration name must contain at least one ASCII letter or digit after normalization.",
+    );
+  }
+
+  return normalized;
+}
+
+function migrationFilename(
+  migrationsDir: string,
+  fromHash: string,
+  toHash: string,
+  name: string = "unnamed",
+  timestamp: string = createTimestamp(),
+): string {
+  return join(
+    migrationsDir,
+    `${timestamp}-${name}-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
+  );
+}
+
+function isCommittedSnapshotFileName(fileName: string): boolean {
+  return /^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i.test(fileName);
+}
+
+async function loadLatestCommittedSnapshot(
+  migrationsDir: string,
+): Promise<ResolvedSchemaInput | null> {
+  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+  const latest = entries
+    .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName))
+    .at(-1);
+  if (!latest) {
+    return null;
+  }
+
+  return {
+    hash: latest.hash,
+    schema: latest.schema,
+  };
+}
+
+async function ensureCommittedSnapshot(
+  migrationsDir: string,
+  schema: ResolvedSchemaInput,
+  timestamp: string,
+): Promise<string | null> {
+  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+  if (
+    entries.some(
+      (entry) => entry.hash === schema.hash && isCommittedSnapshotFileName(entry.fileName),
+    )
+  ) {
+    return null;
+  }
+
+  return writeSnapshotSchemaForMigrations(
+    migrationsDir,
+    snapshotFilename(schema.hash, timestamp),
+    schema.schema,
+  );
+}
+
+async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput> {
+  const compiled = await loadCompiledSchema(schemaDir);
+  return {
+    hash: await computeSchemaHash(compiled.wasmSchema),
+    schema: compiled.wasmSchema,
+  };
+}
+
+async function resolveHistoricalSchemaForCreateMigration(
+  migrationsDir: string,
+  hash: string,
+  label: string,
+  appId: string | undefined,
+  serverUrl: string | undefined,
+  adminSecret: string | undefined,
+): Promise<ResolvedSchemaInput> {
+  const local = await resolveLocalHistoricalSchema(migrationsDir, hash, label);
+  if (local) {
+    return { hash: local.hash, schema: local.schema };
+  }
+
+  return resolveRemoteHistoricalSchema(
+    migrationsDir,
+    hash,
+    label,
+    requireAppId(appId),
+    requireServerValue(serverUrl, "serverUrl"),
+    requireServerValue(adminSecret, "adminSecret"),
+  );
+}
+
+export async function createMigration(
+  options: CreateMigrationOptions,
+): Promise<CreateMigrationResult> {
+  const explicitHashFlow = Boolean(options.fromHash || options.toHash);
+
+  await mkdir(options.migrationsDir, { recursive: true });
+  const currentSchema =
+    !explicitHashFlow || !options.toHash ? await loadCurrentSchema(options.schemaDir) : null;
+
+  let fromSchema: ResolvedSchemaInput;
+  let toSchema: ResolvedSchemaInput;
+  let shouldWriteCommittedSnapshot = false;
+  const timestamp = createTimestamp();
+
+  if (explicitHashFlow) {
+    if (options.fromHash) {
+      fromSchema = await resolveHistoricalSchemaForCreateMigration(
+        options.migrationsDir,
+        options.fromHash,
+        "fromHash",
+        options.appId,
+        options.serverUrl,
+        options.adminSecret,
+      );
+    } else {
+      const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+      if (!latest) {
+        throw new Error(
+          "No committed snapshot found. Provide --fromHash or run `jazz-tools migrations create` once to create an initial snapshot.",
+        );
+      }
+      fromSchema = latest;
+    }
+
+    toSchema = options.toHash
+      ? await resolveHistoricalSchemaForCreateMigration(
+          options.migrationsDir,
+          options.toHash,
+          "toHash",
+          options.appId,
+          options.serverUrl,
+          options.adminSecret,
+        )
+      : currentSchema!;
+    shouldWriteCommittedSnapshot = !options.toHash;
+  } else {
+    const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+    if (!latest) {
+      return {
+        status: "initial-snapshot",
+        snapshotPath: (await ensureCommittedSnapshot(
+          options.migrationsDir,
+          currentSchema!,
+          timestamp,
+        ))!,
+      };
+    }
+
+    if (latest.hash === currentSchema!.hash) {
+      return { status: "unchanged" };
+    }
+
+    fromSchema = latest;
+    toSchema = currentSchema!;
+    shouldWriteCommittedSnapshot = true;
+  }
+
+  if (fromSchema.hash === toSchema.hash) {
+    return { status: "unchanged" };
+  }
+
+  if (!schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+    return {
+      status: "migration-not-required",
+      fromHash: fromSchema.hash,
+      toHash: toSchema.hash,
+      snapshotPath: shouldWriteCommittedSnapshot
+        ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
+        : null,
+    };
+  }
+
+  const filePath = migrationFilename(
+    options.migrationsDir,
+    fromSchema.hash,
+    toSchema.hash,
+    options.name ? normalizeMigrationName(options.name) : undefined,
+    timestamp,
+  );
+  if (await pathExists(filePath)) {
+    throw new Error(`Migration stub already exists: ${filePath}`);
+  }
+
+  const stub = renderMigrationStub({
+    fromHash: fromSchema.hash,
+    toHash: toSchema.hash,
+    fromSchema: fromSchema.schema,
+    toSchema: toSchema.schema,
+  });
+  await writeFile(filePath, stub);
+
+  return {
+    status: "generated",
+    filePath,
+    fromHash: fromSchema.hash,
+    toHash: toSchema.hash,
+    needsRename: !options.name,
+    snapshotPath: shouldWriteCommittedSnapshot
+      ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
+      : null,
+  };
 }
 
 function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
@@ -690,7 +1139,7 @@ async function findMigrationFile(
   return join(migrationsDir, matches[0]!);
 }
 
-export async function resolveSnapshotEntry(
+async function resolveSnapshotEntry(
   dir: string,
   hash: string,
   label: string,
@@ -719,7 +1168,7 @@ export async function resolveSnapshotEntry(
   return matches[0]!;
 }
 
-export async function resolveLocalHistoricalSchema(
+async function resolveLocalHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,
@@ -739,7 +1188,7 @@ export async function resolveLocalHistoricalSchema(
   };
 }
 
-export async function resolveRemoteHistoricalSchema(
+async function resolveRemoteHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,

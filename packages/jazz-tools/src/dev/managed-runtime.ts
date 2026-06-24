@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
+import { shortSchemaHash } from "./catalogue.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -376,7 +377,7 @@ export class ManagedDevRuntime {
           appId,
           adminSecret,
           onPush: async (hash) => {
-            console.log(`${LOG_PREFIX} schema updated (${hash.slice(0, 12)})`);
+            console.log(`${LOG_PREFIX} schema updated (${shortSchemaHash(hash)})`);
             await options.onSchemaPush?.(hash);
           },
           onError: (error) => {
