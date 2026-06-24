@@ -1,4 +1,3 @@
-export { TestingServer } from "jazz-napi";
 export {
   pushSchemaCatalogue,
   startLocalJazzServer,

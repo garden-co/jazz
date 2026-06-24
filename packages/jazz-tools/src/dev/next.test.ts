@@ -300,6 +300,8 @@ describe("withJazz", () => {
       port: 19870,
       url: "http://127.0.0.1:19870",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     const pushSchemaCatalogue = vi
@@ -346,6 +348,8 @@ describe("withJazz", () => {
       port: 19880,
       url: "http://127.0.0.1:19880",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });

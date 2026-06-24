@@ -230,6 +230,8 @@ describe("jazzPlugin", () => {
       port: 19880,
       url: "http://127.0.0.1:19880",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
@@ -277,6 +279,8 @@ describe("jazzPlugin", () => {
       port: 19881,
       url: "http://127.0.0.1:19881",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });

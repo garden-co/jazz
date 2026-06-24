@@ -1,12 +1,12 @@
 import { commands } from "vitest/browser";
 
-export interface TestingServerInfo {
+export interface JazzServerInfo {
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }
 
-export interface TestingServerNetworkDebugState {
+export interface JazzServerNetworkDebugState {
   contextId: number;
   pattern: string;
   blocked: boolean;
@@ -15,11 +15,11 @@ export interface TestingServerNetworkDebugState {
 
 declare module "vitest/internal/browser" {
   interface BrowserCommands {
-    testingServerInfo: (appId?: string) => Promise<TestingServerInfo>;
-    testingServerBlockNetwork: (serverUrl: string) => Promise<void>;
-    testingServerUnblockNetwork: (serverUrl: string) => Promise<void>;
-    testingServerNetworkDebug: (serverUrl: string) => Promise<TestingServerNetworkDebugState>;
-    testingServerJwtForUser: (
+    jazzServerInfo: (appId?: string) => Promise<JazzServerInfo>;
+    jazzServerBlockNetwork: (serverUrl: string) => Promise<void>;
+    jazzServerUnblockNetwork: (serverUrl: string) => Promise<void>;
+    jazzServerNetworkDebug: (serverUrl: string) => Promise<JazzServerNetworkDebugState>;
+    jazzServerJwtForUser: (
       userId: string,
       claims?: Record<string, unknown>,
       appId?: string,
@@ -27,28 +27,26 @@ declare module "vitest/internal/browser" {
   }
 }
 
-export function getTestingServerInfo(appId?: string): Promise<TestingServerInfo> {
-  return commands.testingServerInfo(appId);
+export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
+  return commands.jazzServerInfo(appId);
 }
 
-export function blockTestingServerNetwork(serverUrl: string): Promise<void> {
-  return commands.testingServerBlockNetwork(serverUrl);
+export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
+  return commands.jazzServerBlockNetwork(serverUrl);
 }
 
-export function unblockTestingServerNetwork(serverUrl: string): Promise<void> {
-  return commands.testingServerUnblockNetwork(serverUrl);
+export function unblockJazzServerNetwork(serverUrl: string): Promise<void> {
+  return commands.jazzServerUnblockNetwork(serverUrl);
 }
 
-export function getTestingServerNetworkDebug(
-  serverUrl: string,
-): Promise<TestingServerNetworkDebugState> {
-  return commands.testingServerNetworkDebug(serverUrl);
+export function getJazzServerNetworkDebug(serverUrl: string): Promise<JazzServerNetworkDebugState> {
+  return commands.jazzServerNetworkDebug(serverUrl);
 }
 
-export async function getTestingServerJwtForUser(
+export async function getJazzServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
   appId?: string,
 ): Promise<string> {
-  return commands.testingServerJwtForUser(userId, claims, appId);
+  return commands.jazzServerJwtForUser(userId, claims, appId);
 }

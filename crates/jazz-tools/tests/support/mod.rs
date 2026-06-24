@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
-use jazz_tools::server::{ServerState, TestingServer};
+use jazz_tools::server::{JazzServer, ServerState};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
 use jazz_tools::transport_protocol::encode_outbox_entry_payload;
@@ -73,13 +73,13 @@ enum TestingClientStorage {
     Persistent,
 }
 
-/// Builder-style helper for test clients backed by `TestingServer`.
+/// Builder-style helper for test clients backed by `JazzServer`.
 ///
 /// Supports the three common auth shapes used across the integration suite:
 /// admin-capable clients, normal JWT-only clients, and JWT-only clients with
 /// custom claims.
 pub struct TestingClient<'a> {
-    server: Option<&'a TestingServer>,
+    server: Option<&'a JazzServer>,
     schema: Option<Schema>,
     user_id: Option<String>,
     auth: TestingClientAuth,
@@ -104,7 +104,7 @@ impl<'a> TestingClient<'a> {
         }
     }
 
-    pub fn with_server(mut self, server: &'a TestingServer) -> Self {
+    pub fn with_server(mut self, server: &'a JazzServer) -> Self {
         self.server = Some(server);
         self
     }
@@ -249,7 +249,7 @@ impl<'a> TestingClient<'a> {
 
 #[allow(dead_code)]
 pub async fn connect_ready_client(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: &Schema,
     user_id: &str,
     ready_table: &str,
@@ -266,7 +266,7 @@ pub async fn connect_ready_client(
 
 #[allow(dead_code)]
 pub async fn connect_ready_user(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: &Schema,
     user_id: &str,
     ready_table: &str,
@@ -284,7 +284,7 @@ pub async fn connect_ready_user(
 
 #[allow(dead_code)]
 pub async fn connect_ready_claims(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: &Schema,
     user_id: &str,
     claims: JsonValue,

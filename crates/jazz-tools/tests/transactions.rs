@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use jazz_tools::row_input;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::test_support::wait_for_query;
 use jazz_tools::{
@@ -58,7 +58,7 @@ async fn wait_for_edge_ready(client: &JazzClient) {
     .await;
 }
 
-async fn connect_user(server: &TestingServer, schema: Schema, user_id: &str) -> JazzClient {
+async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
     let client = JazzClient::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
@@ -66,8 +66,8 @@ async fn connect_user(server: &TestingServer, schema: Schema, user_id: &str) -> 
     client
 }
 
-async fn start_two_clients(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+async fn start_two_clients(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let alice = connect_user(&server, schema.clone(), "alice-transactions").await;
     let bob = connect_user(&server, schema, "bob-transactions").await;
     (server, alice, bob)
@@ -396,7 +396,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 #[tokio::test]
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client = connect_user(&server, schema, "transaction-update-inserted-row").await;
     let tx = client
         .begin_transaction()
@@ -446,7 +446,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
 #[tokio::test]
 async fn multiple_updates_to_same_row_in_transaction_compose() {
     let schema = todo_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client = connect_user(&server, schema, "multiple-updates-compose").await;
     let todo_id = insert_visible_todo(&client, "draft", false).await;
 
@@ -499,7 +499,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
 #[tokio::test]
 async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     let schema = todo_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client = connect_user(&server, schema, "multiple-writes-one-transaction").await;
     let tx = client
         .begin_transaction()

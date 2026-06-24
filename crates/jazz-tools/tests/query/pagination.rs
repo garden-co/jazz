@@ -1,6 +1,6 @@
 #![cfg(feature = "test")]
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{QueryBuilder, Value};
 
 use crate::common::{
@@ -22,7 +22,7 @@ use crate::support::{
 #[tokio::test]
 async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
     let schema = subscription_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -142,7 +142,7 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
 #[tokio::test]
 async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit() {
     let schema = subscription_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

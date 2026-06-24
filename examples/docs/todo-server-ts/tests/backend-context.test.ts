@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TestingServer } from "jazz-tools/testing";
+import { startLocalJazzServer } from "jazz-tools/testing";
 import { createServer, startServer, stopServer, type RunningServer } from "../src/main.ts";
 
 describe("Todo Server backend context", () => {
@@ -15,7 +15,7 @@ describe("Todo Server backend context", () => {
   });
 
   it("boots against an upstream Jazz server", async () => {
-    const upstream = await TestingServer.start();
+    const upstream = await startLocalJazzServer();
     let server: RunningServer | undefined;
     try {
       server = await startServer(

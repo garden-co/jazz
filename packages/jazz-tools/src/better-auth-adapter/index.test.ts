@@ -2,7 +2,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
-import { pushSchemaCatalogue, TestingServer } from "../testing/index.js";
+import {
+  pushSchemaCatalogue,
+  startLocalJazzServer,
+  type LocalJazzServerHandle,
+} from "../testing/index.js";
 import { wasmSchema as wasmSchemaExample } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
 
@@ -10,10 +14,10 @@ describe("jazzAdapter", () => {
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
-    let server: Awaited<ReturnType<typeof TestingServer.start>>;
+    let server: LocalJazzServerHandle;
 
     beforeEach(async () => {
-      server = await TestingServer.start({
+      server = await startLocalJazzServer({
         backendSecret: "backend-secret-for-adapter-methods",
       });
 
@@ -465,10 +469,10 @@ describe("jazzAdapter", () => {
   describe("common user flows", async () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
-    let server: Awaited<ReturnType<typeof TestingServer.start>>;
+    let server: LocalJazzServerHandle;
 
     beforeEach(async () => {
-      server = await TestingServer.start({
+      server = await startLocalJazzServer({
         backendSecret: "backend-secret-for-common-user-flows",
       });
 
@@ -834,10 +838,10 @@ describe("jazzAdapter", () => {
   describe("better-auth usage", () => {
     let context: JazzContext;
     let auth: ReturnType<typeof betterAuth>;
-    let server: Awaited<ReturnType<typeof TestingServer.start>>;
+    let server: LocalJazzServerHandle;
 
     beforeEach(async () => {
-      server = await TestingServer.start({
+      server = await startLocalJazzServer({
         backendSecret: "backend-secret-for-better-auth-usage",
       });
 
@@ -911,13 +915,13 @@ describe("jazzAdapter", () => {
     });
   });
 
-  describe("better-auth usage with TestingServer + memory driver", () => {
+  describe("better-auth usage with local Jazz server + memory driver", () => {
     let context: JazzContext;
     let auth: ReturnType<typeof betterAuth>;
-    let server: Awaited<ReturnType<typeof TestingServer.start>>;
+    let server: LocalJazzServerHandle;
 
     beforeEach(async () => {
-      server = await TestingServer.start({
+      server = await startLocalJazzServer({
         backendSecret: "backend-secret-for-integration-tests",
       });
 

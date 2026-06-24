@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::row_input;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::{JazzServer, TestJwtIssuer};
 #[cfg(feature = "rocksdb")]
 use jazz_tools::storage::RocksDBStorage;
 use jazz_tools::storage::Storage;
@@ -331,7 +331,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 #[tokio::test]
 async fn pending_batch_wait_resolves_after_client_reconnect_reconciles_server_fate() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_dir = TempDir::new().expect("client dir");
     let context = AppContext {
         app_id: server.app_id(),
@@ -340,7 +340,7 @@ async fn pending_batch_wait_resolves_after_client_reconnect_reconciles_server_fa
         server_url: server.base_url(),
         data_dir: client_dir.path().to_path_buf(),
         storage: ClientStorage::Persistent,
-        jwt_token: Some(TestingServer::jwt_for_user("alice-pending-batch-reconnect")),
+        jwt_token: Some(TestJwtIssuer::jwt_for_user("alice-pending-batch-reconnect")),
         backend_secret: None,
         admin_secret: None,
         sync_tracer: None,
@@ -412,7 +412,7 @@ async fn pending_batch_wait_resolves_after_client_reconnect_reconciles_server_fa
 #[tokio::test]
 async fn pending_transaction_wait_resolves_after_client_reconnect_reconciles_server_fate() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_dir = TempDir::new().expect("client dir");
     let context = AppContext {
         app_id: server.app_id(),
@@ -421,7 +421,7 @@ async fn pending_transaction_wait_resolves_after_client_reconnect_reconciles_ser
         server_url: server.base_url(),
         data_dir: client_dir.path().to_path_buf(),
         storage: ClientStorage::Persistent,
-        jwt_token: Some(TestingServer::jwt_for_user(
+        jwt_token: Some(TestJwtIssuer::jwt_for_user(
             "alice-pending-transaction-reconnect",
         )),
         backend_secret: None,

@@ -11,7 +11,7 @@ use crate::schema_manager::AppId;
 
 /// A running Jazz server that owns its tasks and metadata.
 ///
-/// Shared abstraction used by both `TestingServer` and `DevServer`.
+/// Shared abstraction used by the public server wrappers.
 pub struct HostedServer {
     pub state: Arc<ServerState>,
     task: Option<JoinHandle<()>>,

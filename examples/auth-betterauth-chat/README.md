@@ -170,7 +170,7 @@ pnpm test
 ```
 
 Vitest browser mode (chromium) generates an ES256 keypair, hosts a local
-JWKS, and starts a Jazz `TestingServer` pointed at it. Tests mint a
+JWKS, and starts a local Jazz server pointed at it. Tests mint a
 verified JWT and assert that authenticated callers can post to both
 chats while anonymous callers are denied for Announcements. The Better
 Auth sign-up / sign-in flow is covered by the example itself when run

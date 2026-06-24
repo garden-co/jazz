@@ -3,14 +3,13 @@ import {
   createDb,
   fetchSchemaHashes,
   publishStoredPermissions,
-  type Db,
   type QueryBuilder,
   type TableProxy,
 } from "../../src/runtime/index.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
-import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
+import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -61,7 +60,7 @@ describe("Db auth refresh browser integration", () => {
   });
 
   it("recovers from auth loss after updateAuthToken and flushes queued local writes", async () => {
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo();
 
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
@@ -70,7 +69,7 @@ describe("Db auth refresh browser integration", () => {
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
-    const validJwt = await getTestingServerJwtForUser("alice", { role: "member" });
+    const validJwt = await getJazzServerJwtForUser("alice", { role: "member" });
 
     const writer = ctx.track(
       await createDb({

@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::TablePolicies;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
@@ -62,7 +62,7 @@ fn claims_gated_schema() -> Schema {
 
 #[tokio::test]
 async fn ephemeral_claims_merged_into_session() {
-    let server = TestingServer::start_with_schema(claims_gated_schema()).await;
+    let server = JazzServer::start_with_schema(claims_gated_schema()).await;
     let schema = claims_gated_schema();
 
     // Admin creates a room with join_code = "secret-123"

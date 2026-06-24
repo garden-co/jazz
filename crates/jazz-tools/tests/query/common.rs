@@ -4,7 +4,7 @@ use std::time::Duration;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::row_input;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Schema,
     SchemaBuilder, TableSchema, Value,
@@ -77,7 +77,7 @@ pub(crate) fn subscription_schema() -> Schema {
 }
 
 pub(crate) struct ClientPair {
-    pub(crate) server: TestingServer,
+    pub(crate) server: JazzServer,
     pub(crate) writer: JazzClient,
     pub(crate) subscriber: JazzClient,
 }
@@ -85,7 +85,7 @@ pub(crate) struct ClientPair {
 impl ClientPair {
     pub(crate) async fn start() -> Self {
         let schema = subscription_schema();
-        let server = TestingServer::start_with_schema(schema.clone()).await;
+        let server = JazzServer::start_with_schema(schema.clone()).await;
         let writer = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())

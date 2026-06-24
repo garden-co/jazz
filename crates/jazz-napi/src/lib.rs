@@ -31,7 +31,7 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -58,7 +58,7 @@ use jazz_tools::runtime_core::{
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
     HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
-    TestingServer as JazzTestingServer,
+    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
@@ -199,17 +199,6 @@ fn parse_subscription_inputs(
     Ok((query, session, durability, propagation))
 }
 
-fn parse_testing_server_start_options(
-    options: Option<JsonValue>,
-) -> napi::Result<TestingServerStartOptions> {
-    match options {
-        None | Some(JsonValue::Null) => Ok(TestingServerStartOptions::default()),
-        Some(value) => serde_json::from_value(value).map_err(|error| {
-            napi::Error::from_reason(format!("Invalid TestingServer options: {error}"))
-        }),
-    }
-}
-
 fn make_subscription_callback(
     tsfn: ThreadsafeFunction<serde_json::Value>,
 ) -> impl Fn(SubscriptionDelta) + Send + 'static {
@@ -227,21 +216,9 @@ fn make_subscription_callback(
 
 type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TestingServerStartOptions {
-    app_id: Option<String>,
-    port: Option<u16>,
-    data_dir: Option<String>,
-    persistent_storage: Option<bool>,
-    admin_secret: Option<String>,
-    backend_secret: Option<String>,
-    jwks_url: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DevServerStartOptions {
+struct JazzServerStartOptions {
     app_id: String,
     port: Option<u16>,
     data_dir: Option<String>,
@@ -254,28 +231,33 @@ struct DevServerStartOptions {
     telemetry_collector_url: Option<String>,
 }
 
-fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
-    serde_json::from_value(options)
-        .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestJwtForUserOptions {
+    expires_in_seconds: Option<u64>,
+    issuer: Option<String>,
 }
 
-static DEV_SERVER_OTEL_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
-    OnceLock::new();
-static DEV_SERVER_TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
+fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServerStartOptions> {
+    serde_json::from_value(options)
+        .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
+}
 
-fn init_dev_server_telemetry(collector_url: Option<&str>) {
+static JAZZ_SERVER_OTEL_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    OnceLock::new();
+static JAZZ_SERVER_TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
+
+fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
         return;
     };
 
-    DEV_SERVER_TELEMETRY_INIT.get_or_init(|| {
+    JAZZ_SERVER_TELEMETRY_INIT.get_or_init(|| {
         use tracing_subscriber::layer::SubscriberExt as _;
 
         let endpoint = jazz_tools::otel::normalize_otlp_traces_endpoint(collector_url);
-        let provider = jazz_tools::otel::init_tracer_provider_with_endpoint(
-            "jazz-dev-server",
-            Some(&endpoint),
-        );
+        let provider =
+            jazz_tools::otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
         let otel_layer = jazz_tools::otel::layer(&provider);
         let filter = tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("jazz_tools=trace".parse().expect("valid tracing directive"))
@@ -286,7 +268,7 @@ fn init_dev_server_telemetry(collector_url: Option<&str>) {
         )
         .is_ok()
         {
-            let _ = DEV_SERVER_OTEL_PROVIDER.set(provider);
+            let _ = JAZZ_SERVER_OTEL_PROVIDER.set(provider);
         }
     });
 }
@@ -982,112 +964,30 @@ impl jazz_tools::transport_manager::TickNotifier for NapiTickNotifier {
 }
 
 // ============================================================================
-// TestingServer
+// TestJwtIssuer
 // ============================================================================
 
 #[napi]
-pub struct TestingServer {
-    inner: Mutex<Option<JazzTestingServer>>,
-    app_id: String,
-    url: String,
-    port: u16,
-    data_dir: String,
-    backend_secret: String,
-    admin_secret: String,
-    built_in_jwt_helpers_available: bool,
+pub struct TestJwtIssuer {
+    inner: Mutex<Option<JazzTestJwtIssuer>>,
+    jwks_url: String,
 }
 
 #[napi]
-impl TestingServer {
-    #[napi(factory, ts_return_type = "Promise<TestingServer>")]
-    pub async fn start(
-        #[napi(
-            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string; jwksUrl?: string }"
-        )]
-        options: Option<JsonValue>,
-    ) -> napi::Result<Self> {
-        let options = parse_testing_server_start_options(options)?;
-
-        let mut builder = JazzTestingServer::builder();
-
-        if let Some(app_id) = options.app_id.as_deref() {
-            let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-            builder = builder.with_app_id(app_id);
-        }
-
-        if let Some(port) = options.port {
-            builder = builder.with_port(port);
-        }
-
-        if let Some(data_dir) = options.data_dir {
-            builder = builder.with_data_dir(data_dir);
-        }
-
-        if options.persistent_storage.unwrap_or(false) {
-            builder = builder.with_persistent_storage();
-        }
-
-        if let Some(admin_secret) = options.admin_secret {
-            builder = builder.with_admin_secret(admin_secret);
-        }
-
-        if let Some(backend_secret) = options.backend_secret {
-            builder = builder.with_backend_secret(backend_secret);
-        }
-
-        if let Some(jwks_url) = options.jwks_url {
-            builder = builder.with_jwks_url(jwks_url);
-        }
-
-        let server = builder.start().await;
-        let app_id = server.app_id().to_string();
-        let url = server.base_url();
-        let port = server.port();
-        let data_dir = server.data_dir().to_string_lossy().into_owned();
-        let admin_secret = server.admin_secret().to_string();
-        let backend_secret = server.backend_secret().to_string();
-        let built_in_jwt_helpers_available = server.built_in_jwt_helpers_available();
-
+impl TestJwtIssuer {
+    #[napi(factory, ts_return_type = "Promise<TestJwtIssuer>")]
+    pub async fn start() -> napi::Result<Self> {
+        let issuer = JazzTestJwtIssuer::start().await;
+        let jwks_url = issuer.endpoint();
         Ok(Self {
-            inner: Mutex::new(Some(server)),
-            app_id,
-            url,
-            port,
-            data_dir,
-            backend_secret,
-            admin_secret,
-            built_in_jwt_helpers_available,
+            inner: Mutex::new(Some(issuer)),
+            jwks_url,
         })
     }
 
-    #[napi(getter, js_name = "appId")]
-    pub fn app_id(&self) -> String {
-        self.app_id.clone()
-    }
-
-    #[napi(getter)]
-    pub fn url(&self) -> String {
-        self.url.clone()
-    }
-
-    #[napi(getter)]
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    #[napi(getter, js_name = "dataDir")]
-    pub fn data_dir(&self) -> String {
-        self.data_dir.clone()
-    }
-
-    #[napi(getter, js_name = "backendSecret")]
-    pub fn backend_secret(&self) -> String {
-        self.backend_secret.clone()
-    }
-
-    #[napi(getter, js_name = "adminSecret")]
-    pub fn admin_secret(&self) -> String {
-        self.admin_secret.clone()
+    #[napi(getter, js_name = "jwksUrl")]
+    pub fn jwks_url(&self) -> String {
+        self.jwks_url.clone()
     }
 
     #[napi(js_name = "jwtForUser")]
@@ -1095,41 +995,46 @@ impl TestingServer {
         &self,
         user_id: String,
         #[napi(ts_arg_type = "Record<string, unknown> | undefined")] claims: Option<JsonValue>,
+        #[napi(ts_arg_type = "{ expiresInSeconds?: number; issuer?: string } | undefined")]
+        options: Option<JsonValue>,
     ) -> napi::Result<String> {
-        if !self.built_in_jwt_helpers_available {
-            return Err(napi::Error::from_reason(
-                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
-            ));
-        }
+        let claims = claims.unwrap_or_else(|| serde_json::json!({ "role": "user" }));
+        let options = match options {
+            None | Some(JsonValue::Null) => TestJwtForUserOptions::default(),
+            Some(value) => {
+                serde_json::from_value::<TestJwtForUserOptions>(value).map_err(|error| {
+                    napi::Error::from_reason(format!("Invalid JWT options: {error}"))
+                })?
+            }
+        };
+        let expires_in_seconds = options.expires_in_seconds.unwrap_or(3600);
 
-        let claims = claims.unwrap_or_else(|| json!({ "role": "user" }));
-        Ok(JazzTestingServer::jwt_for_user_with_claims(
-            &user_id, claims,
+        Ok(JazzTestJwtIssuer::jwt_for_user_with_options(
+            &user_id,
+            claims,
+            TestJwtOptions {
+                expires_in: Duration::from_secs(expires_in_seconds),
+                issuer: options.issuer,
+            },
         ))
     }
 
     #[napi]
     pub async fn stop(&self) -> napi::Result<()> {
-        let server = self
-            .inner
+        self.inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?
             .take();
-
-        if let Some(server) = server {
-            server.shutdown().await;
-        }
-
         Ok(())
     }
 }
 
 // ============================================================================
-// DevServer
+// JazzServer
 // ============================================================================
 
 #[napi]
-pub struct DevServer {
+pub struct JazzServer {
     inner: Mutex<Option<JazzHostedServer>>,
     app_id: String,
     url: String,
@@ -1140,16 +1045,16 @@ pub struct DevServer {
 }
 
 #[napi]
-impl DevServer {
-    #[napi(factory, ts_return_type = "Promise<DevServer>")]
+impl JazzServer {
+    #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
             ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
-        let opts = parse_dev_server_start_options(options)?;
-        init_dev_server_telemetry(opts.telemetry_collector_url.as_deref());
+        let opts = parse_jazz_server_start_options(options)?;
+        init_jazz_server_telemetry(opts.telemetry_collector_url.as_deref());
 
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
@@ -1205,7 +1110,7 @@ impl DevServer {
 
         Ok(Self {
             inner: Mutex::new(Some(hosted)),
-            app_id: opts.app_id,
+            app_id: app_id.to_string(),
             url,
             port,
             data_dir: resolved_data_dir,

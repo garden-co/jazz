@@ -129,6 +129,8 @@ describe("jazzSvelteKit", () => {
       port: 19882,
       url: "http://127.0.0.1:19882",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -161,6 +163,8 @@ describe("jazzSvelteKit", () => {
       port: 19990,
       url: "http://127.0.0.1:19990",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -194,6 +198,8 @@ describe("jazzSvelteKit", () => {
       port: 19991,
       url: "http://127.0.0.1:19991",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -244,6 +250,7 @@ describe("jazzSvelteKit", () => {
       port: 19998,
       url: "http://127.0.0.1:19998",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
@@ -266,6 +273,8 @@ describe("jazzSvelteKit", () => {
       port: 19995,
       url: "http://127.0.0.1:19995",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
@@ -301,6 +310,8 @@ describe("jazzSvelteKit", () => {
       port: 19994,
       url: "http://127.0.0.1:19994",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
@@ -417,6 +428,8 @@ describe("jazzSvelteKit", () => {
       port: 19890,
       url: "http://127.0.0.1:19890",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
@@ -452,6 +465,8 @@ describe("jazzSvelteKit", () => {
       port: 19996,
       url: "http://127.0.0.1:19996",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(new Error("schema push failed"));

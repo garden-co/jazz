@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::row_input;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -41,7 +41,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 #[tokio::test]
 async fn wait_for_batch_waits_until_expected_tier_confirmation_reaches_client() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let alice =
         JazzClient::connect(server.make_client_context_for_user(schema, "alice-wait-for-batch"))
             .await
@@ -120,7 +120,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     const DEEP_HISTORY_UPDATES: usize = 100;
 
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
             .await
@@ -203,7 +203,7 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 #[tokio::test]
 async fn jazz_tools_cli_two_clients_sync_values() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect client a");
@@ -278,7 +278,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 #[tokio::test]
 async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect client a");
@@ -346,7 +346,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results(
 #[tokio::test]
 async fn delete_through_one_client_removes_row_from_peer_query_results() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect client a");
@@ -403,7 +403,7 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
 #[tokio::test]
 async fn caller_supplied_uuid_is_used_for_created_row() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -458,7 +458,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 #[tokio::test]
 async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -531,7 +531,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
 #[tokio::test]
 async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -605,7 +605,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
 #[tokio::test]
 async fn jazz_tools_cli_two_different_users_sync_values() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_alice =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-sync-user"))
             .await

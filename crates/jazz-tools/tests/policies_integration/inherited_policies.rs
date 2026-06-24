@@ -12,7 +12,7 @@ use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnDescriptor, RowDescriptor, Schema, TableName, TablePolicies, TableSchemaBuilder,
 };
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder, TableSchema,
     Value,
@@ -405,7 +405,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -549,7 +549,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -700,7 +700,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -882,7 +882,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1110,7 +1110,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1255,7 +1255,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1415,7 +1415,7 @@ async fn inherited_multiple_folder_paths_compose_with_or() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1590,7 +1590,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1689,7 +1689,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
 #[tokio::test]
 async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or() {
     let schema = file_referencing_schema(false);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1745,7 +1745,7 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
 #[tokio::test]
 async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget() {
     let schema = file_referencing_schema(false);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1857,7 +1857,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
 #[tokio::test]
 async fn inherited_referencing_array_membership_preserves_set_semantics() {
     let schema = file_referencing_schema(true);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1974,7 +1974,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics() {
 )]
 async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     let schema = multi_hop_inherited_parts_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -2066,7 +2066,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -2163,7 +2163,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -2261,7 +2261,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

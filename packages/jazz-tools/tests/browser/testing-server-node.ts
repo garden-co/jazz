@@ -1,16 +1,18 @@
 import type { BrowserContext, Route, WebSocketRoute } from "playwright";
-type JazzNapiTestingServer = import("jazz-napi").TestingServer;
+type JazzNapiServer = import("jazz-napi").JazzServer;
+type JazzNapiTestJwtIssuer = import("jazz-napi").TestJwtIssuer;
 
-interface StartedTestingServer {
-  server: JazzNapiTestingServer;
+interface StartedJazzServer {
+  server: JazzNapiServer;
+  jwtIssuer: JazzNapiTestJwtIssuer;
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }
 
-const DEFAULT_TESTING_SERVER_KEY = "__default__";
-const testingServerPromises = new Map<string, Promise<StartedTestingServer>>();
-interface TestingServerRouteBlock {
+const DEFAULT_JAZZ_SERVER_KEY = "__default__";
+const jazzServerPromises = new Map<string, Promise<StartedJazzServer>>();
+interface JazzServerRouteBlock {
   blocked: boolean;
   httpHandler: (route: Route) => void;
   webSocketHandler: (route: WebSocketRoute) => void | Promise<void>;
@@ -18,56 +20,72 @@ interface TestingServerRouteBlock {
   webSocketRouted: boolean;
 }
 
-const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, TestingServerRouteBlock>>();
+const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRouteBlock>>();
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
-async function loadTestingServer(): Promise<typeof import("jazz-napi").TestingServer> {
+async function loadJazzNapi(): Promise<{
+  JazzServer: typeof import("jazz-napi").JazzServer;
+  TestJwtIssuer: typeof import("jazz-napi").TestJwtIssuer;
+}> {
   try {
     const module = await import("jazz-napi");
-    return module.TestingServer;
+    return {
+      JazzServer: module.JazzServer,
+      TestJwtIssuer: module.TestJwtIssuer,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      "Browser tests require the jazz-napi TestingServer host binding. Run `pnpm --filter jazz-napi build` first.\n\n" +
+      "Browser tests require the jazz-napi JazzServer host binding. Run `pnpm --filter jazz-napi build` first.\n\n" +
         `Original error: ${message}`,
     );
   }
 }
 
-async function startTestingServer(appId?: string): Promise<StartedTestingServer> {
-  const TestingServer = await loadTestingServer();
-  const server = await TestingServer.start(appId ? { appId } : undefined);
+async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
+  const { JazzServer, TestJwtIssuer } = await loadJazzNapi();
+  const jwtIssuer = await TestJwtIssuer.start();
+  const adminSecret = "jazz-browser-test-admin";
+  const backendSecret = "jazz-browser-test-backend";
+  const server = await JazzServer.start({
+    appId: appId ?? "00000000-0000-0000-0000-000000000001",
+    jwksUrl: jwtIssuer.jwksUrl,
+    inMemory: true,
+    adminSecret,
+    backendSecret,
+  });
   return {
     server,
+    jwtIssuer,
     appId: server.appId,
     serverUrl: server.url,
-    adminSecret: server.adminSecret,
+    adminSecret: server.adminSecret ?? adminSecret,
   };
 }
 
-async function getOrStartTestingServer(appId?: string): Promise<StartedTestingServer> {
-  const key = appId ?? DEFAULT_TESTING_SERVER_KEY;
-  const existing = testingServerPromises.get(key);
+async function getOrStartJazzServer(appId?: string): Promise<StartedJazzServer> {
+  const key = appId ?? DEFAULT_JAZZ_SERVER_KEY;
+  const existing = jazzServerPromises.get(key);
 
   if (!existing) {
-    const startedServer = startTestingServer(appId).catch((error) => {
-      testingServerPromises.delete(key);
+    const startedServer = startJazzServer(appId).catch((error) => {
+      jazzServerPromises.delete(key);
       throw error;
     });
-    testingServerPromises.set(key, startedServer);
+    jazzServerPromises.set(key, startedServer);
     return startedServer;
   }
 
   return existing;
 }
 
-export async function testingServerInfo(appId?: string): Promise<{
+export async function jazzServerInfo(appId?: string): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const serverInfo = await getOrStartTestingServer(appId);
+  const serverInfo = await getOrStartJazzServer(appId);
   return {
     appId: serverInfo.appId,
     serverUrl: serverInfo.serverUrl,
@@ -75,18 +93,18 @@ export async function testingServerInfo(appId?: string): Promise<{
   };
 }
 
-export async function testingServerJwtForUser(
+export async function jazzServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
   appId?: string,
 ): Promise<string> {
-  const { server } = await getOrStartTestingServer(appId);
-  return server.jwtForUser(userId, claims);
+  const { jwtIssuer } = await getOrStartJazzServer(appId);
+  return jwtIssuer.jwtForUser(userId, claims);
 }
 
-export async function stopTestingServer(): Promise<void> {
-  const runningServers = [...testingServerPromises.values()];
-  testingServerPromises.clear();
+export async function stopJazzServer(): Promise<void> {
+  const runningServers = [...jazzServerPromises.values()];
+  jazzServerPromises.clear();
 
   if (runningServers.length === 0) {
     return;
@@ -94,8 +112,9 @@ export async function stopTestingServer(): Promise<void> {
 
   for (const runningServer of runningServers) {
     try {
-      const { server } = await runningServer;
+      const { server, jwtIssuer } = await runningServer;
       await server.stop();
+      await jwtIssuer.stop();
     } catch {
       // Swallow all errors: either startup never produced a server (nothing to stop),
       // or stop() itself failed (nothing recoverable during teardown).
@@ -103,11 +122,11 @@ export async function stopTestingServer(): Promise<void> {
   }
 }
 
-function testingServerUrlPattern(serverUrl: string): string {
+function jazzServerUrlPattern(serverUrl: string): string {
   return `${serverUrl.replace(/\/+$/, "")}/**`;
 }
 
-function testingServerWebSocketUrlPattern(serverUrl: string): string {
+function jazzServerWebSocketUrlPattern(serverUrl: string): string {
   const url = new URL(serverUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return `${url.toString().replace(/\/+$/, "")}/**`;
@@ -123,7 +142,7 @@ function getBrowserContextId(context: BrowserContext): number {
 }
 
 function activeBlockedPatterns(
-  contextRoutes: Map<string, TestingServerRouteBlock> | undefined,
+  contextRoutes: Map<string, JazzServerRouteBlock> | undefined,
 ): string[] {
   if (!contextRoutes) return [];
   return [...contextRoutes.entries()]
@@ -131,18 +150,18 @@ function activeBlockedPatterns(
     .map(([pattern]) => pattern);
 }
 
-export interface TestingServerNetworkDebugState {
+export interface JazzServerNetworkDebugState {
   contextId: number;
   pattern: string;
   blocked: boolean;
   activePatterns: string[];
 }
 
-export async function debugTestingServerNetwork(
+export async function debugJazzServerNetwork(
   context: BrowserContext,
   serverUrl: string,
-): Promise<TestingServerNetworkDebugState> {
-  const pattern = testingServerUrlPattern(serverUrl);
+): Promise<JazzServerNetworkDebugState> {
+  const pattern = jazzServerUrlPattern(serverUrl);
   const contextRoutes = blockedServerRoutes.get(context);
   return {
     contextId: getBrowserContextId(context),
@@ -152,11 +171,11 @@ export async function debugTestingServerNetwork(
   };
 }
 
-export async function blockTestingServerNetwork(
+export async function blockJazzServerNetwork(
   context: BrowserContext,
   serverUrl: string,
 ): Promise<void> {
-  const pattern = testingServerUrlPattern(serverUrl);
+  const pattern = jazzServerUrlPattern(serverUrl);
   const contextId = getBrowserContextId(context);
   let contextRoutes = blockedServerRoutes.get(context);
   if (!contextRoutes) {
@@ -165,7 +184,7 @@ export async function blockTestingServerNetwork(
   }
   let routeBlock = contextRoutes.get(pattern);
   if (routeBlock?.blocked) {
-    console.info("[testing-server-network]", {
+    console.info("[jazz-server-network]", {
       action: "block-skip",
       contextId,
       pattern,
@@ -175,7 +194,7 @@ export async function blockTestingServerNetwork(
   }
 
   if (!routeBlock) {
-    const webSocketPattern = testingServerWebSocketUrlPattern(serverUrl);
+    const webSocketPattern = jazzServerWebSocketUrlPattern(serverUrl);
     routeBlock = {
       blocked: false,
       httpHandler: (route) => {
@@ -201,7 +220,7 @@ export async function blockTestingServerNetwork(
     routeBlock.webSocketRouted = true;
   }
   await context.route(pattern, routeBlock.httpHandler);
-  console.info("[testing-server-network]", {
+  console.info("[jazz-server-network]", {
     action: "block",
     contextId,
     pattern,
@@ -210,16 +229,16 @@ export async function blockTestingServerNetwork(
   });
 }
 
-export async function unblockTestingServerNetwork(
+export async function unblockJazzServerNetwork(
   context: BrowserContext,
   serverUrl: string,
 ): Promise<void> {
-  const pattern = testingServerUrlPattern(serverUrl);
+  const pattern = jazzServerUrlPattern(serverUrl);
   const contextId = getBrowserContextId(context);
   const contextRoutes = blockedServerRoutes.get(context);
   const routeBlock = contextRoutes?.get(pattern);
   if (!routeBlock?.blocked) {
-    console.info("[testing-server-network]", {
+    console.info("[jazz-server-network]", {
       action: "unblock-skip",
       contextId,
       pattern,
@@ -230,7 +249,7 @@ export async function unblockTestingServerNetwork(
 
   await context.unroute(pattern, routeBlock.httpHandler);
   routeBlock.blocked = false;
-  console.info("[testing-server-network]", {
+  console.info("[jazz-server-network]", {
     action: "unblock",
     contextId,
     pattern,
