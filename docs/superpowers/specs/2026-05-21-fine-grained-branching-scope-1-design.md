@@ -1,12 +1,20 @@
 # Fine-Grained Branching Scope 1 Design
 
-Scope 1 adds the user-facing API and permission contract needed to work with branch ids on top of
-the current branching system. It does not change branch isolation, branch storage, branch writes,
-diffing, or merging behavior.
+Scope 1 defines the user-facing API and permission contract for working with branch ids: the
+`db.branch(branchId)` view, the `useAll(query, { branch })` reactive read, query-level `.branch(id)`
+selection, and the `policy.forBranch(...)` permission API.
+
+> **Compatibility flag — this design cannot be implemented on top of the current branch layer.**
+> Scope 1 was originally framed as a thin API/permission layer "on top of the current branching
+> system" that changes neither branch storage, writes, nor isolation. Prototyping the API and
+> permission model below showed that premise does not hold: the design is **essentially incompatible
+> with the current branch layer** and can only be implemented by changing it. See
+> [Compatibility with the current branch layer](#compatibility-with-the-current-branch-layer).
 
 ## Goals
 
-- Add a simple branch-view API: `db.createBranch(branchId)`.
+- Add a branch-view API: `db.branch(branchId)`, plus reactive `useAll(query, { branch })` and
+  query-level `.branch(id)` selection.
 - Keep branch metadata app-modeled. Apps create rows in their own tables, then use the created row
   id as the branch id.
 - Add an outer `policy.forBranch(...)` permission API that groups branch-scoped table policies by
@@ -16,33 +24,90 @@ diffing, or merging behavior.
 
 ## Non-Goals
 
-- Scope 1 does not make branch writes isolated from `main`.
 - Scope 1 does not add merge, diff, branch deletion, branch archival, or branch metadata ownership.
 - Scope 1 does not add a Jazz-managed branch registry.
 - Scope 1 does not add a separate branch-opening permission. Opening a branch is governed by normal
   `allowRead` on the backing row.
 
+> Originally a non-goal was "Scope 1 does not make branch writes isolated from `main`." That no longer
+> holds: the API and permission model here only function with branch-isolated reads and writes, so
+> isolation is a prerequisite, not a later scope. See below.
+
+## Compatibility With The Current Branch Layer
+
+This design **cannot** be implemented as a pure API/permission layer on top of the current branching
+system. The two are essentially incompatible, for these reasons:
+
+- **The current runtime binds a branch at load; this design requires per-operation branch routing.**
+  Today a runtime/connection is opened for one `userBranch`, and its writes are pinned to that branch
+  — the write path rejects a write whose target branch differs from the runtime's own branch
+  ("outside the current schema family"). `db.branch(id)`, `useAll(query, { branch })`, and
+  query-level `.branch(id)` all require one runtime to read and write arbitrary branches per
+  operation. Supporting that is a breaking change to the runtime's branch model: drop load-time
+  branch binding, carry the target branch on every operation, and relax the write-path guard to allow
+  any user branch within the same env/schema.
+
+- **The permission contract is only meaningful with branch isolation.** Deny-by-default branch
+  access, `$branch`-bound rules, and branch-scoped CRUD presuppose that a branch insert lands on the
+  branch and stays invisible to `main`, and that a branch read sees only that branch. This cannot sit
+  unchanged on top of `main`; it depends on branch-isolated storage and routing.
+
+- **Synced, enforced branch writes are not supported by the current sync/catalogue layer.** When a
+  user client writes into a new branch through an enforcing server, the write fails at the
+  sync/catalogue layer: registering the new branch's schema catalogue is rejected for non-admin
+  clients (`CatalogueWriteDenied`). Branch writes therefore do not currently sync or enforce on the
+  client→server path, even though they work in-process. Authorizing branch registration/writes for
+  user clients is a prerequisite this design depends on and the current layer does not provide.
+
+In short, the permission and API design here is sound and was validated in-process, but landing it
+end-to-end requires reworking the branch storage/routing/sync layers — not just adding an API on top.
+Scopes 2–4 (writes, merge, isolation) are therefore not independent follow-ons to Scope 1; the
+write/isolation/sync work is a prerequisite for Scope 1 to function over a server.
+
 ## Branch View API
 
-`db.createBranch(branchId)` returns a branch-scoped `Db` view.
+`db.branch(branchId)` returns a branch-scoped `Db` view.
 
 ```ts
-const branchDb = db.createBranch(
+const branchDb = db.branch(
   db.insert(app.branches, {
     projectId,
     name: "Alice's draft",
     ownerId: session.user_id,
   }).value.id,
 );
+
+await branchDb.insert(app.todos, { projectId, title: "Write API docs", ownerId });
+const draftTodos = await branchDb.all(app.todos.where({ projectId }));
 ```
 
 The method is synchronous and cheap. It does not create the backing row and does not eagerly validate
 the branch id. This keeps it aligned with existing local-first write ergonomics: callers can insert a
 branch metadata row and immediately derive a branch view from its local id.
 
-The returned branch view carries the selected branch id as default branch context for reads,
-subscriptions, batches, and transactions. A query-level branch selection may still override the view
-branch when that query API exists.
+### Branch routing is per operation, not a runtime mode
+
+The branch is a per-operation target carried on each read, write, subscription, batch, and
+transaction — it is **not** a mode the runtime is opened in. One runtime/connection serves every
+branch by tagging each operation with its target branch; the write path resolves and composes the
+target branch per write rather than being pinned to one branch at open time. A query-level
+`.branch(id)` selection overrides the view's branch for that query.
+
+This per-operation model is deliberate and is the core reason the design is incompatible with the
+current branch layer (which binds a runtime to one branch at load). See
+[Compatibility with the current branch layer](#compatibility-with-the-current-branch-layer).
+
+### Reactive reads
+
+Framework hooks (`useAll`, React/React Native/Svelte/Vue) scope to a branch through a `branch` option
+on the query options:
+
+```ts
+const todos = useAll(app.todos.where({ projectId }), { branch: branch.id });
+```
+
+Distinct `branch` values key independent subscriptions, so several components or tabs can observe
+different branches at the same time.
 
 ## Backing Row Resolution
 
@@ -119,8 +184,11 @@ For a branch-scoped read of `todos` through a branch id backed by `branches`, au
    resolved backing row.
 
 For branch-scoped inserts, updates, and deletes, the same backing-row resolution applies, then the
-matching branch-scoped operation rule is evaluated. The actual write semantics stay unchanged in
-Scope 1; later scopes will decide branch write storage and isolation behavior.
+matching branch-scoped operation rule is evaluated, with `$branch` bound to literal backing-row
+values before evaluation. The write is routed to the target branch per operation. Unlike the original
+framing, the write path does change: it must accept writes to a branch the runtime was not opened on,
+and the write must be branch-isolated for these rules to be meaningful (see
+[Compatibility with the current branch layer](#compatibility-with-the-current-branch-layer)).
 
 ## Errors
 
@@ -138,7 +206,7 @@ failure channels can carry these reasons as messages or codes.
 
 Scope 1 needs high-level tests that read like app usage:
 
-- insert a `branches` metadata row and derive `branchDb` with `db.createBranch(branch.value.id)`
+- insert a `branches` metadata row and derive `branchDb` with `db.branch(branch.value.id)`
 - allow a user to read the backing row and prove branch-scoped reads use the matching
   `policy.forBranch(...)` block
 - deny branch-scoped reads when the backing row fails normal `allowRead`

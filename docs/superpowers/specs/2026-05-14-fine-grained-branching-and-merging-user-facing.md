@@ -4,10 +4,20 @@ This spec explains the user-facing shape of branches in Jazz.
 
 ## Implementation Scopes
 
+> **Compatibility note.** This scope breakdown originally assumed Scope 1 (APIs + permissions) could
+> land on top of the current branching system without touching writes or isolation, and that writes
+> (Scope 2) and isolation (Scope 4) were later, independent steps. Prototyping showed that is not
+> possible: the branch-view API, reactive `useAll(query, { branch })`, and per-operation branch
+> routing are essentially incompatible with the current branch layer (which binds a runtime to one
+> branch at load), and the permission contract is only meaningful with branch-isolated reads and
+> writes. Synced, enforced branch writes also fail at the current sync/catalogue layer. So Scope 1
+> depends on the write/isolation/sync rework rather than preceding it. See
+> [the Scope 1 design's compatibility section](2026-05-21-fine-grained-branching-scope-1-design.md#compatibility-with-the-current-branch-layer).
+
 ### Scope 1: Branch Creation APIs And Permissions
 
-Build branch creation APIs and the way apps define `forBranch` permissions on the current branching
-system. This scope does not change branch isolation. The detailed design lives in
+Build the branch APIs (`db.branch(branchId)`, reactive `useAll(query, { branch })`, query-level
+`.branch(id)`) and the way apps define `forBranch` permissions. The detailed design lives in
 [2026-05-21-fine-grained-branching-scope-1-design.md](2026-05-21-fine-grained-branching-scope-1-design.md).
 
 ### Scope 2: Branch Writes
@@ -69,13 +79,13 @@ const { value: branch } = db.insert(app.branches, {
   ownerId: session.user_id,
 });
 
-const draft = db.createBranch(branch.id);
+const draft = db.branch(branch.id);
 ```
 
 Here `branch.id` is both the branch metadata row id and the branch id.
 
 The id does not have to come from a `branches` table. Any Jazz-created row id can identify a branch:
-`db.createBranch(project.id)`, `db.createBranch(document.id)`, and `db.createBranch(branch.id)` all
+`db.branch(project.id)`, `db.branch(document.id)`, and `db.branch(branch.id)` all
 use the same core API. The table that owns the id chooses which `forBranch(...)` rule can apply,
 leaving branch management and naming as app-level choices.
 
@@ -84,7 +94,7 @@ leaving branch management and naming as app-level choices.
 Branch access is deny-by-default. A table must declare which backing tables may act as branch
 anchors for that table.
 
-For `db.createBranch(branch.id)`, the backing row is the `branches` row with id `branch.id`.
+For `db.branch(branch.id)`, the backing row is the `branches` row with id `branch.id`.
 
 ```ts
 export default definePermissions(app, ({ policy, session }) => {
@@ -113,15 +123,15 @@ In this example:
 - creating a branch metadata row creates an object id that can be used as a branch id
 - Jazz resolves `branch.id` to the `branches` row
 - `$branch` is that resolved `branches` row
-- opening `db.createBranch(branch.id)` does not eagerly validate the branch id
+- opening `db.branch(branch.id)` does not eagerly validate the branch id
 - the first read or write through that branch resolves the backing row and requires normal
   `policy.branches.allowRead` to pass
-- reading todos through `db.createBranch(branch.id)` requires the branch-scoped todo read rule to
+- reading todos through `db.branch(branch.id)` requires the branch-scoped todo read rule to
   pass
-- writing todos through `db.createBranch(branch.id)` requires the matching branch-scoped todo write
+- writing todos through `db.branch(branch.id)` requires the matching branch-scoped todo write
   rule to pass
-- diffing todos from `db.createBranch(branch.id)` requires the matching branch-scoped todo read rule
-- merging `db.createBranch(branch.id)` requires the matching branch-scoped rules for the source data
+- diffing todos from `db.branch(branch.id)` requires the matching branch-scoped todo read rule
+- merging `db.branch(branch.id)` requires the matching branch-scoped rules for the source data
   and normal write permission for the rows written to `main`
 
 Jazz does not infer that `todos.projectId` points at `$branch.projectId`. The policy says that
@@ -150,10 +160,10 @@ or edit those rows directly. They are separate from branch access.
 
 ### Branch-Scoped Database View
 
-`db.createBranch(branchId)` returns a database view where reads and writes use that branch.
+`db.branch(branchId)` returns a database view where reads and writes use that branch.
 
 ```ts
-const draft = db.createBranch(branch.id);
+const draft = db.branch(branch.id);
 
 await draft.insert(app.todos, {
   projectId: branch.projectId,
@@ -164,6 +174,18 @@ await draft.insert(app.todos, {
 
 The inserted row is visible through `draft`, but not through normal `db` reads from `main`.
 
+### Reactive Reads
+
+Framework hooks scope to a branch through a `branch` option, so reactive reads can observe a branch
+the same way `db.branch(...)` does for imperative reads:
+
+```ts
+const todos = useAll(app.todos.where({ projectId }), { branch: branch.id });
+```
+
+This works across the React, React Native, Svelte, and Vue adapters. Distinct `branch` values key
+independent subscriptions, so different components or tabs can observe different branches at once.
+
 ### Query Builder Branch Selection
 
 Queries can select a branch directly.
@@ -172,12 +194,12 @@ Queries can select a branch directly.
 const rows = await db.all(app.todos.branch(branch.id).where({ projectId: branch.projectId }));
 ```
 
-Query-level branch selection uses the same overlay behavior as `db.createBranch(branchId)`.
+Query-level branch selection uses the same overlay behavior as `db.branch(branchId)`.
 
 If both are present, the query-level branch wins:
 
 ```ts
-const draft = db.createBranch(aliceBranch.id);
+const draft = db.branch(aliceBranch.id);
 
 const rows = await draft.all(
   app.todos.branch(bobBranch.id).where({ projectId: bobBranch.projectId }),
@@ -241,7 +263,7 @@ edit moved it out of the query filter.
 Merging writes branch changes back to `main`.
 
 ```ts
-await db.createBranch(branch.id).merge();
+await db.branch(branch.id).merge();
 ```
 
 Merge uses the same three inputs as diff:
