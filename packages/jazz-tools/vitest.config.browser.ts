@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import {
   blockJazzServerNetwork,
-  debugJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
   unblockJazzServerNetwork,
@@ -70,8 +69,6 @@ export default defineConfig({
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
           unblockJazzServerNetwork(context, serverUrl),
-        jazzServerNetworkDebug: async ({ context }, serverUrl) =>
-          debugJazzServerNetwork(context, serverUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>

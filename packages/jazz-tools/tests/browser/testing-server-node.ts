@@ -1,10 +1,14 @@
 import type { BrowserContext, Route, WebSocketRoute } from "playwright";
-type JazzNapiServer = import("jazz-napi").JazzServer;
-type JazzNapiTestJwtIssuer = import("jazz-napi").TestJwtIssuer;
+import {
+  startLocalJazzServer,
+  startTestJwtIssuer,
+  type LocalJazzServerHandle,
+  type TestJwtIssuerHandle,
+} from "../../src/testing/index.js";
 
 interface StartedJazzServer {
-  server: JazzNapiServer;
-  jwtIssuer: JazzNapiTestJwtIssuer;
+  server: LocalJazzServerHandle;
+  jwtIssuer: TestJwtIssuerHandle;
   appId: string;
   serverUrl: string;
   adminSecret: string;
@@ -24,31 +28,11 @@ const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRo
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
-async function loadJazzNapi(): Promise<{
-  JazzServer: typeof import("jazz-napi").JazzServer;
-  TestJwtIssuer: typeof import("jazz-napi").TestJwtIssuer;
-}> {
-  try {
-    const module = await import("jazz-napi");
-    return {
-      JazzServer: module.JazzServer,
-      TestJwtIssuer: module.TestJwtIssuer,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      "Browser tests require the jazz-napi JazzServer host binding. Run `pnpm --filter jazz-napi build` first.\n\n" +
-        `Original error: ${message}`,
-    );
-  }
-}
-
 async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
-  const { JazzServer, TestJwtIssuer } = await loadJazzNapi();
-  const jwtIssuer = await TestJwtIssuer.start();
+  const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
-  const server = await JazzServer.start({
+  const server = await startLocalJazzServer({
     appId: appId ?? "00000000-0000-0000-0000-000000000001",
     jwksUrl: jwtIssuer.jwksUrl,
     inMemory: true,
@@ -60,7 +44,7 @@ async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
     jwtIssuer,
     appId: server.appId,
     serverUrl: server.url,
-    adminSecret: server.adminSecret ?? adminSecret,
+    adminSecret: server.adminSecret,
   };
 }
 
@@ -155,20 +139,6 @@ export interface JazzServerNetworkDebugState {
   pattern: string;
   blocked: boolean;
   activePatterns: string[];
-}
-
-export async function debugJazzServerNetwork(
-  context: BrowserContext,
-  serverUrl: string,
-): Promise<JazzServerNetworkDebugState> {
-  const pattern = jazzServerUrlPattern(serverUrl);
-  const contextRoutes = blockedServerRoutes.get(context);
-  return {
-    contextId: getBrowserContextId(context),
-    pattern,
-    blocked: contextRoutes?.get(pattern)?.blocked ?? false,
-    activePatterns: activeBlockedPatterns(contextRoutes),
-  };
 }
 
 export async function blockJazzServerNetwork(
