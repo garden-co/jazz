@@ -36,6 +36,13 @@ function typeInto(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Set the value of a React-controlled <select> (triggers React's onChange). */
+function setSelectValue(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")!.set!;
+  setter.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 function todoTitles(el: HTMLDivElement): Array<string | null> {
   return [...el.querySelectorAll("#todo-list li span")].map((span) => span.textContent);
 }
@@ -368,6 +375,55 @@ describe("React Todo App E2E", () => {
         ),
       20000,
       "Todo should sync to app 2 through the server",
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Branch: create a branch, add a branch-scoped todo, verify isolation
+  // -------------------------------------------------------------------------
+
+  it("adds a todo on a branch and isolates it from main", async () => {
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("branch") } });
+
+    // Create a branch (the app auto-switches onto it).
+    const branchNameInput = el.querySelector<HTMLInputElement>(
+      'input[aria-label="New branch name"]',
+    )!;
+    const branchForm = branchNameInput.closest("form")!;
+    await act(async () => {
+      typeInto(branchNameInput, "feature-x");
+      branchForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await waitFor(
+      () =>
+        el.querySelector('[data-testid="current-branch"]')!.textContent?.includes("feature-x") ??
+        false,
+      5000,
+      "App should switch onto the new branch",
+    );
+
+    // Add a todo while on the branch (first text input is the todo title).
+    const todoInput = el.querySelector<HTMLInputElement>("input[type='text']")!;
+    const todoForm = todoInput.closest("form")!;
+    await act(async () => {
+      typeInto(todoInput, "Branch todo");
+      todoForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await waitFor(
+      () => hasTodoTitle(el, "Branch todo"),
+      5000,
+      "Branch todo should appear in the list while on the branch",
+    );
+
+    // Switch back to main: the branch todo must not be visible there.
+    const select = el.querySelector<HTMLSelectElement>('select[aria-label="Current branch"]')!;
+    await act(async () => {
+      setSelectValue(select, "main");
+    });
+    await waitFor(
+      () => !hasTodoTitle(el, "Branch todo"),
+      5000,
+      "Branch todo should be isolated from main",
     );
   });
 });
