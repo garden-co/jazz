@@ -25,7 +25,6 @@ import {
   blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
-  getJazzServerNetworkDebug,
   type JazzServerInfo,
   unblockJazzServerNetwork,
 } from "./testing-server.js";
@@ -192,68 +191,6 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
       return [...events];
     },
   };
-}
-
-function getDbWorkerDebugState(db: Db): Record<string, unknown> {
-  const anyDb = db as unknown as {
-    tabRole?: unknown;
-    tabId?: unknown;
-    currentLeadershipId?: unknown;
-    activeRemoteLeaderTabId?: unknown;
-    primaryDbName?: unknown;
-    workerDbName?: unknown;
-    workerBridge?: {
-      state?: {
-        phase?: unknown;
-        workerClientId?: unknown;
-        expectsUpstreamServer?: unknown;
-        upstreamServerConnected?: unknown;
-        resolveUpstreamServerReady?: unknown;
-        serverPayloadForwarder?: unknown;
-        pendingSyncPayloadsForWorker?: unknown[];
-      };
-    } | null;
-  };
-  const bridgeState = anyDb.workerBridge?.state;
-
-  return {
-    tabRole: anyDb.tabRole,
-    tabId: anyDb.tabId,
-    currentLeadershipId: anyDb.currentLeadershipId,
-    activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
-    primaryDbName: anyDb.primaryDbName,
-    workerDbName: anyDb.workerDbName,
-    bridge: bridgeState
-      ? {
-          phase: bridgeState.phase,
-          workerClientId: bridgeState.workerClientId,
-          expectsUpstreamServer: bridgeState.expectsUpstreamServer,
-          upstreamServerConnected: bridgeState.upstreamServerConnected,
-          waitingForUpstreamServer: Boolean(bridgeState.resolveUpstreamServerReady),
-          hasServerPayloadForwarder: Boolean(bridgeState.serverPayloadForwarder),
-          pendingSyncPayloadsForWorker: bridgeState.pendingSyncPayloadsForWorker?.length ?? 0,
-        }
-      : null,
-  };
-}
-
-async function rethrowWithWorkerDiagnostics(
-  label: string,
-  error: unknown,
-  serverUrl: string,
-  dbs: Array<{ name: string; db: Db; probe?: WorkerMessageProbe }>,
-): Promise<never> {
-  const network = await getJazzServerNetworkDebug(serverUrl);
-  const diagnostics = {
-    network,
-    dbs: dbs.map(({ name, db, probe }) => ({
-      name,
-      state: getDbWorkerDebugState(db),
-      recentWorkerMessages: probe?.snapshot() ?? [],
-    })),
-  };
-  const message = error instanceof Error ? error.message : String(error);
-  throw new Error(`${label}: ${message}\nDiagnostics: ${JSON.stringify(diagnostics, null, 2)}`);
 }
 
 /** QueryBuilder that selects all todos. */
@@ -2037,13 +1974,6 @@ describe("Worker Bridge with OPFS", () => {
         "Writer sees baseline row at edge before blocking",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Writer baseline edge read failed before network block",
-          error,
-          serverUrl,
-          [{ name: "writer", db: dbWriter, probe: writerProbe }],
-        ),
       );
 
       await blockJazzServerNetwork(serverUrl);
@@ -2062,16 +1992,6 @@ describe("Worker Bridge with OPFS", () => {
         "Fresh edge query resolves after upstream attach",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Fresh probe edge read stayed pending after unblock",
-          error,
-          serverUrl,
-          [
-            { name: "writer", db: dbWriter, probe: writerProbe },
-            { name: "probe", db: dbProbe, probe: probeProbe ?? undefined },
-          ],
-        ),
       );
 
       await sleep(500);
@@ -2211,16 +2131,6 @@ describe("Worker Bridge with OPFS", () => {
         "Fresh client sees offline worker row at edge after reconnect",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Fresh probe edge read failed after reconnect",
-          error,
-          serverUrl,
-          [
-            { name: "writer-a", db: dbA, probe: dbAProbe },
-            { name: "probe", db: dbProbe, probe: dbProbeTrace ?? undefined },
-          ],
-        ),
       );
       expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
     } finally {
