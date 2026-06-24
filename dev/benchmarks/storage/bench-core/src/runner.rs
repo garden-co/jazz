@@ -8,7 +8,6 @@ use crate::dataset::KvDataset;
 use crate::engine::{BenchEngine, EngineError};
 use crate::phases::replay;
 use crate::result::{DatasetPhaseResult, DatasetRunResult};
-use crate::rng::SplitMix64;
 
 /// Read phases faster than this are repeated until they reach a measurable
 /// duration, so throughput is computed over a meaningful sample.
@@ -35,12 +34,7 @@ pub async fn run<E: BenchEngine>(
     for (i, phase) in benchmark.phases.iter().enumerate() {
         let kind = phase.kind();
         // Derive a per-phase substream so phases are independent yet stable.
-        let mut rng = SplitMix64::new(
-            benchmark
-                .seed
-                .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-        );
-        let args = phase.gen_args(n, &mut rng);
+        let args = benchmark.phase_args(i, n);
 
         // Time the cold reopen, bracketing, and operations together — matching
         // what each engine actually pays for the phase.

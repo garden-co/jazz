@@ -9,7 +9,7 @@ description = "In-process SQLite (rusqlite + OPFS sahpool VFS) engine for the op
 name = "wasm_sqlite"
 
 [dependencies]
-bench-core = { package = "opfs-btree-bench-core", path = "../bench-core" }
+bench-core = { package = "jazz-storage-bench-core", path = "../../../../dev/benchmarks/storage/bench-core" }
 rusqlite = "0.37"
 sqlite-wasm-rs = "0.5"
 sqlite-wasm-vfs = "0.2"
