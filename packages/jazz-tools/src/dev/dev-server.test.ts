@@ -4,16 +4,15 @@ import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.j
 import { getAvailablePort } from "./test-helpers.js";
 
 describe("dev-server re-export compatibility", () => {
-  it("exports startLocalJazzServer and pushSchemaCatalogue from jazz-tools/testing path", async () => {
+  it("exports startLocalJazzServer and deploy from jazz-tools/testing path", async () => {
     const testing = await import("../testing/index.js");
     expect(typeof testing.startLocalJazzServer).toBe("function");
-    expect(typeof testing.pushSchemaCatalogue).toBe("function");
+    expect(typeof testing.deploy).toBe("function");
   });
 
   it("exports the same functions from dev/index.ts", async () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
-    expect(typeof dev.pushSchemaCatalogue).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
     expect(typeof dev.pushSchema).toBe("function");
     expect(typeof dev.pushPermissions).toBe("function");
@@ -25,7 +24,7 @@ describe("dev-server re-export compatibility", () => {
     const testing = await import("../testing/index.js");
     const dev = await import("./index.js");
     expect(testing.startLocalJazzServer).toBe(dev.startLocalJazzServer);
-    expect(testing.pushSchemaCatalogue).toBe(dev.pushSchemaCatalogue);
+    expect(testing.deploy).toBe(dev.deploy);
   });
 });
 

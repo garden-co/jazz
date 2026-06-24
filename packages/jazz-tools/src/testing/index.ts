@@ -1,8 +1,8 @@
 export {
-  pushSchemaCatalogue,
+  deploy,
   startLocalJazzServer,
+  type DeployOptions,
   type LocalJazzServerHandle,
-  type PushSchemaCatalogueOptions,
   type StartLocalJazzServerOptions,
 } from "../dev/dev-server.js";
 export { createPolicyTestApp, PolicyTestApp } from "./policy-test-app.js";

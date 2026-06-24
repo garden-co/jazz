@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from "node:fs";
 import { basename } from "node:path";
-import { pushSchemaCatalogue } from "./dev-server.js";
+import { deploy } from "./dev-server.js";
 
 export interface SchemaWatcherOptions {
   schemaDir: string;
@@ -27,13 +27,13 @@ export function watchSchema(options: SchemaWatcherOptions): { close: () => void 
     }
     pushing = true;
     try {
-      const { hash } = await pushSchemaCatalogue({
+      const result = await deploy({
         serverUrl: options.serverUrl,
         appId: options.appId,
         adminSecret: options.adminSecret,
         schemaDir: options.schemaDir,
       });
-      if (!closed) options.onPush?.(hash);
+      if (!closed) options.onPush?.(result.schema.hash);
     } catch (error) {
       if (!closed) options.onError?.(error instanceof Error ? error : new Error(String(error)));
     } finally {

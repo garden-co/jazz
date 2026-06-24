@@ -9,11 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import {
-  pushSchemaCatalogue,
-  startLocalJazzServer,
-  type LocalJazzServerHandle,
-} from "jazz-tools/testing";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -30,7 +26,7 @@ describe("Todo Server Integration", () => {
   beforeAll(async () => {
     upstream = await startLocalJazzServer();
 
-    await pushSchemaCatalogue({
+    await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
@@ -200,7 +196,7 @@ describe("Todo Server Integration", () => {
     it("survives a server restart", async () => {
       // Use an isolated upstream so CRUD test data doesn't leak into the count assertion.
       const coldStartUpstream = await startLocalJazzServer();
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: coldStartUpstream.url,
         appId: coldStartUpstream.appId,
         adminSecret: coldStartUpstream.adminSecret,
@@ -280,7 +276,7 @@ describe("Todo Server Integration", () => {
     it("streams all todos and updates on changes", async () => {
       // Use an isolated upstream and local server so this test starts from a clean global state.
       const sseUpstream = await startLocalJazzServer();
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: sseUpstream.url,
         appId: sseUpstream.appId,
         adminSecret: sseUpstream.adminSecret,

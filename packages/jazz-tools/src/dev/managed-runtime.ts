@@ -347,16 +347,16 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }
 
-        const { pushSchemaCatalogue } = await import("./dev-server.js");
+        const { deploy } = await import("./dev-server.js");
         try {
-          const initialPush = await pushSchemaCatalogue({
+          const initialDeploy = await deploy({
             serverUrl,
             appId,
             adminSecret,
             schemaDir,
           });
           console.log(`${LOG_PREFIX} schema published`);
-          await options.onSchemaPush?.(initialPush.hash);
+          await options.onSchemaPush?.(initialDeploy.schema.hash);
         } catch (error) {
           if (usesExistingServer && isSchemaPushNetworkError(error)) {
             warnInitialSchemaPushSkipped({

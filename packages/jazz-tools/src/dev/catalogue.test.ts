@@ -58,14 +58,13 @@ describe("dev catalogue API exports", () => {
     expect(typeof dev.pushPermissions).toBe("function");
     expect(typeof dev.pushMigration).toBe("function");
     expect(typeof dev.deploy).toBe("function");
-    expect(typeof dev.pushSchemaCatalogue).toBe("function");
   });
 
-  it("keeps pushSchemaCatalogue compatible across dev and testing entrypoints", async () => {
+  it("keeps deploy compatible across dev and testing entrypoints", async () => {
     const dev = await import("./index.js");
     const testing = await import("../testing/index.js");
 
-    expect(testing.pushSchemaCatalogue).toBe(dev.pushSchemaCatalogue);
+    expect(testing.deploy).toBe(dev.deploy);
   });
 });
 
@@ -118,7 +117,6 @@ describe("dev catalogue push behavior", () => {
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       schemaDir: root,
-      migrationsDir: join(root, "migrations"),
       onEvent: (event) => events.push(event),
     });
 
@@ -204,7 +202,6 @@ describe("dev catalogue push behavior", () => {
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       schemaDir: root,
-      migrationsDir: join(root, "migrations"),
       onEvent: (event) => events.push(event),
     });
 
@@ -298,7 +295,6 @@ describe("dev catalogue push behavior", () => {
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       schemaDir: root,
-      migrationsDir: join(root, "migrations"),
       onEvent: (event) => events.push(event),
     });
 
@@ -569,7 +565,71 @@ export default s.defineMigration({
     expect(Object.keys(permissionsBody.permissions)).toContain("todos");
   });
 
-  it("pushSchemaCatalogue still publishes permissions when permissions.ts exists", async () => {
+  it("deploy skips permissions publishing when permissions.ts is missing", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), schemaSource());
+
+    let schemaBody: any;
+    const fetchCalls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        fetchCalls.push(input);
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+          schemaBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: SCHEMA_OBJECT_ID,
+              hash: SCHEMA_HASH,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const events: unknown[] = [];
+    const { deploy } = await import("./index.js");
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schemaDir: root,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.schema).toEqual({
+      hash: SCHEMA_HASH,
+      schemaFile: join(root, "schema.ts"),
+      status: "published",
+      objectId: SCHEMA_OBJECT_ID,
+    });
+    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
+    expect(fetchCalls).toEqual([
+      `${SERVER_URL}/apps/${APP_ID}/schemas`,
+      `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
+    ]);
+    expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
+    expect(events).toContainEqual({
+      type: "schema-published",
+      hash: SCHEMA_HASH,
+      objectId: SCHEMA_OBJECT_ID,
+    });
+    expect(events).toContainEqual({
+      type: "permissions-skipped",
+      reason: "missing-permissions-file",
+    });
+  });
+
+  it("deploy publishes permissions when permissions.ts exists", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), schemaSource());
     await writeFile(join(root, "permissions.ts"), permissionsSource());
@@ -588,6 +648,9 @@ export default s.defineMigration({
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         fetchCalls.push(input);
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+        }
         if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
           schemaBody = JSON.parse(String(init?.body));
           return new Response(
@@ -619,15 +682,20 @@ export default s.defineMigration({
       }),
     );
 
-    const { pushSchemaCatalogue } = await import("./index.js");
-    const result = await pushSchemaCatalogue({
+    const { deploy } = await import("./index.js");
+    const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       schemaDir: root,
     });
 
-    expect(result).toEqual({ hash: SCHEMA_HASH });
+    expect(result.schema).toEqual({
+      hash: SCHEMA_HASH,
+      schemaFile: join(root, "schema.ts"),
+      status: "published",
+      objectId: SCHEMA_OBJECT_ID,
+    });
     expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
@@ -636,6 +704,7 @@ export default s.defineMigration({
     expect(permissionsBody.expectedParentBundleObjectId).toBe(previousHead.bundleObjectId);
     expect(Object.keys(permissionsBody.permissions)).toContain("todos");
     expect(fetchCalls).toEqual([
+      `${SERVER_URL}/apps/${APP_ID}/schemas`,
       `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
       `${SERVER_URL}/apps/${APP_ID}/admin/permissions/head`,
       `${SERVER_URL}/apps/${APP_ID}/admin/permissions`,

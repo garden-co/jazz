@@ -1,11 +1,9 @@
 import { join } from "node:path";
-import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import {
   ADMIN_SECRET,
   APP_ID,
   SEEDED_TODO_COUNT,
-  TEST_BRANCH,
-  TEST_ENV,
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
@@ -21,12 +19,10 @@ export default async function runServer() {
     backendSecret: "test",
   });
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: serverHandle.url,
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
-    env: TEST_ENV,
-    userBranch: TEST_BRANCH,
     schemaDir: join(import.meta.dirname, "../tests/browser"),
   });
 
