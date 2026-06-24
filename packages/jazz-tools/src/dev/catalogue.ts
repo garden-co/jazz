@@ -197,46 +197,30 @@ export async function pushPermissions(
 export async function pushSchemaCatalogue(
   options: PushSchemaCatalogueOptions,
 ): Promise<{ hash: string }> {
+  const result = await pushSchema(options);
   const compiled = await loadCompiledSchema(options.schemaDir);
-  emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
-
-  const result = await publishStoredSchema(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schema: compiled.wasmSchema,
-  });
-
-  emit(options, { type: "schema-published", hash: result.hash, objectId: result.objectId });
 
   if (compiled.permissions) {
-    const { head } = await fetchPermissionsHead(options.serverUrl, {
+    await pushPermissions({
       appId: options.appId,
-      adminSecret: options.adminSecret,
-    });
-    const { head: permissionsHead } = await publishStoredPermissions(options.serverUrl, {
-      appId: options.appId,
+      serverUrl: options.serverUrl,
       adminSecret: options.adminSecret,
       schemaHash: result.hash,
-      permissions: compiled.permissions,
-      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
-    });
-    emit(options, {
-      type: "permissions-published",
-      schemaHash: result.hash,
-      version: permissionsHead?.version,
+      schemaDir: options.schemaDir,
+      onEvent: options.onEvent,
     });
   }
 
   if (options.enableLogs === true) {
     console.log(
-      `[jazz-schema-push] published ${result.hash} from ${compiled.schemaFile} to ${options.serverUrl}`,
+      `[jazz-schema-push] published ${result.hash} from ${result.schemaFile} to ${options.serverUrl}`,
     );
   }
 
   return { hash: result.hash };
 }
 
-export const SHORT_SCHEMA_HASH_LENGTH = 12;
+const SHORT_SCHEMA_HASH_LENGTH = 12;
 
 export function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
@@ -250,7 +234,7 @@ export function shortSchemaHash(hash: string): string {
   return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
 }
 
-export function hashMatchesFullSchema(hash: string, fullHash: string): boolean {
+function hashMatchesFullSchema(hash: string, fullHash: string): boolean {
   return fullHash.startsWith(normalizeSchemaHashInput(hash, "schema hash"));
 }
 
@@ -291,7 +275,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export function snapshotsDirForMigrations(migrationsDir: string): string {
+function snapshotsDirForMigrations(migrationsDir: string): string {
   return join(migrationsDir, "snapshots");
 }
 
@@ -308,14 +292,11 @@ export interface SnapshotEntry {
 }
 
 // Supports both millisecond and microsecond-precision timestamps.
-export function looksLikeSnapshotFileName(fileName: string): boolean {
+function looksLikeSnapshotFileName(fileName: string): boolean {
   return /^(?:\d{8,17}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
 }
 
-export async function readSnapshotEntry(
-  dir: string,
-  fileName: string,
-): Promise<SnapshotEntry | null> {
+async function readSnapshotEntry(dir: string, fileName: string): Promise<SnapshotEntry | null> {
   if (!looksLikeSnapshotFileName(fileName)) {
     return null;
   }
@@ -417,7 +398,7 @@ export function columnTypeSignature(columnType: WasmColumnType): string {
   return JSON.stringify(columnType);
 }
 
-export function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean {
+function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean {
   return (
     left.name === right.name &&
     left.nullable === right.nullable &&
@@ -427,7 +408,7 @@ export function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): b
   );
 }
 
-export function indexedColumnsEqual(
+function indexedColumnsEqual(
   left: readonly string[] | undefined,
   right: readonly string[] | undefined,
 ): boolean {
@@ -465,7 +446,7 @@ export function tableSchemasEqual(
   return leftColumns.every((column, index) => columnsEqual(column, rightColumns[index]!));
 }
 
-export function tableSchemasRequireRowTransform(
+function tableSchemasRequireRowTransform(
   left: WasmSchema[string] | undefined,
   right: WasmSchema[string] | undefined,
 ): boolean {
@@ -500,7 +481,7 @@ export function tableSchemasRequireRowTransform(
   });
 }
 
-export function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
+function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
   const leftTableNames = Object.keys(left).sort();
   const rightTableNames = Object.keys(right).sort();
 
@@ -557,7 +538,7 @@ export function schemaTransitionRequiresRowTransform(
   );
 }
 
-export function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
+function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
   if (typeof sqlType === "string") {
     switch (sqlType) {
       case "TEXT":
@@ -597,7 +578,7 @@ export function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
   };
 }
 
-export function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
+function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
   return forward.map((tableLens) => ({
     table: tableLens.table,
     added: tableLens.added,
@@ -621,7 +602,7 @@ export function serializeForwardLenses(forward: readonly Lens[]): PublishedTable
   }));
 }
 
-export function isDefinedMigration(value: unknown): value is DefinedMigration {
+function isDefinedMigration(value: unknown): value is DefinedMigration {
   if (typeof value !== "object" || value === null) {
     return false;
   }
@@ -656,7 +637,7 @@ async function bundleToTempFile(filePath: string): Promise<string> {
   return outFile;
 }
 
-export async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
+async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
   const outFile = await bundleToTempFile(filePath);
   try {
     const loaded = (await import(pathToFileURL(outFile).href)) as {
@@ -675,7 +656,7 @@ export async function loadDefinedMigration(filePath: string): Promise<DefinedMig
   }
 }
 
-export function unwrapMigrationExport(value: unknown): unknown {
+function unwrapMigrationExport(value: unknown): unknown {
   let current = value;
 
   while (
@@ -690,7 +671,7 @@ export function unwrapMigrationExport(value: unknown): unknown {
   return current;
 }
 
-export async function findMigrationFile(
+async function findMigrationFile(
   migrationsDir: string,
   fromHash: string,
   toHash: string,
@@ -813,7 +794,7 @@ export async function resolveRemoteHistoricalSchema(
   }
 }
 
-export async function resolveHistoricalSchema(
+async function resolveHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,
@@ -944,12 +925,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   };
 }
 
-function disconnectedSchemaMessage(
-  appId: string,
-  migrationsDir: string,
-  fromHash: string,
-  toHash: string,
-): string {
+function disconnectedSchemaMessage(appId: string, fromHash: string, toHash: string): string {
   const fromShortHash = shortSchemaHash(fromHash);
   const toShortHash = shortSchemaHash(toHash);
   return `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
@@ -1058,7 +1034,6 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
 
       const message = disconnectedSchemaMessage(
         options.appId,
-        options.migrationsDir,
         previousHead.schemaHash,
         schema.hash,
       );

@@ -2,7 +2,6 @@
  * E2E browser tests for the React chat app.
  *
  * Mounts the real <App /> component in Chromium via @vitest/browser + playwright.
- * Adapted from Jazz 1 Playwright chat.spec.ts to Jazz 2 Vitest browser tests.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
