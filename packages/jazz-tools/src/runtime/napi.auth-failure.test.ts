@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { startLocalJazzServer } from "../testing/local-jazz-server.js";
+import { startLocalJazzServer } from "../testing/index.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { httpUrlToWs } from "./url.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
