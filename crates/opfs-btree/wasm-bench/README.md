@@ -13,9 +13,9 @@ loop, so the comparison measures the storage engines, not calling convention.
   `BenchEngine`, compiled into a separate Rust `gloo-worker`.
 
 Both engines implement one small trait (`BenchEngine`) from the shared
-`bench-core` crate; the workload, phase semantics, timing, and checksum all live
-there once (see [Workload](#workload)), so each engine file is just the trait
-impl.
+`dev/benchmarks/storage/bench-core` crate; the workload, phase semantics,
+timing, and checksum all live there once (see [Workload](#workload)), so each
+engine file is just the trait impl.
 
 The primary harness is the Yew/Trunk app in this directory. It spawns two Rust
 workers, one per engine, over OPFS (sync access handles only exist in a Worker).
@@ -25,25 +25,27 @@ engines produce **identical checksums** before exposing successful results.
 
 ## Workload
 
-The benchmarks are **declared in code** in `bench-core/src/benchmarks.rs`: each
-profile lists its `.kv` data fixture, a fixed RNG seed, and an ordered list of
-phases (`Load`, `GetRandom`, `Mixed { get, put, del }`, `ColdGetRandom`, …). At
-runtime each phase expands to a deterministic operation stream from the seed, so
-both engines replay byte-for-byte identical operations — which is what makes the
-cross-engine checksum comparison meaningful. To add or tune a benchmark, edit
+The benchmarks are **declared in code** in
+`dev/benchmarks/storage/bench-core/src/benchmarks.rs`: each profile lists its
+`.kv` data fixture, a fixed RNG seed, and an ordered list of phases (`Load`,
+`GetRandom`, `Mixed { get, put, del }`, `ColdGetRandom`, …). At runtime each
+phase expands to a deterministic operation stream from the seed, so both engines
+replay byte-for-byte identical operations — which is what makes the cross-engine
+checksum comparison meaningful. To add or tune a benchmark, edit
 `benchmarks.rs`; no fixtures to regenerate.
 
 Each phase's _semantics_ (what `get_skewed` or `mixed_70_20_10` actually does)
-are written once in `bench-core/src/phases.rs`. `bench-core` is unit-tested on
-native against an in-memory engine (`cargo test -p opfs-btree-bench-core`).
+are written once in `dev/benchmarks/storage/bench-core/src/phases.rs`.
+`bench-core` is unit-tested on native against an in-memory engine
+(`cargo test -p jazz-storage-bench-core`).
 
 ## Datasets
 
 The real key/value data is committed as ready-to-run `.kv` fixtures under
-`public/data/` — no download or network access is needed to run the benchmark.
-The fixtures were derived from the public sources below; the raw source data is
-not vendored in the tree. (The synthetic operation streams used to be committed
-as `.ops` files; they now live in `benchmarks.rs`.)
+`dev/benchmarks/storage/data/` — no download or network access is needed to run
+the benchmark. The fixtures were derived from the public sources below; the raw
+source data is not vendored in the tree. (The synthetic operation streams used
+to be committed as `.ops` files; they now live in `benchmarks.rs`.)
 
 | Profile     | Data fixture   | Source                                                         | License                     |
 | ----------- | -------------- | -------------------------------------------------------------- | --------------------------- |
@@ -125,7 +127,7 @@ pnpm --dir crates/opfs-btree run bench:compare -- --profiles objects
 ```
 
 Build output lives under `wasm-bench/dist/` and `wasm-bench/target/`. These are
-ignored and safe to delete. The `wasm-bench/public/data/*.kv` files are
+ignored and safe to delete. The `dev/benchmarks/storage/data/*.kv` files are
 committed benchmark inputs and should stay in the tree.
 
 ## Interpreting output

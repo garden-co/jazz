@@ -53,7 +53,10 @@ impl PhaseKind {
     pub fn is_retryable_read(self) -> bool {
         matches!(
             self,
-            PhaseKind::GetSeq | PhaseKind::GetRandom | PhaseKind::GetSkewed | PhaseKind::RangeRandom
+            PhaseKind::GetSeq
+                | PhaseKind::GetRandom
+                | PhaseKind::GetSkewed
+                | PhaseKind::RangeRandom
         )
     }
 }
@@ -64,12 +67,27 @@ impl PhaseKind {
 pub enum Phase {
     Load,
     GetSeq,
-    GetRandom { count: u32 },
-    GetSkewed { count: u32 },
-    RangeRandom { count: u32 },
-    UpdateRandom { count: u32 },
-    Mixed { count: u32, get: u8, put: u8, del: u8 },
-    ColdGetRandom { count: u32 },
+    GetRandom {
+        count: u32,
+    },
+    GetSkewed {
+        count: u32,
+    },
+    RangeRandom {
+        count: u32,
+    },
+    UpdateRandom {
+        count: u32,
+    },
+    Mixed {
+        count: u32,
+        get: u8,
+        put: u8,
+        del: u8,
+    },
+    ColdGetRandom {
+        count: u32,
+    },
 }
 
 impl Phase {
@@ -100,6 +118,19 @@ impl Phase {
         }
     }
 
+    /// Number of logical operations this phase executes for a dataset size.
+    pub fn op_count(&self, record_count: u32) -> u32 {
+        match self {
+            Phase::Load | Phase::GetSeq => record_count,
+            Phase::GetRandom { count }
+            | Phase::GetSkewed { count }
+            | Phase::RangeRandom { count }
+            | Phase::UpdateRandom { count }
+            | Phase::Mixed { count, .. }
+            | Phase::ColdGetRandom { count } => *count,
+        }
+    }
+
     /// Expand this phase into its concrete operation stream for a dataset of
     /// `record_count` records. Deterministic given `rng`, so both engines
     /// generate the same stream.
@@ -116,9 +147,7 @@ impl Phase {
             | Phase::ColdGetRandom { count } => {
                 (0..*count).map(|_| rng.index(record_count)).collect()
             }
-            Phase::RangeRandom { count } => {
-                (0..*count).map(|_| rng.index(record_count)).collect()
-            }
+            Phase::RangeRandom { count } => (0..*count).map(|_| rng.index(record_count)).collect(),
             Phase::GetSkewed { count } => {
                 // ~80% of gets hit the hottest ~20% of keys.
                 let hot = (record_count / 5).max(1);

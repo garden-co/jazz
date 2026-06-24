@@ -1749,6 +1749,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-storage-bench-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "jazz-storage-native-bench"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "jazz-storage-bench-core",
+ "redb",
+ "rusqlite",
+ "rust-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 dependencies = [
@@ -2911,6 +2930,15 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "yasna",
+]
+
+[[package]]
+name = "redb"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
