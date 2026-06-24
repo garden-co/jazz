@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
+import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
 import {
   ADMIN_SECRET,
   APP_ID,
@@ -14,7 +14,7 @@ import { createJazzContext } from "jazz-tools/backend";
 const SEED_BATCH_SIZE = 50;
 
 export default async function runServer() {
-  const serverHandle = await TestingServer.start({
+  const serverHandle = await startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,

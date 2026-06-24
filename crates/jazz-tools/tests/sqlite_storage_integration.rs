@@ -15,7 +15,7 @@ use jazz_tools::query_manager::encoding::encode_row;
 use jazz_tools::query_manager::types::{SchemaHash, TableName};
 use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, VisibleRowEntry};
 use jazz_tools::schema_manager::encoding::encode_schema;
-use jazz_tools::server::{TestingJwksServer, TestingServer};
+use jazz_tools::server::{JazzServer, TestJwtIssuer};
 use jazz_tools::storage::{SqliteStorage, Storage};
 use jazz_tools::sync_manager::DurabilityTier;
 use jazz_tools::{
@@ -233,7 +233,7 @@ fn seed_sqlite_sealed_batch_frontier_conflict(
 }
 
 async fn make_client(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: jazz_tools::Schema,
     user_id: &str,
     ready_table: &str,
@@ -279,7 +279,7 @@ async fn make_client(
 /// Connects a client to a server that uses an external JWKS URL (where the
 /// built-in `make_client_context_for_user` helper is unavailable).
 async fn make_client_external_jwks(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: jazz_tools::Schema,
     user_id: &str,
     ready_table: &str,
@@ -302,7 +302,7 @@ async fn make_client_external_jwks(
         server_url: server.base_url(),
         data_dir: tempfile::TempDir::new().expect("temp client dir").keep(),
         storage: ClientStorage::Memory,
-        jwt_token: Some(TestingServer::jwt_for_user(user_id)),
+        jwt_token: Some(TestJwtIssuer::jwt_for_user(user_id)),
         backend_secret: None,
         admin_secret: None,
         sync_tracer: None,
@@ -335,7 +335,7 @@ async fn make_client_external_jwks(
 #[tokio::test]
 async fn sqlite_server_storage() {
     // --- shared-server subtests ---
-    let server = TestingServer::builder().with_sqlite_storage().start().await;
+    let server = JazzServer::builder().with_sqlite_storage().start().await;
 
     large_dataset_correctness(&server).await;
     update_and_delete(&server).await;
@@ -362,7 +362,7 @@ async fn sqlite_server_storage() {
 ///                                 │
 ///                                 └──► all 200 rows, correct titles
 /// ```
-async fn large_dataset_correctness(server: &TestingServer) {
+async fn large_dataset_correctness(server: &JazzServer) {
     const ROW_COUNT: usize = 200;
 
     let schema = todos_schema();
@@ -448,7 +448,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
 ///                                                        │
 ///                                         3 rows with updated titles
 /// ```
-async fn update_and_delete(server: &TestingServer) {
+async fn update_and_delete(server: &JazzServer) {
     let schema = todos_schema();
     let alice = make_client(server, schema.clone(), "alice-crud", "todos").await;
 
@@ -555,7 +555,7 @@ async fn update_and_delete(server: &TestingServer) {
 ///                                     │
 ///                                     └──► latest title only
 /// ```
-async fn deep_update_history(server: &TestingServer) {
+async fn deep_update_history(server: &JazzServer) {
     const UPDATE_COUNT: usize = 200;
 
     let schema = todos_schema();
@@ -646,7 +646,7 @@ async fn deep_update_history(server: &TestingServer) {
 ///                                         │
 ///                          todos: 5   notes: 3
 /// ```
-async fn multi_table_isolation(server: &TestingServer) {
+async fn multi_table_isolation(server: &JazzServer) {
     let schema = multi_table_schema();
     let alice = make_client(server, schema.clone(), "alice-multi", "todos").await;
 
@@ -772,7 +772,7 @@ async fn multi_table_isolation(server: &TestingServer) {
 ///              filter_eq(category, "electronics") → 10 rows
 ///              filter_gt(price, 150.0) → 4 rows
 /// ```
-async fn index_queries(server: &TestingServer) {
+async fn index_queries(server: &JazzServer) {
     let schema = indexed_schema();
     let alice = make_client(server, schema.clone(), "alice-index", "products").await;
 
@@ -893,11 +893,11 @@ async fn restart_preserves_data() {
     const AFTER_COUNT: usize = 5;
 
     let data_dir = TempDir::new().expect("temp data dir");
-    let jwks = TestingJwksServer::start().await;
+    let jwks = TestJwtIssuer::start().await;
     let schema = todos_schema();
 
     // --- server₁ ---
-    let server1 = TestingServer::builder()
+    let server1 = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
@@ -945,7 +945,7 @@ async fn restart_preserves_data() {
     server1.shutdown().await;
 
     // --- server₂ (same data_dir) ---
-    let server2 = TestingServer::builder()
+    let server2 = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
@@ -1043,10 +1043,10 @@ async fn restart_preserves_data() {
 /// ```
 async fn catalogue_entries_survive_restart() {
     let data_dir = TempDir::new().expect("temp data dir");
-    let jwks = TestingJwksServer::start().await;
+    let jwks = TestJwtIssuer::start().await;
     let schema = todos_schema();
 
-    let server1 = TestingServer::builder()
+    let server1 = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
@@ -1083,7 +1083,7 @@ async fn catalogue_entries_survive_restart() {
     server1.shutdown().await;
 
     // Restart with same data_dir — catalogue entries should be rehydrated.
-    let server2 = TestingServer::builder()
+    let server2 = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
@@ -1121,8 +1121,8 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
         seeded
     };
 
-    let jwks = TestingJwksServer::start().await;
-    let server = TestingServer::builder()
+    let jwks = TestJwtIssuer::start().await;
+    let server = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
@@ -1171,8 +1171,8 @@ async fn sealed_batch_unrelated_frontier_change_accepts_after_restart() {
         seeded
     };
 
-    let jwks = TestingJwksServer::start().await;
-    let server = TestingServer::builder()
+    let jwks = TestJwtIssuer::start().await;
+    let server = JazzServer::builder()
         .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())

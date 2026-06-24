@@ -4,7 +4,7 @@ import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { loadWasmModule } from "../../src/runtime/client.js";
-import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
+import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../dev/benchmarks/realistic/schema/project_board.schema.json";
 import profileJson from "../../../../dev/benchmarks/realistic/profiles/s.json";
@@ -380,7 +380,7 @@ function hash32(input: string): number {
 }
 
 async function benchmarkAppId(label: string): Promise<string> {
-  const { appId } = await getTestingServerInfo();
+  const { appId } = await getJazzServerInfo();
   const segments = ["a", "b", "c", "d"].map((suffix) =>
     hash32(`${appId}|${browserRunId}|${label}|${suffix}`).toString(16).padStart(8, "0"),
   );
@@ -507,7 +507,7 @@ async function createServerDb(
     localFirstSecret?: string;
   } = {},
 ): Promise<Db> {
-  const { serverUrl, adminSecret } = await getTestingServerInfo();
+  const { serverUrl, adminSecret } = await getJazzServerInfo();
   const config: Parameters<typeof createDb>[0] = {
     appId,
     dbName,
@@ -516,7 +516,7 @@ async function createServerDb(
     logLevel: "warn",
   };
   if (options.includeJwt !== false) {
-    config.jwtToken = await getTestingServerJwtForUser(sub, claims);
+    config.jwtToken = await getJazzServerJwtForUser(sub, claims);
   }
   if (options.localFirstSecret) {
     config.secret = options.localFirstSecret;
@@ -802,8 +802,8 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("W3 start");
   const dbName = uniqueDbName("w3");
   const appId = await benchmarkAppId("w3");
-  const { serverUrl, adminSecret } = await getTestingServerInfo();
-  const token = await getTestingServerJwtForUser("realistic-user");
+  const { serverUrl, adminSecret } = await getJazzServerInfo();
+  const token = await getJazzServerJwtForUser("realistic-user");
   const rng = new Lcg(w3.seed ^ config.seed);
   const offlineWrites = Math.min(w3.offline_write_count, 20);
   let offlineDb: Db | null = null;

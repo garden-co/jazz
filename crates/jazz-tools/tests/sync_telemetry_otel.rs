@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::otel;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
@@ -49,7 +49,7 @@ async fn sync_layers_emit_otel_spans() {
     let subscriber_guard = tracing::subscriber::set_default(subscriber);
 
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

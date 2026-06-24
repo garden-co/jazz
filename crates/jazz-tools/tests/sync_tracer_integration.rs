@@ -5,7 +5,7 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
@@ -32,7 +32,7 @@ async fn alice_write_bob_read() {
     let tracer = SyncTracer::new();
     let schema = test_schema();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
@@ -159,7 +159,7 @@ async fn bob_updates_alice_todo() {
     let tracer = SyncTracer::new();
     let schema = test_schema();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
@@ -286,7 +286,7 @@ async fn single_writer_flow() {
     let tracer = SyncTracer::new();
     let schema = test_schema();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
@@ -338,7 +338,7 @@ async fn named_object_trace() {
     let tracer = SyncTracer::new();
     let schema = test_schema();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()

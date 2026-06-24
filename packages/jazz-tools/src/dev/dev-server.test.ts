@@ -29,7 +29,7 @@ describe("dev-server re-export compatibility", () => {
   });
 });
 
-describe("startLocalJazzServer via DevServer", () => {
+describe("startLocalJazzServer via JazzServer", () => {
   let handle: LocalJazzServerHandle | null = null;
 
   afterEach(async () => {
@@ -46,6 +46,7 @@ describe("startLocalJazzServer via DevServer", () => {
     expect(handle.port).toBe(port);
     expect(handle.url).toBe(`http://127.0.0.1:${port}`);
     expect(handle.adminSecret).toBe("test-admin");
+    expect(handle.backendSecret).toEqual(expect.any(String));
 
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
@@ -61,7 +62,7 @@ describe("startLocalJazzServer via DevServer", () => {
     await expect(fetch(`${url}/health`).then((r) => r.ok)).rejects.toThrow();
   }, 30_000);
 
-  it("passes edge upstream options through DevServer with admin secret only", async () => {
+  it("passes edge upstream options through JazzServer with admin secret only", async () => {
     const port = await getAvailablePort();
     handle = await startLocalJazzServer({
       port,
@@ -82,6 +83,8 @@ describe("startLocalJazzServer via DevServer", () => {
     try {
       first = await startLocalJazzServer();
       const firstDataDir = first.dataDir;
+      expect(first.adminSecret).toEqual(expect.any(String));
+      expect(first.backendSecret).toEqual(expect.any(String));
       expect(firstDataDir).not.toBe("./data");
       await access(firstDataDir);
 

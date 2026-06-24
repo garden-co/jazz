@@ -22,9 +22,9 @@ const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
-/// Builder for configuring and starting a [`TestingServer`].
+/// Builder for configuring and starting a [`JazzServer`].
 #[derive(Default)]
-pub struct TestingServerBuilder {
+pub struct JazzServerBuilder {
     port: Option<u16>,
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
@@ -40,9 +40,9 @@ pub struct TestingServerBuilder {
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
-impl std::fmt::Debug for TestingServerBuilder {
+impl std::fmt::Debug for JazzServerBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TestingServerBuilder")
+        f.debug_struct("JazzServerBuilder")
             .field("port", &self.port)
             .field("app_id", &self.app_id)
             .field("persistent_storage", &self.persistent_storage)
@@ -51,8 +51,8 @@ impl std::fmt::Debug for TestingServerBuilder {
     }
 }
 
-impl TestingServerBuilder {
-    /// Creates a builder with the default test-server configuration.
+impl JazzServerBuilder {
+    /// Creates a builder with the default Jazz server test configuration.
     pub fn new() -> Self {
         Self::default()
     }
@@ -130,24 +130,40 @@ impl TestingServerBuilder {
         self
     }
 
-    pub async fn start(self) -> TestingServer {
-        TestingServer::start_from_builder(self).await
+    pub async fn start(self) -> JazzServer {
+        JazzServer::start_from_builder(self).await
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
     claims: JsonValue,
     exp: u64,
 }
 
-pub struct TestingJwksServer {
+pub struct TestJwtOptions {
+    pub expires_in: Duration,
+    pub issuer: Option<String>,
+}
+
+impl Default for TestJwtOptions {
+    fn default() -> Self {
+        Self {
+            expires_in: Duration::from_secs(3600),
+            issuer: None,
+        }
+    }
+}
+
+pub struct TestJwtIssuer {
     addr: std::net::SocketAddr,
     task: tokio::task::JoinHandle<()>,
 }
 
-impl TestingJwksServer {
+impl TestJwtIssuer {
     pub async fn start() -> Self {
         let app = Router::new().route("/jwks", get(jwks_handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -163,15 +179,59 @@ impl TestingJwksServer {
     pub fn endpoint(&self) -> String {
         format!("http://{}/jwks", self.addr)
     }
+
+    pub fn jwt_for_user(sub: &str) -> String {
+        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
+    }
+
+    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
+        Self::jwt_for_user_with_options(sub, claims, TestJwtOptions::default())
+    }
+
+    pub fn jwt_for_user_with_options(
+        sub: &str,
+        claims: JsonValue,
+        options: TestJwtOptions,
+    ) -> String {
+        Self::jwt_for_user_with_options_at(sub, claims, options, SystemTime::now())
+    }
+
+    fn jwt_for_user_with_options_at(
+        sub: &str,
+        claims: JsonValue,
+        options: TestJwtOptions,
+        now: SystemTime,
+    ) -> String {
+        let claims = JwtClaims {
+            sub: sub.to_string(),
+            iss: options.issuer,
+            claims,
+            exp: now
+                .duration_since(UNIX_EPOCH)
+                .expect("clock drift")
+                .as_secs()
+                + options.expires_in.as_secs(),
+        };
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(JWT_KID.to_string());
+
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
+        )
+        .expect("encode jwt")
+    }
 }
 
-impl Drop for TestingJwksServer {
+impl Drop for TestJwtIssuer {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
-pub struct TestingServer {
+pub struct JazzServer {
     hosted: HostedServer,
     app_id: AppId,
     admin_secret: String,
@@ -179,17 +239,17 @@ pub struct TestingServer {
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
-    embedded_jwks_server: Option<TestingJwksServer>,
+    embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
 }
 
-impl TestingServer {
+impl JazzServer {
     pub const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
     pub const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 
-    /// Creates a builder for configuring a test server before startup.
-    pub fn builder() -> TestingServerBuilder {
-        TestingServerBuilder::new()
+    /// Creates a builder for configuring a Jazz server before startup.
+    pub fn builder() -> JazzServerBuilder {
+        JazzServerBuilder::new()
     }
 
     pub async fn start() -> Self {
@@ -200,8 +260,8 @@ impl TestingServer {
         Self::builder().with_schema(schema).start().await
     }
 
-    async fn start_from_builder(builder: TestingServerBuilder) -> Self {
-        let TestingServerBuilder {
+    async fn start_from_builder(builder: JazzServerBuilder) -> Self {
+        let JazzServerBuilder {
             port,
             app_id,
             data_dir,
@@ -226,7 +286,7 @@ impl TestingServer {
         let (jwks_url, embedded_jwks_server) = match jwks_url {
             Some(jwks_url) => (jwks_url, None),
             None => {
-                let jwks_server = TestingJwksServer::start().await;
+                let jwks_server = TestJwtIssuer::start().await;
                 let jwks_url = jwks_server.endpoint();
                 (jwks_url, Some(jwks_server))
             }
@@ -292,36 +352,6 @@ impl TestingServer {
         AppId::from_string(DEFAULT_APP_ID_STR).expect("parse default app id")
     }
 
-    pub fn jwt_for_user(sub: &str) -> String {
-        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
-    }
-
-    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
-        Self::jwt_for_user_with_claims_at(sub, claims, SystemTime::now())
-    }
-
-    fn jwt_for_user_with_claims_at(sub: &str, claims: JsonValue, now: SystemTime) -> String {
-        let claims = JwtClaims {
-            sub: sub.to_string(),
-            claims,
-            exp: now
-                .duration_since(UNIX_EPOCH)
-                .expect("clock drift")
-                .as_secs()
-                + 3600,
-        };
-
-        let mut header = Header::new(Algorithm::HS256);
-        header.kid = Some(JWT_KID.to_string());
-
-        encode(
-            &header,
-            &claims,
-            &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
-        )
-        .expect("encode jwt")
-    }
-
     pub fn app_id(&self) -> AppId {
         self.app_id
     }
@@ -384,7 +414,7 @@ impl TestingServer {
             Ok(())
         } else {
             Err(
-                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
+                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
             )
         }
     }
@@ -413,7 +443,13 @@ impl TestingServer {
             .expect("lock test client data dirs")
             .push(client_data_dir);
 
-        let jwt_token = self.jwt_for_user_for_server_clock(user_id.as_ref());
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
+            user_id.as_ref(),
+            json!({"role": "user"}),
+            TestJwtOptions::default(),
+            now,
+        );
         AppContext {
             app_id: self.app_id,
             client_id: None,
@@ -435,11 +471,6 @@ impl TestingServer {
 
     pub async fn shutdown(mut self) {
         self.hosted.shutdown().await;
-    }
-
-    fn jwt_for_user_for_server_clock(&self, sub: &str) -> String {
-        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
-        Self::jwt_for_user_with_claims_at(sub, json!({"role": "user"}), now)
     }
 }
 
@@ -478,7 +509,7 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
     }
 }
 
-/// Applies the storage mode flags from [`TestingServerBuilder`] to a
+/// Applies the storage mode flags from [`JazzServerBuilder`] to a
 /// [`ServerBuilder`].  Kept as a free function to avoid nested `#[cfg]`
 /// blocks inside `start_from_builder`.
 fn apply_storage_mode(
@@ -529,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn internal_shutdown_stops_hosted_server() {
-        let server = TestingServer::start().await;
+        let server = JazzServer::start().await;
         let base_url = server.base_url();
         let admin_secret = server.admin_secret().to_string();
         let client = reqwest::Client::new();
@@ -564,8 +595,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_testing_server_keeps_built_in_jwt_helpers_enabled() {
-        let server = TestingServer::start().await;
+    async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
+        let server = JazzServer::start().await;
         let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
 
         assert!(server.built_in_jwt_helpers_available());
@@ -578,8 +609,8 @@ mod tests {
 
     #[tokio::test]
     async fn external_jwks_url_disables_built_in_jwt_helpers() {
-        let external_jwks = TestingJwksServer::start().await;
-        let server = TestingServer::builder()
+        let external_jwks = TestJwtIssuer::start().await;
+        let server = JazzServer::builder()
             .with_jwks_url(external_jwks.endpoint())
             .start()
             .await;
@@ -589,7 +620,7 @@ mod tests {
         assert_eq!(
             server.ensure_built_in_jwt_helpers_available(),
             Err(
-                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
             )
         );
 
@@ -613,7 +644,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
         );
 
         server.shutdown().await;

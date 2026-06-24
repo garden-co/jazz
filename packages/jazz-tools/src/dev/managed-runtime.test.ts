@@ -85,6 +85,7 @@ describe("ManagedDevRuntime", () => {
       url: "http://127.0.0.1:19883",
       dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
       adminSecret: "noninteractive-admin",
+      backendSecret: "noninteractive-backend",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });

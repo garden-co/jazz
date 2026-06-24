@@ -12,7 +12,7 @@ use jazz_tools::query_manager::relation_ir::{
     ProjectExpr, RelExpr, RowIdRef, ValueRef,
 };
 use jazz_tools::query_manager::types::{TableName, TablePolicies, TableSchemaBuilder};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -355,7 +355,7 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
 #[tokio::test]
 async fn recursive_query_step_magic_columns_use_reader_session() {
     let schema = recursive_step_magic_column_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -429,7 +429,7 @@ async fn recursive_query_step_magic_columns_use_reader_session() {
 async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_sessions() {
     let table_name = "recursive_folders";
     let schema = recursive_folder_policy_schema(None);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -501,7 +501,7 @@ async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_s
 async fn recursive_inherits_respects_max_depth_boundaries() {
     let table_name = "recursive_folders";
     let schema = recursive_folder_policy_schema(Some(1));
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -561,7 +561,7 @@ async fn recursive_inherits_respects_max_depth_boundaries() {
 async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch() {
     let table_name = "recursive_folders";
     let schema = recursive_folder_policy_schema(Some(10));
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -624,7 +624,7 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch(
 async fn recursive_inherits_subscription_updates_when_graph_edges_change() {
     let table_name = "recursive_folders";
     let schema = recursive_folder_policy_schema(None);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -723,7 +723,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change() {
 #[should_panic] // known failing: read-side recursive ExistsRel never grants rows in integration
 async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_without_path() {
     let schema = recursive_relation_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -794,7 +794,7 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 #[should_panic] // known failing: recursive ExistsRel grant path is still invisible, so diamond dedupe never settles
 async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas() {
     let schema = recursive_relation_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

@@ -28,7 +28,7 @@ pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub use hosted::HostedServer;
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
-pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
+pub use testing::{JazzServer, JazzServerBuilder, TestJwtIssuer, TestJwtOptions};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::middleware::auth::TestClock;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder,
     Session, TableSchema, Value, identity,
@@ -53,7 +53,7 @@ fn test_schema() -> Schema {
 /// derived from `seed`. Drops the backend/admin secrets so the server must
 /// accept (or reject) the Bearer token on its own merits.
 fn local_first_context(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: Schema,
     seed: &[u8; 32],
     storage: ClientStorage,
@@ -87,7 +87,7 @@ fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
 /// principal recognition.
 #[tokio::test]
 async fn same_seed_syncs_across_devices() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema()).await;
 
     let alice_device_a = JazzClient::connect(local_first_context(
         &server,
@@ -129,7 +129,7 @@ async fn same_seed_syncs_across_devices() {
 /// for any future per-principal permission scoping.
 #[tokio::test]
 async fn different_seeds_produce_distinct_principals() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema()).await;
 
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
     let bob_user_id = identity::derive_user_id(&bob_seed()).to_string();
@@ -196,7 +196,7 @@ async fn different_seeds_produce_distinct_principals() {
 /// principal and still see its own rows locally.
 #[tokio::test]
 async fn persistent_seed_reconnects_as_same_principal() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema()).await;
 
     let context = local_first_context(
         &server,
@@ -264,7 +264,7 @@ async fn persistent_seed_reconnects_as_same_principal() {
 /// up to the Ed25519 identity path end-to-end.
 #[tokio::test]
 async fn local_first_writes_carry_derived_principal_as_created_by() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema()).await;
 
     let alice = JazzClient::connect(local_first_context(
         &server,
@@ -307,7 +307,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by() {
 /// principal. Guards the mixed-auth path some apps will run during migration.
 #[tokio::test]
 async fn local_first_and_jwt_clients_coexist() {
-    let server = TestingServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema()).await;
 
     let alice = JazzClient::connect(local_first_context(
         &server,
@@ -319,7 +319,7 @@ async fn local_first_and_jwt_clients_coexist() {
     .expect("connect alice (local-first)");
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
-    // Bob authenticates via the default HS256 JWT minted by TestingServer.
+    // Bob authenticates via the default HS256 JWT minted by JazzServer.
     let mut bob_ctx = server.make_client_context_for_user(test_schema(), "bob");
     bob_ctx.backend_secret = None;
     bob_ctx.admin_secret = None;
@@ -382,7 +382,7 @@ async fn local_first_and_jwt_clients_coexist() {
 #[tokio::test]
 async fn expired_token_reconnect_flushes_queued_writes() {
     let auth_clock = TestClock::new(1_700_000_000);
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(test_schema())
         .with_auth_clock(auth_clock.clone())
         .start()

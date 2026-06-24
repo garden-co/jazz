@@ -8,7 +8,7 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, SchemaBuilder, TableSchema,
     Value,
@@ -132,7 +132,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -270,7 +270,7 @@ async fn admin_role_claims_reject_member_mutations() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -438,7 +438,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -597,7 +597,7 @@ async fn role_claim_presence_gates_row_visibility() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -728,7 +728,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -958,7 +958,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1124,7 +1124,7 @@ async fn row_and_claim_predicates_compose_under_and_and_or() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

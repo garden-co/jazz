@@ -22,12 +22,12 @@ import {
   withTimeout,
 } from "./support.js";
 import {
-  blockTestingServerNetwork,
-  getTestingServerInfo,
-  getTestingServerJwtForUser,
-  getTestingServerNetworkDebug,
-  type TestingServerInfo,
-  unblockTestingServerNetwork,
+  blockJazzServerNetwork,
+  getJazzServerInfo,
+  getJazzServerJwtForUser,
+  getJazzServerNetworkDebug,
+  type JazzServerInfo,
+  unblockJazzServerNetwork,
 } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
@@ -243,7 +243,7 @@ async function rethrowWithWorkerDiagnostics(
   serverUrl: string,
   dbs: Array<{ name: string; db: Db; probe?: WorkerMessageProbe }>,
 ): Promise<never> {
-  const network = await getTestingServerNetworkDebug(serverUrl);
+  const network = await getJazzServerNetworkDebug(serverUrl);
   const diagnostics = {
     network,
     dbs: dbs.map(({ name, db, probe }) => ({
@@ -1320,7 +1320,7 @@ describe("Worker Bridge with OPFS", () => {
         },
         serverUrl,
         adminSecret,
-        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt", undefined, appId),
+        jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
       }),
     );
 
@@ -1977,9 +1977,9 @@ describe("Worker Bridge with OPFS", () => {
       20000,
     );
 
-    await blockTestingServerNetwork(serverUrl);
+    await blockJazzServerNetwork(serverUrl);
     await sleep(500);
-    await unblockTestingServerNetwork(serverUrl);
+    await unblockJazzServerNetwork(serverUrl);
     await sleep(250);
 
     (dbA as any).sendLifecycleHint?.("freeze");
@@ -2046,7 +2046,7 @@ describe("Worker Bridge with OPFS", () => {
         ),
       );
 
-      await blockTestingServerNetwork(serverUrl);
+      await blockJazzServerNetwork(serverUrl);
       await sleep(250);
 
       const dbProbe = await createSyncedDb(
@@ -2075,7 +2075,7 @@ describe("Worker Bridge with OPFS", () => {
       );
 
       await sleep(500);
-      await unblockTestingServerNetwork(serverUrl);
+      await unblockJazzServerNetwork(serverUrl);
       await sleep(250);
 
       const rowsOnProbe = await probeRowsPromise;
@@ -2083,7 +2083,7 @@ describe("Worker Bridge with OPFS", () => {
     } finally {
       probeProbe?.dispose();
       writerProbe.dispose();
-      await unblockTestingServerNetwork(serverUrl);
+      await unblockJazzServerNetwork(serverUrl);
     }
   }, 60000);
 
@@ -2126,7 +2126,7 @@ describe("Worker Bridge with OPFS", () => {
       20000,
     );
 
-    await blockTestingServerNetwork(serverUrl);
+    await blockJazzServerNetwork(serverUrl);
     // Disconnect the WS transport so the block takes effect immediately.
     // Playwright route blocking only intercepts new connections; the existing
     // WebSocket must be closed explicitly for the offline simulation to hold.
@@ -2157,7 +2157,7 @@ describe("Worker Bridge with OPFS", () => {
       ),
     ).rejects.toThrow();
 
-    await unblockTestingServerNetwork(serverUrl);
+    await unblockJazzServerNetwork(serverUrl);
     // Re-establish the worker's upstream WebSocket now that the network is live again.
     (dbA as any).workerBridge?.reconnectUpstream?.();
     await sleep(250);
@@ -2549,9 +2549,9 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("fans out an auth failure to follower tabs", async () => {
-    const { appId, serverUrl } = await getTestingServerInfo(uniqueDbName("auth-fanout"));
+    const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
     const dbName = uniqueDbName("auth-fanout");
-    const validJwt = await getTestingServerJwtForUser("auth-fanout-user", undefined, appId);
+    const validJwt = await getJazzServerJwtForUser("auth-fanout-user", undefined, appId);
     const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
 
     const dbA = track(
@@ -2989,8 +2989,8 @@ async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
   schema?: Schema,
-): Promise<TestingServerInfo> {
-  const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const permissionsToPublish = permissions ?? {
     todos: {
       select: { using: { type: "True" } },
@@ -3016,7 +3016,7 @@ async function publishSyncServerSchemaAndPermissions(
 }
 
 async function publishPermissionsForServer(
-  testingServer: TestingServerInfo,
+  testingServer: JazzServerInfo,
   permissions: CompiledPermissions,
   schema?: Schema,
 ): Promise<void> {

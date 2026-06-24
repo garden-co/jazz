@@ -5,11 +5,11 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import {
-  blockTestingServerNetwork,
-  debugTestingServerNetwork,
-  testingServerInfo,
-  testingServerJwtForUser,
-  unblockTestingServerNetwork,
+  blockJazzServerNetwork,
+  debugJazzServerNetwork,
+  jazzServerInfo,
+  jazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "./tests/browser/testing-server-node.js";
 import {
   closeRemoteBrowserDb,
@@ -65,20 +65,20 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
-        testingServerInfo: async (_context, appId) => testingServerInfo(appId),
-        testingServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockTestingServerNetwork(context, serverUrl),
-        testingServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockTestingServerNetwork(context, serverUrl),
-        testingServerNetworkDebug: async ({ context }, serverUrl) =>
-          debugTestingServerNetwork(context, serverUrl),
+        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
+          blockJazzServerNetwork(context, serverUrl),
+        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
+          unblockJazzServerNetwork(context, serverUrl),
+        jazzServerNetworkDebug: async ({ context }, serverUrl) =>
+          debugJazzServerNetwork(context, serverUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
-        testingServerJwtForUser: async (_context, userId, claims, appId) =>
-          testingServerJwtForUser(userId, claims, appId),
+        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
+          jazzServerJwtForUser(userId, claims, appId),
         writeRealisticBrowserReport: async (_context, runId, report) => {
           mkdirSync(realisticBrowserBenchReportDir, { recursive: true });
           const reportFile = resolve(realisticBrowserBenchReportDir, `${runId}.json`);

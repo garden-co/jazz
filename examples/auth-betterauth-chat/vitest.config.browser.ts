@@ -37,7 +37,7 @@ export default defineConfig(async () => {
 
   // Vitest doesn't pass state from config to global-setup directly; the only
   // channel is process.env. global-setup.ts reads these via requireEnv() to
-  // boot the JWKS server and the Jazz TestingServer.
+  // boot the JWKS server and the local Jazz server.
   process.env.JAZZ_TEST_JWKS_PUBLIC_KEY = JSON.stringify(publicJwk);
   process.env.JAZZ_TEST_JWKS_PORT = String(jwksPort);
   process.env.JAZZ_TEST_JAZZ_PORT = String(jazzPort);

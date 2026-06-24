@@ -1,10 +1,14 @@
 import { join } from "node:path";
-import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import {
+  startLocalJazzServer,
+  pushSchemaCatalogue,
+  type LocalJazzServerHandle,
+} from "jazz-tools/testing";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 export { TEST_PORT, ADMIN_SECRET, APP_ID };
 
-let server: Promise<TestingServer> | null = null;
+let server: Promise<LocalJazzServerHandle> | null = null;
 
 export async function setup(): Promise<void> {
   if (server) {
@@ -12,7 +16,7 @@ export async function setup(): Promise<void> {
     return;
   }
 
-  server = TestingServer.start({
+  server = startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,

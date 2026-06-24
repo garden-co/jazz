@@ -6,14 +6,18 @@
  */
 
 import { join } from "node:path";
-import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import {
+  startLocalJazzServer,
+  pushSchemaCatalogue,
+  type LocalJazzServerHandle,
+} from "jazz-tools/testing";
 
 const TEST_PORT = parseInt(process.env.TEST_PORT!, 10);
 const ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
 const APP_ID = "00000000-0000-0000-0000-000000000003";
 const APP_ID_MULTI = "00000000-0000-0000-0000-000000000004";
 
-let server: Promise<TestingServer> | null = null;
+let server: Promise<LocalJazzServerHandle> | null = null;
 
 export async function setup(): Promise<void> {
   if (server) {
@@ -21,7 +25,7 @@ export async function setup(): Promise<void> {
     return;
   }
 
-  server = TestingServer.start({
+  server = startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
