@@ -42,6 +42,9 @@ export interface CatalogueProjectOptions {
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  /**
+   * Directory where the `schema.ts` and `permissions.ts` files are located
+   */
   schemaDir: string;
   onEvent?: (event: CatalogueEvent) => void;
 }
@@ -74,12 +77,6 @@ export interface PushPermissionsResult {
   head: StoredPermissionsHead | null;
 }
 
-export interface PushSchemaCatalogueOptions extends CatalogueProjectOptions {
-  env?: string;
-  userBranch?: string;
-  enableLogs?: boolean;
-}
-
 export interface PushMigrationOptions {
   appId: string;
   serverUrl: string;
@@ -108,7 +105,10 @@ export interface DeployResult {
 }
 
 export interface DeployOptions extends CatalogueProjectOptions {
-  migrationsDir: string;
+  /**
+   * Directory containing migration files. Defaults to `<schemaDir>/migrations`.
+   */
+  migrationsDir?: string;
   noVerify?: boolean;
 }
 
@@ -141,6 +141,14 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
   };
 }
 
+/**
+ * Publishes a schema to the Jazz server.
+ *
+ * When using this function, permissions and migrations need to be updated
+ * separately, using {@link pushPermissions} and {@link pushMigration}.
+ *
+ * Prefer using {@link deploy}, which handles all operations.
+ */
 export async function pushSchema(options: PushSchemaOptions): Promise<PushSchemaResult> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
@@ -161,6 +169,10 @@ export async function pushSchema(options: PushSchemaOptions): Promise<PushSchema
   };
 }
 
+/**
+ * Publishes permissions to a known schema.
+ * @throws when no `permissions.ts` file exists.
+ */
 export async function pushPermissions(
   options: PushPermissionsOptions,
 ): Promise<PushPermissionsResult> {
@@ -192,32 +204,6 @@ export async function pushPermissions(
     previousHead,
     head,
   };
-}
-
-export async function pushSchemaCatalogue(
-  options: PushSchemaCatalogueOptions,
-): Promise<{ hash: string }> {
-  const result = await pushSchema(options);
-  const compiled = await loadCompiledSchema(options.schemaDir);
-
-  if (compiled.permissions) {
-    await pushPermissions({
-      appId: options.appId,
-      serverUrl: options.serverUrl,
-      adminSecret: options.adminSecret,
-      schemaHash: result.hash,
-      schemaDir: options.schemaDir,
-      onEvent: options.onEvent,
-    });
-  }
-
-  if (options.enableLogs === true) {
-    console.log(
-      `[jazz-schema-push] published ${result.hash} from ${result.schemaFile} to ${options.serverUrl}`,
-    );
-  }
-
-  return { hash: result.hash };
 }
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
@@ -808,6 +794,12 @@ async function resolveHistoricalSchema(
   );
 }
 
+/**
+ * Publishes the migration that connects two schemas.
+ *
+ * When a reviewed migration file is not present, this publishes an empty migration
+ * only if the schema transition does not require row transformations.
+ */
 export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
   const { hashes } = await fetchSchemaHashes(options.serverUrl, {
     appId: options.appId,
@@ -931,7 +923,14 @@ function disconnectedSchemaMessage(appId: string, fromHash: string, toHash: stri
   return `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
 }
 
+/**
+ * Publishes the current schema and permissions.
+ *
+ * When updating a schema, also attempts to publish a migration between the old and new schemas.
+ * Set `noVerify` to return a warning instead of throwing if that migration is missing.
+ */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
+  const migrationsDir = options.migrationsDir ?? join(options.schemaDir, "migrations");
   const compiled = await loadCompiledSchema(options.schemaDir);
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
 
@@ -1020,14 +1019,14 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
           appId: options.appId,
           serverUrl: options.serverUrl,
           adminSecret: options.adminSecret,
-          migrationsDir: options.migrationsDir,
+          migrationsDir,
           fromHash: previousHead.schemaHash,
           toHash: schema.hash,
           onEvent: options.onEvent,
         });
       }
     } catch (error) {
-      const migrationMissingPrefix = `No migration file found in ${options.migrationsDir}`;
+      const migrationMissingPrefix = `No migration file found in ${migrationsDir}`;
       if (!(error instanceof Error) || !error.message.startsWith(migrationMissingPrefix)) {
         throw error;
       }

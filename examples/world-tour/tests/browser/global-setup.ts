@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import type { TestProject } from "vitest/node";
 import { ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
@@ -10,7 +10,7 @@ export async function setup(project: TestProject): Promise<() => Promise<void>> 
     inMemory: true,
   });
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: handle.url,
     appId: handle.appId,
     adminSecret: ADMIN_SECRET,

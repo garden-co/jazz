@@ -7,8 +7,8 @@ import { anyOf, definePermissions } from "../permissions/index.js";
 import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
+  deploy,
   type LocalJazzServerHandle,
-  pushSchemaCatalogue,
   startLocalJazzServer,
 } from "./index.js";
 
@@ -251,12 +251,12 @@ describe("startLocalJazzServer", () => {
   });
 });
 
-describe("pushSchemaCatalogue", () => {
+describe("deploy", () => {
   it("rejects when no root schema.ts can be found", async () => {
     const root = await createTempRoot("jazz-tools-testing-missing-schema-");
 
     await expect(
-      pushSchemaCatalogue({
+      deploy({
         serverUrl: "http://127.0.0.1:9999",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
@@ -265,9 +265,10 @@ describe("pushSchemaCatalogue", () => {
     ).rejects.toThrow(/schema file not found/i);
   });
 
-  it("publishes the current schema object via schema.ts using pushSchemaCatalogue", async () => {
+  it("deploys the current schema object via schema.ts", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
+    const schemaDir = join(import.meta.dirname, "fixtures/basic");
 
     const server = await startTrackedLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000001",
@@ -276,14 +277,14 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
-      const { hash } = await pushSchemaCatalogue({
+      const result = await deploy({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures/basic"),
+        schemaDir,
       });
 
-      expect(hash).toBeTruthy();
+      expect(result.schema.hash).toBeTruthy();
 
       const response = await fetch(`${server.url}/apps/${server.appId}/schemas`, {
         headers: {
@@ -300,12 +301,14 @@ describe("pushSchemaCatalogue", () => {
   }, 30_000);
 
   it("rejects when server is unreachable", async () => {
+    const schemaDir = join(import.meta.dirname, "fixtures/basic");
+
     await expect(
-      pushSchemaCatalogue({
+      deploy({
         serverUrl: "http://127.0.0.1:9",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
-        schemaDir: join(import.meta.dirname, "fixtures/basic"),
+        schemaDir,
       }),
     ).rejects.toThrow();
   }, 10_000);

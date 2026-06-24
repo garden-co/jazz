@@ -11,11 +11,7 @@ import { createServer } from "node:net";
 import type { BrowserCommand } from "vitest/node";
 import type { BrowserContext, ConsoleMessage, Page } from "playwright";
 import type {} from "@vitest/browser-playwright";
-import {
-  startLocalJazzServer,
-  pushSchemaCatalogue,
-  type LocalJazzServerHandle,
-} from "jazz-tools/testing";
+import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -245,7 +241,7 @@ export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx
   });
 
   const schemaDir = join(import.meta.dirname, "../..");
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: handle.url,
     appId: FRESH_APP_ID,
     adminSecret: FRESH_ADMIN_SECRET,

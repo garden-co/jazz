@@ -5,11 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
 
-export {
-  pushSchemaCatalogue,
-  type PushSchemaCatalogueOptions,
-  type PushSchemaCatalogueOptions as PushSchemaOptions,
-} from "./catalogue.js";
+export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;

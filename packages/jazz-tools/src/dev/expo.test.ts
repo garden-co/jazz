@@ -117,8 +117,8 @@ describe("withJazz", () => {
     const schemaDir = await tempRoots.create("jazz-expo-retry-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
 
-    const pushSchemaCatalogue = vi
-      .spyOn(devServer, "pushSchemaCatalogue")
+    const deploy = vi
+      .spyOn(devServer, "deploy")
       .mockRejectedValueOnce(new Error("schema push failed"));
 
     await expect(
@@ -140,7 +140,7 @@ describe("withJazz", () => {
     );
 
     expect(process.env.EXPO_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(pushSchemaCatalogue).toHaveBeenCalledTimes(2);
+    expect(deploy).toHaveBeenCalledTimes(2);
   }, 30_000);
 
   it("ignores a bare server URL env var with no adminSecret and starts a fresh local server", async () => {

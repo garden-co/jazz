@@ -6,11 +6,7 @@
  */
 
 import { join } from "node:path";
-import {
-  startLocalJazzServer,
-  pushSchemaCatalogue,
-  type LocalJazzServerHandle,
-} from "jazz-tools/testing";
+import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
 
 const TEST_PORT = parseInt(process.env.TEST_PORT!, 10);
 const ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
@@ -34,7 +30,7 @@ export async function setup(): Promise<void> {
   const handle = await server;
 
   const schemaDir = join(import.meta.dirname, "../..");
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: handle.url,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
@@ -42,7 +38,7 @@ export async function setup(): Promise<void> {
   });
   // Register schema for the isolated multi-player namespace so test 837
   // starts with an empty event history (no stream connect timeout).
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: handle.url,
     appId: APP_ID_MULTI,
     adminSecret: ADMIN_SECRET,

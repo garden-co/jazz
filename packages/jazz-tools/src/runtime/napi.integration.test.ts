@@ -10,7 +10,7 @@ import { type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 type RuntimeRowWithBatchId = Row & {
@@ -429,13 +429,11 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
         schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
       });
       const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
@@ -575,13 +573,11 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
         schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
       });
       const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
@@ -661,7 +657,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,

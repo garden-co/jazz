@@ -24,7 +24,7 @@ function findFreePort(): Promise<number> {
 
 export default defineConfig(async () => {
   // permissions.ts reads NEXT_PUBLIC_* env vars at module-eval time. Set them
-  // here so pushSchemaCatalogue (called from globalSetup) and the browser
+  // here so deploy (called from globalSetup) and the browser
   // bundle both see consistent values.
   process.env.NEXT_PUBLIC_CHAT_ID = TEST_CHAT_ID;
   process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID = TEST_ANNOUNCEMENTS_CHAT_ID;
