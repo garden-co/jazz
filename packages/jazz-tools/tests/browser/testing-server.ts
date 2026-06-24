@@ -18,7 +18,6 @@ declare module "vitest/internal/browser" {
     jazzServerInfo: (appId?: string) => Promise<JazzServerInfo>;
     jazzServerBlockNetwork: (serverUrl: string) => Promise<void>;
     jazzServerUnblockNetwork: (serverUrl: string) => Promise<void>;
-    jazzServerNetworkDebug: (serverUrl: string) => Promise<JazzServerNetworkDebugState>;
     jazzServerJwtForUser: (
       userId: string,
       claims?: Record<string, unknown>,
@@ -37,10 +36,6 @@ export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
 
 export function unblockJazzServerNetwork(serverUrl: string): Promise<void> {
   return commands.jazzServerUnblockNetwork(serverUrl);
-}
-
-export function getJazzServerNetworkDebug(serverUrl: string): Promise<JazzServerNetworkDebugState> {
-  return commands.jazzServerNetworkDebug(serverUrl);
 }
 
 export async function getJazzServerJwtForUser(
