@@ -2250,7 +2250,7 @@ export class Db {
     data: Init,
     options?: CreateOptions,
   ): WriteResult<T> {
-    const client = this.getClient(table._schema, branchId);
+    const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
@@ -2341,7 +2341,7 @@ export class Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
-    const client = this.getClient(table._schema, branchId);
+    const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
@@ -2365,7 +2365,7 @@ export class Db {
     id: string,
     options?: DeleteOptions,
   ): WriteHandle {
-    const client = this.getClient(table._schema, branchId);
+    const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
       client.delete(id, options, context?.session, context?.attribution, branchId),
@@ -2523,7 +2523,7 @@ export class Db {
     query: QueryBuilder<T>,
     options?: QueryOptions,
   ): Promise<T[]> {
-    const client = this.getClient(query._schema, branchId);
+    const client = this.getClient(query._schema);
     const scopedQuery = query;
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
@@ -2667,7 +2667,7 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const { branch, ...executionOptions } = options ?? {};
-    const client = this.getClient(query._schema, branch);
+    const client = this.getClient(query._schema);
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
     );
