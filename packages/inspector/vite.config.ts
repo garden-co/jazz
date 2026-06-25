@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
-import { defineConfig } from "vite";
+import { defineConfig, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode }): UserConfig => {
   if (mode === "embedded") {
     return {
       plugins: [react()],
