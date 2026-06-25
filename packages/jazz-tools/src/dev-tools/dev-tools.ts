@@ -213,6 +213,9 @@ function hookRegistration(
     registeredRuntimeBridgeDbs.add(db);
 
     window.addEventListener("message", async (event) => {
+      // LOAD-BEARING for the inspector overlay: the relay (dev/inspector-overlay)
+      // re-injects iframe requests into THIS window so event.source === window.
+      // Loosening this guard would let any frame drive the bridge and could loop.
       if (event.source !== window) return;
       const rawMessage = event.data;
       if (!isRecord(rawMessage)) return;
