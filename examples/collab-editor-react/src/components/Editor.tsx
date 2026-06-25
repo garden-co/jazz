@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "../lib/monaco-setup.js";
 import MonacoEditor, { type OnMount } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
@@ -17,6 +17,11 @@ type EditorProps = {
 type MonacoRuntime = {
   editor: monaco.editor.IStandaloneCodeEditor;
   monaco: typeof import("monaco-editor");
+};
+
+// Hoisted so the editor doesn't get a fresh options object on every render.
+const monacoOptions: monaco.editor.IStandaloneEditorConstructionOptions = {
+  minimap: { enabled: false },
 };
 
 function EditorSurface({ room }: { room: Room }) {
@@ -80,7 +85,7 @@ function EditorSurface({ room }: { room: Room }) {
             height="70vh"
             language={room.editorLanguage}
             theme="vs-light"
-            options={{ minimap: { enabled: false } }}
+            options={monacoOptions}
             onMount={handleMount}
           />
         )}
@@ -101,21 +106,31 @@ export function Editor({ shareToken }: EditorProps) {
       : undefined,
   );
 
+  // Record/refresh this room in the user's list once per visit. Writing
+  // `lastAccessedAt` mutates a row this component subscribes to via `useAll`
+  // above, so without this guard the effect would re-fire on its own write —
+  // an infinite write→subscription→write loop. The ref pins the touch to one
+  // run per (room, session); on room change the key changes and we touch again.
+  const touchedRoomRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (!room || !sessionUserId || !participants) return;
+
+    const key = `${room.id}:${sessionUserId}`;
+    if (touchedRoomRef.current === key) return;
+    touchedRoomRef.current = key;
 
     const now = new Date();
     const participant = participants[0];
     if (participant) {
       db.update(app.roomParticipants, participant.id, { lastAccessedAt: now });
-      return;
+    } else {
+      db.insert(app.roomParticipants, {
+        room_id: room.id,
+        session_user_id: sessionUserId,
+        lastAccessedAt: now,
+      });
     }
-
-    db.insert(app.roomParticipants, {
-      room_id: room.id,
-      session_user_id: sessionUserId,
-      lastAccessedAt: now,
-    });
   }, [db, participants, room, sessionUserId]);
 
   if (!rooms) return <p>Loading room...</p>;
