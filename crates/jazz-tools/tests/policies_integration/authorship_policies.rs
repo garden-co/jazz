@@ -9,7 +9,7 @@ use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::SchemaManager;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, ServerId, SyncManager};
 use jazz_tools::{
@@ -48,7 +48,7 @@ async fn create_note_without_session(client: &JazzClient, title: &str) -> Object
 }
 
 async fn create_note_with_backend_attribution(
-    server: &TestingServer,
+    server: &JazzServer,
     schema: &Schema,
     attributed_user_id: &str,
     title: &str,
@@ -120,8 +120,8 @@ async fn create_note_with_backend_attribution(
     note_id
 }
 
-async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
-    let server = TestingServer::builder()
+async fn start_alice_and_bob_server(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

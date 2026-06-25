@@ -1,17 +1,17 @@
 import { join } from "node:path";
-import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 export { TEST_PORT, ADMIN_SECRET, APP_ID };
 
-let server: Promise<TestingServer> | null = null;
+let server: Promise<LocalJazzServerHandle> | null = null;
 export async function setup(): Promise<void> {
   if (server) {
     await server;
     return;
   }
 
-  server = TestingServer.start({
+  server = startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
@@ -19,7 +19,7 @@ export async function setup(): Promise<void> {
 
   const serverHandle = await server;
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: serverHandle.url,
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,

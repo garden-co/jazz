@@ -8,7 +8,7 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -251,8 +251,8 @@ async fn update_document_title(client: &JazzClient, document_id: ObjectId, title
         .expect("update document title");
 }
 
-async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
-    let server = TestingServer::builder()
+async fn start_alice_and_bob_server(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -383,7 +383,7 @@ async fn select_policies_filter_subscription_results_per_client_session() {
 async fn select_policy_pagination_offsets_over_visible_rows_only() {
     let schema = authorized_pagination_schema();
     let table_name = "paginated_documents";
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1013,7 +1013,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
 #[tokio::test]
 async fn select_policy_excludes_rows_from_join_results() {
     let schema = join_select_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1099,7 +1099,7 @@ async fn select_policy_excludes_rows_from_join_results() {
 #[tokio::test]
 async fn in_session_array_policy_gates_visibility_by_membership() {
     let schema = in_session_array_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1196,7 +1196,7 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
 #[tokio::test]
 async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1291,7 +1291,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
 #[tokio::test]
 async fn update_policies_block_unauthorized_server_mutations() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1393,7 +1393,7 @@ async fn update_policies_block_unauthorized_server_mutations() {
 #[tokio::test]
 async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1490,7 +1490,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
 #[tokio::test]
 async fn update_policy_read_clause_differs_from_write_clause() {
     let schema = write_check_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1586,7 +1586,7 @@ async fn update_policy_read_clause_differs_from_write_clause() {
 #[tokio::test]
 async fn delete_then_reinsert_by_owner_visible_to_others() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1678,7 +1678,7 @@ async fn delete_then_reinsert_by_owner_visible_to_others() {
 #[tokio::test]
 async fn delete_policies_block_unauthorized_server_mutations() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1788,7 +1788,7 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_client_operations_reach_server_in_causal_order() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1903,7 +1903,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
 #[ignore = "TODO: server does not notify the originating client of rejections."]
 async fn originating_client_receives_rollback_for_rejected_mutation() {
     let schema = write_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

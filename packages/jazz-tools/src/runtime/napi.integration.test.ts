@@ -1,17 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { type MutationErrorEvent, type Row } from "./client.js";
+import { type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 type RuntimeRowWithBatchId = Row & {
@@ -430,13 +429,11 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
         schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
       });
       const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
@@ -576,13 +573,11 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
         schemaDir: TODO_SERVER_SCHEMA_DIR,
-        env: "test",
-        userBranch: "main",
       });
       const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
@@ -662,7 +657,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await pushSchemaCatalogue({
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,

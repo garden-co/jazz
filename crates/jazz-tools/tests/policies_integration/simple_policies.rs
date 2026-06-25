@@ -9,7 +9,7 @@ use super::support::{
 use super::{pe, permissions};
 use jazz_tools::query_manager::policy::CmpOp;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -127,8 +127,8 @@ fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
     vec![title.into(), status.into(), archived.into()]
 }
 
-async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
-    let server = TestingServer::builder()
+async fn start_alice_and_bob_server(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -327,7 +327,7 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
         )
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1411,7 +1411,7 @@ async fn read_and_write_policies_remain_independent() {
         ))
         .build();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1564,7 +1564,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
         .build();
     let verifier_schema = schema.clone();
 
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -1768,7 +1768,7 @@ async fn admin_secret_ws_client_bypasses_row_select_policies() {
             }),
         ))
         .build();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

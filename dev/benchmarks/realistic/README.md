@@ -94,7 +94,7 @@ pnpm --dir packages/jazz-tools run bench:realistic:browser
 ```
 
 The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
-The Node-side test server used by the browser harness comes from `jazz-napi`, so its native binding needs to be built first in a workspace checkout.
+The Node-side Jazz server used by the browser harness comes from `jazz-napi`, so its native binding needs to be built first in a workspace checkout.
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
 
@@ -111,7 +111,7 @@ This launches:
 
 - a Vite dev server rooted at `packages/jazz-tools`
 - a headless Chromium with CDP enabled
-- a real `TestingServer` from `jazz-napi`
+- a real `JazzServer` plus `TestJwtIssuer` from `jazz-napi`
 
 It captures both main-thread and dedicated-worker CPU profiles to `/tmp/jazz-browser-profiles`
 by default, then prints the hottest self-time frames for each scenario.

@@ -6,7 +6,7 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import { publishStoredPermissions, publishStoredSchema } from "./schema-fetch.js";
-import { startLocalJazzServer } from "../testing/local-jazz-server.js";
+import { startLocalJazzServer } from "../testing/index.js";
 
 const reproApp = s.defineApp({
   teams: s.table({

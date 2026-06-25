@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import jazzNapi from "../../../crates/jazz-napi/index.js";
 
-const { TestingServer } = jazzNapi;
+const { JazzServer, TestJwtIssuer } = jazzNapi;
 
 const DEFAULT_SCENARIOS = ["w4", "b2"];
 const DEFAULT_OUT_DIR = "/tmp/jazz-browser-profiles";
@@ -944,7 +944,8 @@ async function main() {
     },
   );
 
-  let testingServer;
+  let jazzServer;
+  let jwtIssuer;
   let chrome;
   let userDataDir = null;
   const pageUrl = `http://127.0.0.1:${args.vitePort}/tests/browser/remote-db-harness.html`;
@@ -976,13 +977,20 @@ async function main() {
       { stdio: "ignore" },
     );
 
-    const server = await TestingServer.start();
-    testingServer = server;
+    jwtIssuer = await TestJwtIssuer.start();
+    const server = await JazzServer.start({
+      appId: "00000000-0000-0000-0000-000000000001",
+      jwksUrl: jwtIssuer.jwksUrl,
+      inMemory: true,
+      adminSecret: "jazz-browser-profile-admin",
+      backendSecret: "jazz-browser-profile-backend",
+    });
+    jazzServer = server;
     const serverInfo = {
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      jwtToken: await server.jwtForUser("browser-profile-user", {}),
+      jwtToken: jwtIssuer.jwtForUser("browser-profile-user", {}),
     };
 
     const { webSocketDebuggerUrl } = await waitForJson(
@@ -1140,9 +1148,14 @@ async function main() {
 
     await cdp.close();
   } finally {
-    if (testingServer) {
+    if (jazzServer) {
       try {
-        await testingServer.stop();
+        await jazzServer.stop();
+      } catch {}
+    }
+    if (jwtIssuer) {
+      try {
+        await jwtIssuer.stop();
       } catch {}
     }
     if (chrome) {

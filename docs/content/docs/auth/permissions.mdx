@@ -229,7 +229,7 @@ encoding extra meaning into authorship alone.
 Jazz provides utilities to test permissions in isolation without testing your whole app's logic.
 
 The `createPolicyTestApp` helper from `jazz-tools/testing` starts an isolated local Jazz server, publishes your app schema
-and compiled permissions, and gives you session-scoped database clients for assertions.
+and permissions, and gives you session-scoped database clients for assertions.
 
 ```typescript title="permissions.test.ts"
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";

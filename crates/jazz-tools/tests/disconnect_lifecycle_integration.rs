@@ -5,7 +5,7 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
 use support::{TestingClient, wait_for_query};
 
@@ -38,7 +38,7 @@ fn test_schema() -> jazz_tools::Schema {
 #[tokio::test]
 async fn client_reconnects_after_server_reaps_stale_state() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     // Phase 1: Alice connects and creates a todo
     let alice = TestingClient::builder()
@@ -210,7 +210,7 @@ async fn client_reconnects_after_server_reaps_stale_state() {
 #[tokio::test]
 async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -333,7 +333,7 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
 #[tokio::test]
 async fn background_sweep_task_reaps_expired_candidates() {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)

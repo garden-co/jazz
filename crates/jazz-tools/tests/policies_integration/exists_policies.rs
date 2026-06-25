@@ -4,7 +4,7 @@ use std::time::Duration;
 #[cfg(feature = "test-utils")]
 use crate::JazzClient;
 #[cfg(feature = "test-utils")]
-use crate::server::TestingServer;
+use crate::server::JazzServer;
 #[cfg(feature = "test-utils")]
 use crate::sync_manager::DurabilityTier;
 #[cfg(feature = "test-utils")]
@@ -96,7 +96,7 @@ async fn rebac_exists_clause_denies_non_matching_insert() {
         )
         .build();
 
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let bob = JazzClient::connect_with_row_policy_mode(
         server.make_client_context_for_user(schema.clone(), "bob"),
         crate::query_manager::types::RowPolicyMode::PermissiveLocal,
@@ -158,7 +158,7 @@ async fn rebac_update_denied_by_using_exists_policy() {
         )
         .build();
 
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let alice = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
         .await
         .expect("connect alice");

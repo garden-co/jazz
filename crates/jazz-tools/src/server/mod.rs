@@ -18,17 +18,15 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
-mod hosted;
 pub mod routes;
 mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub use hosted::HostedServer;
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
-pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
+pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 

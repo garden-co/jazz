@@ -12,7 +12,7 @@ use jazz_tools::query_manager::relation_ir::{
     RelExpr, RowIdRef, ValueRef,
 };
 use jazz_tools::query_manager::types::{TableName, TablePolicies, TableSchemaBuilder};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
@@ -397,7 +397,7 @@ async fn create_join_policy_post(client: &JazzClient, owner_name: &str, title: &
 #[should_panic] // known failing: SELECT EXISTS does not surface rows or deltas after related-row writes
 async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     let schema = exists_share_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -534,7 +534,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
 #[should_panic] // known failing: read-side ExistsRel join grants never become visible in integration
 async fn exists_rel_join_grants_and_denies_correctly() {
     let schema = exists_join_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -579,7 +579,7 @@ async fn exists_rel_join_grants_and_denies_correctly() {
 #[tokio::test]
 async fn join_query_applies_policy_filter_on_joined_table() {
     let schema = joined_table_select_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -650,7 +650,7 @@ async fn join_query_applies_policy_filter_on_joined_table() {
 #[should_panic] // known failing: read-side ExistsRel hop grants never become visible in integration
 async fn exists_rel_hop_grants_and_denies_correctly() {
     let schema = exists_hop_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -745,7 +745,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     }
 
     let schema = mixed_complex_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -855,7 +855,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
 #[tokio::test]
 async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
     let schema = exists_update_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;
@@ -969,7 +969,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
 #[tokio::test]
 async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_state() {
     let schema = exists_update_policy_schema();
-    let server = TestingServer::builder()
+    let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
         .await;

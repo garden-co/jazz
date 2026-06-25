@@ -3,11 +3,7 @@
  * Starts a local Jazz server and pushes the schema before the web server launches.
  */
 import { join } from "node:path";
-import {
-  type LocalJazzServerHandle,
-  startLocalJazzServer,
-  pushSchemaCatalogue,
-} from "jazz-tools/testing";
+import { type LocalJazzServerHandle, startLocalJazzServer, deploy } from "jazz-tools/testing";
 import { WALKTHROUGH_PORT, WALKTHROUGH_APP_ID } from "./walkthrough-constants.js";
 
 const ADMIN_SECRET = "walkthrough-admin-secret";
@@ -23,7 +19,7 @@ export default async function globalSetup() {
     enableLogs: true,
   });
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: serverHandle.url,
     appId: WALKTHROUGH_APP_ID,
     adminSecret: ADMIN_SECRET,

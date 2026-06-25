@@ -22,6 +22,13 @@ async function resolveWrappedConfig(
   return wrapped(phase, { defaultConfig: {} });
 }
 
+function deployed(hash = "abc123def4567890") {
+  return {
+    schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    warnings: [],
+  };
+}
+
 // Managed-runtime writes NEXT_PUBLIC_JAZZ_APP_ID / NEXT_PUBLIC_JAZZ_SERVER_URL
 // to process.env on successful init; that state leaks across vitest workers in
 // the same thread pool and flips later tests onto the env-driven cloud branch.
@@ -191,8 +198,8 @@ describe("withJazz", () => {
     const schemaDir = await tempRoots.create("jazz-next-retry-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
 
-    const pushSchemaCatalogue = vi
-      .spyOn(devServer, "pushSchemaCatalogue")
+    const deploy = vi
+      .spyOn(devServer, "deploy")
       .mockRejectedValueOnce(new Error("schema push failed"));
 
     const wrapped = withJazz(
@@ -210,7 +217,7 @@ describe("withJazz", () => {
     const resolved = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
 
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(pushSchemaCatalogue).toHaveBeenCalledTimes(2);
+    expect(deploy).toHaveBeenCalledTimes(2);
   }, 30_000);
 
   it("ignores a bare server URL env var with no adminSecret and starts a fresh local server", async () => {
@@ -300,11 +307,13 @@ describe("withJazz", () => {
       port: 19870,
       url: "http://127.0.0.1:19870",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    const pushSchemaCatalogue = vi
-      .spyOn(devServer, "pushSchemaCatalogue")
-      .mockResolvedValue({ hash: "1111111111111111aaaaaaaaaaaaaaaaaaaaaaaa" });
+    const deploy = vi
+      .spyOn(devServer, "deploy")
+      .mockResolvedValue(deployed("1111111111111111aaaaaaaaaaaaaaaaaaaaaaaa"));
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
       capturedOnPush = opts.onPush;
@@ -337,7 +346,7 @@ describe("withJazz", () => {
     expect(updated).toContain("2222222222222222bbbbbbbbbbbbbbbbbbbbbbbb");
     expect(updated).not.toContain("1111111111111111aaaaaaaaaaaaaaaaaaaaaaaa");
 
-    expect(pushSchemaCatalogue).toHaveBeenCalled();
+    expect(deploy).toHaveBeenCalled();
   });
 
   it("aliases jazz-tools/_dev/schema-hash to the generated stub for both webpack and turbopack", async () => {
@@ -346,9 +355,11 @@ describe("withJazz", () => {
       port: 19880,
       url: "http://127.0.0.1:19880",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation(() => ({ close: vi.fn() }));
 
     const appRoot = await tempRoots.create("jazz-next-alias-");
@@ -421,7 +432,7 @@ describe("withJazz", () => {
 describe("dev barrel", () => {
   it("preserves the existing dev exports and exposes withJazz", () => {
     expect(dev.startLocalJazzServer).toBeDefined();
-    expect(dev.pushSchemaCatalogue).toBeDefined();
+    expect(dev.deploy).toBeDefined();
     expect(dev.watchSchema).toBeDefined();
     expect(dev.jazzPlugin).toBeDefined();
     expect(dev.withJazz).toBe(withJazz);

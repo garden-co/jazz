@@ -24,7 +24,7 @@ function findFreePort(): Promise<number> {
 
 export default defineConfig(async () => {
   // permissions.ts reads NEXT_PUBLIC_* env vars at module-eval time. Set them
-  // here so pushSchemaCatalogue (called from globalSetup) and the browser
+  // here so deploy (called from globalSetup) and the browser
   // bundle both see consistent values.
   process.env.NEXT_PUBLIC_CHAT_ID = TEST_CHAT_ID;
   process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID = TEST_ANNOUNCEMENTS_CHAT_ID;
@@ -37,7 +37,7 @@ export default defineConfig(async () => {
 
   // Vitest doesn't pass state from config to global-setup directly; the only
   // channel is process.env. global-setup.ts reads these via requireEnv() to
-  // boot the JWKS server and the Jazz TestingServer.
+  // boot the JWKS server and the local Jazz server.
   process.env.JAZZ_TEST_JWKS_PUBLIC_KEY = JSON.stringify(publicJwk);
   process.env.JAZZ_TEST_JWKS_PORT = String(jwksPort);
   process.env.JAZZ_TEST_JAZZ_PORT = String(jazzPort);

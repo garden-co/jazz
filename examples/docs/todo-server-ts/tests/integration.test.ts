@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -21,12 +21,12 @@ import {
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
-  let upstream: Awaited<ReturnType<typeof TestingServer.start>> | undefined;
+  let upstream: LocalJazzServerHandle | undefined;
 
   beforeAll(async () => {
-    upstream = await TestingServer.start();
+    upstream = await startLocalJazzServer();
 
-    await pushSchemaCatalogue({
+    await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
@@ -195,8 +195,8 @@ describe("Todo Server Integration", () => {
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
       // Use an isolated upstream so CRUD test data doesn't leak into the count assertion.
-      const coldStartUpstream = await TestingServer.start();
-      await pushSchemaCatalogue({
+      const coldStartUpstream = await startLocalJazzServer();
+      await deploy({
         serverUrl: coldStartUpstream.url,
         appId: coldStartUpstream.appId,
         adminSecret: coldStartUpstream.adminSecret,
@@ -275,8 +275,8 @@ describe("Todo Server Integration", () => {
   describe("SSE Live Endpoint", () => {
     it("streams all todos and updates on changes", async () => {
       // Use an isolated upstream and local server so this test starts from a clean global state.
-      const sseUpstream = await TestingServer.start();
-      await pushSchemaCatalogue({
+      const sseUpstream = await startLocalJazzServer();
+      await deploy({
         serverUrl: sseUpstream.url,
         appId: sseUpstream.appId,
         adminSecret: sseUpstream.adminSecret,

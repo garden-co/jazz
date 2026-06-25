@@ -2,7 +2,7 @@
 
 ## No mocks
 
-All tests are integration tests against a real `TestingServer`. No mocked transports, no stubbed storage. If a behavior can't be exercised end-to-end, it's not tested here.
+All tests are integration tests against a real `JazzServer`. No mocked transports, no stubbed storage. If a behavior can't be exercised end-to-end, it's not tested here.
 
 ## Document each test
 

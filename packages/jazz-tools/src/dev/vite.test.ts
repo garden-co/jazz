@@ -12,6 +12,13 @@ const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
 const originalJazzTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 
+function deployed(hash = "abc123def4567890") {
+  return {
+    schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    warnings: [],
+  };
+}
+
 // Managed-runtime writes VITE_JAZZ_APP_ID / VITE_JAZZ_SERVER_URL to process.env
 // on successful init; that state leaks across vitest workers in the same thread
 // pool and flips later tests onto the env-driven cloud branch. Scrub before each
@@ -230,9 +237,11 @@ describe("jazzPlugin", () => {
       port: 19880,
       url: "http://127.0.0.1:19880",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
       capturedOnPush = opts.onPush;
@@ -277,9 +286,11 @@ describe("jazzPlugin", () => {
       port: 19881,
       url: "http://127.0.0.1:19881",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const schemaDir = await tempRoots.create("jazz-vite-top-level-telemetry-test-");
@@ -363,7 +374,7 @@ describe("jazzPlugin", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     process.env.VITE_JAZZ_SERVER_URL = "http://localhost:4242";
     process.env.VITE_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000090";
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
     vi.spyOn(devServer, "startLocalJazzServer");
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { startLocalJazzServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { startLocalJazzServer, deploy } from "jazz-tools/testing";
 import {
   EDGE_TEST_PORT,
   CORE_TEST_PORT,
@@ -84,14 +84,14 @@ export async function setup(): Promise<void> {
         inMemory: true,
       });
 
-      const { hash } = await pushSchemaCatalogue({
+      const result = await deploy({
         serverUrl: coreServer.url,
         appId: coreServer.appId,
         adminSecret: coreServer.adminSecret!,
         schemaDir: join(import.meta.dirname, "../.."),
       });
 
-      await waitForCatalogueOnEdge(edgeServer, hash);
+      await waitForCatalogueOnEdge(edgeServer, result.schema.hash);
     })();
   }
 

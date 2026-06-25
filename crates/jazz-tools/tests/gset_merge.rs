@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
@@ -73,7 +73,7 @@ fn tags_of(row: &(ObjectId, Vec<Value>)) -> Option<Vec<String>> {
 /// test assert convergence is identical regardless of propagation order, with
 /// no dependence on the async scheduler.
 async fn merge_concurrently(
-    server: &TestingServer,
+    server: &JazzServer,
     doc_id: ObjectId,
     column: &str,
     first: &JazzClient,
@@ -151,7 +151,7 @@ async fn assert_converges<T>(
 async fn concurrent_writes_converge_to_sorted_union() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -242,7 +242,7 @@ async fn concurrent_writes_converge_to_sorted_union() {
 async fn concurrent_writes_never_remove_a_shared_element() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -385,7 +385,7 @@ fn scores_bits(row: &(ObjectId, Vec<Value>)) -> Option<Vec<u64>> {
 async fn distinct_float_representations_converge_deterministically() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_float_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)

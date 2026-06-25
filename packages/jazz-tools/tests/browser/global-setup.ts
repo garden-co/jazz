@@ -1,4 +1,4 @@
-import { stopTestingServer } from "./testing-server-node.js";
+import { stopJazzServer } from "./testing-server-node.js";
 
 interface BrowserProjectHooks {
   onClose?: (cb: () => void | Promise<void>) => void;
@@ -6,10 +6,10 @@ interface BrowserProjectHooks {
 }
 
 export function setup(project: BrowserProjectHooks): void {
-  project.onClose?.(() => stopTestingServer());
-  project.onTestsRerun?.(() => stopTestingServer());
+  project.onClose?.(() => stopJazzServer());
+  project.onTestsRerun?.(() => stopJazzServer());
 }
 
 export async function teardown(): Promise<void> {
-  await stopTestingServer();
+  await stopJazzServer();
 }
