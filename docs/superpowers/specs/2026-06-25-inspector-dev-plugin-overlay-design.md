@@ -1,7 +1,19 @@
 # Inspector as a Dev-Plugin Overlay — Design
 
 **Date:** 2026-06-25
-**Status:** Approved design, pending implementation plan
+**Status:** Implemented (on branch `guido/inspector-dev-plugin-overlay`). See "Implementation outcome" below for decisions that superseded parts of the original design.
+
+## Implementation outcome (resolved during build)
+
+The design below is the original approved version. A three-way review (GLM + Opus + Codex) of the implementation plan, and implementation itself, settled these points — where they differ from the prose below, **these win**:
+
+- **Packaging — consumer installs the inspector.** `jazz-tools` takes **no** dependency on the inspector (that would create an `inspector → jazz-tools → inspector` cycle and break turbo's `^build`). The inspector is published as **`jazz-inspector`** (was `private: true`; the org already owns that npm name from jazz1 and is repurposing it). The dev plugin resolves `jazz-inspector/dist-embedded/*` from the **app's** `node_modules` and **degrades gracefully** (logs a one-line hint, serves 404) when it isn't installed. So the overlay is "one devDependency," not literally zero-install. This supersedes §F.
+- **Dev-gating uses `process.env.NODE_ENV !== "production"` only** (never `import.meta.env.DEV`, which Next doesn't define), and `attachDevTools` is loaded via a **dynamic `import()`** inside the dev-only branch so it is statically dropped from production bundles. Verified: the example's prod build contains neither `/__jazz/loader.js` nor `attachDevTools`. This refines §D.
+- **Embedded build** is a dedicated Vite mode (`--mode embedded`) emitting `dist-embedded/` with `base: "./"`. Vite names the HTML output after the source file, so the emitted entry is **`embedded.html`** (not `index.html`) — the loader iframe and serve middleware target `embedded.html`. This refines §A.
+- **Loader injection:** Vite + SvelteKit inject `<script src="/__jazz/loader.js">` via a `ctx.server`-gated `transformIndexHtml` (never during `build`). **Next** has no such hook: its plugin copies the embedded build + bundled loader into the app's `public/__jazz/` in the dev phase only, and users add one line — `import { JazzInspectorScript } from "jazz-tools/dev/next-inspector-script"` — to their root layout (dev-gated; returns `null` in prod). This is the one framework needing app code. This refines §E.
+- **Toggle shortcut:** Alt+Shift+J; open state persisted in `localStorage`.
+- **Multi-peer namespacing:** deferred (documented, not implemented) — see below.
+- **Relay reuse:** the e2e test currently inlines a copy of the relay because `createRelay` isn't exported from a public entry; exporting it from a `jazz-tools/dev` entry is a noted follow-up to remove the duplication.
 
 ## Summary
 
@@ -235,11 +247,12 @@ copy/serve from there at dev/build time — it does **not** bundle wasm into the
 
 So, mirroring that precedent correctly:
 
-- `inspector` is already a build-time dependency of `jazz-tools`. The dev plugin does
-  `require.resolve("inspector/<embedded-build-entry>")` to locate the embedded assets in
-  `node_modules` and **serves them through dev-server middleware** (e.g. `sirv` mounted at
-  `/__jazz/embedded`). For Vite/SvelteKit this is `viteServer.middlewares.use(...)`; for
-  Next, the route-handler/copy approach in §E.
+- **[SUPERSEDED — see "Implementation outcome".]** The original plan assumed `inspector`
+  was already a build-time dependency of `jazz-tools`; it is not, and making it one creates
+  a dependency cycle. The shipped approach: the inspector is published as `jazz-inspector`,
+  the consumer installs it as a devDependency, and the dev plugin resolves
+  `jazz-inspector/dist-embedded/*` from the **app root** (degrading gracefully when absent),
+  serving via dev-server middleware for Vite/SvelteKit and the `public/__jazz/` copy for Next.
 - Zero added weight in the published `jazz-tools` package; assets exist only where
   `inspector` is already installed as a dev dependency, and are served only in dev.
 - The inspector remains its own source and still produces the Vercel (`dist/`) and
