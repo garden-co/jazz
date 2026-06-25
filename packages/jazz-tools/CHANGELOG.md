@@ -1,5 +1,30 @@
 # jazz-tools
 
+## 2.0.0-alpha.52
+
+### Patch Changes
+
+- 6284805: The browser broker SharedWorker is now shipped as self-contained, bundled ESM. It was previously unbundled with bare `../runtime/*.js` imports, and because its `new SharedWorker(...)` call is indirected past bundler worker-detection, Turbopack, webpack and Vite copied it verbatim and its imports 404'd on load — crashing every Jazz app under `next dev` / `next build` and `vite build` with "Browser broker SharedWorker failed to start". (`vite dev` masked it.) Fixing it in the package build covers all frameworks.
+  </content>
+- 97751b0: Make `db.one(...)` execute with a root query limit of one instead of fetching every matching row and discarding all but the first.
+- a9c0cf4: Fix `deleteClientStorage()` hanging forever when called on a persistent browser Db before any table or query has been used.
+- 57d2eb6: Add a `merge("g-set")` strategy for non-nullable array columns. Concurrent writes converge to the grow-only union of every replica's elements, deduplicated and sorted into a canonical, byte-identical order, so an element written by one replica is never dropped by a concurrent write that never saw it.
+- fc12a85: Removed `TestingServer` and `pushSchemaCatalogue` from `jazz-tools/testing` exports and consolidated `startLocalJazzServer` and `deploy` as the canonical way of starting a Jazz sync server and publishing schema changes.
+- a454f75: Add a `jazz.server.active_websockets` OpenTelemetry gauge reporting the server's current inbound WebSocket connection count. It is exported over OTLP only when the crate is built with the `otel` feature and `OTEL_EXPORTER_OTLP_ENDPOINT` is set; builds without the feature are unaffected.
+- 03dcdbb: Add a `jazz-tools/shared` entry point exposing the framework-agnostic utilities the React, Svelte and Vue bindings use to turn a live query into a reactive, in-place-updated result set: `applyDelta`, `reconcileArray`, `RowChangeKind`, and the supporting types (`SubscriptionDelta`, `RowDelta`, `QueryBuilder`, `QueryOptions`, and the orchestrator's `SubscriptionsOrchestrator` / `CacheEntryHandle` / `UseAllState` shapes). The in-repo bindings now consume this shared surface so an external author can build their own binding (e.g. a signals-based `useAllSignal`) on the same utilities.
+
+  This is an advanced, use-at-your-own-risk surface — the internals our framework bindings are built on, surfaced for reuse. It is not covered by semver; the orchestrator/cache-entry/delta shapes may change between releases, so pin a version if you depend on it.
+
+- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one OPFS-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
+
+  **Breaking change — browser support:** persistent browser mode now requires `SharedWorker`, `MessageChannel`, and Web Locks support. Browsers or embedded webviews missing those capabilities will reject `createDb()`/`createJazzClient()` startup for persistent storage instead of using the previous BroadcastChannel tab-election path. Use a supported browser runtime for persistent local storage, or switch to the memory driver with a `serverUrl` in unsupported environments.
+
+- f958471: Add first-class Solid support in `jazz-tools`, including `createSolidJazzClient`, `JazzProvider`, `useAll`, and `useLocalFirstAuth`, plus Solid-specific build/test configuration and lifecycle/auth/query coverage.
+- Updated dependencies [ec543e3]
+- Updated dependencies [6c17100]
+  - jazz-wasm@2.0.0-alpha.52
+  - jazz-rn@2.0.0-alpha.52
+
 ## 2.0.0-alpha.51
 
 ### Minor Changes
