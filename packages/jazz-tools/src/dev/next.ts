@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, cp, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
+import { bundleOverlayLoaderScript, resolveEmbeddedDir } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -71,6 +73,35 @@ async function copyWasmToPublic(appRoot: string): Promise<void> {
   await copyFile(wasmSource, wasmDest);
 }
 
+const OVERLAY_PUBLIC_DIR = join("public", "__jazz");
+
+// Dev-only: copy the inspector overlay assets into the host app's public/ dir
+// so they're served at /__jazz/. Next has no dev-server middleware hook (unlike
+// Vite/SvelteKit), so we mirror copyWasmToPublic and stage the files on disk.
+// This MUST never run during a production build (the assets are dev tooling).
+async function copyOverlayToPublic(appRoot: string): Promise<void> {
+  const embeddedDir = resolveEmbeddedDir(appRoot);
+  if (!embeddedDir) {
+    console.log(
+      "[jazz] Inspector overlay: install `jazz-inspector` as a devDependency to enable it.",
+    );
+    return;
+  }
+  const overlayDest = join(appRoot, OVERLAY_PUBLIC_DIR);
+  await mkdir(overlayDest, { recursive: true });
+  await cp(embeddedDir, join(overlayDest, "embedded"), { recursive: true });
+  await writeFile(join(overlayDest, "loader.js"), await bundleOverlayLoaderScript());
+}
+
+function warnOverlayInProductionBuild(appRoot: string): void {
+  if (existsSync(join(appRoot, OVERLAY_PUBLIC_DIR))) {
+    console.warn(
+      "[jazz] Inspector overlay assets found in public/__jazz during a production build. " +
+        "These are dev-only; add `public/__jazz` to .gitignore so they aren't shipped.",
+    );
+  }
+}
+
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
   return Array.from(new Set([...(existing ?? []), "jazz-napi"]));
 }
@@ -108,6 +139,14 @@ export function withJazz(
     const copyAndAdvertiseWasm = phase === DEVELOPMENT_PHASE || phase === PRODUCTION_BUILD_PHASE;
     if (copyAndAdvertiseWasm) {
       await copyWasmToPublic(options.appRoot ?? process.cwd());
+    }
+    // Inspector overlay assets are dev tooling: stage them only in the dev
+    // phase, and warn (don't copy) during a production build so they aren't
+    // accidentally shipped.
+    if (phase === DEVELOPMENT_PHASE) {
+      await copyOverlayToPublic(options.appRoot ?? process.cwd());
+    } else if (phase === PRODUCTION_BUILD_PHASE) {
+      warnOverlayInProductionBuild(options.appRoot ?? process.cwd());
     }
     const mergedWithWasmEnv: NextConfigLike = copyAndAdvertiseWasm
       ? {
