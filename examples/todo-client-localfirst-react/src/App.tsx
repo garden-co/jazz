@@ -1,10 +1,8 @@
 import * as React from "react";
-import { JazzProvider, attachDevTools, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { app } from "../schema.js";
-
-const devToolsAttachedClients = new WeakSet<object>();
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
@@ -27,28 +25,6 @@ type AppProps = {
   fallback?: React.ReactNode;
 };
 
-function DevToolsRegistration() {
-  const client = useJazzClient();
-
-  React.useEffect(() => {
-    if (devToolsAttachedClients.has(client as object)) {
-      return;
-    }
-
-    void attachDevTools(client, app.wasmSchema);
-    devToolsAttachedClients.add(client as object);
-
-    if (location.origin.includes("localhost")) {
-      Object.defineProperty(window, "jazzClient", {
-        value: client,
-        writable: true,
-      });
-    }
-  }, [client]);
-
-  return null;
-}
-
 // #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
   const { secret, isLoading } = useLocalFirstAuth();
@@ -60,8 +36,11 @@ export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(secret, config);
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
-      <DevToolsRegistration />
+    <JazzProvider
+      config={resolvedConfig}
+      wasmSchema={app.wasmSchema}
+      fallback={fallback ?? <p>Loading...</p>}
+    >
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>
