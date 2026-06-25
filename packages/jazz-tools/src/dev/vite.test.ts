@@ -152,13 +152,7 @@ describe("jazzPlugin", () => {
     expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
     expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
-          `http://127.0.0.1:${port}`,
-        )}&appId=${encodeURIComponent(fakeViteServer.config.env.VITE_JAZZ_APP_ID!)}&adminSecret=vite-test-admin`,
-      ),
-    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
 
     for (const handler of closeHandlers) {
       await handler();
