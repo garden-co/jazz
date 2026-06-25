@@ -1,5 +1,6 @@
-import { createContext, useContext, type JSX, type Accessor, Show } from "solid-js";
+import { createContext, useContext, type JSX, type Accessor, Show, createEffect } from "solid-js";
 import type { Session } from "../runtime/context.js";
+import type { WasmSchema } from "../index.js";
 import {
   isPendingSolidJazzClientReady,
   type SolidJazzClient,
@@ -11,15 +12,35 @@ type JazzClientContextValue = SolidJazzClient;
 
 export const JazzClientContext = createContext<JazzClientContextValue | undefined>(undefined);
 
+// Tracks db instances that already have devtools attached, so a manual
+// attachDevTools call elsewhere doesn't double-attach via the provider.
+const autoAttachedDbs = new WeakSet<object>();
+
 export type JazzProviderProps = {
   client: PendingSolidJazzClient;
   fallback?: JSX.Element;
   children: JSX.Element;
+  autoAttachDevTools?: boolean;
+  wasmSchema?: WasmSchema;
 };
 
 export function JazzProvider(props: JazzProviderProps) {
   const clientReady = () =>
     isPendingSolidJazzClientReady(props.client) ? props.client : undefined;
+
+  if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools !== false) {
+    createEffect(() => {
+      const client = clientReady();
+      if (!client || !props.wasmSchema) return;
+      const db = client.db;
+      if (autoAttachedDbs.has(db as object)) return;
+      autoAttachedDbs.add(db as object);
+      const wasmSchema = props.wasmSchema;
+      void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
+        attachDevTools({ db }, wasmSchema),
+      );
+    });
+  }
 
   return (
     <Show when={clientReady()} keyed fallback={props.fallback ?? null}>

@@ -2,8 +2,15 @@
 Makes a Jazz client available to descendant Svelte components through context.
 Pass a pre-created client or a promise that resolves to one.
 -->
+<script module lang="ts">
+	// Tracks db instances that already have devtools attached, so a manual
+	// attachDevTools call elsewhere doesn't double-attach via the provider.
+	const autoAttachedDbs = new WeakSet<object>();
+</script>
+
 <script lang="ts">
 	import type { Db } from '../runtime/db.js';
+	import type { WasmSchema } from '../index.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
 
@@ -11,9 +18,11 @@ Pass a pre-created client or a promise that resolves to one.
 		client: JazzClient | Promise<JazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
+		autoAttachDevTools?: boolean;
+		wasmSchema?: WasmSchema;
 	}
 
-	let { client, children, fallback }: Props = $props();
+	let { client, children, fallback, autoAttachDevTools = true, wasmSchema }: Props = $props();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
@@ -46,6 +55,20 @@ Pass a pre-created client or a promise that resolves to one.
 
 					ctx.session = session ?? null;
 				});
+
+				if (
+					process.env.NODE_ENV !== 'production' &&
+					autoAttachDevTools &&
+					wasmSchema &&
+					!autoAttachedDbs.has(resolved.db as object)
+				) {
+					const db = resolved.db;
+					const schema = wasmSchema;
+					autoAttachedDbs.add(db as object);
+					void import('../dev-tools/dev-tools.js').then(({ attachDevTools }) =>
+						attachDevTools({ db }, schema),
+					);
+				}
 			})
 			.catch((reason) => {
 				if (cancelled) {
