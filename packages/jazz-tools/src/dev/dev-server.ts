@@ -154,8 +154,8 @@ export async function startLocalJazzServer(
     port: server.port,
     url: server.url,
     dataDir: server.dataDir,
-    adminSecret: server.adminSecret ?? adminSecret,
-    backendSecret: server.backendSecret ?? backendSecret,
+    adminSecret: server.adminSecret,
+    backendSecret: server.backendSecret,
     stop,
   };
 }

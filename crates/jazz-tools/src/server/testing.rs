@@ -238,12 +238,10 @@ pub struct JazzServer {
     shutdown_task: Option<JoinHandle<()>>,
     port: u16,
     app_id: AppId,
-    data_dir: PathBuf,
-    admin_secret: Option<String>,
-    backend_secret: Option<String>,
-    default_client_user_id: String,
+    data_dir: ServerDataDir,
+    admin_secret: String,
+    backend_secret: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
-    _owned_data_dir: Option<OwnedTempDir>,
     embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
 }
@@ -283,11 +281,12 @@ impl JazzServer {
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
-        let (data_dir, owned_data_dir) = if persistent_storage {
-            prepare_data_dir(data_dir)
+        let data_dir = if persistent_storage {
+            ServerDataDir::persistent(data_dir)
         } else {
-            (PathBuf::new(), None)
+            ServerDataDir::in_memory()
         };
+        let storage_data_dir = data_dir.path().to_path_buf();
         let (jwks_url, embedded_jwks_server) = match jwks_url {
             Some(jwks_url) => (jwks_url, None),
             None => {
@@ -316,7 +315,7 @@ impl JazzServer {
         }
         let mut server_builder = apply_storage_mode(
             server_builder,
-            data_dir.clone(),
+            storage_data_dir,
             persistent_storage,
             sqlite_storage,
             rocksdb_storage,
@@ -330,16 +329,8 @@ impl JazzServer {
         }
         let built = server_builder.build().await.expect("build test server");
 
-        let mut server = Self::from_built(
-            built,
-            port,
-            app_id,
-            data_dir,
-            Some(admin_secret),
-            Some(backend_secret),
-        )
-        .await;
-        server._owned_data_dir = owned_data_dir;
+        let mut server =
+            Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await;
         server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
         server
@@ -354,9 +345,9 @@ impl JazzServer {
         built: BuiltServer,
         port: Option<u16>,
         app_id: AppId,
-        data_dir: PathBuf,
-        admin_secret: Option<String>,
-        backend_secret: Option<String>,
+        data_dir: ServerDataDir,
+        admin_secret: String,
+        backend_secret: String,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
             .await
@@ -389,9 +380,7 @@ impl JazzServer {
             data_dir,
             admin_secret,
             backend_secret,
-            default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
-            _owned_data_dir: None,
             embedded_jwks_server: None,
             auth_clock: crate::middleware::auth::AuthClock::default(),
         };
@@ -416,15 +405,11 @@ impl JazzServer {
     }
 
     pub fn admin_secret(&self) -> &str {
-        self.admin_secret
-            .as_deref()
-            .expect("JazzServer was started without an admin secret")
+        &self.admin_secret
     }
 
     pub fn backend_secret(&self) -> &str {
-        self.backend_secret
-            .as_deref()
-            .expect("JazzServer was started without a backend secret")
+        &self.backend_secret
     }
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
@@ -453,32 +438,12 @@ impl JazzServer {
         self.state.disconnect_candidates.read().await.len()
     }
 
-    pub fn built_in_jwt_helpers_available(&self) -> bool {
-        self.embedded_jwks_server.is_some()
-    }
-
-    pub fn uses_external_jwks(&self) -> bool {
-        !self.built_in_jwt_helpers_available()
-    }
-
-    pub fn ensure_built_in_jwt_helpers_available(&self) -> Result<(), &'static str> {
-        if self.built_in_jwt_helpers_available() {
-            Ok(())
-        } else {
-            Err(
-                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
-            )
-        }
-    }
-
     fn require_built_in_jwt_helpers(&self) {
-        if let Err(message) = self.ensure_built_in_jwt_helpers_available() {
-            panic!("{message}");
+        if self.embedded_jwks_server.is_none() {
+            panic!(
+                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            );
         }
-    }
-
-    pub fn make_client_context(&self, schema: Schema) -> AppContext {
-        self.make_client_context_for_user(schema, &self.default_client_user_id)
     }
 
     pub fn make_client_context_for_user(
@@ -516,9 +481,8 @@ impl JazzServer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+        self.data_dir.path()
     }
 
     pub async fn shutdown(mut self) {
@@ -575,6 +539,55 @@ impl Drop for JazzServer {
     }
 }
 
+pub struct ServerDataDir {
+    path: PathBuf,
+    _owned_temp: Option<OwnedTempDir>,
+}
+
+impl ServerDataDir {
+    pub fn in_memory() -> Self {
+        Self {
+            path: PathBuf::new(),
+            _owned_temp: None,
+        }
+    }
+
+    fn persistent(data_dir: Option<PathBuf>) -> Self {
+        match data_dir {
+            Some(path) => {
+                std::fs::create_dir_all(&path).expect("create test server data dir");
+                Self {
+                    path,
+                    _owned_temp: None,
+                }
+            }
+            None => {
+                let temp_dir = OwnedTempDir::new("jazz-tools-testing-server");
+                let path = temp_dir.path().to_path_buf();
+                Self {
+                    path,
+                    _owned_temp: Some(temp_dir),
+                }
+            }
+        }
+    }
+
+    pub fn from_path(path: PathBuf) -> Self {
+        if path.as_os_str().is_empty() {
+            Self::in_memory()
+        } else {
+            Self {
+                path,
+                _owned_temp: None,
+            }
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 struct OwnedTempDir {
     path: PathBuf,
 }
@@ -594,19 +607,6 @@ impl OwnedTempDir {
 impl Drop for OwnedTempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>) {
-    match data_dir {
-        Some(path) => {
-            std::fs::create_dir_all(&path).expect("create test server data dir");
-            (path, None)
-        }
-        None => {
-            let temp_dir = OwnedTempDir::new("jazz-tools-testing-server");
-            (temp_dir.path().to_path_buf(), Some(temp_dir))
-        }
     }
 }
 
@@ -700,8 +700,6 @@ mod tests {
         let server = JazzServer::start().await;
         let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
 
-        assert!(server.built_in_jwt_helpers_available());
-        assert!(!server.uses_external_jwks());
         assert!(context.jwt_token.is_some());
         assert!(context.admin_secret.is_none());
 
@@ -715,15 +713,6 @@ mod tests {
             .with_jwks_url(external_jwks.endpoint())
             .start()
             .await;
-
-        assert!(!server.built_in_jwt_helpers_available());
-        assert!(server.uses_external_jwks());
-        assert_eq!(
-            server.ensure_built_in_jwt_helpers_available(),
-            Err(
-                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
-            )
-        );
 
         let health = reqwest::Client::new()
             .get(format!("{}/health", server.base_url()))

@@ -26,7 +26,7 @@ mod testing;
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
-pub use testing::{JazzServer, JazzServerBuilder, TestJwtIssuer, TestJwtOptions};
+pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
