@@ -9,3 +9,10 @@ export {
   onDevToolsPortConnect,
   onDevToolsPortDisconnect,
 } from "./extension-panel.js";
+export {
+  setDevtoolsBridgeConnector,
+  resetDevtoolsBridgeConnector,
+  type DevtoolsBridgePort,
+  type DevtoolsBridgeConnector,
+} from "./extension-panel.js";
+export { createParentWindowBridgePort } from "./parent-window-port.js";
