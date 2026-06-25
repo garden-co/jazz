@@ -1,0 +1,5 @@
+# Enable web-sys's unstable OPFS APIs so opfs-btree can request the
+# `readwrite-unsafe` sync-access-handle mode in this benchmark build.
+# Scoped to the wasm target the bench compiles for.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

@@ -235,13 +235,18 @@ impl OpfsFile {
         const MAX_RETRIES: u32 = 12;
         const BASE_DELAY_MS: u32 = 50;
 
+        // Prefer the `readwrite-unsafe` access mode when the build enables it
+        // (cfg `web_sys_unstable_apis`).  It drops the per-file exclusive lock,
+        // which can reduce per-I/O overhead.  If the browser rejects the mode
+        // we fall back to the default exclusive `readwrite` handle.
+        let mut prefer_unsafe = true;
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = BASE_DELAY_MS * (1 << (attempt - 1));
                 sleep_ms(delay).await;
             }
-            match JsFuture::from(file.create_sync_access_handle()).await {
+            match JsFuture::from(request_handle(&file, prefer_unsafe)).await {
                 Ok(val) => {
                     let handle: web_sys::FileSystemSyncAccessHandle =
                         val.dyn_into().map_err(|_| {
@@ -262,10 +267,22 @@ impl OpfsFile {
                     });
                 }
                 Err(e) => {
-                    if !is_retryable_handle_conflict(&e) {
-                        return Err(map_js_error(e));
+                    if is_retryable_handle_conflict(&e) {
+                        last_err = Some(e);
+                        continue;
                     }
-                    last_err = Some(e);
+                    // A non-conflict error while requesting `readwrite-unsafe`
+                    // most likely means the browser doesn't support the mode —
+                    // retry once with the default exclusive handle.
+                    if prefer_unsafe {
+                        tracing::warn!(
+                            "readwrite-unsafe handle unavailable, falling back to default mode"
+                        );
+                        prefer_unsafe = false;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(map_js_error(e));
                 }
             }
         }
@@ -355,6 +372,31 @@ impl SyncFile for OpfsFile {
     fn flush(&self) -> Result<(), BTreeError> {
         self.inner.handle.flush().map_err(map_js_error)
     }
+}
+
+/// Build the promise that requests a sync access handle.
+///
+/// When the crate is built with `--cfg=web_sys_unstable_apis` and
+/// `prefer_unsafe` is set, this asks for the `readwrite-unsafe` access mode
+/// (no exclusive lock).  Otherwise — including any build without the unstable
+/// web-sys APIs — it requests the default exclusive `readwrite` handle.
+#[cfg(all(target_arch = "wasm32", web_sys_unstable_apis))]
+fn request_handle(file: &web_sys::FileSystemFileHandle, prefer_unsafe: bool) -> js_sys::Promise {
+    if prefer_unsafe {
+        let opts = web_sys::FileSystemSyncAccessHandleOptions::new();
+        opts.set_mode(web_sys::FileSystemSyncAccessHandleMode::ReadwriteUnsafe);
+        // The typed `Promise<FileSystemSyncAccessHandle>` is cast to the plain
+        // promise; the resolved value is `dyn_into`'d at the call site anyway.
+        file.create_sync_access_handle_with_options(&opts)
+            .unchecked_into()
+    } else {
+        file.create_sync_access_handle()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(web_sys_unstable_apis)))]
+fn request_handle(file: &web_sys::FileSystemFileHandle, _prefer_unsafe: bool) -> js_sys::Promise {
+    file.create_sync_access_handle()
 }
 
 #[cfg(target_arch = "wasm32")]

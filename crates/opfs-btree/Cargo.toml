@@ -30,7 +30,17 @@ web-sys = { version = "0.3", features = [
   "FileSystemFileHandle",
   "FileSystemGetFileOptions",
   "FileSystemSyncAccessHandle",
+  "FileSystemSyncAccessHandleOptions",
+  "FileSystemSyncAccessHandleMode",
   "FileSystemReadWriteOptions",
   "DomException",
+] }
+
+# `web_sys_unstable_apis` is an opt-in cfg (set via RUSTFLAGS) that exposes the
+# unstable OPFS access-mode APIs.  Declare it so referencing it in `file.rs`
+# doesn't trip the `unexpected_cfgs` lint on builds that don't set it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(web_sys_unstable_apis)',
 ] }
 
