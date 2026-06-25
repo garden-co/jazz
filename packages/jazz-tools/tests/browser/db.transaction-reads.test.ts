@@ -120,7 +120,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     const _txResult = tx.commit();
     // No need to wait in this case, because the Db is not connected to a server
-    // await _txResult.wait({ tier: "global" });
+    // await _txResult.wait();
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
@@ -238,7 +238,7 @@ describe("db exclusive transaction reads browser integration", () => {
         return "no writes needed";
       });
       expect(result.value).toEqual("no writes needed");
-      await expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
+      await expect(result.wait()).resolves.toEqual("no writes needed");
     });
 
     it("rolls back cleanly when an async transaction reads then throws before writing", async () => {
@@ -264,7 +264,7 @@ describe("db exclusive transaction reads browser integration", () => {
         return tx.insert(todos, { title: "Exclusive transaction", done: false });
       });
       // No need to wait in this case, because the Db is not connected to a server
-      // await txResult.wait({ tier: "global" });
+      // await txResult.wait();
       const insertedTodo = txResult.value;
 
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
@@ -325,8 +325,8 @@ describe("db exclusive transaction reads browser integration", () => {
     aliceTx.update(todos, base.id, { title: "Alice's title" });
     bobTx.update(todos, base.id, { title: "Bob's title" });
 
-    await aliceTx.commit().wait({ tier: "local" });
-    await expect(bobTx.commit().wait({ tier: "local" })).rejects.toThrow(
+    await aliceTx.commit().wait();
+    await expect(bobTx.commit().wait()).rejects.toThrow(
       "(transaction_conflict): row visible parent changed since transaction write was staged",
     );
 

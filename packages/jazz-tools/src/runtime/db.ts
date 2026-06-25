@@ -20,6 +20,8 @@ import type {
 import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
+  ExclusiveWriteHandle,
+  ExclusiveWriteResult,
   WriteResult,
   JazzClient,
   type MutationErrorEvent,
@@ -607,10 +609,18 @@ function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
   );
 }
 
-type RunInTransactionResult<TResult> =
+type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "exclusive"
+  ? ExclusiveWriteHandle
+  : WriteHandle;
+
+type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "exclusive"
+  ? ExclusiveWriteResult<TResult>
+  : WriteResult<TResult>;
+
+type RunInTransactionResult<TResult, TKind extends TransactionKind> =
   TResult extends PromiseLike<unknown>
-    ? Promise<WriteResult<Awaited<TResult>>>
-    : WriteResult<TResult>;
+    ? Promise<TransactionWriteResult<Awaited<TResult>, TKind>>
+    : TransactionWriteResult<TResult, TKind>;
 
 export type Scoped<TTransaction> = Omit<TTransaction, "commit" | "rollback">;
 
@@ -639,11 +649,27 @@ function createTransactionScope<TTransaction extends object>(
   }) as Scoped<TTransaction>;
 }
 
-export function runInTransaction<TResult>(
-  transaction: Transaction,
-  callback: (target: Scoped<Transaction>) => TResult,
+function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
+  transaction: Transaction<TKind>,
+  value: TResult,
+  transactionId: string,
+  client: JazzClient,
+): TransactionWriteResult<TResult, TKind> {
+  if (transaction.kind === "exclusive") {
+    return new ExclusiveWriteResult(value, transactionId, client) as TransactionWriteResult<
+      TResult,
+      TKind
+    >;
+  }
+
+  return new WriteResult(value, transactionId, client) as TransactionWriteResult<TResult, TKind>;
+}
+
+export function runInTransaction<TResult, TKind extends TransactionKind>(
+  transaction: Transaction<TKind>,
+  callback: (target: Scoped<Transaction<TKind>>) => TResult,
   client: JazzClient | (() => JazzClient),
-): RunInTransactionResult<TResult> {
+): RunInTransactionResult<TResult, TKind> {
   let value: TResult;
   try {
     const scope = createTransactionScope(transaction);
@@ -661,7 +687,8 @@ export function runInTransaction<TResult>(
     return value.then(
       (resolvedValue) => {
         const committed = transaction.commit();
-        return new WriteResult(
+        return createTransactionWriteResult(
+          transaction,
           resolvedValue as Awaited<TResult>,
           committed.transactionId,
           resultClient(),
@@ -675,22 +702,23 @@ export function runInTransaction<TResult>(
         }
         throw error;
       },
-    ) as RunInTransactionResult<TResult>;
+    ) as RunInTransactionResult<TResult, TKind>;
   }
   const committed = transaction.commit();
-  return new WriteResult(
+  return createTransactionWriteResult(
+    transaction,
     value,
     committed.transactionId,
     resultClient(),
-  ) as RunInTransactionResult<TResult>;
+  ) as RunInTransactionResult<TResult, TKind>;
 }
 
 /**
  * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
-export class Transaction {
+export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
-    readonly kind: TransactionKind,
+    readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly session?: Session,
     private readonly attribution?: string,
@@ -730,9 +758,16 @@ export class Transaction {
   /**
    * Commit this transaction.
    */
-  commit(): WriteHandle {
+  commit(): TransactionCommitHandle<TKind> {
     const { client, transactionId } = this.requireBinding("commit");
-    return client.commitTransaction(transactionId);
+    const committed = client.commitTransaction(transactionId);
+    if (this.kind === "exclusive") {
+      return new ExclusiveWriteHandle(
+        committed.transactionId,
+        client,
+      ) as TransactionCommitHandle<TKind>;
+    }
+    return committed as TransactionCommitHandle<TKind>;
   }
 
   /**
@@ -886,7 +921,9 @@ export class Transaction {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type TransactionScope = Scoped<Transaction>;
+export type TransactionScope<TKind extends TransactionKind = TransactionKind> = Scoped<
+  Transaction<TKind>
+>;
 
 interface BrokerPromotionState {
   leadershipId: number;
@@ -2368,7 +2405,7 @@ export class Db {
     return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
   }
 
-  private createTransaction(kind: TransactionKind): Transaction {
+  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     const context = this.getRuntimeOperationContext();
     return new Transaction(
       kind,
@@ -2385,7 +2422,7 @@ export class Db {
    *
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
-  beginTransaction(): Transaction {
+  beginTransaction(): Transaction<"mergeable"> {
     return this.createTransaction("mergeable");
   }
 
@@ -2396,7 +2433,7 @@ export class Db {
    *
    * Prefer using {@link Db.exclusiveTransaction} when an explicit commit is not required.
    */
-  beginExclusiveTransaction(): Transaction {
+  beginExclusiveTransaction(): Transaction<"exclusive"> {
     return this.createTransaction("exclusive");
   }
 
@@ -2406,11 +2443,13 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   transaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
+    callback: (tx: TransactionScope<"mergeable">) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
   transaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+    callback: (tx: TransactionScope<"mergeable">) => TResult,
+  ): WriteResult<TResult>;
+  transaction<TResult>(
+    callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInTransaction(
@@ -2426,12 +2465,14 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   exclusiveTransaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  exclusiveTransaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+    callback: (tx: TransactionScope<"exclusive">) => Promise<TResult>,
+  ): Promise<ExclusiveWriteResult<Awaited<TResult>>>;
   exclusiveTransaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    callback: (tx: TransactionScope<"exclusive">) => TResult,
+  ): ExclusiveWriteResult<TResult>;
+  exclusiveTransaction<TResult>(
+    callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
+  ): ExclusiveWriteResult<TResult> | Promise<ExclusiveWriteResult<Awaited<TResult>>> {
     const transaction = this.beginExclusiveTransaction();
     return runInTransaction(
       transaction,

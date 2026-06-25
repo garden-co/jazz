@@ -6735,7 +6735,7 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
 Jazz also allows grouping writes together using [transactions](#transactions).
-Writes made through an open transaction are not individually waitable. Call `.wait({ tier })` on the returned write result instead.
+Writes made through an open transaction are not individually waitable. Call `.wait()` on the returned write result instead.
 
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
 or `db.createFileFromStream(...)` and store the returned file ID on your own row.
