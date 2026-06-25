@@ -1,8 +1,13 @@
 {
-  "name": "inspector",
+  "name": "jazz-inspector",
   "version": "0.0.0",
-  "private": true,
+  "files": [
+    "dist-embedded"
+  ],
   "type": "module",
+  "exports": {
+    "./dist-embedded/*": "./dist-embedded/*"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && pnpm run build:web && pnpm run build:extension",
