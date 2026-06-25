@@ -1,5 +1,14 @@
 # jazz-wasm
 
+## 2.0.0-alpha.52
+
+### Patch Changes
+
+- ec543e3: Improve browser OPFS B-tree persistence performance with append-only WAL flushes, raw-page tree descents, pinned-aware cache eviction, and deferred page checksums.
+- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one OPFS-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
+
+  **Breaking change — browser support:** persistent browser mode now requires `SharedWorker`, `MessageChannel`, and Web Locks support. Browsers or embedded webviews missing those capabilities will reject `createDb()`/`createJazzClient()` startup for persistent storage instead of using the previous BroadcastChannel tab-election path. Use a supported browser runtime for persistent local storage, or switch to the memory driver with a `serverUrl` in unsupported environments.
+
 ## 2.0.0-alpha.51
 
 ### Patch Changes
