@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.52
+
+### Patch Changes
+
+- fc12a85: Removed `TestingServer` and `pushSchemaCatalogue` from `jazz-tools/testing` exports and consolidated `startLocalJazzServer` and `deploy` as the canonical way of starting a Jazz sync server and publishing schema changes.
+
 ## 2.0.0-alpha.51
 
 ### Patch Changes
