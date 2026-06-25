@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
+import type { WasmSchema } from "../index.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -26,14 +27,40 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
+// Tracks db instances that already have devtools attached, so a manual
+// attachDevTools call elsewhere doesn't double-attach via the provider.
+const autoAttachedDbs = new WeakSet<object>();
+
+function DevToolsAutoAttach({ wasmSchema }: { wasmSchema?: WasmSchema }) {
+  const { db } = useCoreJazzClient() as JazzClientContextValue;
+  useEffect(() => {
+    if (!wasmSchema || autoAttachedDbs.has(db as object)) return;
+    autoAttachedDbs.add(db as object);
+    void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
+      attachDevTools({ db }, wasmSchema),
+    );
+  }, [db, wasmSchema]);
+  return null;
+}
+
 export type JazzProviderProps = {
   config: DbConfig;
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
+  autoAttachDevTools?: boolean;
+  wasmSchema?: WasmSchema;
 };
 
-export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+export function JazzProvider({
+  config,
+  fallback,
+  children,
+  onJWTExpired,
+  autoAttachDevTools,
+  wasmSchema,
+}: JazzProviderProps) {
+  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
     <CoreJazzProvider
       config={config}
@@ -41,6 +68,7 @@ export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzP
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
     >
+      {shouldAutoAttach ? <DevToolsAutoAttach wasmSchema={wasmSchema} /> : null}
       {children}
     </CoreJazzProvider>
   );
