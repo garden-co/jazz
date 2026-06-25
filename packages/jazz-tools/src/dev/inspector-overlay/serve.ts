@@ -24,7 +24,7 @@ const ext = (p: string) => {
   return i === -1 ? "" : p.slice(i);
 };
 
-function resolveEmbeddedDir(appRoot: string): string | null {
+export function resolveEmbeddedDir(appRoot: string): string | null {
   try {
     const requireFromApp = createRequire(join(appRoot, "noop.js"));
     // Resolve an existing emitted file (the build outputs embedded.html, not index.html).
@@ -35,7 +35,7 @@ function resolveEmbeddedDir(appRoot: string): string | null {
 }
 
 let loaderScriptPromise: Promise<string> | null = null;
-function getLoaderScript(): Promise<string> {
+export function bundleOverlayLoaderScript(): Promise<string> {
   if (!loaderScriptPromise) {
     const here = dirname(fileURLToPath(import.meta.url));
     const tsEntry = join(here, "loader.ts");
@@ -67,7 +67,7 @@ export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
     const url = (req.url ?? "").split("?")[0];
     if (url === OVERLAY_LOADER_PATH) {
       res.setHeader("Content-Type", MIME[".js"]);
-      res.end(await getLoaderScript());
+      res.end(await bundleOverlayLoaderScript());
       return true;
     }
     if (url === OVERLAY_EMBEDDED_PREFIX || url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
