@@ -450,7 +450,7 @@ export class PersistedWriteRejectedError extends Error {
 }
 
 /**
- * Returned by upsert, update, delete, and explicitly-committed transaction operations.
+ * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
  */
 export class WriteHandle<T = void> {
@@ -504,6 +504,43 @@ export class WriteResult<T> extends WriteHandle<T> {
 
   mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
     return new WriteResult(transformValue(this.value), this.transactionId, this.client());
+  }
+}
+
+/**
+ * Returned by explicitly-committed exclusive transactions.
+ *
+ * Exclusive transactions are accepted or rejected by the global authority, so
+ * callers do not choose a durability tier when waiting for confirmation.
+ */
+export class ExclusiveWriteHandle extends WriteHandle<void> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   */
+  override async wait(): Promise<void> {
+    await this.client().waitForExclusiveTransaction(this.transactionId);
+  }
+}
+
+/**
+ * Returned by auto-committed exclusive transactions.
+ */
+export class ExclusiveWriteResult<T> extends WriteResult<T> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * @returns the callback result.
+   */
+  override async wait(): Promise<T> {
+    await this.client().waitForExclusiveTransaction(this.transactionId);
+    return this.value;
+  }
+
+  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+    return new ExclusiveWriteResult(transformValue(this.value), this.transactionId, this.client());
   }
 }
 
@@ -1041,6 +1078,11 @@ export class JazzClient {
     } catch (error) {
       throw this.normalizeTransactionWaitError(error);
     }
+  }
+
+  /** @internal */
+  async waitForExclusiveTransaction(transactionId: TransactionId): Promise<void> {
+    await this.waitForTransaction(transactionId, this.context.serverUrl ? "global" : "local");
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {

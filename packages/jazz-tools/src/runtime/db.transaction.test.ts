@@ -81,6 +81,21 @@ describe("Db transactions", () => {
     expect(result.value).toBe("mergeable");
   });
 
+  it("types exclusive transaction waits without durability options", () => {
+    if (false) {
+      const result = db.exclusiveTransaction((tx) => tx.kind);
+      void result.wait();
+      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
+      void result.wait({ tier: "global" });
+
+      const tx = db.beginExclusiveTransaction();
+      const committed = tx.commit();
+      void committed.wait();
+      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
+      void committed.wait({ tier: "global" });
+    }
+  });
+
   it("throws when committing a db transaction before any actions", () => {
     const tx = db.beginExclusiveTransaction();
 
