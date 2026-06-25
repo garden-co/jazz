@@ -57,7 +57,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
-    JazzServer as CoreJazzServer, ServerBuilder, StorageBackend,
+    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
@@ -224,8 +224,8 @@ struct JazzServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
-    backend_secret: Option<String>,
-    admin_secret: Option<String>,
+    backend_secret: String,
+    admin_secret: String,
     upstream_url: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
@@ -1036,12 +1036,6 @@ impl TestJwtIssuer {
 #[napi]
 pub struct JazzServer {
     inner: Mutex<Option<CoreJazzServer>>,
-    app_id: String,
-    url: String,
-    port: u16,
-    data_dir: String,
-    backend_secret: Option<String>,
-    admin_secret: Option<String>,
 }
 
 #[napi]
@@ -1049,7 +1043,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1062,8 +1056,8 @@ impl JazzServer {
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
-            backend_secret: opts.backend_secret.clone(),
-            admin_secret: opts.admin_secret.clone(),
+            backend_secret: Some(opts.backend_secret.clone()),
+            admin_secret: Some(opts.admin_secret.clone()),
             ..Default::default()
         };
 
@@ -1098,55 +1092,45 @@ impl JazzServer {
             built,
             opts.port,
             app_id,
-            data_dir_path,
+            ServerDataDir::from_path(data_dir_path),
             opts.admin_secret.clone(),
             opts.backend_secret.clone(),
         )
         .await;
 
-        let url = server.base_url();
-        let port = server.port();
-        let resolved_data_dir = server.data_dir().to_string_lossy().into_owned();
-
         Ok(Self {
             inner: Mutex::new(Some(server)),
-            app_id: app_id.to_string(),
-            url,
-            port,
-            data_dir: resolved_data_dir,
-            backend_secret: opts.backend_secret,
-            admin_secret: opts.admin_secret,
         })
     }
 
     #[napi(getter, js_name = "appId")]
-    pub fn app_id(&self) -> String {
-        self.app_id.clone()
+    pub fn app_id(&self) -> napi::Result<String> {
+        self.with_server(|server| server.app_id().to_string())
     }
 
     #[napi(getter)]
-    pub fn url(&self) -> String {
-        self.url.clone()
+    pub fn url(&self) -> napi::Result<String> {
+        self.with_server(|server| server.base_url())
     }
 
     #[napi(getter)]
-    pub fn port(&self) -> u16 {
-        self.port
+    pub fn port(&self) -> napi::Result<u16> {
+        self.with_server(|server| server.port())
     }
 
     #[napi(getter, js_name = "dataDir")]
-    pub fn data_dir(&self) -> String {
-        self.data_dir.clone()
+    pub fn data_dir(&self) -> napi::Result<String> {
+        self.with_server(|server| server.data_dir().to_string_lossy().into_owned())
     }
 
     #[napi(getter, js_name = "backendSecret")]
-    pub fn backend_secret(&self) -> Option<String> {
-        self.backend_secret.clone()
+    pub fn backend_secret(&self) -> napi::Result<String> {
+        self.with_server(|server| server.backend_secret().to_string())
     }
 
     #[napi(getter, js_name = "adminSecret")]
-    pub fn admin_secret(&self) -> Option<String> {
-        self.admin_secret.clone()
+    pub fn admin_secret(&self) -> napi::Result<String> {
+        self.with_server(|server| server.admin_secret().to_string())
     }
 
     #[napi]
@@ -1162,6 +1146,17 @@ impl JazzServer {
         }
 
         Ok(())
+    }
+
+    fn with_server<T>(&self, f: impl FnOnce(&CoreJazzServer) -> T) -> napi::Result<T> {
+        let server = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let server = server
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("JazzServer has been stopped"))?;
+        Ok(f(server))
     }
 }
 

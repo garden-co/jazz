@@ -204,12 +204,15 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 async fn jazz_tools_cli_two_clients_sync_values() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(schema))
-        .await
-        .expect("connect client b");
+    let client_a = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "sync-values-user"),
+    )
+    .await
+    .expect("connect client a");
+    let client_b =
+        JazzClient::connect(server.make_client_context_for_user(schema, "sync-values-user"))
+            .await
+            .expect("connect client b");
 
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
@@ -279,12 +282,16 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(schema))
-        .await
-        .expect("connect client b");
+    let client_a = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "update-through-server-user"),
+    )
+    .await
+    .expect("connect client a");
+    let client_b = JazzClient::connect(
+        server.make_client_context_for_user(schema, "update-through-server-user"),
+    )
+    .await
+    .expect("connect client b");
 
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
@@ -347,12 +354,16 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results(
 async fn delete_through_one_client_removes_row_from_peer_query_results() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(schema))
-        .await
-        .expect("connect client b");
+    let client_a = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "delete-through-server-user"),
+    )
+    .await
+    .expect("connect client a");
+    let client_b = JazzClient::connect(
+        server.make_client_context_for_user(schema, "delete-through-server-user"),
+    )
+    .await
+    .expect("connect client b");
 
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
@@ -411,9 +422,11 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
         &schema,
     )
     .await;
-    let client = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect writer");
+    let client = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "external-id-writer"),
+    )
+    .await
+    .expect("connect writer");
 
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
@@ -466,9 +479,11 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
         &schema,
     )
     .await;
-    let client = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect writer");
+    let client = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "external-id-provenance-writer"),
+    )
+    .await
+    .expect("connect writer");
 
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
@@ -539,9 +554,11 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
         &schema,
     )
     .await;
-    let client = JazzClient::connect(server.make_client_context(schema.clone()))
-        .await
-        .expect("connect writer");
+    let client = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), "external-id-upsert-writer"),
+    )
+    .await
+    .expect("connect writer");
 
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
