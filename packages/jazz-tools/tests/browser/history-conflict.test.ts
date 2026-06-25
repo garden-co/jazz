@@ -19,9 +19,9 @@ import {
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
 import {
-  getTestingServerInfo,
-  unblockTestingServerNetwork,
-  type TestingServerInfo,
+  getJazzServerInfo,
+  unblockJazzServerNetwork,
+  type JazzServerInfo,
 } from "./testing-server.js";
 import {
   TestCleanup,
@@ -72,12 +72,12 @@ const allTodos = makeQuery<Todo>("todos", schema);
 
 describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
-  let testingServer: TestingServerInfo;
+  let testingServer: JazzServerInfo;
   afterEach(() => ctx.cleanup());
   beforeEach(async () => {
-    testingServer = await getTestingServerInfo(uniqueDbName("history-conflict-app"));
+    testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
     const { appId, serverUrl, adminSecret } = testingServer;
-    await unblockTestingServerNetwork(serverUrl);
+    await unblockJazzServerNetwork(serverUrl);
     const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
       appId,
       adminSecret,
@@ -459,7 +459,7 @@ async function createReadySyncedDb(
   ctx: TestCleanup,
   label: string,
   secret: string,
-  testingServer: TestingServerInfo,
+  testingServer: JazzServerInfo,
 ): Promise<Db> {
   const db = await createSyncedDb(ctx, label, secret, testingServer);
   const warmupTitle = `warmup-${label}-${Date.now()}`;

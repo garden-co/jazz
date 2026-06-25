@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
-import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { TEST_ADMIN_SECRET, TEST_APP_ID } from "./test-constants.js";
 
 function requireEnv(name: string): string {
@@ -14,7 +14,7 @@ function requireEnv(name: string): string {
 }
 
 let jwksServer: Server | null = null;
-let jazzServer: Promise<TestingServer> | null = null;
+let jazzServer: Promise<LocalJazzServerHandle> | null = null;
 
 export async function setup(): Promise<void> {
   if (jazzServer) return;
@@ -36,7 +36,7 @@ export async function setup(): Promise<void> {
 
   const jwksUrl = `http://127.0.0.1:${jwksPort}/.well-known/jwks.json`;
 
-  jazzServer = TestingServer.start({
+  jazzServer = startLocalJazzServer({
     appId: TEST_APP_ID,
     port: jazzPort,
     adminSecret: TEST_ADMIN_SECRET,
@@ -45,7 +45,7 @@ export async function setup(): Promise<void> {
 
   const handle = await jazzServer;
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: handle.url,
     appId: handle.appId,
     adminSecret: handle.adminSecret,

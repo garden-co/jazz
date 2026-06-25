@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{Query, QueryBuilder, Value};
 
 use crate::common::{
@@ -117,7 +117,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 #[tokio::test]
 async fn subscribe_all_only_returns_rows_that_match_query() {
     let schema = subscription_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -332,7 +332,7 @@ async fn subscribe_all_supports_condition_filters() {
     }
 
     let schema = subscription_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

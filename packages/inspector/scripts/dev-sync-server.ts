@@ -1,11 +1,9 @@
 import { join } from "node:path";
-import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import {
   ADMIN_SECRET,
   APP_ID,
   SEEDED_TODO_COUNT,
-  TEST_BRANCH,
-  TEST_ENV,
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
@@ -14,19 +12,17 @@ import { createJazzContext } from "jazz-tools/backend";
 const SEED_BATCH_SIZE = 50;
 
 export default async function runServer() {
-  const serverHandle = await TestingServer.start({
+  const serverHandle = await startLocalJazzServer({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
     backendSecret: "test",
   });
 
-  await pushSchemaCatalogue({
+  await deploy({
     serverUrl: serverHandle.url,
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
-    env: TEST_ENV,
-    userBranch: TEST_BRANCH,
     schemaDir: join(import.meta.dirname, "../tests/browser"),
   });
 

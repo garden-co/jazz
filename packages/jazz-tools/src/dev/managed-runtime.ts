@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
+import { shortSchemaHash } from "./catalogue.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -347,16 +348,16 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }
 
-        const { pushSchemaCatalogue } = await import("./dev-server.js");
+        const { deploy } = await import("./dev-server.js");
         try {
-          const initialPush = await pushSchemaCatalogue({
+          const initialDeploy = await deploy({
             serverUrl,
             appId,
             adminSecret,
             schemaDir,
           });
           console.log(`${LOG_PREFIX} schema published`);
-          await options.onSchemaPush?.(initialPush.hash);
+          await options.onSchemaPush?.(initialDeploy.schema.hash);
         } catch (error) {
           if (usesExistingServer && isSchemaPushNetworkError(error)) {
             warnInitialSchemaPushSkipped({
@@ -376,7 +377,7 @@ export class ManagedDevRuntime {
           appId,
           adminSecret,
           onPush: async (hash) => {
-            console.log(`${LOG_PREFIX} schema updated (${hash.slice(0, 12)})`);
+            console.log(`${LOG_PREFIX} schema updated (${shortSchemaHash(hash)})`);
             await options.onSchemaPush?.(hash);
           },
           onError: (error) => {

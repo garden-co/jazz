@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
     SchemaBuilder, TableSchema, Value,
@@ -52,7 +52,7 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 async fn concurrent_updates_resolve_to_lww_winner() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -172,7 +172,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 async fn concurrent_creates_both_survive() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -257,7 +257,7 @@ async fn concurrent_creates_both_survive() {
 async fn rapid_concurrent_updates_converge() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -377,7 +377,7 @@ async fn rapid_concurrent_updates_converge() {
 async fn fresh_client_sees_lww_winner_after_conflict() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -530,7 +530,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 async fn subscription_reflects_concurrent_update() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -599,7 +599,7 @@ async fn subscription_reflects_concurrent_update() {
 async fn sequential_updates_preserve_latest() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -690,7 +690,7 @@ async fn sequential_updates_preserve_latest() {
 async fn concurrent_edits_on_different_fields() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -820,7 +820,7 @@ async fn concurrent_edits_on_different_fields() {
 async fn post_conflict_update_rebases_on_merged_preview() {
     let _suite_guard = lock_history_conflict_suite().await;
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -950,7 +950,7 @@ async fn post_conflict_update_rebases_on_merged_preview() {
 }
 
 struct OfflineReconnectBaseline {
-    server: TestingServer,
+    server: JazzServer,
     alice: JazzClient,
     bob: JazzClient,
     bob_ctx: AppContext,
@@ -963,7 +963,7 @@ async fn establish_offline_reconnect_baseline(
     bob_user_id: &str,
 ) -> OfflineReconnectBaseline {
     let schema = test_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)

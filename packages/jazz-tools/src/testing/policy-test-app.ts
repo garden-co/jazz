@@ -7,7 +7,7 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../runtime/schema-fetch.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "./local-jazz-server.js";
+import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
 type ExpectLike = (value: unknown) => {

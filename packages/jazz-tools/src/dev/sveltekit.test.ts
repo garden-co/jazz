@@ -15,6 +15,13 @@ const originalJazzServerUrl = process.env.PUBLIC_JAZZ_SERVER_URL;
 const originalJazzTelemetryCollectorUrl = process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalBackendSecret = process.env.BACKEND_SECRET;
 
+function deployed(hash = "abc123def4567890") {
+  return {
+    schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    warnings: [],
+  };
+}
+
 function makeViteServer(
   command: "serve" | "build",
   root = "/tmp/jazz-sveltekit-test",
@@ -129,9 +136,11 @@ describe("jazzSvelteKit", () => {
       port: 19882,
       url: "http://127.0.0.1:19882",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-top-level-telemetry-test-");
@@ -161,9 +170,11 @@ describe("jazzSvelteKit", () => {
       port: 19990,
       url: "http://127.0.0.1:19990",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-config-hook-");
@@ -194,9 +205,11 @@ describe("jazzSvelteKit", () => {
       port: 19991,
       url: "http://127.0.0.1:19991",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-no-restart-");
@@ -244,12 +257,11 @@ describe("jazzSvelteKit", () => {
       port: 19998,
       url: "http://127.0.0.1:19998",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({
@@ -266,11 +278,11 @@ describe("jazzSvelteKit", () => {
       port: 19995,
       url: "http://127.0.0.1:19995",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-jwks-test-");
@@ -301,11 +313,11 @@ describe("jazzSvelteKit", () => {
       port: 19994,
       url: "http://127.0.0.1:19994",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     try {
@@ -340,9 +352,7 @@ describe("jazzSvelteKit", () => {
     process.env.PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000010";
 
     vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({ adminSecret: "env-test-admin" });
@@ -350,7 +360,7 @@ describe("jazzSvelteKit", () => {
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
-    expect(devServer.pushSchemaCatalogue).toHaveBeenCalledWith(
+    expect(devServer.deploy).toHaveBeenCalledWith(
       expect.objectContaining({
         serverUrl: "http://jazz-test-server:4000",
         appId: "00000000-0000-0000-0000-000000000010",
@@ -361,9 +371,7 @@ describe("jazzSvelteKit", () => {
 
   it("connects to an existing server via options.server string URL", async () => {
     vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({
@@ -374,7 +382,7 @@ describe("jazzSvelteKit", () => {
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
-    expect(devServer.pushSchemaCatalogue).toHaveBeenCalledWith(
+    expect(devServer.deploy).toHaveBeenCalledWith(
       expect.objectContaining({
         serverUrl: "http://explicit-server:5000",
         appId: "00000000-0000-0000-0000-000000000020",
@@ -417,9 +425,11 @@ describe("jazzSvelteKit", () => {
       port: 19890,
       url: "http://127.0.0.1:19890",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc123def4567890"));
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
       capturedOnPush = opts.onPush;
@@ -452,9 +462,11 @@ describe("jazzSvelteKit", () => {
       port: 19996,
       url: "http://127.0.0.1:19996",
       dataDir: undefined as unknown as string,
+      adminSecret: "test-admin-secret",
+      backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(new Error("schema push failed"));
+    vi.spyOn(devServer, "deploy").mockRejectedValue(new Error("schema push failed"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-hmr-test-");

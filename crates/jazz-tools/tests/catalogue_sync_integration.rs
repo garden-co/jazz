@@ -15,7 +15,7 @@ use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::query_manager::types::TablePolicies;
 use jazz_tools::row_input;
 use jazz_tools::schema_manager::{Lens, LensOp, LensTransform, generate_lens};
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
@@ -485,7 +485,7 @@ struct PermissionsHeadHttpResponse {
     head: Option<PublishedPermissionsHead>,
 }
 
-async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Schema) {
+async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz_tools::Schema) {
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -534,19 +534,19 @@ async fn assert_edge_query_does_not_include_row(
 //          |
 //          | publish/read catalogue over HTTP
 //          v
-//   edge TestingServer
+//   edge JazzServer
 //          |
 //          | forwards after local admin-secret validation
 //          v
-//   core TestingServer
+//   core JazzServer
 //
 // The assertions verify that writes sent to the edge are persisted by the real
 // core, and reads sent to the edge return the core catalogue state.
 #[tokio::test]
 async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
-    let app_id = TestingServer::default_app_id();
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
-    let edge = TestingServer::builder()
+    let app_id = JazzServer::default_app_id();
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .start()
@@ -664,19 +664,19 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
 //          |
 //          | publish migration over HTTP
 //          v
-//   edge TestingServer
+//   edge JazzServer
 //          |
 //          | forwards POST /admin/migrations after local admin-secret validation
 //          v
-//   core TestingServer
+//   core JazzServer
 //
 // The assertions verify that the migration is installed by the real core and
 // becomes observable both directly on core and through the edge.
 #[tokio::test]
 async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge() {
-    let app_id = TestingServer::default_app_id();
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
-    let edge = TestingServer::builder()
+    let app_id = JazzServer::default_app_id();
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .start()
@@ -785,7 +785,7 @@ async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_ed
 /// published, then expose rows once an explicit head is installed.
 #[tokio::test]
 async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
 
@@ -861,7 +861,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 
 #[tokio::test]
 async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
@@ -1029,7 +1029,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
 
 #[tokio::test]
 async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
@@ -1117,7 +1117,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
 
 #[tokio::test]
 async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
@@ -1235,7 +1235,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 /// ```
 #[tokio::test]
 async fn column_addition_new_client_can_read_old_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let target_schema = schema_v2();
 
     // === Push v2 schema + lens to server through the real sync pipeline ===
@@ -1319,7 +1319,7 @@ async fn column_addition_new_client_can_read_old_rows() {
 
 #[tokio::test]
 async fn cannot_read_from_old_schema_until_lens_is_added() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
 
@@ -1427,7 +1427,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
 
 #[tokio::test]
 async fn draft_lens_does_not_make_rows_from_old_schema_visible() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = draft_lens_schema_v1();
     let v2_schema = draft_lens_schema_v2();
     let draft_lens = draft_lens_v1_to_v2();
@@ -1522,7 +1522,7 @@ async fn draft_lens_does_not_make_rows_from_old_schema_visible() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_additions_new_client_can_read_old_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v3_schema = schema_v3();
 
     push_catalogue_in_memory(
@@ -1672,7 +1672,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_renames_new_client_can_read_old_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
     let v3_schema = rename_chain_schema_v3();
@@ -1754,7 +1754,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_renames_old_client_can_read_new_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
     let v3_schema = rename_chain_schema_v3();
@@ -1833,7 +1833,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
 /// ```
 #[tokio::test]
 async fn table_rename_new_client_can_read_old_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -1907,7 +1907,7 @@ async fn table_rename_new_client_can_read_old_rows() {
 /// rename lens.
 #[tokio::test]
 async fn table_rename_subscription_reacts_to_old_branch_updates() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -2005,7 +2005,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
 /// Alice's old subscription receives the row through the table rename lens.
 #[tokio::test]
 async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -2120,7 +2120,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
 
 #[tokio::test]
 async fn table_rename_update_and_delete_copy_on_write() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
     let v2_branch = format!("client-{}-main", SchemaHash::compute(&v2_schema).short());
@@ -2227,7 +2227,7 @@ async fn table_rename_update_and_delete_copy_on_write() {
 
 #[tokio::test]
 async fn table_rename_join_query_translates_join_target_on_old_branch() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
@@ -2316,7 +2316,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
 
 #[tokio::test]
 async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
@@ -2408,7 +2408,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
 
 #[tokio::test]
 async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let legacy_schema = legacy_join_provenance_schema();
     let current_schema = current_join_provenance_permission_schema();
 
@@ -2532,7 +2532,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 
 #[tokio::test]
 async fn multi_hop_table_renames_and_column_rename() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = multi_hop_table_rename_schema_v1();
     let v2_schema = multi_hop_table_rename_schema_v2();
     let v3_schema = multi_hop_table_rename_schema_v3();
@@ -2672,7 +2672,7 @@ async fn multi_hop_table_renames_and_column_rename() {
 /// removed in v2.
 #[tokio::test]
 async fn removed_table_then_readded_does_not_resurface_old_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let v1_schema = removed_readded_schema_v1();
     let v2_schema = removed_readded_schema_v2();
     let v3_schema = removed_readded_schema_v3();
@@ -2788,7 +2788,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
 /// ```
 #[tokio::test]
 async fn column_addition_old_client_can_read_new_rows() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let target_schema = schema_v2();
 
     // Seed the server with both schemas and the v1<->v2 lens before clients connect.
@@ -2881,7 +2881,7 @@ async fn column_addition_old_client_can_read_new_rows() {
 
 #[tokio::test]
 async fn keeps_authorization_through_v1_head() {
-    let server = TestingServer::start().await;
+    let server = JazzServer::start().await;
     let query = QueryBuilder::new("users").build();
     let v1_schema = schema_v1();
     push_catalogue_in_memory(

@@ -37,6 +37,13 @@ function setStdoutIsTTY(isTTY: boolean): void {
   });
 }
 
+function deployed(hash = "abc123def4567890") {
+  return {
+    schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    warnings: [],
+  };
+}
+
 beforeEach(() => {
   delete process.env.VITE_JAZZ_APP_ID;
   delete process.env.VITE_JAZZ_SERVER_URL;
@@ -85,9 +92,10 @@ describe("ManagedDevRuntime", () => {
       url: "http://127.0.0.1:19883",
       dataDir: join(schemaDir, "node_modules", ".cache", "jazz-dev-server"),
       adminSecret: "noninteractive-admin",
+      backendSecret: "noninteractive-backend",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const runtime = makeRuntime();
@@ -113,7 +121,7 @@ describe("ManagedDevRuntime", () => {
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
     const startLocalJazzServer = vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(makeFetchFailedError("ENOTFOUND"));
+    vi.spyOn(devServer, "deploy").mockRejectedValue(makeFetchFailedError("ENOTFOUND"));
     const watchSchema = vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({
       close: vi.fn(),
     });
@@ -154,7 +162,7 @@ describe("ManagedDevRuntime", () => {
     process.env.VITE_JAZZ_SERVER_URL = "https://v2.sync.jazz.tools/";
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(
+    vi.spyOn(devServer, "deploy").mockRejectedValue(
       new Error("Schema publish failed: 401 Unauthorized"),
     );
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -172,7 +180,7 @@ describe("ManagedDevRuntime", () => {
     process.env.VITE_JAZZ_SERVER_URL = "https://v2.sync.jazz.tools/";
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(
+    vi.spyOn(devServer, "deploy").mockRejectedValue(
       new Error("getaddrinfo ENOTFOUND v2.sync.jazz.tools"),
     );
     vi.spyOn(console, "error").mockImplementation(() => {});

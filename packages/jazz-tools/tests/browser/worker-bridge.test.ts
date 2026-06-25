@@ -22,12 +22,11 @@ import {
   withTimeout,
 } from "./support.js";
 import {
-  blockTestingServerNetwork,
-  getTestingServerInfo,
-  getTestingServerJwtForUser,
-  getTestingServerNetworkDebug,
-  type TestingServerInfo,
-  unblockTestingServerNetwork,
+  blockJazzServerNetwork,
+  getJazzServerInfo,
+  getJazzServerJwtForUser,
+  type JazzServerInfo,
+  unblockJazzServerNetwork,
 } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
@@ -192,68 +191,6 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
       return [...events];
     },
   };
-}
-
-function getDbWorkerDebugState(db: Db): Record<string, unknown> {
-  const anyDb = db as unknown as {
-    tabRole?: unknown;
-    tabId?: unknown;
-    currentLeadershipId?: unknown;
-    activeRemoteLeaderTabId?: unknown;
-    primaryDbName?: unknown;
-    workerDbName?: unknown;
-    workerBridge?: {
-      state?: {
-        phase?: unknown;
-        workerClientId?: unknown;
-        expectsUpstreamServer?: unknown;
-        upstreamServerConnected?: unknown;
-        resolveUpstreamServerReady?: unknown;
-        serverPayloadForwarder?: unknown;
-        pendingSyncPayloadsForWorker?: unknown[];
-      };
-    } | null;
-  };
-  const bridgeState = anyDb.workerBridge?.state;
-
-  return {
-    tabRole: anyDb.tabRole,
-    tabId: anyDb.tabId,
-    currentLeadershipId: anyDb.currentLeadershipId,
-    activeRemoteLeaderTabId: anyDb.activeRemoteLeaderTabId,
-    primaryDbName: anyDb.primaryDbName,
-    workerDbName: anyDb.workerDbName,
-    bridge: bridgeState
-      ? {
-          phase: bridgeState.phase,
-          workerClientId: bridgeState.workerClientId,
-          expectsUpstreamServer: bridgeState.expectsUpstreamServer,
-          upstreamServerConnected: bridgeState.upstreamServerConnected,
-          waitingForUpstreamServer: Boolean(bridgeState.resolveUpstreamServerReady),
-          hasServerPayloadForwarder: Boolean(bridgeState.serverPayloadForwarder),
-          pendingSyncPayloadsForWorker: bridgeState.pendingSyncPayloadsForWorker?.length ?? 0,
-        }
-      : null,
-  };
-}
-
-async function rethrowWithWorkerDiagnostics(
-  label: string,
-  error: unknown,
-  serverUrl: string,
-  dbs: Array<{ name: string; db: Db; probe?: WorkerMessageProbe }>,
-): Promise<never> {
-  const network = await getTestingServerNetworkDebug(serverUrl);
-  const diagnostics = {
-    network,
-    dbs: dbs.map(({ name, db, probe }) => ({
-      name,
-      state: getDbWorkerDebugState(db),
-      recentWorkerMessages: probe?.snapshot() ?? [],
-    })),
-  };
-  const message = error instanceof Error ? error.message : String(error);
-  throw new Error(`${label}: ${message}\nDiagnostics: ${JSON.stringify(diagnostics, null, 2)}`);
 }
 
 /** QueryBuilder that selects all todos. */
@@ -1320,7 +1257,7 @@ describe("Worker Bridge with OPFS", () => {
         },
         serverUrl,
         adminSecret,
-        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt", undefined, appId),
+        jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
       }),
     );
 
@@ -1977,9 +1914,9 @@ describe("Worker Bridge with OPFS", () => {
       20000,
     );
 
-    await blockTestingServerNetwork(serverUrl);
+    await blockJazzServerNetwork(serverUrl);
     await sleep(500);
-    await unblockTestingServerNetwork(serverUrl);
+    await unblockJazzServerNetwork(serverUrl);
     await sleep(250);
 
     (dbA as any).sendLifecycleHint?.("freeze");
@@ -2037,16 +1974,9 @@ describe("Worker Bridge with OPFS", () => {
         "Writer sees baseline row at edge before blocking",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Writer baseline edge read failed before network block",
-          error,
-          serverUrl,
-          [{ name: "writer", db: dbWriter, probe: writerProbe }],
-        ),
       );
 
-      await blockTestingServerNetwork(serverUrl);
+      await blockJazzServerNetwork(serverUrl);
       await sleep(250);
 
       const dbProbe = await createSyncedDb(
@@ -2062,20 +1992,10 @@ describe("Worker Bridge with OPFS", () => {
         "Fresh edge query resolves after upstream attach",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Fresh probe edge read stayed pending after unblock",
-          error,
-          serverUrl,
-          [
-            { name: "writer", db: dbWriter, probe: writerProbe },
-            { name: "probe", db: dbProbe, probe: probeProbe ?? undefined },
-          ],
-        ),
       );
 
       await sleep(500);
-      await unblockTestingServerNetwork(serverUrl);
+      await unblockJazzServerNetwork(serverUrl);
       await sleep(250);
 
       const rowsOnProbe = await probeRowsPromise;
@@ -2083,7 +2003,7 @@ describe("Worker Bridge with OPFS", () => {
     } finally {
       probeProbe?.dispose();
       writerProbe.dispose();
-      await unblockTestingServerNetwork(serverUrl);
+      await unblockJazzServerNetwork(serverUrl);
     }
   }, 60000);
 
@@ -2126,7 +2046,7 @@ describe("Worker Bridge with OPFS", () => {
       20000,
     );
 
-    await blockTestingServerNetwork(serverUrl);
+    await blockJazzServerNetwork(serverUrl);
     // Disconnect the WS transport so the block takes effect immediately.
     // Playwright route blocking only intercepts new connections; the existing
     // WebSocket must be closed explicitly for the offline simulation to hold.
@@ -2157,7 +2077,7 @@ describe("Worker Bridge with OPFS", () => {
       ),
     ).rejects.toThrow();
 
-    await unblockTestingServerNetwork(serverUrl);
+    await unblockJazzServerNetwork(serverUrl);
     // Re-establish the worker's upstream WebSocket now that the network is live again.
     (dbA as any).workerBridge?.reconnectUpstream?.();
     await sleep(250);
@@ -2211,16 +2131,6 @@ describe("Worker Bridge with OPFS", () => {
         "Fresh client sees offline worker row at edge after reconnect",
         20000,
         "edge",
-      ).catch((error) =>
-        rethrowWithWorkerDiagnostics(
-          "Fresh probe edge read failed after reconnect",
-          error,
-          serverUrl,
-          [
-            { name: "writer-a", db: dbA, probe: dbAProbe },
-            { name: "probe", db: dbProbe, probe: dbProbeTrace ?? undefined },
-          ],
-        ),
       );
       expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
     } finally {
@@ -2549,9 +2459,9 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("fans out an auth failure to follower tabs", async () => {
-    const { appId, serverUrl } = await getTestingServerInfo(uniqueDbName("auth-fanout"));
+    const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
     const dbName = uniqueDbName("auth-fanout");
-    const validJwt = await getTestingServerJwtForUser("auth-fanout-user", undefined, appId);
+    const validJwt = await getJazzServerJwtForUser("auth-fanout-user", undefined, appId);
     const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
 
     const dbA = track(
@@ -2989,8 +2899,8 @@ async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
   schema?: Schema,
-): Promise<TestingServerInfo> {
-  const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const permissionsToPublish = permissions ?? {
     todos: {
       select: { using: { type: "True" } },
@@ -3016,7 +2926,7 @@ async function publishSyncServerSchemaAndPermissions(
 }
 
 async function publishPermissionsForServer(
-  testingServer: TestingServerInfo,
+  testingServer: JazzServerInfo,
   permissions: CompiledPermissions,
   schema?: Schema,
 ): Promise<void> {

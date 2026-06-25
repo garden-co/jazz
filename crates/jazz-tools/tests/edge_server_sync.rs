@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
@@ -41,7 +41,7 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLICATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn publish_schema_to_core(core: &TestingServer, schema: &jazz_tools::Schema) {
+async fn publish_schema_to_core(core: &JazzServer, schema: &jazz_tools::Schema) {
     let response = reqwest::Client::new()
         .post(format!(
             "{}/apps/{}/admin/schemas",
@@ -63,7 +63,7 @@ async fn publish_schema_to_core(core: &TestingServer, schema: &jazz_tools::Schem
     }
 }
 
-async fn wait_for_schema_hash(server: &TestingServer, schema: &jazz_tools::Schema) {
+async fn wait_for_schema_hash(server: &JazzServer, schema: &jazz_tools::Schema) {
     let expected_hash = SchemaHash::compute(schema);
 
     wait_for(
@@ -82,7 +82,7 @@ async fn wait_for_schema_hash(server: &TestingServer, schema: &jazz_tools::Schem
     .await;
 }
 
-async fn wait_for_permissions_head(server: &TestingServer, expected_bundle_object_id: &str) {
+async fn wait_for_permissions_head(server: &JazzServer, expected_bundle_object_id: &str) {
     wait_for(
         REPLICATION_TIMEOUT,
         format!(
@@ -102,7 +102,7 @@ async fn wait_for_permissions_head(server: &TestingServer, expected_bundle_objec
     .await;
 }
 
-async fn wait_for_upstream(edge: &TestingServer) {
+async fn wait_for_upstream(edge: &JazzServer) {
     tokio::time::timeout(
         UPSTREAM_TIMEOUT,
         edge.server_state().runtime.transport_wait_until_connected(),
@@ -113,7 +113,7 @@ async fn wait_for_upstream(edge: &TestingServer) {
     .expect("edge transport should report connected");
 }
 
-fn app_scoped_ws_upstream_url(server: &TestingServer) -> String {
+fn app_scoped_ws_upstream_url(server: &JazzServer) -> String {
     format!(
         "ws://127.0.0.1:{}/apps/{}/ws",
         server.port(),
@@ -123,15 +123,15 @@ fn app_scoped_ws_upstream_url(server: &TestingServer) -> String {
 
 #[tokio::test]
 async fn edge_connects_to_core_with_admin_secret_only() {
-    let app_id = TestingServer::default_app_id();
+    let app_id = JazzServer::default_app_id();
     let admin_secret = "shared-admin-secret";
 
-    let core = TestingServer::builder()
+    let core = JazzServer::builder()
         .with_app_id(app_id)
         .with_admin_secret(admin_secret)
         .start()
         .await;
-    let edge = TestingServer::builder()
+    let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_admin_secret(admin_secret)
         .with_upstream_url(core.base_url())
@@ -143,9 +143,9 @@ async fn edge_connects_to_core_with_admin_secret_only() {
 
 struct MultiServerCluster {
     schema: jazz_tools::Schema,
-    core: TestingServer,
-    edge_us: TestingServer,
-    edge_eu: TestingServer,
+    core: JazzServer,
+    edge_us: JazzServer,
+    edge_eu: JazzServer,
 }
 
 impl MultiServerCluster {
@@ -154,15 +154,15 @@ impl MultiServerCluster {
     }
 
     async fn start_dynamic(schema: jazz_tools::Schema) -> Self {
-        let app_id = TestingServer::default_app_id();
+        let app_id = JazzServer::default_app_id();
 
-        let core = TestingServer::builder().with_app_id(app_id).start().await;
-        let edge_us = TestingServer::builder()
+        let core = JazzServer::builder().with_app_id(app_id).start().await;
+        let edge_us = JazzServer::builder()
             .with_app_id(app_id)
             .with_upstream_url(core.base_url())
             .start()
             .await;
-        let edge_eu = TestingServer::builder()
+        let edge_eu = JazzServer::builder()
             .with_app_id(app_id)
             .with_upstream_url(core.base_url())
             .start()
@@ -181,9 +181,9 @@ impl MultiServerCluster {
 
     async fn start_with_tracer(tracer: Option<SyncTracer>) -> Self {
         let schema = todo_schema();
-        let app_id = TestingServer::default_app_id();
+        let app_id = JazzServer::default_app_id();
 
-        let mut core_builder = TestingServer::builder()
+        let mut core_builder = JazzServer::builder()
             .with_app_id(app_id)
             .with_schema(schema.clone());
         if let Some(tracer) = tracer.clone() {
@@ -191,7 +191,7 @@ impl MultiServerCluster {
         }
         let core = core_builder.start().await;
 
-        let mut edge_us_builder = TestingServer::builder()
+        let mut edge_us_builder = JazzServer::builder()
             .with_app_id(app_id)
             .with_schema(schema.clone())
             .with_upstream_url(core.base_url());
@@ -200,7 +200,7 @@ impl MultiServerCluster {
         }
         let edge_us = edge_us_builder.start().await;
 
-        let mut edge_eu_builder = TestingServer::builder()
+        let mut edge_eu_builder = JazzServer::builder()
             .with_app_id(app_id)
             .with_schema(schema.clone())
             .with_upstream_url(core.base_url());
@@ -222,7 +222,7 @@ impl MultiServerCluster {
 
     async fn connect_user(
         &self,
-        server: &TestingServer,
+        server: &JazzServer,
         user_id: &str,
         tracer: Option<&SyncTracer>,
     ) -> JazzClient {
@@ -658,10 +658,10 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
 #[tokio::test]
 async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_query() {
     let schema = todo_schema();
-    let app_id = TestingServer::default_app_id();
+    let app_id = JazzServer::default_app_id();
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
 
     publish_schema_to_core(&core, &schema).await;
     let permissions_head = publish_allow_all_permissions(
@@ -672,7 +672,7 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
     )
     .await;
 
-    let edge_eu = TestingServer::builder()
+    let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .start()
@@ -734,16 +734,16 @@ async fn fresh_edge_pulls_existing_core_catalogue_on_connect_without_client_quer
 #[tokio::test]
 async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
     let schema = todo_schema();
-    let app_id = TestingServer::default_app_id();
+    let app_id = JazzServer::default_app_id();
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
-    let edge_us = TestingServer::builder()
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let edge_us = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .start()
         .await;
-    let edge_eu = TestingServer::builder()
+    let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .start()
@@ -837,12 +837,12 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
 async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() {
     let schema = todo_schema();
     let schema_hash = SchemaHash::compute(&schema).to_string();
-    let app_id = TestingServer::default_app_id();
+    let app_id = JazzServer::default_app_id();
     let query = QueryBuilder::new("todos").build();
     let client = reqwest::Client::new();
 
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
-    let edge = TestingServer::builder()
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(app_scoped_ws_upstream_url(&core))
         .start()
@@ -958,13 +958,13 @@ async fn app_scoped_ws_upstream_url_forwards_and_reads_catalogue_through_edge() 
 /// ```
 #[tokio::test]
 async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
-    let app_id = TestingServer::default_app_id();
+    let app_id = JazzServer::default_app_id();
     let v1_schema = todo_schema();
     let v2_schema = todo_schema_with_notes();
     let edge_data_dir = TempDir::new().expect("temp edge data dir");
     let query = QueryBuilder::new("todos").build();
 
-    let core = TestingServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
 
     publish_schema_to_core(&core, &v1_schema).await;
     let v1_permissions_head = publish_allow_all_permissions(
@@ -975,7 +975,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
     )
     .await;
 
-    let edge_before_restart = TestingServer::builder()
+    let edge_before_restart = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .with_persistent_storage()
@@ -1012,7 +1012,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
         "edge should restart from an older persisted catalogue hash"
     );
 
-    let edge_after_restart = TestingServer::builder()
+    let edge_after_restart = JazzServer::builder()
         .with_app_id(app_id)
         .with_upstream_url(core.base_url())
         .with_persistent_storage()

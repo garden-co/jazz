@@ -14,7 +14,7 @@
  *    updateAuthToken with a refreshed JWT for the same user and asserts
  *    that a "update-auth" message was posted to the worker.
  *
- * 2. Post-refresh usability (real server via getTestingServerJwtForUser):
+ * 2. Post-refresh usability (real server via getJazzServerJwtForUser):
  *    creates a Db with an initial valid JWT, writes a row, refreshes the
  *    JWT with a fresh token for the same user, and confirms the Db still
  *    serves local-tier queries.  Uses global-setup server but does not

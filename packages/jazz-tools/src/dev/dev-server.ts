@@ -1,14 +1,11 @@
 import { createServer as createNetServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DevServer } from "jazz-napi";
+import { JazzServer } from "jazz-napi";
 
-export {
-  pushSchemaCatalogue,
-  type PushSchemaCatalogueOptions,
-  type PushSchemaCatalogueOptions as PushSchemaOptions,
-} from "./catalogue.js";
+export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;
@@ -37,8 +34,8 @@ export interface LocalJazzServerHandle {
   port: number;
   url: string;
   dataDir: string;
-  adminSecret?: string;
-  backendSecret?: string;
+  adminSecret: string;
+  backendSecret: string;
   stop: () => Promise<void>;
 }
 
@@ -78,6 +75,19 @@ async function createOwnedDataDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), "jazz-dev-server-"));
 }
 
+/**
+ * Start a local Jazz sync server.
+ *
+ * When no port is provided, an available localhost port is chosen automatically.
+ * When no data directory is provided, the server owns a temporary directory and
+ * removes it when {@link LocalJazzServerHandle.stop} is called. Pass
+ * `inMemory: true` for an in-memory server instead. Admin and backend secrets
+ * are generated when omitted.
+ *
+ * @returns A handle with the server URL, resolved app id, secrets, and an
+ * idempotent `stop()` method that shuts the server down and releases owned
+ * resources.
+ */
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
@@ -86,17 +96,19 @@ export async function startLocalJazzServer(
   const ownsPort = options.port === undefined;
   const ownsDataDir = options.inMemory !== true && options.dataDir === undefined;
   const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
+  const adminSecret = options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`;
+  const backendSecret = options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`;
 
   let server;
   try {
-    server = await DevServer.start({
+    server = await JazzServer.start({
       appId,
       port,
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
-      backendSecret: options.backendSecret,
-      adminSecret: options.adminSecret,
+      backendSecret,
+      adminSecret,
       upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
@@ -142,8 +154,8 @@ export async function startLocalJazzServer(
     port: server.port,
     url: server.url,
     dataDir: server.dataDir,
-    adminSecret: server.adminSecret ?? undefined,
-    backendSecret: server.backendSecret ?? undefined,
+    adminSecret: server.adminSecret,
+    backendSecret: server.backendSecret,
     stop,
   };
 }

@@ -9,7 +9,7 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "./schema-fetch.js";
-import { startLocalJazzServer } from "../testing/local-jazz-server.js";
+import { startLocalJazzServer } from "../testing/index.js";
 
 // ---------------------------------------------------------------------------
 // Inline schema + permissions

@@ -7,7 +7,7 @@ use crate::support::{
     wait_for_subscription_update,
 };
 use jazz_tools::row_input;
-use jazz_tools::server::TestingServer;
+use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
@@ -43,14 +43,14 @@ fn team_graph_schema() -> Schema {
 }
 
 struct Clients {
-    server: TestingServer,
+    server: JazzServer,
     alice: JazzClient,
     bob: JazzClient,
 }
 
 impl Clients {
     async fn start(schema: Schema) -> Self {
-        let server = TestingServer::start_with_schema(schema.clone()).await;
+        let server = JazzServer::start_with_schema(schema.clone()).await;
         let alice = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())
