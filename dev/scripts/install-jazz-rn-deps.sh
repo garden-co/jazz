@@ -49,7 +49,11 @@ if ! command -v rustup >/dev/null 2>&1; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
 fi
 
-rustup toolchain install "$RUST_TOOLCHAIN"
+if rustup toolchain list | grep -q "^${RUST_TOOLCHAIN}-"; then
+  echo "Rust toolchain ${RUST_TOOLCHAIN} already installed, skipping download."
+else
+  rustup toolchain install "$RUST_TOOLCHAIN"
+fi
 rustup default "$RUST_TOOLCHAIN"
 rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN"
 
