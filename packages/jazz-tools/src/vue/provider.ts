@@ -14,13 +14,20 @@ import {
 } from "vue";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
+import type { WasmSchema } from "../index.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
 export interface JazzProviderProps {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
+  autoAttachDevTools?: boolean;
+  wasmSchema?: WasmSchema;
 }
+
+// Tracks db instances that already have devtools attached, so a manual
+// attachDevTools call elsewhere doesn't double-attach via the provider.
+const autoAttachedDbs = new WeakSet<object>();
 
 const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = Symbol("jazz");
 
@@ -34,6 +41,14 @@ export const JazzProvider = defineComponent({
     client: {
       type: Object as PropType<JazzProviderProps["client"]>,
       required: true,
+    },
+    autoAttachDevTools: {
+      type: Boolean,
+      default: true,
+    },
+    wasmSchema: {
+      type: Object as PropType<WasmSchema>,
+      default: undefined,
     },
   },
   setup(props, { slots }) {
@@ -80,6 +95,20 @@ export const JazzProvider = defineComponent({
               }
               triggerRef(clientRef);
             });
+
+            if (
+              process.env.NODE_ENV !== "production" &&
+              props.autoAttachDevTools &&
+              props.wasmSchema &&
+              !autoAttachedDbs.has(client.db as object)
+            ) {
+              const db = client.db;
+              const wasmSchema = props.wasmSchema;
+              autoAttachedDbs.add(db as object);
+              void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
+                attachDevTools({ db }, wasmSchema),
+              );
+            }
           })
           .catch((reason) => {
             if (cancelled || activeRunId !== runId) {
