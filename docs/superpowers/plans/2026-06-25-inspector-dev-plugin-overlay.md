@@ -660,7 +660,9 @@ function mount(): void {
     "position:fixed;bottom:64px;right:16px;width:480px;height:640px;max-width:90vw;max-height:80vh;background:#fff;border:1px solid #ddd;border-radius:8px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.3);resize:both;display:none;";
 
   const iframe = document.createElement("iframe");
-  iframe.src = "/__jazz/embedded/index.html";
+  // NOTE: the embedded Vite build emits embedded.html (Vite names HTML output
+  // after the source filename), NOT index.html.
+  iframe.src = "/__jazz/embedded/embedded.html";
   iframe.style.cssText = "width:100%;height:100%;border:none;";
   panel.appendChild(iframe);
 
@@ -914,7 +916,9 @@ const ext = (p: string) => {
 function resolveEmbeddedDir(appRoot: string): string | null {
   try {
     const requireFromApp = createRequire(join(appRoot, "noop.js"));
-    return dirname(requireFromApp.resolve(`${INSPECTOR_PACKAGE}/dist-embedded/index.html`));
+    // Resolve an existing emitted file (the build outputs embedded.html, not
+    // index.html) — require.resolve throws if the target file doesn't exist.
+    return dirname(requireFromApp.resolve(`${INSPECTOR_PACKAGE}/dist-embedded/embedded.html`));
   } catch {
     return null;
   }
@@ -970,7 +974,9 @@ export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
         res.end("Inspector not installed");
         return true;
       }
-      const rel = url.slice(OVERLAY_EMBEDDED_PREFIX.length).replace(/^\//, "") || "index.html";
+      // The embedded build emits embedded.html (Vite names HTML output after the
+      // source file), so that is the directory-root default — not index.html.
+      const rel = url.slice(OVERLAY_EMBEDDED_PREFIX.length).replace(/^\//, "") || "embedded.html";
       const filePath = join(dir, rel);
       const within = relative(dir, filePath);
       if (within.startsWith("..") || isAbsolute(within)) {
