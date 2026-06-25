@@ -57,7 +57,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
-    HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
+    JazzServer as CoreJazzServer, ServerBuilder, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
@@ -1035,7 +1035,7 @@ impl TestJwtIssuer {
 
 #[napi]
 pub struct JazzServer {
-    inner: Mutex<Option<JazzHostedServer>>,
+    inner: Mutex<Option<CoreJazzServer>>,
     app_id: String,
     url: String,
     port: u16,
@@ -1094,7 +1094,7 @@ impl JazzServer {
 
         let data_dir_path = std::path::PathBuf::from(&data_dir);
 
-        let hosted = JazzHostedServer::start(
+        let server = CoreJazzServer::from_built(
             built,
             opts.port,
             app_id,
@@ -1104,12 +1104,12 @@ impl JazzServer {
         )
         .await;
 
-        let url = hosted.base_url();
-        let port = hosted.port;
-        let resolved_data_dir = hosted.data_dir.to_string_lossy().into_owned();
+        let url = server.base_url();
+        let port = server.port();
+        let resolved_data_dir = server.data_dir().to_string_lossy().into_owned();
 
         Ok(Self {
-            inner: Mutex::new(Some(hosted)),
+            inner: Mutex::new(Some(server)),
             app_id: app_id.to_string(),
             url,
             port,
@@ -1151,13 +1151,13 @@ impl JazzServer {
 
     #[napi]
     pub async fn stop(&self) -> napi::Result<()> {
-        let mut server = self
+        let server = self
             .inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?
             .take();
 
-        if let Some(ref mut server) = server {
+        if let Some(server) = server {
             server.shutdown().await;
         }
 
