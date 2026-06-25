@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
@@ -14,9 +14,10 @@ use crate::middleware::AuthConfig;
 use crate::query_manager::types::Schema;
 use crate::schema_manager::AppId;
 
-use super::hosted::HostedServer;
-use super::{ServerBuilder, StorageBackend};
+use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use crate::sync_manager::ClientId;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
@@ -131,7 +132,7 @@ impl JazzServerBuilder {
     }
 
     pub async fn start(self) -> JazzServer {
-        JazzServer::start_from_builder(self).await
+        JazzServer::from_builder(self).await
     }
 }
 
@@ -232,10 +233,14 @@ impl Drop for TestJwtIssuer {
 }
 
 pub struct JazzServer {
-    hosted: HostedServer,
+    state: Arc<ServerState>,
+    task: Option<JoinHandle<()>>,
+    shutdown_task: Option<JoinHandle<()>>,
+    port: u16,
     app_id: AppId,
-    admin_secret: String,
-    backend_secret: String,
+    data_dir: PathBuf,
+    admin_secret: Option<String>,
+    backend_secret: Option<String>,
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
@@ -260,7 +265,7 @@ impl JazzServer {
         Self::builder().with_schema(schema).start().await
     }
 
-    async fn start_from_builder(builder: JazzServerBuilder) -> Self {
+    async fn from_builder(builder: JazzServerBuilder) -> Self {
         let JazzServerBuilder {
             port,
             app_id,
@@ -325,27 +330,73 @@ impl JazzServer {
         }
         let built = server_builder.build().await.expect("build test server");
 
-        let hosted = HostedServer::start(
+        let mut server = Self::from_built(
             built,
             port,
             app_id,
             data_dir,
-            Some(admin_secret.clone()),
-            Some(backend_secret.clone()),
+            Some(admin_secret),
+            Some(backend_secret),
         )
         .await;
+        server._owned_data_dir = owned_data_dir;
+        server.embedded_jwks_server = embedded_jwks_server;
+        server.auth_clock = auth_clock;
+        server
+    }
 
-        Self {
-            hosted,
+    /// Create a Jazz server from an already-built router/state pair.
+    ///
+    /// This is used by bindings that need to construct their own
+    /// [`ServerBuilder`] configuration while sharing the same server lifecycle
+    /// and shutdown behavior as the Rust test server.
+    pub async fn from_built(
+        built: BuiltServer,
+        port: Option<u16>,
+        app_id: AppId,
+        data_dir: PathBuf,
+        admin_secret: Option<String>,
+        backend_secret: Option<String>,
+    ) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
+            .await
+            .expect("bind server listener");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let (serve_shutdown_tx, serve_shutdown_rx) = oneshot::channel();
+        let shutdown_state = built.state.clone();
+        let shutdown_task = tokio::spawn(async move {
+            shutdown_state.shutdown.wait_requested().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            shutdown_state.run_shutdown_finalization().await;
+            let _ = serve_shutdown_tx.send(());
+        });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, built.app)
+                .with_graceful_shutdown(async {
+                    let _ = serve_shutdown_rx.await;
+                })
+                .await
+                .expect("serve jazz server");
+        });
+
+        let server = Self {
+            state: built.state,
+            task: Some(task),
+            shutdown_task: Some(shutdown_task),
+            port,
             app_id,
+            data_dir,
             admin_secret,
             backend_secret,
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
-            _owned_data_dir: owned_data_dir,
-            embedded_jwks_server,
-            auth_clock,
-        }
+            _owned_data_dir: None,
+            embedded_jwks_server: None,
+            auth_clock: crate::middleware::auth::AuthClock::default(),
+        };
+        server.wait_ready().await;
+        server
     }
 
     pub fn default_app_id() -> AppId {
@@ -357,48 +408,49 @@ impl JazzServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.hosted.port
+        self.port
     }
 
     pub fn base_url(&self) -> String {
-        self.hosted.base_url()
+        format!("http://127.0.0.1:{}", self.port)
     }
 
     pub fn admin_secret(&self) -> &str {
-        &self.admin_secret
+        self.admin_secret
+            .as_deref()
+            .expect("JazzServer was started without an admin secret")
     }
 
     pub fn backend_secret(&self) -> &str {
-        &self.backend_secret
+        self.backend_secret
+            .as_deref()
+            .expect("JazzServer was started without a backend secret")
     }
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
     /// that need to call internal server methods (e.g. `process_ws_client_frame`).
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
-        self.hosted.state.clone()
+        self.state.clone()
     }
 
     /// Temporarily buffer server-to-client sync messages for the given client.
     pub fn block_messages_to(&self, client_id: ClientId) -> super::BlockedMessagesToClient {
-        self.hosted
-            .state
-            .connection_event_hub
-            .block_messages_to(client_id)
+        self.state.connection_event_hub.block_messages_to(client_id)
     }
 
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
     pub async fn set_client_ttl(&self, ttl: Duration) {
-        self.hosted.state.set_client_ttl(ttl).await;
+        self.state.set_client_ttl(ttl).await;
     }
 
     /// Run one sweep iteration to reap expired disconnect candidates.
     pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        self.hosted.state.run_sweep_once().await
+        self.state.run_sweep_once().await
     }
 
     /// Number of clients currently in the disconnect candidates list.
     pub async fn disconnect_candidate_count(&self) -> usize {
-        self.hosted.state.disconnect_candidates.read().await.len()
+        self.state.disconnect_candidates.read().await.len()
     }
 
     pub fn built_in_jwt_helpers_available(&self) -> bool {
@@ -458,7 +510,7 @@ impl JazzServer {
             data_dir,
             storage: crate::ClientStorage::Memory,
             jwt_token: Some(jwt_token),
-            backend_secret: Some(self.backend_secret.clone()),
+            backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
             sync_tracer: None,
         }
@@ -466,11 +518,60 @@ impl JazzServer {
 
     #[allow(dead_code)]
     pub fn data_dir(&self) -> &Path {
-        &self.hosted.data_dir
+        &self.data_dir
     }
 
     pub async fn shutdown(mut self) {
-        self.hosted.shutdown().await;
+        self.state.shutdown.request_shutdown();
+        let shutdown_budget = self.state.shutdown.timeout() * 2 + Duration::from_secs(5);
+
+        let mut finalization_completed = false;
+        if let Some(mut shutdown_task) = self.shutdown_task.take()
+            && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
+                .await
+                .is_ok()
+        {
+            finalization_completed = true;
+        }
+
+        if !finalization_completed {
+            return;
+        }
+
+        if let Some(mut task) = self.task.take()
+            && tokio::time::timeout(shutdown_budget, &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
+        }
+    }
+
+    async fn wait_ready(&self) {
+        let client = reqwest::Client::new();
+        let health_url = format!("{}/health", self.base_url());
+        for _ in 0..80 {
+            if let Ok(response) = client.get(&health_url).send().await
+                && response.status().is_success()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("jazz server did not become ready in time");
+    }
+}
+
+impl Drop for JazzServer {
+    fn drop(&mut self) {
+        self.state.shutdown.request_shutdown();
+        if let Some(task) = self.shutdown_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -511,7 +612,7 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
 
 /// Applies the storage mode flags from [`JazzServerBuilder`] to a
 /// [`ServerBuilder`].  Kept as a free function to avoid nested `#[cfg]`
-/// blocks inside `start_from_builder`.
+/// blocks inside `from_builder`.
 fn apply_storage_mode(
     builder: ServerBuilder,
     data_dir: PathBuf,
@@ -559,7 +660,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn internal_shutdown_stops_hosted_server() {
+    async fn internal_shutdown_stops_jazz_server() {
         let server = JazzServer::start().await;
         let base_url = server.base_url();
         let admin_secret = server.admin_secret().to_string();
@@ -591,7 +692,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        panic!("hosted server did not stop after internal shutdown");
+        panic!("jazz server did not stop after internal shutdown");
     }
 
     #[tokio::test]
