@@ -51,7 +51,7 @@ const devtoolsPortDisconnectListeners = new Set<DevToolsPortListener>();
 const devtoolsPortConnectListeners = new Set<DevToolsPortListener>();
 const activeQuerySubscriptionsListeners = new Set<ActiveQuerySubscriptionsListener>();
 
-let devtoolsPort: any | null = null;
+let devtoolsPort: DevtoolsBridgePort | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
@@ -59,6 +59,27 @@ const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
 let activeQuerySubscriptions: ActiveQuerySubscriptionTrace[] = [];
+
+export interface DevtoolsBridgePort {
+  postMessage(message: unknown): void;
+  onMessage: {
+    addListener(cb: (message: unknown) => void): void;
+    removeListener(cb: (message: unknown) => void): void;
+  };
+  onDisconnect: {
+    addListener(cb: () => void): void;
+    removeListener(cb: () => void): void;
+  };
+}
+export type DevtoolsBridgeConnector = () => Promise<DevtoolsBridgePort>;
+
+let bridgeConnector: DevtoolsBridgeConnector = connectChromeDevtoolsPort;
+export function setDevtoolsBridgeConnector(connector: DevtoolsBridgeConnector): void {
+  bridgeConnector = connector;
+}
+export function resetDevtoolsBridgeConnector(): void {
+  bridgeConnector = connectChromeDevtoolsPort;
+}
 
 function cloneActiveQuerySubscriptions(
   subscriptions: readonly ActiveQuerySubscriptionTrace[],
@@ -214,11 +235,7 @@ async function connectValidatedPort(chromeApi: any, tabId: number): Promise<any>
   return port;
 }
 
-async function ensureDevtoolsPort(): Promise<any> {
-  if (devtoolsPort) {
-    return devtoolsPort;
-  }
-
+async function connectChromeDevtoolsPort(): Promise<DevtoolsBridgePort> {
   const global = globalThis as any;
   const chromeApi = global?.chrome;
 
@@ -234,14 +251,22 @@ async function ensureDevtoolsPort(): Promise<any> {
 
   const tabId = chromeApi.devtools.inspectedWindow.tabId;
   try {
-    devtoolsPort = await connectValidatedPort(chromeApi, tabId);
+    return await connectValidatedPort(chromeApi, tabId);
   } catch (error) {
     if (!isMissingReceivingEndError(error)) {
       throw error;
     }
     await installBridgeInInspectedTab(chromeApi, tabId);
-    devtoolsPort = await connectValidatedPort(chromeApi, tabId);
+    return await connectValidatedPort(chromeApi, tabId);
   }
+}
+
+async function ensureDevtoolsPort(): Promise<DevtoolsBridgePort> {
+  if (devtoolsPort) {
+    return devtoolsPort;
+  }
+
+  devtoolsPort = await bridgeConnector();
 
   const onMessage = (message: unknown) => {
     if (!message || typeof message !== "object") return;
