@@ -20,21 +20,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         batch_id
     }
 
-    fn batch_handle_kind(batch_mode: BatchMode) -> &'static str {
-        match batch_mode {
-            BatchMode::Direct => "batch",
-            BatchMode::Transactional => "transaction",
-        }
-    }
-
-    fn committed_batch_error(batch_id: BatchId, batch_mode: BatchMode) -> RuntimeError {
-        let kind = Self::batch_handle_kind(batch_mode);
-        RuntimeError::WriteError(format!("{kind} {batch_id} is already committed"))
+    fn committed_batch_error(batch_id: BatchId) -> RuntimeError {
+        RuntimeError::WriteError(format!("transaction {batch_id} is already committed"))
     }
 
     fn unavailable_batch_error(batch_id: BatchId) -> RuntimeError {
         RuntimeError::WriteError(format!(
-            "batch {batch_id} has already been completed or was never opened"
+            "transaction {batch_id} has already been completed or was never opened"
         ))
     }
 
@@ -58,14 +50,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if let Some(record) = self.load_runtime_batch_record(batch_id)? {
             if record.sealed {
-                return Err(Self::committed_batch_error(batch_id, record.mode));
+                return Err(Self::committed_batch_error(batch_id));
             }
 
             return Ok(());
         }
 
         if self.durability.accepted_batch_tier(batch_id).is_some() {
-            return Err(Self::committed_batch_error(batch_id, BatchMode::Direct));
+            return Err(Self::committed_batch_error(batch_id));
         }
 
         Err(Self::unavailable_batch_error(batch_id))
@@ -89,7 +81,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if write_context.batch_mode.is_none() && write_context.target_branch_name.is_none() {
                 if let Some(record) = self.load_runtime_batch_record(batch_id)? {
                     if record.sealed {
-                        return Err(Self::committed_batch_error(batch_id, record.mode));
+                        return Err(Self::committed_batch_error(batch_id));
                     }
                     return Ok(Some(write_context.clone()));
                 }
@@ -263,7 +255,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if self.durability.accepted_batch_tier(batch_id).is_some() {
             return Err(RuntimeError::WriteError(format!(
-                "batch {batch_id:?} is already sealed"
+                "transaction {batch_id:?} is already sealed"
             )));
         }
 
@@ -275,7 +267,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
             if record.sealed {
                 return Err(RuntimeError::WriteError(format!(
-                    "batch {batch_id:?} is already sealed"
+                    "transaction {batch_id:?} is already sealed"
                 )));
             }
             return Ok(());
@@ -298,7 +290,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         if record.sealed {
             return Err(RuntimeError::WriteError(format!(
-                "batch {batch_id:?} is already sealed"
+                "transaction {batch_id:?} is already sealed"
             )));
         }
 

@@ -239,14 +239,14 @@ export function GenerateData() {
     setError(null);
 
     try {
-      // Generate projects in batches
+      // Generate projects in mergeable transactions
       const projectIds: string[] = [];
       let batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_PROJECTS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_PROJECTS);
-        db.batch((batch) => {
+        db.transaction((tx) => {
           for (let j = i; j < batchEnd; j++) {
-            const row = batch.insert(app.projects, { name: randomProjectName() });
+            const row = tx.insert(app.projects, { name: randomProjectName() });
             projectIds.push(row.id);
           }
         });
@@ -258,13 +258,13 @@ export function GenerateData() {
         }
       }
 
-      // Generate todos in batches, round-robin across projects
+      // Generate todos in mergeable transactions, round-robin across projects
       batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_TODOS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_TODOS);
-        db.batch((batch) => {
+        db.transaction((tx) => {
           for (let j = i; j < batchEnd; j++) {
-            batch.insert(app.todos, {
+            tx.insert(app.todos, {
               title: randomTodoTitle(),
               done: j % 5 === 0,
               owner_id: sessionUserId,

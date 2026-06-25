@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use jazz_tools::binding_support::{parse_batch_mode_input, parse_external_object_id};
+use jazz_tools::binding_support::{parse_external_object_id, parse_transaction_kind_input};
 use js_sys::Function;
 use js_sys::Uint8Array;
 #[cfg(target_arch = "wasm32")]
@@ -88,7 +88,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::binding_support::serialize_mutation_error_event;
-use jazz_tools::binding_support::{parse_batch_id_input, parse_read_durability_options};
+use jazz_tools::binding_support::{
+    parse_batch_id_input, parse_read_durability_options, parse_transaction_id_input,
+};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
@@ -141,13 +143,13 @@ struct WasmLensEdgeDebug {
 struct WasmInsertResult {
     id: String,
     values: Vec<Value>,
-    batch_id: String,
+    transaction_id: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WasmMutationResult {
-    batch_id: String,
+    transaction_id: String,
 }
 
 /// Parse a persistence tier string from JS.
@@ -206,7 +208,7 @@ fn parse_subscription_inputs(
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation, _transaction_batch_id) =
+    let (durability, propagation, _transaction_id) =
         parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
             .map_err(|err| JsError::new(&err))?;
     Ok((query, session, durability, propagation))
@@ -1628,7 +1630,7 @@ impl WasmRuntime {
     /// Insert a row into a table.
     ///
     /// # Returns
-    /// The inserted row as `{ id, values, batchId }`.
+    /// The inserted row as `{ id, values, transactionId }`.
     #[wasm_bindgen]
     pub fn insert(
         &self,
@@ -1651,7 +1653,7 @@ impl WasmRuntime {
         let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
             values: row_values,
-            batch_id: batch_id.to_string(),
+            transaction_id: batch_id.to_string(),
         };
         tracing::debug!(object_id = %row.id, "inserted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -1674,20 +1676,14 @@ impl WasmRuntime {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, transaction_batch_id) =
+        let (durability, propagation, transaction_id) =
             parse_read_durability_options(settled_tier.as_deref(), options_json.as_deref())
                 .map_err(|err| JsError::new(&err))?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_local_batch(
-                query,
-                session,
-                durability,
-                propagation,
-                transaction_batch_id,
-            )
-            .map_err(|e| JsError::new(&format!("Query setup failed: {e}")))?
+            core.query_with_local_batch(query, session, durability, propagation, transaction_id)
+                .map_err(|e| JsError::new(&format!("Query setup failed: {e}")))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -1740,7 +1736,7 @@ impl WasmRuntime {
         tracing::debug!(object_id, "updated");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         WasmMutationResult {
-            batch_id: batch_id.to_string(),
+            transaction_id: batch_id.to_string(),
         }
         .serialize(&serializer)
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
@@ -1770,7 +1766,7 @@ impl WasmRuntime {
         tracing::debug!(object_id, "upserted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         WasmMutationResult {
-            batch_id: batch_id.to_string(),
+            transaction_id: batch_id.to_string(),
         }
         .serialize(&serializer)
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
@@ -1797,7 +1793,7 @@ impl WasmRuntime {
         tracing::debug!(object_id, "deleted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         WasmMutationResult {
-            batch_id: batch_id.to_string(),
+            transaction_id: batch_id.to_string(),
         }
         .serialize(&serializer)
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
@@ -1828,7 +1824,7 @@ impl WasmRuntime {
         let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
             values: row_values,
-            batch_id: batch_id.to_string(),
+            transaction_id: batch_id.to_string(),
         };
         tracing::debug!(object_id = %row.id, "restored");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -1836,22 +1832,32 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
-    #[wasm_bindgen(js_name = beginBatch)]
-    pub fn begin_batch(&self, batch_mode: &str) -> Result<String, JsError> {
-        let batch_mode = parse_batch_mode_input(batch_mode).map_err(|err| JsError::new(&err))?;
-        Ok(self.core.borrow_mut().begin_batch(batch_mode).to_string())
+    #[wasm_bindgen(js_name = beginTransaction)]
+    pub fn begin_transaction(&self, transaction_kind: &str) -> Result<String, JsError> {
+        let transaction_kind =
+            parse_transaction_kind_input(transaction_kind).map_err(|err| JsError::new(&err))?;
+        Ok(self
+            .core
+            .borrow_mut()
+            .begin_batch(transaction_kind)
+            .to_string())
     }
 
-    /// Wait for a batch to settle at the requested durability tier.
-    #[wasm_bindgen(js_name = waitForBatch)]
-    pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+    /// Wait for a transaction to settle at the requested durability tier.
+    #[wasm_bindgen(js_name = waitForTransaction)]
+    pub fn wait_for_transaction(
+        &self,
+        transaction_id: &str,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let batch_id =
+            parse_transaction_id_input(transaction_id).map_err(|err| JsError::new(&err))?;
         let tier = parse_tier(tier)?;
         let core_rc = Rc::clone(&self.core);
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.wait_for_batch(batch_id, tier)
-                .map_err(|e| JsError::new(&format!("Wait for batch failed: {e}")))?
+                .map_err(|e| JsError::new(&format!("Wait for transaction failed: {e}")))?
         };
 
         Ok(wasm_bindgen_futures::future_to_promise(async move {
@@ -1863,39 +1869,41 @@ impl WasmRuntime {
                         serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
                     let value = serde_json::json!({
                         "kind": "rejected",
-                        "batchId": batch_id.to_string(),
+                        "transactionId": batch_id.to_string(),
                         "code": rejection.code,
                         "reason": rejection.reason,
                     })
                     .serialize(&serializer)
-                    .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"));
+                    .unwrap_or_else(|_| JsValue::from_str("Persisted transaction was rejected"));
                     if let Err(err) = core_rc
                         .borrow_mut()
                         .acknowledge_handled_rejected_batch(batch_id)
                     {
-                        tracing::warn!("acknowledge handled rejected batch: {err:?}");
+                        tracing::warn!("acknowledge handled rejected transaction: {err:?}");
                     }
                     Err(value)
                 }
-                Err(_) => Err(JsValue::from_str("Wait for batch cancelled")),
+                Err(_) => Err(JsValue::from_str("Wait for transaction cancelled")),
             }
         }))
     }
 
-    #[wasm_bindgen(js_name = rollbackBatch)]
-    pub fn rollback_batch(&self, batch_id: &str) -> Result<bool, JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+    #[wasm_bindgen(js_name = rollbackTransaction)]
+    pub fn rollback_transaction(&self, transaction_id: &str) -> Result<bool, JsError> {
+        let batch_id =
+            parse_transaction_id_input(transaction_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
         core.rollback_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Rollback batch failed: {e}")))
+            .map_err(|e| JsError::new(&format!("Rollback transaction failed: {e}")))
     }
 
-    #[wasm_bindgen(js_name = commitBatch)]
-    pub fn commit_batch(&self, batch_id: &str) -> Result<(), JsError> {
-        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+    #[wasm_bindgen(js_name = commitTransaction)]
+    pub fn commit_transaction(&self, transaction_id: &str) -> Result<(), JsError> {
+        let batch_id =
+            parse_transaction_id_input(transaction_id).map_err(|err| JsError::new(&err))?;
         let mut core = self.core.borrow_mut();
         core.commit_batch(batch_id)
-            .map_err(|e| JsError::new(&format!("Commit batch failed: {e}")))
+            .map_err(|e| JsError::new(&format!("Commit transaction failed: {e}")))
     }
 
     // =========================================================================

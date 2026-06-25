@@ -15,16 +15,16 @@ class TestDb extends Db {
 
 function makeHandleClient(): JazzClient {
   return {
-    waitForBatch: vi.fn(async () => undefined),
+    waitForTransaction: vi.fn(async () => undefined),
   } as unknown as JazzClient;
 }
 
 function makeWriteResult(row: DirectInsertResult): WriteResult<DirectInsertResult> {
-  return new WriteResult(row, row.batchId, makeHandleClient());
+  return new WriteResult(row, row.transactionId, makeHandleClient());
 }
 
-function makeWriteHandle(batchId: string): WriteHandle {
-  return new WriteHandle(batchId, makeHandleClient());
+function makeWriteHandle(transactionId: string): WriteHandle {
+  return new WriteHandle(transactionId, makeHandleClient());
 }
 
 describe("Db runtime schema order", () => {
@@ -52,7 +52,7 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-schema-order-runtime",
+        transactionId: "transaction-schema-order-runtime",
       }),
     );
     const client = {
@@ -160,7 +160,7 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-schema-order-generated",
+        transactionId: "transaction-schema-order-generated",
       }),
     );
     const client = {
@@ -216,7 +216,7 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-1",
+        transactionId: "transaction-1",
       }),
     );
     const client = {
@@ -264,7 +264,7 @@ describe("Db runtime schema order", () => {
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => WriteHandle>(() =>
-      makeWriteHandle("batch-upsert"),
+      makeWriteHandle("transaction-upsert"),
     );
     const client = {
       getSchema: () => new Map(),
@@ -282,7 +282,7 @@ describe("Db runtime schema order", () => {
     >;
 
     expect(db.upsert(table, { title: "Buy milk", done: false }, { id: externalId })).toMatchObject({
-      batchId: "batch-upsert",
+      transactionId: "transaction-upsert",
     });
 
     expect(upsert).toHaveBeenCalledWith(
@@ -316,15 +316,15 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-1",
+        transactionId: "transaction-1",
       }),
     );
     const update = vi.fn<(...args: [string, InsertValues, { updatedAt: number }]) => WriteHandle>(
-      () => makeWriteHandle("batch-update"),
+      () => makeWriteHandle("transaction-update"),
     );
     const upsert = vi.fn<
       (...args: [string, InsertValues, { id: string; updatedAt: number }]) => WriteHandle
-    >(() => makeWriteHandle("batch-upsert"));
+    >(() => makeWriteHandle("transaction-upsert"));
     const client = {
       getSchema: () => new Map(),
       insert,
@@ -393,11 +393,11 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-insert",
+        transactionId: "transaction-insert",
       }),
     );
-    const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-update"));
-    const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-upsert"));
+    const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("transaction-update"));
+    const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("transaction-upsert"));
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
       insert,

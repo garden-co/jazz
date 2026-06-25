@@ -1,4 +1,8 @@
-import type { MutationErrorEvent } from "../runtime/client.js";
+import type {
+  DirectInsertResult,
+  DirectMutationResult,
+  MutationErrorEvent,
+} from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type InsertValues = Record<string, unknown>;
@@ -104,30 +108,30 @@ declare module "jazz-wasm" {
       values: InsertValues,
       writeContextJson?: string | null,
       objectId?: string | null,
-    ): { id: string; values: any[]; batchId: string };
+    ): DirectInsertResult;
     restore(
       table: string,
       objectId: string,
       values: InsertValues,
       writeContextJson?: string | null,
-    ): { id: string; values: any[]; batchId: string };
+    ): DirectInsertResult;
     update(
       objectId: string,
       values: unknown,
       writeContextJson?: string | null,
-    ): { batchId: string };
+    ): DirectMutationResult;
     upsert(
       table: string,
       objectId: string,
       values: InsertValues,
       writeContextJson?: string | null,
-    ): { batchId: string };
-    delete(objectId: string, writeContextJson?: string | null): { batchId: string };
+    ): DirectMutationResult;
+    delete(objectId: string, writeContextJson?: string | null): DirectMutationResult;
     onMutationError(callback: (event: MutationErrorEvent) => void): void;
-    beginBatch(batchMode: "direct" | "transactional"): string;
-    rollbackBatch(batchId: string): boolean;
-    commitBatch(batchId: string): void;
-    waitForBatch(batchId: string, tier: string): Promise<void>;
+    beginTransaction(transactionKind: "mergeable" | "exclusive"): string;
+    rollbackTransaction(transactionId: string): boolean;
+    commitTransaction(transactionId: string): void;
+    waitForTransaction(transactionId: string, tier: string): Promise<void>;
     /** Connect to a Jazz server over WebSocket. */
     connect(url: string, authJson: string): void;
     /** Disconnect from the Jazz server and drop the transport handle. */

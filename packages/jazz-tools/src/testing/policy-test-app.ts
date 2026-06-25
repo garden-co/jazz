@@ -43,14 +43,14 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
   Object.defineProperties(testDb, {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
+        const tx = db.beginExclusiveTransaction();
         expect(() => callback(tx)).not.toThrow();
         tx.rollback();
       },
     },
     expectDenied: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
+        const tx = db.beginExclusiveTransaction();
         expect(() => callback(tx)).toThrow('WriteError("policy denied');
         tx.rollback();
       },
