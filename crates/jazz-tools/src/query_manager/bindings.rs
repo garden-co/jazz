@@ -163,12 +163,30 @@ pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
         .map_err(|err: String| format!("Invalid BatchId: {err}"))
 }
 
+pub fn parse_transaction_id_input(transaction_id: &str) -> Result<BatchId, String> {
+    transaction_id
+        .parse()
+        .map_err(|err: String| format!("Invalid transaction id: {err}"))
+}
+
 pub fn parse_batch_mode_input(batch_mode: &str) -> Result<BatchMode, String> {
     match batch_mode {
         "direct" | "Direct" => Ok(BatchMode::Direct),
         "transactional" | "Transactional" => Ok(BatchMode::Transactional),
         other => Err(format!(
             "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
+        )),
+    }
+}
+
+pub fn parse_transaction_kind_input(transaction_kind: &str) -> Result<BatchMode, String> {
+    match transaction_kind {
+        "mergeable" | "Mergeable" | "direct" | "Direct" => Ok(BatchMode::Direct),
+        "exclusive" | "Exclusive" | "transactional" | "Transactional" => {
+            Ok(BatchMode::Transactional)
+        }
+        other => Err(format!(
+            "Invalid transaction kind '{other}'. Must be 'mergeable' or 'exclusive'."
         )),
     }
 }
@@ -188,6 +206,13 @@ pub fn serialize_batch_mode(mode: BatchMode) -> &'static str {
     }
 }
 
+pub fn serialize_transaction_kind(mode: BatchMode) -> &'static str {
+    match mode {
+        BatchMode::Direct => "mergeable",
+        BatchMode::Transactional => "exclusive",
+    }
+}
+
 pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
     match settlement {
         BatchFate::Rejected {
@@ -196,7 +221,7 @@ pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
             reason,
         } => json!({
             "kind": "rejected",
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
             "code": code,
             "reason": reason,
         }),
@@ -204,29 +229,29 @@ pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
             batch_id,
             confirmed_tier,
         } => json!({
-            "kind": "durableDirect",
-            "batchId": batch_id.to_string(),
+            "kind": "accepted",
+            "transactionId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
         }),
         BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier,
         } => json!({
-            "kind": "acceptedTransaction",
-            "batchId": batch_id.to_string(),
+            "kind": "accepted",
+            "transactionId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
         }),
         BatchFate::Missing { batch_id } => json!({
             "kind": "missing",
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }),
     }
 }
 
 pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
     json!({
-        "batchId": record.batch_id.to_string(),
-        "mode": serialize_batch_mode(record.mode),
+        "transactionId": record.batch_id.to_string(),
+        "kind": serialize_transaction_kind(record.mode),
         "sealed": record.sealed,
         "latestSettlement": record.latest_fate.as_ref().map(serialize_batch_fate),
     })
@@ -240,7 +265,7 @@ pub fn serialize_mutation_error_event(event: &MutationErrorEvent) -> JsonValue {
     json!({
         "code": event.code.as_str(),
         "reason": event.reason.as_str(),
-        "batch": serialize_local_batch_record(&event.batch),
+        "transaction": serialize_local_batch_record(&event.batch),
     })
 }
 

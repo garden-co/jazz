@@ -5,7 +5,7 @@ import {
   WriteResult,
   WriteHandle,
   type JazzClient,
-  type LocalBatchRecord,
+  type LocalTransactionRecord,
   type Row,
 } from "./client.js";
 import type { Session } from "./context.js";
@@ -44,38 +44,41 @@ function todoTable() {
   >;
 }
 
-function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
+function makeLocalTransactionRecord(transactionId: string): LocalTransactionRecord {
   return {
-    batchId,
-    mode: "direct",
+    transactionId,
+    kind: "mergeable",
     sealed: true,
     latestSettlement: null,
   };
 }
 
-function makeHandleClient(localBatchRecord: LocalBatchRecord) {
+function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   return {
-    waitForBatch: vi.fn(async () => undefined),
-    localBatchRecord: vi.fn(() => localBatchRecord),
+    waitForTransaction: vi.fn(async () => undefined),
+    localTransactionRecord: vi.fn(() => localTransactionRecord),
   };
 }
 
 function makeWriteResult(
   value: Row,
-  batchId: string,
-  localBatchRecord = makeLocalBatchRecord(batchId),
+  transactionId: string,
+  localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
-  const client = makeHandleClient(localBatchRecord);
+  const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteResult(value, batchId, client as unknown as JazzClient),
+    handle: new WriteResult(value, transactionId, client as unknown as JazzClient),
     client,
   };
 }
 
-function makeWriteHandle(batchId: string, localBatchRecord = makeLocalBatchRecord(batchId)) {
-  const client = makeHandleClient(localBatchRecord);
+function makeWriteHandle(
+  transactionId: string,
+  localTransactionRecord = makeLocalTransactionRecord(transactionId),
+) {
+  const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteHandle(batchId, client as unknown as JazzClient),
+    handle: new WriteHandle(transactionId, client as unknown as JazzClient),
     client,
   };
 }
@@ -92,7 +95,7 @@ describe("Db write handles", () => {
     };
     const { handle: writeResult, client: handleClient } = makeWriteResult(
       runtimeRow,
-      "batch-insert",
+      "transaction-insert",
     );
     const insert = vi.fn(() => writeResult);
     const client = {
@@ -113,7 +116,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    expect(pending.batchId).toBe("batch-insert");
+    expect(pending.transactionId).toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -124,13 +127,13 @@ describe("Db write handles", () => {
       title: "Buy milk",
       done: false,
     });
-    expect(handleClient.waitForBatch).toHaveBeenCalledWith("batch-insert", "global");
+    expect(handleClient.waitForTransaction).toHaveBeenCalledWith("transaction-insert", "global");
   });
 
   it("keeps update and delete handles waitable by durability tier", async () => {
     const table = todoTable();
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-update");
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-delete");
+    const { handle: updateHandle, client: updateClient } = makeWriteHandle("transaction-update");
+    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("transaction-delete");
     const update = vi.fn(() => updateHandle);
     const remove = vi.fn(() => deleteHandle);
     const client = {
@@ -155,8 +158,8 @@ describe("Db write handles", () => {
     expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
-    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-delete", "global");
+    expect(updateClient.waitForTransaction).toHaveBeenCalledWith("transaction-update", "edge");
+    expect(deleteClient.waitForTransaction).toHaveBeenCalledWith("transaction-delete", "global");
   });
 
   it("routes write handles through the session-aware client-backed db path", async () => {
@@ -174,10 +177,14 @@ describe("Db write handles", () => {
           { type: "Boolean", value: true },
         ],
       },
-      "batch-session-insert",
+      "transaction-session-insert",
     );
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-session-update");
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-session-delete");
+    const { handle: updateHandle, client: updateClient } = makeWriteHandle(
+      "transaction-session-update",
+    );
+    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle(
+      "transaction-session-delete",
+    );
     const insert = vi.fn(() => insertHandle);
     const update = vi.fn(() => updateHandle);
     const deleteRow = vi.fn(() => deleteHandle);
@@ -231,8 +238,17 @@ describe("Db write handles", () => {
     });
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertClient.waitForBatch).toHaveBeenCalledWith("batch-session-insert", "global");
-    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-session-update", "edge");
-    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-session-delete", "local");
+    expect(insertClient.waitForTransaction).toHaveBeenCalledWith(
+      "transaction-session-insert",
+      "global",
+    );
+    expect(updateClient.waitForTransaction).toHaveBeenCalledWith(
+      "transaction-session-update",
+      "edge",
+    );
+    expect(deleteClient.waitForTransaction).toHaveBeenCalledWith(
+      "transaction-session-delete",
+      "local",
+    );
   });
 });

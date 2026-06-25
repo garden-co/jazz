@@ -7,7 +7,7 @@ fn rc_auto_committed_direct_write_rejects_later_commit() {
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .unwrap();
 
-    let expected_error = format!("Write error: batch {batch_id} is already committed");
+    let expected_error = format!("Write error: transaction {batch_id} is already committed");
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);
 }
@@ -284,7 +284,9 @@ fn rc_sealing_empty_batch_completes_waits_without_local_record() {
         .expect_err("sealed empty batch should not accept later writes");
     assert_eq!(
         error.to_string(),
-        format!("Write error: batch {batch_id} has already been completed or was never opened")
+        format!(
+            "Write error: transaction {batch_id} has already been completed or was never opened"
+        )
     );
 }
 
@@ -303,8 +305,9 @@ fn rc_rolled_back_batch_rejects_later_operations() {
 
     core.rollback_batch(batch_id).unwrap();
 
-    let expected_error =
-        format!("Write error: batch {batch_id} has already been completed or was never opened");
+    let expected_error = format!(
+        "Write error: transaction {batch_id} has already been completed or was never opened"
+    );
 
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);
@@ -567,7 +570,7 @@ fn rc_committed_batch_rejects_later_handle_operations() {
     .unwrap();
     core.commit_batch(batch_id).unwrap();
 
-    let expected_error = format!("Write error: batch {batch_id} is already committed");
+    let expected_error = format!("Write error: transaction {batch_id} is already committed");
 
     let commit_err = core.commit_batch(batch_id).unwrap_err().to_string();
     assert_eq!(commit_err, expected_error);

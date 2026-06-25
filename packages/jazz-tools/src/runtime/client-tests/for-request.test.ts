@@ -6,7 +6,7 @@ import {
   makeClientWithContext,
   mockMutation,
   mockRow,
-  runtimeBatchRecordStubs,
+  runtimeTransactionRecordStubs,
   schemaWithTodos,
   type AppContext,
   type Runtime,
@@ -175,7 +175,7 @@ describe("JazzClient runtime helpers", () => {
     let writeContextJson: string | null | undefined;
 
     const runtime: Runtime = {
-      ...runtimeBatchRecordStubs,
+      ...runtimeTransactionRecordStubs,
       insert: (_table, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
@@ -225,20 +225,20 @@ describe("JazzClient runtime helpers", () => {
       "edge",
     );
 
-    const batchId = client.beginBatch("transactional");
+    const transactionId = client.beginTransaction("exclusive");
     client.insertInternal(
       "todos",
       { done: { type: "Boolean", value: false } },
       undefined,
       undefined,
       undefined,
-      batchId,
+      transactionId,
     );
     await client.query(
       '{"table":"todos"}',
       {
         localUpdates: "deferred",
-        transactionBatchId: batchId,
+        transactionId,
       },
       undefined,
     );

@@ -3,7 +3,7 @@ import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runti
 import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
-  const commitBatch = overrides.commitBatch ?? vi.fn();
+  const commitTransaction = overrides.commitTransaction ?? vi.fn();
   return {
     batchedTick: vi.fn(),
     close: vi.fn(),
@@ -14,38 +14,44 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onMutationError: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn((_objectId, writeContextJson) =>
-      JSON.stringify({ batchId: writeContextJson ? "batch-delete-2" : "batch-delete-1" }),
+      JSON.stringify({
+        transactionId: writeContextJson ? "transaction-delete-2" : "transaction-delete-1",
+      }),
     ),
     executeSubscription: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    waitForBatch: vi.fn(async () => undefined),
-    beginBatch: vi.fn((batchMode) => `batch-${batchMode}`),
-    rollbackBatch: vi.fn(() => true),
+    waitForTransaction: vi.fn(async () => undefined),
+    beginTransaction: vi.fn((kind) => `transaction-${kind}`),
+    rollbackTransaction: vi.fn(() => true),
     insert: vi.fn((_table, _valuesJson, writeContextJson) =>
       JSON.stringify({
         id: "row-1",
         values: [],
-        batchId: writeContextJson ? "batch-2" : "batch-1",
+        transactionId: writeContextJson ? "transaction-2" : "transaction-1",
       }),
     ),
     restore: vi.fn((_table, _objectId, _valuesJson, writeContextJson) =>
       JSON.stringify({
         id: "row-1",
         values: [],
-        batchId: writeContextJson ? "batch-restore-2" : "batch-restore-1",
+        transactionId: writeContextJson ? "transaction-restore-2" : "transaction-restore-1",
       }),
     ),
     onBatchedTickNeeded: vi.fn(),
     query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
     unsubscribe: vi.fn(),
     update: vi.fn((_objectId, _valuesJson, writeContextJson) =>
-      JSON.stringify({ batchId: writeContextJson ? "batch-update-2" : "batch-update-1" }),
+      JSON.stringify({
+        transactionId: writeContextJson ? "transaction-update-2" : "transaction-update-1",
+      }),
     ),
     upsert: vi.fn((_table, _objectId, _valuesJson, writeContextJson) =>
-      JSON.stringify({ batchId: writeContextJson ? "batch-upsert-2" : "batch-upsert-1" }),
+      JSON.stringify({
+        transactionId: writeContextJson ? "transaction-upsert-2" : "transaction-upsert-1",
+      }),
     ),
     ...overrides,
-    commitBatch,
+    commitTransaction,
   };
 }
 
@@ -68,11 +74,11 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    expect(adapter.beginBatch("transactional")).toBe("batch-transactional");
-    expect(adapter.rollbackBatch("batch-transactional")).toBe(true);
+    expect(adapter.beginTransaction("exclusive")).toBe("transaction-exclusive");
+    expect(adapter.rollbackTransaction("transaction-exclusive")).toBe(true);
 
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
-    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
+    expect(row).toEqual({ id: "row-1", values: [], transactionId: "transaction-1" });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -81,7 +87,7 @@ describe("JazzRnRuntimeAdapter", () => {
     );
 
     const restored = adapter.restore("todos", "row-1", { title: { type: "Text", value: "eggs" } });
-    expect(restored).toEqual({ id: "row-1", values: [], batchId: "batch-restore-1" });
+    expect(restored).toEqual({ id: "row-1", values: [], transactionId: "transaction-restore-1" });
     expect(binding.restore).toHaveBeenCalledWith(
       "todos",
       "row-1",
@@ -225,7 +231,7 @@ describe("JazzRnRuntimeAdapter", () => {
       { title: { type: "Text", value: "milk" } },
       writeContextJson,
     );
-    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-2" });
+    expect(row).toEqual({ id: "row-1", values: [], transactionId: "transaction-2" });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -239,7 +245,7 @@ describe("JazzRnRuntimeAdapter", () => {
       { title: { type: "Text", value: "eggs" } },
       writeContextJson,
     );
-    expect(restored).toEqual({ id: "row-1", values: [], batchId: "batch-restore-2" });
+    expect(restored).toEqual({ id: "row-1", values: [], transactionId: "transaction-restore-2" });
     expect(binding.restore).toHaveBeenCalledWith(
       "todos",
       "row-1",
@@ -500,13 +506,13 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(listener).toHaveBeenCalledWith("token expired");
   });
 
-  it("bridges mutation error callback and batch sealing", () => {
+  it("bridges mutation error callback and transaction sealing", () => {
     let capturedMutationError: { onError: (eventJson: string) => void } | null = null;
     const binding = createBinding({
       onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
         capturedMutationError = callback;
       }),
-      commitBatch: vi.fn(),
+      commitTransaction: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
@@ -516,8 +522,8 @@ describe("JazzRnRuntimeAdapter", () => {
       JSON.stringify({
         code: "WriteRejected",
         reason: "nope",
-        batch: {
-          batchId: "batch-1",
+        transaction: {
+          transactionId: "transaction-1",
           latestSettlement: {
             kind: "rejected",
             code: "WriteRejected",
@@ -526,14 +532,14 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       }),
     );
-    adapter.commitBatch("batch-1");
+    adapter.commitTransaction("transaction-1");
 
     expect(binding.onMutationError).toHaveBeenCalledTimes(1);
     expect(mutationErrorListener).toHaveBeenCalledWith({
       code: "WriteRejected",
       reason: "nope",
-      batch: {
-        batchId: "batch-1",
+      transaction: {
+        transactionId: "transaction-1",
         latestSettlement: {
           kind: "rejected",
           code: "WriteRejected",
@@ -541,6 +547,6 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       },
     });
-    expect(binding.commitBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.commitTransaction).toHaveBeenCalledWith("transaction-1");
   });
 });

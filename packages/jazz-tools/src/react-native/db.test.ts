@@ -51,9 +51,9 @@ function makeClientStub() {
     const row: DirectInsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
-      batchId: "batch-1",
+      transactionId: "transaction-1",
     };
-    return new WriteResult(row, row.batchId, client);
+    return new WriteResult(row, row.transactionId, client);
   });
   client = {
     insert,

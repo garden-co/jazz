@@ -24,7 +24,7 @@ import {
   JazzClient,
   type MutationErrorEvent,
   WriteHandle,
-  type BatchMode,
+  type TransactionKind,
   type CreateOptions,
   type RestoreOptions,
   type UpdateOptions,
@@ -34,8 +34,6 @@ import {
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
-  runInBatch,
-  Scoped,
   type DeleteOptions,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
@@ -504,13 +502,12 @@ function assertTableBelongsToClient<T, Init>(
   table: TableProxy<T, Init>,
   expectedClient: JazzClient,
   resolveClient: (schema: WasmSchema) => JazzClient,
-  operation: string,
 ): void {
   if (resolveClient(table._schema) === expectedClient) {
     return;
   }
   throw new Error(
-    `${operation} is bound to the client chosen by the first table used and cannot be used with table "${table._table}" from a different schema/client.`,
+    `Transaction is bound to the client chosen by the first table used and cannot be used with table "${table._table}" from a different schema/client.`,
   );
 }
 
@@ -541,24 +538,19 @@ export interface ColumnTransform {
 
 export type ColumnTransformMap = Record<string, ColumnTransform>;
 
-type DbBatchHandleBinding = {
+type DbTransactionHandleBinding = {
   client: JazzClient;
-  batchId: string;
+  transactionId: string;
   session?: Session;
   attribution?: string;
 };
-type AnyDbBatchHandle = DbBatchHandleBase;
 
-const dbBatchHandleBindings = new WeakMap<AnyDbBatchHandle, DbBatchHandleBinding>();
+const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
 
-function getDbBatchHandleBinding(
-  handle: AnyDbBatchHandle,
-  operation: string,
-  bindingName: "DbTransaction" | "DbDirectBatch",
-): DbBatchHandleBinding {
-  const binding = dbBatchHandleBindings.get(handle);
+function getDbTxHandleBinding(handle: Transaction, operation: string): DbTransactionHandleBinding {
+  const binding = dbTxHandleBindings.get(handle);
   if (!binding) {
-    throw new Error(`${bindingName}.${operation}() requires at least one table operation first`);
+    throw new Error(`DbTransaction.${operation}() requires at least one table operation first`);
   }
   return binding;
 }
@@ -605,89 +597,183 @@ function transformInputColumns(
   return transformed;
 }
 
+export type { TransactionKind } from "./client.js";
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as PromiseLike<T>).then === "function"
+  );
+}
+
+type RunInTransactionResult<TResult> =
+  TResult extends PromiseLike<unknown>
+    ? Promise<WriteResult<Awaited<TResult>>>
+    : WriteResult<TResult>;
+
+export type Scoped<TTransaction> = Omit<TTransaction, "commit" | "rollback">;
+
+function createTransactionScope<TTransaction extends object>(
+  transaction: TTransaction,
+): Scoped<TTransaction> {
+  return new Proxy(transaction, {
+    get(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return undefined;
+      }
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    has(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return false;
+      }
+
+      return Reflect.has(target, property);
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+  }) as Scoped<TTransaction>;
+}
+
+export function runInTransaction<TResult>(
+  transaction: Transaction,
+  callback: (target: Scoped<Transaction>) => TResult,
+  client: JazzClient | (() => JazzClient),
+): RunInTransactionResult<TResult> {
+  let value: TResult;
+  try {
+    const scope = createTransactionScope(transaction);
+    value = callback(scope);
+  } catch (error) {
+    try {
+      transaction.rollback();
+    } catch {
+      // Preserve the original callback error.
+    }
+    throw error;
+  }
+  const resultClient = typeof client === "function" ? client : () => client;
+  if (isPromiseLike(value)) {
+    return value.then(
+      (resolvedValue) => {
+        const committed = transaction.commit();
+        return new WriteResult(
+          resolvedValue as Awaited<TResult>,
+          committed.transactionId,
+          resultClient(),
+        );
+      },
+      (error) => {
+        try {
+          transaction.rollback();
+        } catch {
+          // Preserve the original callback error.
+        }
+        throw error;
+      },
+    ) as RunInTransactionResult<TResult>;
+  }
+  const committed = transaction.commit();
+  return new WriteResult(
+    value,
+    committed.transactionId,
+    resultClient(),
+  ) as RunInTransactionResult<TResult>;
+}
+
 /**
- * Shared implementation for batches and transactions.
+ * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
-abstract class DbBatchHandleBase {
+export class Transaction {
   constructor(
-    private readonly bindingName: "DbTransaction" | "DbDirectBatch",
-    private readonly batchMode: BatchMode,
+    readonly kind: TransactionKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly session?: Session,
     private readonly attribution?: string,
   ) {}
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
-    const existingBinding = dbBatchHandleBindings.get(this);
+  private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
+    const existingBinding = dbTxHandleBindings.get(this);
     if (existingBinding) {
-      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
+      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient);
       return existingBinding;
     }
 
     const client = this.resolveClient(table._schema);
-    const batchId = client.beginBatch(this.batchMode);
+    const transactionId = client.beginTransaction(this.kind);
     const binding = {
       client,
-      batchId,
+      transactionId,
       session: this.session,
       attribution: this.attribution,
     };
-    dbBatchHandleBindings.set(this, binding);
+    dbTxHandleBindings.set(this, binding);
     return binding;
   }
 
-  private bindQuery<T>(query: QueryBuilder<T>): DbBatchHandleBinding {
-    return this.bindTable(query as unknown as TableProxy<T, never>, this.bindingName);
+  private bindQuery<T>(query: QueryBuilder<T>): DbTransactionHandleBinding {
+    return this.bindTable(query as unknown as TableProxy<T, never>);
   }
 
-  private requireBinding(operation: string): DbBatchHandleBinding {
-    return getDbBatchHandleBinding(this, operation, this.bindingName);
+  private requireBinding(operation: string): DbTransactionHandleBinding {
+    return getDbTxHandleBinding(this, operation);
   }
 
-  batchId(): string {
-    return this.requireBinding("batchId").batchId;
+  transactionId(): string {
+    return this.requireBinding("transactionId").transactionId;
   }
 
   /**
-   * Commit this batch.
+   * Commit this transaction.
    */
   commit(): WriteHandle {
-    const { client, batchId } = this.requireBinding("commit");
-    return client.commitBatch(batchId);
+    const { client, transactionId } = this.requireBinding("commit");
+    return client.commitTransaction(transactionId);
   }
 
   /**
-   * Roll back this batch locally.
+   * Roll back this transaction locally.
    *
-   * Pending rows remain pending, but this batch can no longer be committed.
+   * Pending rows remain pending, but this transaction can no longer be committed.
    *
-   * Only available on batches/transactions created with {@link Db.beginBatch}/{@link Db.beginTransaction}.
-   * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): void {
-    const { client, batchId } = this.requireBinding("rollback");
-    client.rollbackBatch(batchId);
+    const { client, transactionId } = this.requireBinding("rollback");
+    client.rollbackTransaction(transactionId);
   }
 
   /**
    * Insert a new row into a table.
    *
-   * The insert is scoped to this batch, and will only be globally visible
+   * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    this.bindTable(table, this.bindingName);
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("insert");
-    const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
+    const { client, transactionId, session, attribution } = this.requireBinding("insert");
+    const row = client.insertInternal(
+      table._table,
+      values,
+      options,
+      session,
+      attribution,
+      transactionId,
+    );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
   /**
    * Restore a soft-deleted row.
    *
-   * The restore is scoped to this batch, and will only be globally visible
+   * The restore is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   restore<T, Init>(
@@ -696,10 +782,10 @@ abstract class DbBatchHandleBase {
     data: Init,
     options?: RestoreOptions,
   ): T {
-    this.bindTable(table, this.bindingName);
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("restore");
+    const { client, transactionId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
       id,
@@ -707,7 +793,7 @@ abstract class DbBatchHandleBase {
       options,
       session,
       attribution,
-      batchId,
+      transactionId,
     );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
@@ -715,49 +801,49 @@ abstract class DbBatchHandleBase {
   /**
    * Create or update a row with a caller-supplied id.
    *
-   * The upsert is scoped to this batch, and will only be globally visible
+   * The upsert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    this.bindTable(table, this.bindingName);
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, values, options, session, attribution, batchId);
+    const { client, transactionId, session, attribution } = this.requireBinding("upsert");
+    client.upsertInternal(table._table, values, options, session, attribution, transactionId);
   }
 
   /**
    * Update an existing row in a table.
    *
-   * The update is scoped to this batch, and will only be globally visible
+   * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.bindTable(table, this.bindingName);
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("update");
-    client.updateInternal(id, updates, undefined, session, attribution, batchId);
+    const { client, transactionId, session, attribution } = this.requireBinding("update");
+    client.updateInternal(id, updates, undefined, session, attribution, transactionId);
   }
 
   /**
    * Delete an existing row from a table.
    *
-   * The delete is scoped to this batch, and will only be globally visible
+   * The delete is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { client, batchId, session, attribution } = this.bindTable(table, this.bindingName);
-    client.deleteInternal(id, undefined, session, attribution, batchId);
+    const { client, transactionId, session, attribution } = this.bindTable(table);
+    client.deleteInternal(id, undefined, session, attribution, transactionId);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * Read data is scoped to this batch.
+   * Read data is scoped to this transaction.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, batchId, session } = this.bindQuery(query);
+    const { client, transactionId, session } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
@@ -769,7 +855,7 @@ abstract class DbBatchHandleBase {
       {
         ...options,
         localUpdates: "deferred",
-        transactionBatchId: batchId,
+        transactionId,
       },
       session,
     );
@@ -789,7 +875,7 @@ abstract class DbBatchHandleBase {
   /**
    * Execute a query with a limit of one and return the first matching row, or null.
    *
-   * Read data is scoped to this batch.
+   * Read data is scoped to this transaction.
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
@@ -798,45 +884,9 @@ abstract class DbBatchHandleBase {
 }
 
 /**
- * Transactions group a set of writes that should settle together after an authority validates them.
- *
- * Data read and written through this transaction is scoped to it, and will only be
- * globally visible once it's committed using {@link DbTransaction.commit} and
- * accepted by the authority.
- */
-export class DbTransaction extends DbBatchHandleBase {
-  constructor(
-    resolveClient: (schema: WasmSchema) => JazzClient,
-    session?: Session,
-    attribution?: string,
-  ) {
-    super("DbTransaction", "transactional", resolveClient, session, attribution);
-  }
-}
-
-/**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type TransactionScope = Scoped<DbTransaction>;
-
-/**
- * Direct batches group a set of writes that should become visible together on batch commit,
- * without waiting for an authority approval.
- */
-export class DbDirectBatch extends DbBatchHandleBase {
-  constructor(
-    resolveClient: (schema: WasmSchema) => JazzClient,
-    session?: Session,
-    attribution?: string,
-  ) {
-    super("DbDirectBatch", "direct", resolveClient, session, attribution);
-  }
-}
-
-/**
- * Batch object available inside {@link Db.batch}'s callback.
- */
-export type BatchScope = Scoped<DbDirectBatch>;
+export type TransactionScope = Scoped<Transaction>;
 
 interface BrokerPromotionState {
   leadershipId: number;
@@ -2318,18 +2368,10 @@ export class Db {
     return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
   }
 
-  /**
-   * Begin a new transaction.
-   *
-   * Use transactions when several writes should settle together after an authority validates them.
-   *
-   * Use {@link DbTransaction.commit} to commit the transaction.
-   *
-   * Prefer using {@link Db.transaction} when an explicit commit is not required.
-   */
-  beginTransaction(): DbTransaction {
+  private createTransaction(kind: TransactionKind): Transaction {
     const context = this.getRuntimeOperationContext();
-    return new DbTransaction(
+    return new Transaction(
+      kind,
       (schema) => this.getClient(schema),
       context?.session,
       context?.attribution,
@@ -2337,9 +2379,29 @@ export class Db {
   }
 
   /**
-   * Run {@link callback} inside a transaction and commit it once the callback returns.
+   * Begin a mergeable transaction.
    *
-   * Use transactions when several writes should settle together after an authority validates them.
+   * Use {@link Transaction.commit} to commit the transaction.
+   *
+   * Prefer using {@link Db.transaction} when an explicit commit is not required.
+   */
+  beginTransaction(): Transaction {
+    return this.createTransaction("mergeable");
+  }
+
+  /**
+   * Begin an exclusive transaction for writes that need serializable validation by the authority.
+   *
+   * Use {@link Transaction.commit} to commit the transaction.
+   *
+   * Prefer using {@link Db.exclusiveTransaction} when an explicit commit is not required.
+   */
+  beginExclusiveTransaction(): Transaction {
+    return this.createTransaction("exclusive");
+  }
+
+  /**
+   * Run {@link callback} inside a mergeable transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
@@ -2351,50 +2413,30 @@ export class Db {
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
-    return runInBatch(
+    return runInTransaction(
       transaction,
       callback,
-      () => getDbBatchHandleBinding(transaction, "result", "DbTransaction").client,
+      () => getDbTxHandleBinding(transaction, "result").client,
     );
   }
 
   /**
-   * Begin a new batch.
-   *
-   * Use a batch when several visible writes should settle together.
-   * Call {@link DbDirectBatch.commit} to freeze the batch, then wait on the
-   * returned handle if you need durable confirmation.
-   *
-   * Prefer using {@link Db.batch} when an explicit commit is not required.
-   */
-  beginBatch(): DbDirectBatch {
-    const context = this.getRuntimeOperationContext();
-    return new DbDirectBatch(
-      (schema) => this.getClient(schema),
-      context?.session,
-      context?.attribution,
-    );
-  }
-
-  /**
-   * Run {@link callback} inside a batch and commit it once the callback returns.
-   *
-   * Use a batch when several visible writes should settle together.
+   * Run {@link callback} inside an exclusive transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
-  batch<TResult>(
-    callback: (batch: BatchScope) => Promise<TResult>,
+  exclusiveTransaction<TResult>(
+    callback: (tx: TransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
-  batch<TResult>(
-    callback: (batch: BatchScope) => TResult | Promise<TResult>,
+  exclusiveTransaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  exclusiveTransaction<TResult>(
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(
-      batch,
+    const transaction = this.beginExclusiveTransaction();
+    return runInTransaction(
+      transaction,
       callback,
-      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
+      () => getDbTxHandleBinding(transaction, "result").client,
     );
   }
 

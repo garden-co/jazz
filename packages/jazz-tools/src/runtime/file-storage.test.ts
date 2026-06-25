@@ -67,7 +67,7 @@ function makeTable<Row, Init>(table: string): QueryableTable<Row, Init> {
 
 class FakeDb implements FileStorageDb {
   private nextSyntheticId = 1;
-  private nextBatchId = 1;
+  private nextTransactionId = 1;
   readonly inserts: Array<{
     table: string;
     data: Record<string, unknown>;
@@ -78,28 +78,28 @@ class FakeDb implements FileStorageDb {
   readonly queryOptions: Array<QueryOptions | undefined> = [];
   readonly files = new Map<string, StoredFile>();
   readonly fileParts = new Map<string, StoredFilePart>();
-  readonly #insertsByBatchId = new Map<string, number>();
+  readonly #insertsByTransactionId = new Map<string, number>();
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteResult<T> {
-    const batchId = `batch-${this.nextBatchId++}`;
+    const transactionId = `transaction-${this.nextTransactionId++}`;
     const row = this.store(table, data, false);
-    this.#insertsByBatchId.set(batchId, this.inserts.length - 1);
+    this.#insertsByTransactionId.set(transactionId, this.inserts.length - 1);
     const client = {
-      waitForBatch: async (persistedBatchId: string, tier: string) => {
-        const insertIndex = this.#insertsByBatchId.get(persistedBatchId);
+      waitForTransaction: async (persistedTransactionId: string, tier: string) => {
+        const insertIndex = this.#insertsByTransactionId.get(persistedTransactionId);
         if (insertIndex === undefined) {
-          throw new Error(`unknown batch ${persistedBatchId}`);
+          throw new Error(`unknown transaction ${persistedTransactionId}`);
         }
         const insert = this.inserts[insertIndex];
         if (!insert) {
-          throw new Error(`missing insert for batch ${persistedBatchId}`);
+          throw new Error(`missing insert for transaction ${persistedTransactionId}`);
         }
         insert.durable = true;
         insert.tier = tier;
       },
-    } as JazzClient;
+    } as unknown as JazzClient;
 
-    return new WriteResult(row as T, batchId, client);
+    return new WriteResult(row as T, transactionId, client);
   }
 
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {

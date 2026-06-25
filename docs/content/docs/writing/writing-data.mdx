@@ -8,8 +8,8 @@ reviewedAt: "4059cdef"
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
-Jazz also allows grouping writes together using [batches and transactions](#transactions-and-batches).
-Writes made through an open transaction or batch are not individually waitable. Call `.wait({ tier })` on the returned write result instead.
+Jazz also allows grouping writes together using [transactions](#transactions).
+Writes made through an open transaction are not individually waitable. Call `.wait({ tier })` on the returned write result instead.
 
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
@@ -152,7 +152,7 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
-`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+`wait({ tier })` resolves when the transaction reaches the requested durability tier. If the transaction is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
 ```ts
 const pending = db.insert(app.todos, {
@@ -160,7 +160,7 @@ const pending = db.insert(app.todos, {
   done: false,
 });
 
-console.log(pending.batchId);
+console.log(pending.transactionId);
 
 try {
   const row = await pending.wait({ tier: "global" });
@@ -180,42 +180,42 @@ db.onMutationError((error) => {
 });
 ```
 
-## Transactions and batches
+## Transactions
 
-Use a transaction when several writes should settle together after an authority validates the sealed batch:
+Use an exclusive transaction when several writes should settle together after an authority validates the sealed transaction:
 
 ```ts
-const result = await db.transaction(async (tx) => {
+const result = await db.exclusiveTransaction(async (tx) => {
   tx.insert(app.todos, { title: "Draft copy", done: false });
   const stagedDrafts = await tx.all(app.todos.where({ done: false }));
   tx.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
-console.log(result.batchId);
+console.log(result.transactionId);
 ```
 
-The changes made as part of the transaction are scoped to it, and will only be
+The changes made as part of an exclusive transaction are scoped to it, and will only be
 globally visible once it's committed and accepted by the authority.
 
-You can also use batches when you want to group several ordinary writes and commit them together:
+Use a mergeable transaction when you want to group several ordinary writes and commit them together:
 
 ```ts
-const result = db.batch((batch) => {
-  batch.insert(app.todos, { title: "Grouped write", done: false });
-  batch.update(app.todos, todoId, { done: true });
+const result = db.transaction((tx) => {
+  tx.insert(app.todos, { title: "Grouped write", done: false });
+  tx.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
-console.log(result.batchId);
+console.log(result.transactionId);
 ```
 
-Transactions and batches can read its own local writes through `all(...)` and `one(...)` before commit.
+Transactions can read their own local writes through `all(...)` and `one(...)` before commit.
 
-When using `transaction` and `batch`, changes are automatically committed once the callback finishes running and,
-if an error is thrown inside the callback, the open transaction or batch is rolled back instead of committed.
+When using `transaction`, changes are automatically committed once the callback finishes running and,
+if an error is thrown inside the callback, the open transaction is rolled back instead of committed.
 
-Alternatively, you can use `beginTransaction` and `beginBatch` to get a transaction or batch object, respectively.
+Alternatively, you can use `beginTransaction` to get a transaction object.
 This can be useful when making writes across multiple contexts. In this case however, you need to commit or rollback
-the transaction/batch explicitly.
+the transaction explicitly.
 
 ```ts
 let transaction: DbTransaction;
