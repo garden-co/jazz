@@ -1435,7 +1435,7 @@ describe("Worker Bridge with OPFS", () => {
       reason: "Insert denied by policy on table todos",
       transaction: {
         transactionId: insertResult.transactionId,
-        mode: "mergeable",
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
@@ -1506,7 +1506,7 @@ describe("Worker Bridge with OPFS", () => {
       reason: "Insert denied by policy on table todos",
       transaction: {
         transactionId: insertResult.transactionId,
-        mode: "mergeable",
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
@@ -1579,7 +1579,7 @@ describe("Worker Bridge with OPFS", () => {
       reason: "Insert denied by policy on table todos",
       transaction: {
         transactionId: insertResult.transactionId,
-        mode: "mergeable",
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
