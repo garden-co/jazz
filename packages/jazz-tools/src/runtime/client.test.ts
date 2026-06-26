@@ -191,7 +191,7 @@ describe("JazzClient.updateAuthToken", () => {
 });
 
 describe("JazzClient.updateCookieSession", () => {
-  it("refreshes transport auth without requiring a JS-readable JWT", () => {
+  it("refreshes transport auth without inventing backend session auth", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, {
       appId: "cookie-app",
@@ -223,6 +223,34 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+    expect(JSON.parse(arg)).not.toHaveProperty("backend_session");
+  });
+
+  it("forwards cookie session as backend_session when backend auth is configured", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      backendSecret: "backend-secret",
+      cookieSession: {
+        user_id: "00000000-0000-0000-0000-000000000001",
+        claims: { role: "reader" },
+        authMode: "external",
+      },
+    });
+
+    const refreshed = {
+      user_id: "00000000-0000-0000-0000-000000000001",
+      claims: { role: "writer" },
+      authMode: "external" as const,
+    };
+    client.updateCookieSession(refreshed);
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({
+      jwt_token: "initial.jwt.token",
+      backend_secret: "backend-secret",
+      backend_session: refreshed,
+    });
   });
 });
 

@@ -114,6 +114,13 @@ async fn direct_ws_admission(
         });
     }
 
+    if !has_jwt
+        && !has_session_header
+        && direct_ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
+    {
+        validate_direct_ws_cookie_origin(&headers)?;
+    }
+
     let session = crate::middleware::auth::extract_session(
         &headers,
         state.app_id,
@@ -129,9 +136,7 @@ async fn direct_ws_admission(
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
-    uuid::Uuid::parse_str(session.user_id.trim())
-        .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
-        .map_err(|_| "direct websocket session user_id must be a UUID".to_owned())?;
+    direct_ws_validate_session_identity(&session.user_id, peer_identity)?;
     Ok(DirectWsAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
@@ -195,6 +200,100 @@ fn direct_ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
         .try_into()
         .map_err(|_| "peer_identity must be 32 hex characters".to_owned())?;
     Ok(AuthorId::from_bytes(bytes))
+}
+
+fn direct_ws_validate_session_identity(
+    user_id: &str,
+    peer_identity: AuthorId,
+) -> Result<(), String> {
+    let session_identity = uuid::Uuid::parse_str(user_id.trim())
+        .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
+        .map_err(|_| "direct websocket session user_id must be a UUID".to_owned())?;
+    if session_identity != peer_identity {
+        return Err(
+            "direct websocket peer_identity must match authenticated session user_id".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn direct_ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
+    let Some(cookie_name) = cookie_name else {
+        return false;
+    };
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|cookie| {
+            cookie.split(';').any(|segment| {
+                let Some((name, value)) = segment.trim().split_once('=') else {
+                    return false;
+                };
+                name == cookie_name && !value.trim().is_empty()
+            })
+        })
+}
+
+fn validate_direct_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
+
+    if direct_ws_origin_matches_host(origin, host) {
+        return Ok(());
+    }
+    Err("cookie websocket auth Origin does not match Host".to_owned())
+}
+
+fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
+    let Ok(origin) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    let Some(origin_host) = origin.host_str() else {
+        return false;
+    };
+    let Ok(request_authority) = direct_ws_parse_authority(host) else {
+        return false;
+    };
+
+    let origin_port = origin
+        .port_or_known_default()
+        .unwrap_or_else(|| match origin.scheme() {
+            "https" | "wss" => 443,
+            _ => 80,
+        });
+    if origin_host.eq_ignore_ascii_case(&request_authority.host)
+        && origin_port == request_authority.port
+    {
+        return true;
+    }
+
+    is_loopback_host(origin_host) && is_loopback_host(&request_authority.host)
+}
+
+struct DirectWsAuthority {
+    host: String,
+    port: u16,
+}
+
+fn direct_ws_parse_authority(authority: &str) -> Result<DirectWsAuthority, ()> {
+    let parsed = reqwest::Url::parse(&format!("ws://{authority}")).map_err(|_| ())?;
+    let host = parsed.host_str().ok_or(())?.to_owned();
+    let port = parsed.port_or_known_default().ok_or(())?;
+    Ok(DirectWsAuthority { host, port })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("::1")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|addr| addr.is_loopback())
 }
 
 async fn read_direct_auth_prelude(
@@ -543,5 +642,59 @@ mod tests {
         );
 
         assert!(direct_ws_peer_identity("not-hex").is_err());
+    }
+
+    #[test]
+    fn direct_ws_session_identity_must_match_peer_identity() {
+        let peer = AuthorId::from_bytes([1; 16]);
+        let matching = uuid::Uuid::from_bytes([1; 16]).to_string();
+        let mismatching = uuid::Uuid::from_bytes([2; 16]).to_string();
+
+        assert!(direct_ws_validate_session_identity(&matching, peer).is_ok());
+        assert!(direct_ws_validate_session_identity(&mismatching, peer).is_err());
+        assert!(direct_ws_validate_session_identity("not-a-uuid", peer).is_err());
+    }
+
+    #[test]
+    fn direct_ws_cookie_auth_detects_configured_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "other=value; jazz-auth=token".parse().unwrap(),
+        );
+
+        assert!(direct_ws_has_auth_cookie(&headers, Some("jazz-auth")));
+        assert!(!direct_ws_has_auth_cookie(&headers, Some("missing")));
+        assert!(!direct_ws_has_auth_cookie(&headers, None));
+    }
+
+    #[test]
+    fn direct_ws_cookie_origin_accepts_same_origin_and_loopback() {
+        assert!(direct_ws_origin_matches_host(
+            "https://app.example:8443",
+            "app.example:8443"
+        ));
+        assert!(direct_ws_origin_matches_host(
+            "http://localhost:5173",
+            "127.0.0.1:4200"
+        ));
+    }
+
+    #[test]
+    fn direct_ws_cookie_origin_rejects_missing_or_cross_origin() {
+        assert!(!direct_ws_origin_matches_host(
+            "https://evil.example",
+            "app.example"
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
+        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
     }
 }

@@ -570,17 +570,22 @@ export class JazzClient {
     jwt_token: string | null;
     admin_secret?: string;
     backend_secret?: string;
+    backend_session?: Session;
   } {
     const payload: {
       jwt_token: string | null;
       admin_secret?: string;
       backend_secret?: string;
+      backend_session?: Session;
     } = { jwt_token: this.context.jwtToken ?? null };
     if (this.context.adminSecret) {
       payload.admin_secret = this.context.adminSecret;
     }
     if (this.context.backendSecret) {
       payload.backend_secret = this.context.backendSecret;
+      if (this.context.cookieSession) {
+        payload.backend_session = this.context.cookieSession;
+      }
     }
     return payload;
   }
