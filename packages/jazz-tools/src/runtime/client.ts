@@ -17,7 +17,6 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
-import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
 
 /**
  * Minimal request shape supported by backend request helpers.
@@ -258,10 +257,8 @@ interface WriteContextPayload {
  */
 export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 
-export interface ConnectSyncRuntimeOptions {
-  useBinaryEncoding?: boolean;
+export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  nonDurableClientRuntime?: boolean;
 }
 
 /**
@@ -328,20 +325,6 @@ function resolveQueryJson(query: string | QueryInput): string {
   }
 
   return translateQuery(builtQuery, schema);
-}
-
-function deterministicRuntimeBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 function isBrowserRuntime(): boolean {
@@ -594,7 +577,7 @@ export class JazzClient {
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
+    runtimeOptions?: ConnectRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
@@ -615,37 +598,6 @@ export class JazzClient {
   }
 
   /**
-   * Create client synchronously with a pre-loaded WASM module.
-   *
-   * Use this after loading WASM via `loadWasmModule()` to avoid
-   * async client creation. This enables sync mutations in the Db class.
-   *
-   * @param wasmModule Pre-loaded WASM module from loadWasmModule()
-   * @param context Application context with driver and schema
-   * @returns Connected JazzClient instance (created synchronously)
-   */
-  static connectSync(
-    wasmModule: WasmModule,
-    context: AppContext,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
-  ): JazzClient {
-    const runtime = new DirectWasmRuntime(
-      wasmModule.WasmDb,
-      context.schema,
-      deterministicRuntimeBytes(
-        `${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:node`,
-      ),
-      deterministicRuntimeBytes(
-        `${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:author`,
-      ),
-      1,
-      !runtimeOptions?.nonDurableClientRuntime,
-    );
-
-    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
-  }
-
-  /**
    * Create client from a pre-constructed runtime (e.g., NapiRuntime).
    *
    * This allows server-side apps to use the native NAPI backend directly
@@ -658,7 +610,7 @@ export class JazzClient {
   static connectWithRuntime(
     runtime: Runtime,
     context: AppContext,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
+    runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
