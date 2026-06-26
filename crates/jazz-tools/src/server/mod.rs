@@ -21,6 +21,7 @@ use jazz_server::StorageConfig;
 mod builder;
 mod catalogue;
 mod core_server;
+pub mod direct_client;
 mod direct_schema;
 pub mod routes;
 mod shutdown;
