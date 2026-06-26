@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import {
   blockJazzServerNetwork,
-  directJazzServerInfo,
   jazzServerInfo,
   jazzServerJwtForUser,
   unblockJazzServerNetwork,
@@ -65,9 +64,7 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
-        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        directJazzServerInfo: async (_context, appId, schema) =>
-          directJazzServerInfo(appId, schema),
+        jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>

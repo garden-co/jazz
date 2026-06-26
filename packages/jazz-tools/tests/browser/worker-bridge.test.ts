@@ -22,7 +22,6 @@ import {
 } from "./support.js";
 import {
   blockJazzServerNetwork,
-  getDirectJazzServerInfo,
   getJazzServerInfo,
   getJazzServerJwtForUser,
   type JazzServerInfo,
@@ -1258,7 +1257,7 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("propagates synced row from client A to client B", async () => {
-    const syncServer = await startDirectSyncServer("sync-a-to-b");
+    const syncServer = await startFixedSchemaSyncServer("sync-a-to-b");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken, syncServer);
@@ -1283,7 +1282,7 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("propagates synced row from client B to client A", async () => {
-    const syncServer = await startDirectSyncServer("sync-b-to-a");
+    const syncServer = await startFixedSchemaSyncServer("sync-b-to-a");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken, syncServer);
@@ -2898,9 +2897,9 @@ async function publishSyncServerSchemaAndPermissions(
   return testingServer;
 }
 
-async function startDirectSyncServer(scope: string, schema?: Schema): Promise<JazzServerInfo> {
+async function startFixedSchemaSyncServer(scope: string, schema?: Schema): Promise<JazzServerInfo> {
   const appId = uniqueDbName(`worker-bridge-${scope}`);
-  return getDirectJazzServerInfo(appId, encodeDirectSchema(schema ?? app.wasmSchema));
+  return getJazzServerInfo(appId, encodeDirectSchema(schema ?? app.wasmSchema));
 }
 
 async function publishPermissionsForServer(

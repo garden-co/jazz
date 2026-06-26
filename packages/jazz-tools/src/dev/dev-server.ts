@@ -4,7 +4,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
-import * as JazzNapi from "jazz-napi";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -28,7 +27,7 @@ export interface StartLocalJazzServerOptions {
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
-  directCoreSchema?: Uint8Array;
+  schema?: Uint8Array;
 }
 
 export interface LocalJazzServerHandle {
@@ -101,61 +100,6 @@ export async function startLocalJazzServer(
   const adminSecret = options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`;
   const backendSecret = options.backendSecret ?? `jazz-test-backend-${randomUUID().slice(0, 8)}`;
 
-  if (options.directCoreSchema) {
-    const DirectJazzServer = (
-      JazzNapi as unknown as {
-        DirectJazzServer?: {
-          start(options: { appId: string; port: number; schema: Uint8Array }): Promise<{
-            url: string;
-            stop(): void | Promise<void>;
-          }>;
-        };
-      }
-    ).DirectJazzServer;
-    if (!DirectJazzServer) {
-      throw new Error("jazz-napi does not expose DirectJazzServer");
-    }
-    let server;
-    try {
-      server = await DirectJazzServer.start({
-        appId,
-        port,
-        schema: options.directCoreSchema,
-      });
-    } catch (error) {
-      if (ownsPort) {
-        autoAllocatedPorts.delete(port);
-      }
-      throw error;
-    }
-    if (options.enableLogs === true) {
-      console.log(`[jazz-server] direct core started on ${server.url}`);
-    }
-    let stopPromise: Promise<void> | null = null;
-    const stop = async () => {
-      if (stopPromise) return await stopPromise;
-      stopPromise = (async () => {
-        try {
-          await server.stop();
-        } finally {
-          if (ownsPort) {
-            autoAllocatedPorts.delete(port);
-          }
-        }
-      })();
-      return await stopPromise;
-    };
-    return {
-      appId,
-      port,
-      url: server.url,
-      dataDir: "",
-      adminSecret,
-      backendSecret,
-      stop,
-    };
-  }
-
   let server;
   try {
     server = await JazzServer.start({
@@ -169,6 +113,7 @@ export async function startLocalJazzServer(
       upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
+      schema: options.schema ? [...options.schema] : undefined,
     });
   } catch (error) {
     if (ownsPort) {
