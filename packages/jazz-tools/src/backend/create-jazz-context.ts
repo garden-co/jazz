@@ -6,7 +6,8 @@ import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
-import { DirectWasmRuntime } from "../runtime/direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "../runtime/direct-wasm/runtime.js";
+import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
   resolveSchemaSource,
@@ -61,8 +62,6 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
 };
 
 type FlushableRuntime = Runtime & { flush?: () => void };
-
-const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
 
 function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;
@@ -141,7 +140,7 @@ export class JazzContext {
 
     const env = this.config.env ?? "dev";
     const userBranch = this.config.userBranch ?? "main";
-    this.runtime = new DirectWasmRuntime(
+    this.runtime = new DirectCoreRuntime(
       NapiDirectDb,
       schema,
       deterministicBytes(

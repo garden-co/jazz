@@ -888,6 +888,7 @@ mod tests {
         ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
@@ -896,6 +897,34 @@ mod tests {
             .await
             .expect("build direct ws test state")
             .state
+    }
+
+    #[tokio::test]
+    async fn direct_ws_backend_session_must_match_peer_identity() {
+        let state = make_direct_ws_test_state().await;
+        let authenticated = AuthorId::from_bytes([0x51; 16]);
+        let forged_peer = AuthorId::from_bytes([0x52; 16]);
+        let prelude = DirectWsPrelude {
+            peer_identity: hex::encode(forged_peer.as_bytes()),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("backend-secret".to_owned()),
+                backend_session: Some(serde_json::json!({
+                    "user_id": uuid::Uuid::from_bytes(*authenticated.as_bytes()).to_string(),
+                    "claims": {},
+                    "authMode": "external",
+                })),
+                ..Default::default()
+            },
+        };
+
+        let error = direct_ws_admission(prelude, &HeaderMap::new(), &state)
+            .await
+            .expect_err("mismatched authenticated session and peer_identity must be rejected");
+
+        assert!(
+            error.contains("peer_identity must match authenticated session user_id"),
+            "unexpected direct ws admission error: {error}"
+        );
     }
 
     async fn start_direct_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {

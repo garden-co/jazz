@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
-import { DirectWasmRuntime } from "../direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "../direct-wasm/runtime.js";
 
 export type TestRuntime = Runtime & { free?(): void };
 
@@ -99,7 +99,7 @@ export async function createWasmRuntime(
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const userBranch = opts?.userBranch ?? "main";
-  const runtime = new DirectWasmRuntime(
+  const runtime = new DirectCoreRuntime(
     wasmModule.WasmDb,
     schema,
     deterministicBytes(`${appId}:${env}:${userBranch}:node`),

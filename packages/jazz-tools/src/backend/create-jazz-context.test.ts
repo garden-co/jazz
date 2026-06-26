@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
+import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
@@ -60,7 +61,7 @@ const mocks = vi.hoisted(() => {
     }),
   };
 
-  class MockDirectWasmRuntime {
+  class MockDirectCoreRuntime {
     readonly close = vi.fn();
     constructor(
       Runtime: typeof MockNapiDirectDb,
@@ -91,7 +92,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     MockNapiDirectDb,
-    MockDirectWasmRuntime,
+    MockDirectCoreRuntime,
     MockJazzClient,
     resolveRequestSession,
     openMemory,
@@ -124,7 +125,7 @@ vi.mock("jazz-napi", () => ({
 }));
 
 vi.mock("../runtime/direct-wasm/runtime.js", () => ({
-  DirectWasmRuntime: mocks.MockDirectWasmRuntime,
+  DirectCoreRuntime: mocks.MockDirectCoreRuntime,
 }));
 
 vi.mock("../runtime/client.js", async () => {
@@ -297,8 +298,9 @@ describe("backend/create-jazz-context", () => {
       client: mocks.clients[0]!,
     });
     expect(backendDb).toEqual({
-      kind: "db",
+      kind: "attributed-db",
       client: mocks.clients[0]!,
+      attribution: SYSTEM_AUTHOR_ID,
     });
     expect(requestDb).toEqual({
       kind: "scoped-db",

@@ -1,4 +1,4 @@
-use crate::query::{Include, JoinMode};
+use crate::query::{Include, JoinMode, OrderDirection};
 
 #[test]
 fn write_policy_rejection_cleans_up_client() {
@@ -1918,6 +1918,98 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
 }
 
 #[test]
+fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_incremental() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), priority_schema());
+    let first = row(0x11);
+    let second = row(0x22);
+    let third = row(0x33);
+    let fourth = row(0x44);
+    let first_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", first, 10).cells(priority_cells("first", 10)),
+    );
+    let second_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", second, 11).cells(priority_cells("second", 20)),
+    );
+    let third_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", third, 12).cells(priority_cells("third", 30)),
+    );
+    let fourth_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", fourth, 13).cells(priority_cells("fourth", 40)),
+    );
+    let shape = Query::from("todos")
+        .order_by("priority", OrderDirection::Asc)
+        .offset(1)
+        .limit(2)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        core.supported_maintained_view(&shape, &binding, AuthorId::SYSTEM),
+        "ordered offset/limit windows should be maintained, not silently downgraded"
+    );
+
+    let mut peer = PeerState::new();
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        initial,
+        [("todos", second, second_tx), ("todos", third, third_tx)],
+        [],
+    );
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
+
+    let zeroth = row(0x05);
+    let zeroth_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", zeroth, 14).cells(priority_cells("zeroth", 5)),
+    );
+    let shifted_down = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        shifted_down,
+        [("todos", first, first_tx)],
+        [("todos", third, third_tx)],
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", zeroth, 15)
+            .parents(vec![zeroth_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        shifted_back,
+        [("todos", third, third_tx)],
+        [("todos", first, first_tx)],
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", second, 16)
+            .parents(vec![second_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        fill_from_tail,
+        [("todos", fourth, fourth_tx)],
+        [("todos", second, second_tx)],
+    );
+
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.full_recomputes_out, 0);
+    assert_eq!(metrics.unsupported_skips_out, 0);
+    assert_eq!(metrics.hits_out, 4);
+}
+
+#[test]
 fn supported_maintained_view_allows_reference_bearing_root_table() {
     // The maintained subscription view footprint is table-aware and now ships
     // reference-closure rows from the fast path.
@@ -2084,6 +2176,54 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) 
     )
     .unwrap();
     tx_id
+}
+
+fn priority_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("priority", ColumnType::U64),
+        ],
+    )])
+}
+
+fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.into())),
+        ("priority".to_owned(), Value::U64(priority)),
+    ])
+}
+
+fn assert_view_update_rows<const A: usize, const R: usize>(
+    update: SyncMessage,
+    expected_adds: [(&str, RowUuid, TxId); A],
+    expected_removes: [(&str, RowUuid, TxId); R],
+) {
+    let SyncMessage::ViewUpdate {
+        result_row_adds,
+        result_row_removes,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    let mut result_row_adds = result_row_adds;
+    let mut result_row_removes = result_row_removes;
+    result_row_adds.sort();
+    result_row_removes.sort();
+    let mut expected_adds = expected_adds
+        .into_iter()
+        .map(|(table, row_uuid, tx_id)| (table.to_owned().into(), row_uuid, tx_id))
+        .collect::<Vec<_>>();
+    let mut expected_removes = expected_removes
+        .into_iter()
+        .map(|(table, row_uuid, tx_id)| (table.to_owned().into(), row_uuid, tx_id))
+        .collect::<Vec<_>>();
+    expected_adds.sort();
+    expected_removes.sort();
+    assert_eq!(result_row_adds, expected_adds);
+    assert_eq!(result_row_removes, expected_removes);
 }
 
 struct RecursiveReachableFixture {

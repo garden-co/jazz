@@ -12,7 +12,7 @@ import {
   type DbRuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./db-runtime-module.js";
-import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "./direct-wasm/runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -68,7 +68,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       onAuthFailure,
     };
 
-    const mainThreadPeerRuntime = new DirectWasmRuntime(
+    const mainThreadPeerRuntime = new DirectCoreRuntime(
       this.wasmModule.WasmDb,
       schema,
       deterministicBytes(

@@ -17,6 +17,7 @@ import type {
   Runtime,
   TransactionKind,
 } from "../client.js";
+import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -36,12 +37,12 @@ import {
 import { DirectWebSocketCarrier, directWireAuthFailureReason } from "./direct-websocket.js";
 import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
-type WasmDbConstructor = {
-  openMemory(schema: Uint8Array, config: Uint8Array): DirectWasmDb;
-  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): DirectWasmDb;
+type DirectCoreDbConstructor = {
+  openMemory(schema: Uint8Array, config: Uint8Array): DirectCoreDb;
+  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): DirectCoreDb;
 };
 
-type DirectWasmDb = {
+type DirectCoreDb = {
   all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   propagateQuery?(query: DirectPreparedQuery, opts: unknown): void;
@@ -140,22 +141,21 @@ type RowState = {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
 
 function openPersistentDirectDb(
-  Runtime: WasmDbConstructor,
+  Runtime: DirectCoreDbConstructor,
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
-): DirectWasmDb {
+): DirectCoreDb {
   if (!Runtime.openPersistent) {
-    throw new Error("Direct WasmDb runtime does not expose persistent storage");
+    throw new Error("Direct core runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
 }
 
-export class DirectWasmRuntime implements Runtime {
-  private readonly db: DirectWasmDb;
+export class DirectCoreRuntime implements Runtime {
+  private readonly db: DirectCoreDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
@@ -177,7 +177,7 @@ export class DirectWasmRuntime implements Runtime {
   private nextSubscriptionId = 1;
 
   constructor(
-    Runtime: WasmDbConstructor,
+    Runtime: DirectCoreDbConstructor,
     private readonly schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
@@ -341,13 +341,13 @@ export class DirectWasmRuntime implements Runtime {
   }
 
   onMutationError(_callback: (event: MutationErrorEvent) => void): void {
-    // Direct WasmDb wait() surfaces rejected writes synchronously today. Worker
+    // Direct core wait() surfaces rejected writes synchronously today. Worker
     // replay of async rejection events is handled above this runtime layer.
   }
 
   beginTransaction(kind: TransactionKind): string {
     if (kind !== "mergeable") {
-      throw new Error("Direct WasmDb runtime does not support exclusive transactions yet");
+      throw new Error("Direct core runtime does not support exclusive transactions yet");
     }
     const id = `tx-${this.nextTransactionId++}`;
     this.pendingTxs.set(id, { kind, tx: this.db.mergeableTx(), writes: [] });
@@ -416,7 +416,7 @@ export class DirectWasmRuntime implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     void readSession(sessionJson);
     if (!this.db.subscribe) {
-      throw new Error("Direct WasmDb runtime does not support subscriptions");
+      throw new Error("Direct core runtime does not support subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
@@ -736,7 +736,7 @@ function identityFromWriteContext(writeContext?: string | null): Uint8Array | un
 function assertNoSessionWriteInTx(writeIdentity: Uint8Array | undefined): void {
   if (!writeIdentity) return;
   throw new Error(
-    "Direct WasmDb runtime cannot perform session-scoped transaction writes: " +
+    "Direct core runtime cannot perform session-scoped transaction writes: " +
       "the direct core mergeable transaction API has no identity-aware staging methods.",
   );
 }
@@ -749,7 +749,7 @@ function readOptions(tier?: string | null, includeDeleted = false): unknown {
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
   if (tier != null && !["local", "edge", "global"].includes(tier)) {
-    throw new Error(`Direct WasmDb runtime received unsupported read tier '${tier}'`);
+    throw new Error(`Direct core runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
@@ -758,7 +758,7 @@ function readSession(sessionJson?: string | null): { user_id: string } | null {
   if (sessionJson == null) return null;
   const parsed = JSON.parse(sessionJson) as { user_id?: unknown };
   if (typeof parsed.user_id !== "string") {
-    throw new Error("Direct WasmDb runtime session is missing user_id");
+    throw new Error("Direct core runtime session is missing user_id");
   }
   return { user_id: parsed.user_id };
 }
@@ -768,7 +768,7 @@ function readSupportedReadOptions(optionsJson: string): void {
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full") {
     throw new Error(
-      `Direct WasmDb runtime does not support read propagation '${String(propagation)}' yet`,
+      `Direct core runtime does not support read propagation '${String(propagation)}' yet`,
     );
   }
 }
@@ -842,7 +842,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     relation_ir?: unknown;
   };
   if (typeof parsed.table !== "string") {
-    throw new Error("Direct WasmDb runtime only supports table queries in this slice");
+    throw new Error("Direct core runtime only supports table queries in this slice");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
   if (encoded) {
@@ -870,7 +870,7 @@ function encodeSimpleRelationQuery(
   );
   if (unsupportedIdComparator) {
     throw new Error(
-      `Direct WasmDb runtime does not support '${unsupportedIdComparator.op}' comparisons on id yet`,
+      `Direct core runtime does not support '${unsupportedIdComparator.op}' comparisons on id yet`,
     );
   }
   const hasPostFilter = unwrapped.predicates.some((filter) => filter.column === "id");
@@ -1326,7 +1326,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Array":
       return encodeArrayValue(type.element, value);
     case "Row":
-      throw new Error(`Direct WasmDb runtime does not encode ${type.type} values yet`);
+      throw new Error(`Direct core runtime does not encode ${type.type} values yet`);
   }
 }
 
@@ -1595,7 +1595,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Array":
       return { tag: 11, inner: readValueType(type.element) };
     case "Row":
-      throw new Error("Direct WasmDb runtime does not encode nested row columns yet");
+      throw new Error("Direct core runtime does not encode nested row columns yet");
   }
 }
 

@@ -39,6 +39,7 @@ import {
   type DeleteOptions,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
+import { SYSTEM_READ_SESSION } from "./system-identity.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import {
   MessagePortRuntimeBridge,
@@ -253,13 +254,6 @@ type DbRuntimeOperationContext = {
   session?: Session;
   attribution?: string;
   readSession?: Session;
-};
-
-const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
-const SYSTEM_READ_SESSION: Session = {
-  user_id: SYSTEM_AUTHOR_ID,
-  claims: {},
-  authMode: "external",
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
