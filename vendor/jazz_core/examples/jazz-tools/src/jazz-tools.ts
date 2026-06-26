@@ -1024,23 +1024,8 @@ class DirectAbiDb implements Db {
   ): Subscription<Row> {
     this.#assertOpen();
     const relationQuery = subscribeRelationQuery(tableOrQuery, this.#schema);
-    const callbackForSubscription: SubscriptionCallback<Row> = relationQuery
-      ? () => callback(this.#readBuiltQuery(relationQuery) as Row[])
-      : callback;
     const query = relationQuery
-      ? this.#prepareQueryBytes(
-          encodeBuiltQuery(
-            JSON.stringify(
-              stripIdFilters({
-                ...relationQuery,
-                includes: undefined,
-                hops: undefined,
-                gather: undefined,
-              }),
-            ),
-            this.#schema,
-          ),
-        )
+      ? this.#prepareQueryBytes(encodeBuiltQuery(JSON.stringify(relationQuery), this.#schema))
       : this.#prepareQuery(tableOrQuery);
     const reader = this.#db.subscribe(query, subscriptionReadOptions()).getReader();
     const subscription = new DirectAbiSubscription(
@@ -1049,8 +1034,11 @@ class DirectAbiDb implements Db {
       () => {
         this.#subscriptions.delete(subscription as DirectAbiSubscription<unknown>);
       },
-      callbackForSubscription,
-      undefined,
+      callback,
+      relationQuery,
+      (table, rowId) =>
+        this.#readRows(queryFromTable(table)).find((row) => sameBytes(encodeRowId(row.id), rowId)) ??
+        null,
     );
     this.#subscriptions.add(subscription as DirectAbiSubscription<unknown>);
     void subscription.start().catch((error: unknown) => {
@@ -1449,6 +1437,10 @@ class DirectAbiSubscription<Row> implements Subscription<Row> {
     private readonly onUnsubscribe: () => void,
     private readonly callback: SubscriptionCallback<Row>,
     private readonly relationQuery?: BuiltQuery,
+    private readonly resolveIncludedRow?: (
+      table: string,
+      rowId: Uint8Array,
+    ) => Record<string, unknown> | null,
   ) {}
 
   async start(): Promise<void> {
@@ -1509,6 +1501,7 @@ class DirectAbiSubscription<Row> implements Subscription<Row> {
       relationSnapshot,
       this.schema,
       rows,
+      this.resolveIncludedRow,
     ) as Row[];
   }
 }
@@ -3125,6 +3118,7 @@ function applyRelationSubscriptionIncludes(
   snapshot: AbiRelationSubscriptionSnapshot,
   schema: SchemaDefinition,
   decodedSnapshotRows?: Array<Record<string, unknown>>,
+  resolveIncludedRow?: (table: string, rowId: Uint8Array) => Record<string, unknown> | null,
 ): Array<Record<string, unknown>> {
   const includedRowsByKey = rowMapByTableAndId(
     decodedSnapshotRows ?? decodeRows(snapshot.rows, schema),
@@ -3151,15 +3145,20 @@ function applyRelationSubscriptionIncludes(
           candidate.relation === relation.column &&
           sameBytes(candidate.sourceRowId, encodeRowId(row.id)),
       );
+      const targetId = row[relation.column];
       const rowPayloadTargets =
         decodedSnapshotRows?.filter((candidate) => candidate["__jazz_table"] === relation.table) ??
         [];
       const target =
         edge == null
-          ? rowPayloadTargets.length === 1
-            ? rowPayloadTargets[0]
-            : null
-          : (includedRowsByKey.get(rowKey(edge.targetTable, edge.targetRowId)) ?? null);
+          ? targetId == null
+            ? null
+            : rowPayloadTargets.length === 1
+              ? rowPayloadTargets[0]
+              : resolveIncludedRow?.(relation.table, encodeRowId(targetId)) ?? null
+          : (includedRowsByKey.get(rowKey(edge.targetTable, edge.targetRowId)) ??
+            resolveIncludedRow?.(edge.targetTable, edge.targetRowId) ??
+            null);
       if (include.required && target == null) return [];
       expanded[includeName] =
         target == null
@@ -3171,6 +3170,7 @@ function applyRelationSubscriptionIncludes(
               snapshot,
               schema,
               decodedSnapshotRows,
+              resolveIncludedRow,
             )[0];
     }
     return [expanded];
