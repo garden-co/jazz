@@ -154,6 +154,17 @@ impl ServerBuilder {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
+        let direct_core = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => {
+                let schema = crate::server::direct_schema::convert_alpha_schema(schema)
+                    .map_err(|error| format!("failed to build direct core schema: {error}"))?;
+                Some(crate::server::direct_core::DirectCoreServer::in_memory(
+                    schema,
+                )?)
+            }
+            ServerSchemaMode::Dynamic => None,
+        };
+
         let state = Arc::new(ServerState {
             runtime,
             app_id: self.app_id,
@@ -168,6 +179,7 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
+            direct_core,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 

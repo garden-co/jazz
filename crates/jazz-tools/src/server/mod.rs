@@ -18,6 +18,7 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
+mod direct_core;
 mod direct_schema;
 pub mod routes;
 mod shutdown;
@@ -427,6 +428,8 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    /// Server-side jazz_core peer loop for the direct websocket route.
+    pub(crate) direct_core: Option<direct_core::DirectCoreServer>,
     pub shutdown: ShutdownController,
 }
 
@@ -746,6 +749,7 @@ mod tests {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: None,
+            direct_core: None,
             shutdown: ShutdownController::new(timeout),
         })
     }

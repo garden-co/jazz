@@ -1915,6 +1915,7 @@ dependencies = [
  "insta",
  "internment",
  "jazz",
+ "jazz-server",
  "jsonschema",
  "jsonwebtoken 9.3.1",
  "lz4_flex",

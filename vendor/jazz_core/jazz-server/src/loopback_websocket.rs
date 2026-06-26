@@ -192,9 +192,11 @@ impl LoopbackWebSocketServer {
                     }
                 };
                 let _ = startup_tx.send(Ok(()));
+                #[allow(clippy::arc_with_non_send_sync)]
+                let shell = Arc::new(TokioMutex::new(shell));
                 accept_loop(
                     listener,
-                    Arc::new(TokioMutex::new(shell)),
+                    shell,
                     websocket_path,
                     auth_admission,
                     thread_shutdown,
@@ -463,17 +465,15 @@ async fn admit_socket(
         });
     }
 
-    if admission.bearer.is_some() {
-        if auth_admission.jwt_verifier.is_some() {
-            if is_local_first_bearer(auth_admission, admission.bearer.as_deref()) {
-                return admit_local_first_jwt(auth_admission, admission.bearer.as_deref());
-            }
-            return admit_bearer_jwt(
-                auth_admission,
-                admission.bearer.as_deref(),
-                AdmissionSource::AuthorizationHeader,
-            );
+    if admission.bearer.is_some() && auth_admission.jwt_verifier.is_some() {
+        if is_local_first_bearer(auth_admission, admission.bearer.as_deref()) {
+            return admit_local_first_jwt(auth_admission, admission.bearer.as_deref());
         }
+        return admit_bearer_jwt(
+            auth_admission,
+            admission.bearer.as_deref(),
+            AdmissionSource::AuthorizationHeader,
+        );
     }
 
     if !auth_admission.requires_bearer() {

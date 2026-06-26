@@ -708,7 +708,7 @@ fn parse_hex_frames(body: &[u8]) -> std::result::Result<Vec<Vec<u8>>, String> {
 }
 
 fn decode_hex(text: &str) -> std::result::Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex frame has odd length".to_owned());
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);

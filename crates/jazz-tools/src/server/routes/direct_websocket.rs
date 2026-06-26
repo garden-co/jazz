@@ -4,13 +4,15 @@
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
 //! matching the direct core binding/server carrier shape.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
+    extract::{Query, State},
     response::{IntoResponse, Response},
 };
+use jazz::ids::AuthorId;
 use jazz::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError,
     WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, encode_frame, negotiate_wire,
@@ -30,6 +32,7 @@ const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE
 pub(super) async fn direct_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if state.shutdown.is_shutting_down() {
         return (
@@ -41,10 +44,25 @@ pub(super) async fn direct_ws_handler(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_direct_ws_connection(socket, state))
+    let identity = match direct_ws_identity(&params) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(crate::jazz_transport::ErrorResponse::unauthorized(error)),
+            )
+                .into_response();
+        }
+    };
+
+    ws.on_upgrade(move |socket| handle_direct_ws_connection(socket, state, identity))
 }
 
-async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerState>) {
+async fn handle_direct_ws_connection(
+    mut socket: WebSocket,
+    state: Arc<ServerState>,
+    identity: AuthorId,
+) {
     let mut shutdown_rx = state.shutdown.subscribe();
     let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
         close_direct_ws_for_shutdown(&mut socket).await;
@@ -123,12 +141,40 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
         return;
     }
 
+    let Some(direct_core) = state.direct_core.clone() else {
+        send_direct_wire_error(
+            &mut socket,
+            WireError::new(
+                WireErrorCode::Internal,
+                WireRetry::Never,
+                "direct websocket requires a fixed schema server",
+            ),
+        )
+        .await;
+        let _ = socket.close().await;
+        return;
+    };
+    let session = match direct_core.open(identity, BTreeMap::new()).await {
+        Ok(session) => session,
+        Err(error) => {
+            send_direct_wire_error(
+                &mut socket,
+                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
     tracing::info!(
         protocol_version = negotiated.protocol_version,
         features = negotiated.features,
+        ?identity,
         "direct jazz_core ws negotiated"
     );
 
+    let mut outbound_tick = tokio::time::interval(std::time::Duration::from_millis(5));
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -139,7 +185,7 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    let frames = match decode_direct_frame_batch(&bytes) {
+                    let frames = match decode_direct_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
                             send_direct_wire_error(
@@ -154,9 +200,19 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
                             break;
                         }
                     };
-                    if frames.iter().any(|frame| matches!(frame, WireFrame::Message(_))) {
-                        send_direct_wire_error(&mut socket, direct_peer_loop_unavailable_error())
+                    let outbound = match direct_core.receive_tick_take(session, frames).await {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            send_direct_wire_error(
+                                &mut socket,
+                                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                            )
                             .await;
+                            break;
+                        }
+                    };
+                    if !outbound.is_empty() && send_direct_encoded_frames(&mut socket, &outbound).await.is_err() {
+                        break;
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -166,45 +222,35 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
                     }
                 }
                 _ => {}
+            },
+            _ = outbound_tick.tick() => {
+                let outbound = match direct_core.tick_take(session).await {
+                    Ok(frames) => frames,
+                    Err(_) => break,
+                };
+                if !outbound.is_empty() && send_direct_encoded_frames(&mut socket, &outbound).await.is_err() {
+                    break;
+                }
             }
         }
     }
 
+    direct_core.close(session);
     let _ = socket.close().await;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MissingDirectPeerLoopState {
-    fields: &'static [&'static str],
-}
-
-impl MissingDirectPeerLoopState {
-    fn current_server_state() -> Self {
-        Self {
-            fields: &[
-                "history-complete jazz::Db stored on ServerState",
-                "jazz::schema::JazzSchema for the direct core node",
-                "groove::storage::OrderedKvStorage + ReopenableStorage for direct core history",
-                "jazz::db::DbIdentity for the direct core node",
-                "authenticated client AuthorId/session admission for accept_subscriber",
-            ],
-        }
+fn direct_ws_identity(params: &HashMap<String, String>) -> Result<AuthorId, String> {
+    let Some(identity) = params.get("identity") else {
+        return Err("direct websocket requires identity".to_owned());
+    };
+    if identity.len() != 32 {
+        return Err("identity must be 32 hex characters".to_owned());
     }
-
-    fn diagnostic(&self) -> String {
-        format!(
-            "direct websocket negotiated jazz_core wire frames, but ServerState cannot start a server-side peer loop yet; missing: {}. TODO: add a ServerState-owned history-complete jazz::Db and call Db::accept_subscriber through WireTransportAdapter instead of routing through the legacy SyncPayload runtime.",
-            self.fields.join(", ")
-        )
-    }
-}
-
-fn direct_peer_loop_unavailable_error() -> WireError {
-    WireError::new(
-        WireErrorCode::Internal,
-        WireRetry::Never,
-        MissingDirectPeerLoopState::current_server_state().diagnostic(),
-    )
+    let bytes: [u8; 16] = hex::decode(identity)
+        .map_err(|_| "identity contains non-hex digit".to_owned())?
+        .try_into()
+        .map_err(|_| "identity must be 32 hex characters".to_owned())?;
+    Ok(AuthorId::from_bytes(bytes))
 }
 
 fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
@@ -217,11 +263,23 @@ fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error
 }
 
 fn decode_direct_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
-    let encoded_frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)?;
+    let encoded_frames = decode_direct_encoded_frame_batch(bytes)?;
     encoded_frames
         .iter()
         .map(|frame| jazz::wire::decode_frame(frame))
         .collect()
+}
+
+fn decode_direct_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
+}
+
+async fn send_direct_encoded_frames(
+    socket: &mut WebSocket,
+    frames: &[Vec<u8>],
+) -> Result<(), axum::Error> {
+    let batch = postcard::to_allocvec(frames).map_err(axum::Error::new)?;
+    socket.send(Message::Binary(batch)).await
 }
 
 async fn send_direct_wire_error(socket: &mut WebSocket, error: WireError) {
@@ -271,39 +329,19 @@ mod tests {
     }
 
     #[test]
-    fn direct_peer_loop_error_documents_missing_server_state() {
-        // Internal test: the missing direct jazz_core Db is not observable
-        // through public client APIs until ServerState can own one.
-        let error = direct_peer_loop_unavailable_error();
+    fn direct_ws_identity_requires_hex_author() {
+        let mut params = HashMap::new();
+        params.insert(
+            "identity".to_owned(),
+            "0102030405060708090a0b0c0d0e0f10".to_owned(),
+        );
 
-        assert_eq!(error.code, WireErrorCode::Internal);
-        assert_eq!(error.retry, WireRetry::Never);
-        assert!(
-            error
-                .message
-                .contains("history-complete jazz::Db stored on ServerState")
+        assert_eq!(
+            direct_ws_identity(&params).unwrap(),
+            AuthorId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
         );
-        assert!(error.message.contains("jazz::schema::JazzSchema"));
-        assert!(
-            error
-                .message
-                .contains("OrderedKvStorage + ReopenableStorage")
-        );
-        assert!(error.message.contains("jazz::db::DbIdentity"));
-        assert!(
-            error
-                .message
-                .contains("authenticated client AuthorId/session admission")
-        );
-        assert!(
-            error
-                .message
-                .contains("Db::accept_subscriber through WireTransportAdapter")
-        );
-        assert!(
-            !error
-                .message
-                .contains("SyncPayload websocket compatibility")
-        );
+
+        params.insert("identity".to_owned(), "not-hex".to_owned());
+        assert!(direct_ws_identity(&params).is_err());
     }
 }
