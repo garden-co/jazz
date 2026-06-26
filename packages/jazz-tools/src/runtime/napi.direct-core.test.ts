@@ -273,6 +273,82 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     ]);
   });
 
+  it("applies session ownership policy to direct NAPI subscriptions", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const runtime = new DirectCoreRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-policy-subscription:node"),
+      deterministicBytes("jazz-napi-direct-core-policy-subscription:author"),
+      14,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const query = JSON.stringify({ table: "todos" });
+    const aliceUpdates: unknown[] = [];
+
+    const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
+    runtime.executeSubscription(aliceHandle, (delta: unknown) => {
+      aliceUpdates.push(delta);
+    });
+
+    expect(aliceUpdates).toEqual([[]]);
+
+    const aliceTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "alice subscribed row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    const bobTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "bob subscribed row" },
+        done: { type: "Boolean", value: true },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      bobSession,
+    );
+
+    await Promise.all([
+      runtime.waitForTransaction(aliceTodo.transactionId, "local"),
+      runtime.waitForTransaction(bobTodo.transactionId, "local"),
+    ]);
+
+    expect(await runtime.query(query, aliceSession, "local")).toEqual([
+      expect.objectContaining({ id: aliceTodo.id }),
+    ]);
+    expect(await runtime.query(query, bobSession, "local")).toEqual([
+      expect.objectContaining({ id: bobTodo.id }),
+    ]);
+
+    expect(aliceUpdates).toEqual([
+      [],
+      [
+        expect.objectContaining({
+          kind: 0,
+          id: aliceTodo.id,
+          row: expect.objectContaining({
+            id: aliceTodo.id,
+            values: [
+              { type: "Text", value: "alice subscribed row" },
+              { type: "Boolean", value: false },
+              { type: "Text", value: ALICE_ID },
+            ],
+          }),
+        }),
+      ],
+    ]);
+
+    runtime.unsubscribe(aliceHandle);
+  });
+
   it("isolates two session identities sharing one direct NAPI runtime for owned deletes", async () => {
     const { NapiDirectDb } = await loadNapiModule();
     const runtime = new DirectCoreRuntime(

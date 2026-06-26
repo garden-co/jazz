@@ -1,7 +1,7 @@
 import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import type { AuthFailureReason } from "./auth-state.js";
 
 export interface RuntimeTokenOptions {
   secret: string;

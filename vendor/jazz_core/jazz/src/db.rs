@@ -428,7 +428,18 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, opts).await
+        self.subscribe_for_identity(prepared, opts, self.identity.author)
+            .await
+    }
+
+    /// Subscribe to a query evaluated as `author`.
+    pub async fn subscribe_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        self.open_subscription(prepared, opts, author).await
     }
 
     /// Ask connected upstreams to cover this query shape.
@@ -475,6 +486,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
+        author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         let read_tier = effective_read_tier(opts);
         let (maintained_subscription, rows) = if read_tier == DurabilityTier::Global {
@@ -485,15 +497,15 @@ where
                 .open_local_maintained_view_subscription(
                     &prepared.shape,
                     &prepared.binding,
-                    self.identity.author,
+                    author,
                 )?;
             (Some(subscription), rows)
         } else {
-            let rows = self.node.node.borrow_mut().query_rows_with_prepared_plan(
+            let rows = self.node.node.borrow_mut().query_rows_for_link(
                 &prepared.shape,
                 &prepared.binding,
                 read_tier,
-                prepared.plan_for_tier(read_tier),
+                author,
             )?;
             (None, rows)
         };
@@ -501,6 +513,7 @@ where
         let state = Rc::new(RefCell::new(SubscriptionState {
             shape: prepared.shape.clone(),
             binding: prepared.binding.clone(),
+            author,
             read_tier,
             rows: rows.clone(),
             maintained_subscription,
@@ -1608,13 +1621,14 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, previous, shape, binding) = {
+        let (read_tier, previous, shape, binding, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.rows.clone(),
                 state.shape.clone(),
                 state.binding.clone(),
+                state.author,
             )
         };
         let maybe_rows = {
@@ -1641,7 +1655,7 @@ where
                 rows_by_id.into_values().collect::<Vec<_>>()
             } else {
                 node.borrow_mut()
-                    .query_rows_with_prepared_plan(&shape, &binding, read_tier, None)?
+                    .query_rows_for_link(&shape, &binding, read_tier, author)?
             }
         };
         let rows = maybe_rows;
@@ -2984,6 +2998,7 @@ fn write_rejected(reason: RejectionReason) -> Error {
 struct SubscriptionState {
     shape: ValidatedQuery,
     binding: Binding,
+    author: AuthorId,
     read_tier: DurabilityTier,
     rows: Vec<CurrentRow>,
     maintained_subscription: Option<LocalMaintainedViewSubscription>,

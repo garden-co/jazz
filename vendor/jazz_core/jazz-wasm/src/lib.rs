@@ -291,6 +291,21 @@ impl WasmDbInner {
         }
     }
 
+    fn subscribe_for_identity(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => block_on(db.subscribe_for_identity(query, opts, author))
+                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => block_on(db.subscribe_for_identity(query, opts, author))
+                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
+        }
+    }
+
     fn propagate_query(&self, query: &PreparedQuery, opts: ReadOpts) {
         match self {
             Self::Memory(db) => db.propagate_query_with_opts(query, opts),
@@ -636,12 +651,24 @@ impl WasmDb {
         readable_stream_from_stream(stream.map(subscription_chunk_to_js))
     }
 
-    #[wasm_bindgen(js_name = propagateQuery)]
-    pub fn propagate_query(
+    #[wasm_bindgen(js_name = subscribeForIdentity)]
+    pub fn subscribe_for_identity(
         &self,
         query: &WasmPreparedQuery,
+        author: Vec<u8>,
         opts: JsValue,
-    ) -> Result<(), JsValue> {
+    ) -> Result<JsValue, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = author_id_from_bytes(&author)?;
+        let stream = self
+            .inner
+            .subscribe_for_identity(&query.inner, opts, author)
+            .map_err(to_js_error)?;
+        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+    }
+
+    #[wasm_bindgen(js_name = propagateQuery)]
+    pub fn propagate_query(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<(), JsValue> {
         let opts = read_opts_from_js(opts)?;
         self.inner.propagate_query(&query.inner, opts);
         Ok(())

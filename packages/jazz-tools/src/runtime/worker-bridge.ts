@@ -5,7 +5,7 @@ import {
   DirectWebSocketCarrier,
   directWireAuthFailureReason,
 } from "./direct-wasm/direct-websocket.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import type { AuthFailureReason } from "./auth-state.js";
 
 /** Page lifecycle hint forwarded to the worker runtime. */
 export type WorkerLifecycleEvent =

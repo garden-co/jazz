@@ -8,7 +8,7 @@
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import type { AuthFailureReason } from "./auth-state.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
