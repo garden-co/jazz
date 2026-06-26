@@ -133,6 +133,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.216.0",
