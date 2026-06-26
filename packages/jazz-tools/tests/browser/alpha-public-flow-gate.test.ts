@@ -1,0 +1,145 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { createDb, schema, type Db, type RowOf } from "../../src/index.js";
+import { encodeDirectSchema } from "../../src/runtime/direct-wasm/runtime.js";
+import {
+  TestCleanup,
+  uniqueDbName,
+  waitForCondition,
+  waitForQuery,
+  withTimeout,
+} from "./support.js";
+import { getJazzServerInfo } from "./testing-server.js";
+
+const app = schema.defineApp({
+  todos: schema.table({
+    title: schema.string(),
+    done: schema.boolean(),
+    list: schema.string(),
+  }),
+});
+
+type Todo = RowOf<typeof app.todos>;
+
+const ctx = new TestCleanup();
+
+afterEach(async () => {
+  await ctx.cleanup();
+});
+
+describe("alpha public package flow", () => {
+  it("opens a public-import Db with direct websocket server config and converges todo CRUD", async () => {
+    const appId = uniqueDbName("alpha-public-flow");
+    const { serverUrl, adminSecret } = await getJazzServerInfo(
+      appId,
+      encodeDirectSchema(app.wasmSchema),
+    );
+    const db = await openAlphaDb(appId, serverUrl, adminSecret);
+    const snapshots: Todo[][] = [];
+    const unsubscribe = ctx.trackSubscription(
+      db.subscribeAll(app.todos.orderBy("title"), (delta) => {
+        snapshots.push([...delta.all]);
+      }),
+    );
+
+    const created = db.insert(app.todos, {
+      title: "Adopt alpha public flow",
+      done: false,
+      list: "launch",
+    });
+    const createdRow = await withTimeout(
+      created.wait({ tier: "local" }),
+      10_000,
+      "initial insert was not accepted",
+    );
+    await expectTodoTitles(db, snapshots, ["Adopt alpha public flow"]);
+
+    const second = db.insert(app.todos, {
+      title: "Prove public imports",
+      done: false,
+      list: "launch",
+    });
+    const secondRow = await withTimeout(
+      second.wait({ tier: "local" }),
+      10_000,
+      "second insert was not accepted",
+    );
+    await withTimeout(
+      db.update(app.todos, createdRow.id, { done: true }).wait({ tier: "local" }),
+      10_000,
+      "update was not accepted",
+    );
+    await expectTodoSummaries(db, ["Adopt alpha public flow:done", "Prove public imports:open"]);
+
+    await withTimeout(
+      db.delete(app.todos, secondRow.id).wait({ tier: "local" }),
+      10_000,
+      "delete was not accepted",
+    );
+    await expectTodoSummaries(db, ["Adopt alpha public flow:done"]);
+    expect((await db.all(app.todos)).some((todo) => todo.title === "Prove public imports")).toBe(
+      false,
+    );
+
+    unsubscribe();
+    expect(snapshots.some((rows) => rows.length === 0)).toBe(true);
+    expect(
+      snapshots.some((rows) =>
+        rows.some((todo) => todo.title === "Adopt alpha public flow" && todo.done),
+      ),
+    ).toBe(true);
+  });
+});
+
+async function openAlphaDb(appId: string, serverUrl: string, adminSecret: string): Promise<Db> {
+  return ctx.track(
+    await createDb({
+      appId,
+      serverUrl,
+      adminSecret,
+      driver: { type: "memory" },
+    }),
+  );
+}
+
+async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): Promise<void> {
+  const rows = await waitForQuery(
+    db,
+    app.todos.orderBy("title"),
+    (todos) => titlesEqual(todos, titles),
+    `todos converge to ${titles.join(", ")}`,
+    15_000,
+  );
+  expect(rows.map((todo) => todo.title)).toEqual(titles);
+  await waitForCondition(
+    async () => snapshots.some((todos) => titlesEqual(todos, titles)),
+    5_000,
+    `subscription snapshot for ${titles.join(", ")}`,
+  );
+}
+
+async function expectTodoSummaries(db: Db, summaries: string[]): Promise<void> {
+  const rows = await waitForQuery(
+    db,
+    app.todos.orderBy("title"),
+    (todos) => summariesEqual([...todos].sort(byTitle), summaries),
+    `todos converge to ${summaries.join(", ")}`,
+    15_000,
+  );
+  expect([...rows].sort(byTitle).map(summary)).toEqual(summaries);
+}
+
+function titlesEqual(rows: Todo[], titles: string[]): boolean {
+  return rows.map((todo) => todo.title).join("\n") === titles.join("\n");
+}
+
+function summariesEqual(rows: Todo[], summaries: string[]): boolean {
+  return rows.map(summary).join("\n") === summaries.join("\n");
+}
+
+function summary(todo: Todo): string {
+  return `${todo.title}:${todo.done ? "done" : "open"}`;
+}
+
+function byTitle(left: Todo, right: Todo): number {
+  return left.title.localeCompare(right.title);
+}
