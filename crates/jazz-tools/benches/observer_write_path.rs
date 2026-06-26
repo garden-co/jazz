@@ -1,20 +1,95 @@
-//! Focused write-path benchmark for comparing plain mutations to observed mutations.
+//! Focused direct-core write-path benchmark for plain vs observed mutations.
 //!
-//! The key reproduction case here is a content-only update on a fixed-size table.
-//! That keeps result cardinality stable so the benchmark isolates the overhead of
-//! maintaining a live query, rather than measuring table growth across iterations.
+//! The reproduction case is a content-only update on a fixed-size table. That
+//! keeps result cardinality stable so the benchmark isolates the overhead of
+//! maintaining a live query, rather than measuring table growth.
 
 #![allow(clippy::single_element_loop)]
 
-mod common;
+use std::collections::BTreeMap;
 
-use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use jazz_tools::Query;
-use jazz_tools::Value;
-use jazz_tools::WriteContext;
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
+};
+use jazz::groove::records::Value;
+use jazz::groove::schema::{ColumnSchema, ColumnType};
+use jazz::groove::storage::MemoryStorage;
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::Query;
+use jazz::schema::{JazzSchema, Policy, TableSchema};
 
-const USER_ID: &str = "benchmark_user";
+type BenchDb = Db<MemoryStorage>;
+
+const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+
+fn schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("content", ColumnType::String),
+            ColumnSchema::new("created_at", ColumnType::U64),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
+}
+
+fn open_db(seed: u64) -> BenchDb {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+
+    block_on(Db::open(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([seed as u8; 16]),
+                author: AUTHOR,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(seed)),
+    ))
+    .expect("open direct observer benchmark db")
+}
+
+fn document_cells(index: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(format!("Document {index}"))),
+        (
+            "content".to_owned(),
+            Value::String(format!("Content body for document {index}")),
+        ),
+        ("created_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+fn seed_documents(db: &BenchDb, count: usize) -> Vec<RowUuid> {
+    (0..count)
+        .map(|index| {
+            db.insert("documents", document_cells(index))
+                .expect("seed direct observer benchmark row")
+                .row_uuid()
+        })
+        .collect()
+}
+
+fn content_update(index: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "content".to_owned(),
+            Value::String(format!("Updated content {index}")),
+        ),
+        ("created_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+fn all_documents_query(db: &BenchDb) -> jazz::db::PreparedQuery {
+    db.prepare_query(&Query::from("documents"))
+        .expect("prepare documents query")
+}
 
 fn update_write_path_with_and_without_observer(c: &mut Criterion) {
     let mut group = c.benchmark_group("observer_write_path/update_content");
@@ -26,34 +101,18 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
             BenchmarkId::new("no_observer", scale),
             &scale,
             |b, &scale| {
-                let mut core = create_runtime();
-                let data = setup_data(&mut core, scale, USER_ID);
-                let session = create_session(USER_ID);
-                let write_ctx = WriteContext::from_session(session);
-                let doc_ids = data.owned_documents;
-                let mut doc_idx = 0usize;
-                let mut update_counter = 0u64;
+                let db = open_db(1);
+                let rows = seed_documents(&db, scale);
+                let mut row_index = 0usize;
+                let mut update_index = 0usize;
 
                 b.iter(|| {
-                    update_counter += 1;
-                    let doc_id = doc_ids[doc_idx % doc_ids.len()];
-                    doc_idx += 1;
+                    update_index += 1;
+                    let row = rows[row_index % rows.len()];
+                    row_index += 1;
 
-                    core.update(
-                        doc_id,
-                        vec![
-                            (
-                                "content".to_string(),
-                                Value::Text(format!("Updated content {}", update_counter)),
-                            ),
-                            (
-                                "created_at".to_string(),
-                                Value::Timestamp(current_timestamp() + update_counter),
-                            ),
-                        ],
-                        Some(&write_ctx),
-                    )
-                    .expect("update without observer should succeed");
+                    db.update("documents", row, content_update(update_index))
+                        .expect("direct update without observer should succeed")
                 });
             },
         );
@@ -62,40 +121,32 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
             BenchmarkId::new("observe_all", scale),
             &scale,
             |b, &scale| {
-                let mut core = create_runtime();
-                let data = setup_data(&mut core, scale, USER_ID);
-                let session = create_session(USER_ID);
-                let write_ctx = WriteContext::from_session(session.clone());
-                let doc_ids = data.owned_documents;
-                let mut doc_idx = 0usize;
-                let mut update_counter = 0u64;
+                let db = open_db(2);
+                let rows = seed_documents(&db, scale);
+                let query = all_documents_query(&db);
+                let mut subscription =
+                    block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
+                match block_on(subscription.next_event()) {
+                    Some(SubscriptionEvent::Opened { current, .. }) => {
+                        assert_eq!(current.len(), scale);
+                    }
+                    other => panic!("expected opened subscription event, got {other:?}"),
+                }
 
-                let _handle = core
-                    .subscribe(Query::new("documents"), |_delta| {}, Some(session))
-                    .expect("subscribe");
-                core.immediate_tick();
-                core.batched_tick();
+                let mut row_index = 0usize;
+                let mut update_index = 0usize;
 
                 b.iter(|| {
-                    update_counter += 1;
-                    let doc_id = doc_ids[doc_idx % doc_ids.len()];
-                    doc_idx += 1;
+                    update_index += 1;
+                    let row = rows[row_index % rows.len()];
+                    row_index += 1;
 
-                    core.update(
-                        doc_id,
-                        vec![
-                            (
-                                "content".to_string(),
-                                Value::Text(format!("Observed updated content {}", update_counter)),
-                            ),
-                            (
-                                "created_at".to_string(),
-                                Value::Timestamp(current_timestamp() + update_counter),
-                            ),
-                        ],
-                        Some(&write_ctx),
-                    )
-                    .expect("update with observer should succeed");
+                    db.update("documents", row, content_update(update_index))
+                        .expect("direct update with observer should succeed");
+                    match block_on(subscription.next_event()) {
+                        Some(SubscriptionEvent::Delta { updated, .. }) => updated.len(),
+                        other => panic!("expected subscription delta event, got {other:?}"),
+                    }
                 });
             },
         );

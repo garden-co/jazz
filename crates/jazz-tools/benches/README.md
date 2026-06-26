@@ -10,14 +10,16 @@ The active bench harness is the explicit `[[bench]]` list in
 
 - `observer_write_path`
 - `direct_core_benchmark`
+- `direct_authorization_scope_benchmark`
 - `insert_benchmark`
 - `update_benchmark`
 - `subscription_benchmark`
 - `memory_benchmark`
 
-`direct_core_benchmark` is the first direct-core bench. It exercises the new
-`jazz_core`/`jazz` facade directly instead of going through the legacy
-`jazz-tools::runtime_core::RuntimeCore` stack.
+`direct_core_benchmark`, `direct_authorization_scope_benchmark`, and
+`observer_write_path` exercise the new `jazz_core`/`jazz` facade directly
+instead of going through the legacy `jazz-tools::runtime_core::RuntimeCore`
+stack.
 
 The remaining active benches still use the legacy RuntimeCore helpers under
 `benches/common/`. Keep that split visible while porting: direct-core benches are
@@ -29,7 +31,6 @@ benches until they are rewritten or retired.
 Next ports should prioritize the inactive deep-internal benches before they are
 re-enabled:
 
-- `server_authorization_scope_benchmark`
 - `realistic_phase1`
 
 Inactive legacy benches should remain in the tree as source material for
