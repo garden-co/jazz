@@ -1,7 +1,7 @@
 //! The Storage trait plus its blanket forwarding impl for `Box<T: Storage>`.
 //!
 //! Trait-adjacent types and codecs live in `super` (the storage module root);
-//! per-backend implementations (sqlite, rocksdb, opfs_btree, memory) live in
+//! per-backend implementations (sqlite, rocksdb, memory) live in
 //! their own sibling modules.
 
 use std::ops::Bound;

@@ -903,11 +903,9 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         // because the scheduled `batched_tick` (setTimeout(0)) sits behind
         // the control macrotask in the worker queue.
         //
-        // `simulate_crash` keeps the same drain step. On opfs-btree
-        // `flush_wal` is the only durability primitive (snapshot == WAL
-        // checkpoint), so the crash flavour and the clean shutdown have
-        // the same effect on storage; the distinction is preserved in case
-        // a future storage backend introduces a separate snapshot path.
+        // `simulate_crash` keeps the same drain step. The distinction from
+        // clean shutdown is preserved so the replacement storage backend can
+        // introduce a separate snapshot path.
         rt.batched_tick();
         if let Err(err) = rt.flush_wal() {
             let message = format!("shutdown flush failed: {}", js_error_message(&err));

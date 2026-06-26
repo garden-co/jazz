@@ -572,7 +572,7 @@ mod trace_entry_tests {
         TraceEntry::Span {
             sequence,
             name: "opfs put".to_string(),
-            target: "opfs_btree::db".to_string(),
+            target: "jazz_storage::db".to_string(),
             level: "TRACE".to_string(),
             start_unix_nano: (1_775_000_000, 0),
             end_unix_nano: (1_775_000_000, 1_000),
@@ -583,7 +583,7 @@ mod trace_entry_tests {
     fn log_entry(sequence: u64) -> TraceEntry {
         TraceEntry::Log {
             sequence,
-            target: "opfs_btree::db".to_string(),
+            target: "jazz_storage::db".to_string(),
             level: "WARN".to_string(),
             timestamp_unix_nano: (1_775_000_000, 2_000),
             message: "retrying write".to_string(),
@@ -592,10 +592,10 @@ mod trace_entry_tests {
     }
 
     fn emit_test_trace_records() {
-        tracing::warn!(target: "opfs_btree::db", attempt = 2, "retrying write");
+        tracing::warn!(target: "jazz_storage::db", attempt = 2, "retrying write");
 
         let span = tracing::span!(
-            target: "opfs_btree::db",
+            target: "jazz_storage::db",
             Level::TRACE,
             "opfs put",
             key_len = 8
@@ -639,7 +639,7 @@ mod trace_entry_tests {
                 message,
                 fields,
                 ..
-            } if target == "opfs_btree::db"
+            } if target == "jazz_storage::db"
                 && level == "WARN"
                 && message == "retrying write"
                 && fields.get("attempt") == Some(&"2".to_string())
@@ -654,7 +654,7 @@ mod trace_entry_tests {
                 fields,
                 ..
             } if name == "opfs put"
-                && target == "opfs_btree::db"
+                && target == "jazz_storage::db"
                 && level == "TRACE"
                 && fields.get("key_len") == Some(&"8".to_string())
         ));

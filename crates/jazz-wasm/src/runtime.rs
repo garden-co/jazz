@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
+//! - `MemoryStorage` provides synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `RustOutboxSender` implements `SyncSender` and posts directly to a JS
 //!   `postMessage`-bearing target (a `Worker` on the main side, the
@@ -107,8 +107,6 @@ use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::sync_manager::QueryPropagation;
@@ -316,9 +314,6 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
         _ => "client",
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-const DEFAULT_OPFS_CACHE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Build a `SchemaManager` from raw inputs. Shared by `open_persistent` and `open_ephemeral`.
 #[cfg(target_arch = "wasm32")]
@@ -1349,19 +1344,8 @@ impl WasmRuntime {
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
                 .map_err(JsValue::from)?;
 
-        let storage: Box<dyn Storage> = Box::new(
-            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
-                .await
-                .map_err(|e| {
-                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
-                        let err = js_sys::Error::new(msg);
-                        err.set_name("SecurityError");
-                        JsValue::from(err)
-                    } else {
-                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
-                    }
-                })?,
-        );
+        let storage: Box<dyn Storage> =
+            compile_error!("persistent wasm storage needs a replacement backend");
 
         if let Err(error) =
             rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)

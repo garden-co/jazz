@@ -308,8 +308,8 @@ describe("telemetry OTLP helpers", () => {
         {
           kind: "span",
           sequence: 0,
-          name: "OpfsBTree::put",
-          target: "opfs_btree::db",
+          name: "Storage::put",
+          target: "jazz_storage::db",
           level: "TRACE",
           fields: { key_len: "8", "jazz.span.target": "reserved" },
           startUnixNano: [1775000000, 0],
@@ -318,7 +318,7 @@ describe("telemetry OTLP helpers", () => {
         {
           kind: "log",
           sequence: 1,
-          target: "opfs_btree::db",
+          target: "jazz_storage::db",
           level: "WARN",
           fields: { attempt: "2" },
           message: "retrying write",
@@ -346,11 +346,11 @@ describe("telemetry OTLP helpers", () => {
       url: "http://127.0.0.1:54418/v1/logs",
     });
     expect(otelMocks.startSpan).toHaveBeenCalledWith(
-      "OpfsBTree::put",
+      "Storage::put",
       expect.objectContaining({
         attributes: expect.objectContaining({
           "jazz.runtime_thread": "worker",
-          "jazz.span.target": "opfs_btree::db",
+          "jazz.span.target": "jazz_storage::db",
           "jazz.span.fields": JSON.stringify({
             key_len: "8",
             "jazz.span.target": "reserved",
@@ -360,7 +360,7 @@ describe("telemetry OTLP helpers", () => {
       }),
     );
     expect(otelMocks.startSpan).not.toHaveBeenCalledWith(
-      "OpfsBTree::put",
+      "Storage::put",
       expect.objectContaining({
         attributes: expect.objectContaining({
           "jazz.span.target": "reserved",
@@ -374,7 +374,7 @@ describe("telemetry OTLP helpers", () => {
         severityText: "WARN",
         attributes: expect.objectContaining({
           "jazz.runtime_thread": "worker",
-          "jazz.log.target": "opfs_btree::db",
+          "jazz.log.target": "jazz_storage::db",
           "jazz.log.fields": JSON.stringify({ attempt: "2" }),
           attempt: "2",
         }),

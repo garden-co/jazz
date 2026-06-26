@@ -1272,6 +1272,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "groove"
+version = "0.1.0"
+dependencies = [
+ "internment",
+ "opfs-btree",
+ "paste",
+ "postcard",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1651,6 +1665,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "636d4b0f6a39fd684effe2a73f5310df16a3fa7954c26d36833e98f44d1977a2"
 dependencies = [
  "hashbrown 0.15.5",
+ "serde",
 ]
 
 [[package]]
@@ -1709,6 +1724,20 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "jazz"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "groove",
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
 
 [[package]]
 name = "jazz-napi"
@@ -1786,6 +1815,7 @@ dependencies = [
  "hex",
  "insta",
  "internment",
+ "jazz",
  "jsonschema",
  "jsonwebtoken",
  "lz4_flex",
@@ -1795,7 +1825,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-stdout",
  "opentelemetry_sdk",
- "opfs-btree",
  "postcard",
  "rand 0.8.5",
  "rcgen",
@@ -2544,6 +2573,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pem"
