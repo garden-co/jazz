@@ -306,7 +306,7 @@ export class DirectWasmRuntime implements Runtime {
   async query(
     queryJson: string,
     _sessionJson?: string | null,
-    tier?: string | null,
+    _tier?: string | null,
     _optionsJson?: string | null,
   ): Promise<unknown> {
     const query = this.prepareQuery(queryJson);
