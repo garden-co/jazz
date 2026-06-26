@@ -3,31 +3,27 @@
 //! Authentication integration tests for the Jazz server.
 //!
 //! Tests the three auth mechanisms:
-//! 1. JWT authentication (frontend) — via WS handshake
-//! 2. Backend session impersonation — via WS handshake
+//! 1. JWT authentication (frontend) — via direct websocket admission
+//! 2. Backend session impersonation — via direct websocket admission
 //! 3. Admin authentication — via HTTP admin endpoints
 
 mod test_server;
 
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures::SinkExt as _;
-use jazz_tools::catalogue::CatalogueEntry;
-use jazz_tools::metadata::{MetadataKey, ObjectType};
-use jazz_tools::query_manager::session::Session;
-use jazz_tools::schema_manager::encoding::encode_schema;
-use jazz_tools::sync_manager::{ClientId, SyncError, SyncPayload};
-use jazz_tools::transport_manager::{
-    AuthConfig, AuthHandshake, ConnectedResponse, SYNC_PROTOCOL_VERSION,
+use jazz::wire::{
+    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireError, WireFrame, WireHello,
+    WirePeerRole, decode_frame, encode_frame,
 };
+use jazz_tools::query_manager::session::Session;
+use jazz_tools::transport_manager::AuthConfig;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use test_server::TestServer;
 
@@ -81,126 +77,121 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    let compressed = lz4_flex::compress_prepend_size(payload);
-    let mut out = Vec::with_capacity(4 + compressed.len());
-    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
-    out.extend_from_slice(&compressed);
-    out
+#[derive(Debug)]
+enum DirectWsAdmissionResponse {
+    Hello(WireHello),
+    Error(WireError),
 }
 
-fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 4 {
-        return None;
-    }
-    let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-    if data.len() < 4 + len {
-        return None;
-    }
-    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
+fn test_author_id(seed: u8) -> jazz::ids::AuthorId {
+    jazz::ids::AuthorId::from_bytes([seed; 16])
 }
 
-type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+fn author_uuid_string(author: jazz::ids::AuthorId) -> String {
+    uuid::Uuid::from_bytes(*author.as_bytes()).to_string()
+}
 
-async fn ws_handshake_open(
+fn direct_ws_prelude(peer_identity: jazz::ids::AuthorId, auth: AuthConfig) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "peer_identity": hex::encode(peer_identity.as_bytes()),
+        "auth": auth,
+    }))
+    .expect("serialize direct websocket prelude")
+}
+
+fn direct_ws_client_hello_batch() -> Vec<u8> {
+    let hello = WireFrame::Hello(WireHello::current(
+        WirePeerRole::Client,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+    ));
+    let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
+    postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+}
+
+fn decode_direct_ws_admission_response(bytes: &[u8]) -> Result<DirectWsAdmissionResponse, String> {
+    let frames: Vec<Vec<u8>> =
+        postcard::from_bytes(bytes).map_err(|e| format!("invalid direct frame batch: {e}"))?;
+    if frames.len() != 1 {
+        return Err(format!("expected one direct frame, got {}", frames.len()));
+    }
+    match decode_frame(&frames[0]).map_err(|e| format!("invalid direct wire frame: {e}"))? {
+        WireFrame::Hello(hello) => Ok(DirectWsAdmissionResponse::Hello(hello)),
+        WireFrame::Error(error) => Ok(DirectWsAdmissionResponse::Error(error)),
+        other => Err(format!("unexpected direct websocket response: {other:?}")),
+    }
+}
+
+async fn direct_ws_admit(
     server: &TestServer,
+    peer_identity: jazz::ids::AuthorId,
     auth: AuthConfig,
-) -> Result<(WsStream, ConnectedResponse), String> {
+) -> Result<DirectWsAdmissionResponse, String> {
     let ws_url = format!("ws://127.0.0.1:{}/apps/{}/ws", server.port, server.app_id());
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("ws connect failed: {e}"))?;
 
-    let handshake = AuthHandshake {
-        sync_protocol_version: SYNC_PROTOCOL_VERSION,
-        client_id: ClientId::new().to_string(),
-        auth,
-        catalogue_state_hash: None,
-        declared_schema_hash: None,
-    };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
-    ws.send(Message::Binary(frame_encode(&payload).into()))
+    ws.send(Message::Binary(
+        direct_ws_prelude(peer_identity, auth).into(),
+    ))
+    .await
+    .map_err(|e| format!("ws send prelude failed: {e}"))?;
+    ws.send(Message::Binary(direct_ws_client_hello_batch().into()))
         .await
-        .map_err(|e| format!("ws send failed: {e}"))?;
+        .map_err(|e| format!("ws send client hello failed: {e}"))?;
 
     use futures::StreamExt as _;
-    match ws.next().await {
-        Some(Ok(Message::Binary(bytes))) => {
-            let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(&inner) {
-                Ok((ws, connected))
-            } else {
-                let msg = serde_json::from_slice::<serde_json::Value>(&inner)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("message")
-                            .and_then(|m| m.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "auth rejected".to_string());
-                Err(msg)
-            }
-        }
-        Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
-        Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
-        Some(Err(e)) => Err(format!("ws recv error: {e}")),
+    match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+        Ok(Some(Ok(Message::Binary(bytes)))) => decode_direct_ws_admission_response(&bytes),
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Err("server closed connection".to_string()),
+        Ok(Some(Ok(other))) => Err(format!("unexpected WS message: {other:?}")),
+        Ok(Some(Err(e))) => Err(format!("ws recv error: {e}")),
+        Err(_) => Err("timed out waiting for direct websocket response".to_string()),
     }
 }
 
-async fn ws_send_sync_payload(ws: &mut WsStream, payload: SyncPayload) -> Result<(), String> {
-    let batch = jazz_tools::transport_protocol::SyncBatchRequest {
-        client_id: ClientId::new(),
-        payloads: vec![payload],
-    };
-    let bytes = batch
-        .encode_payload()
-        .expect("encode SyncBatchRequest payload");
-    ws.send(Message::Binary(frame_encode(&bytes).into()))
-        .await
-        .map_err(|e| format!("ws send sync payload failed: {e}"))
-}
-
-async fn ws_recv_server_event(
-    ws: &mut WsStream,
-) -> Result<jazz_tools::transport_protocol::ServerEvent, String> {
-    use futures::StreamExt as _;
-
-    let message = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-        .await
-        .map_err(|_| "timed out waiting for server event".to_string())?;
-
-    match message {
-        Some(Ok(Message::Binary(bytes))) => {
-            let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            jazz_tools::transport_protocol::ServerEvent::decode_payload(&inner)
-                .map_err(|e| format!("invalid server event: {e}"))
-        }
-        Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
-        Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
-        Some(Err(e)) => Err(format!("ws recv error: {e}")),
+async fn direct_ws_connect(
+    server: &TestServer,
+    peer_identity: jazz::ids::AuthorId,
+    auth: AuthConfig,
+) -> Result<WireHello, String> {
+    let response = direct_ws_admit(server, peer_identity, auth).await?;
+    match response {
+        DirectWsAdmissionResponse::Hello(hello) if hello.role == WirePeerRole::Core => Ok(hello),
+        DirectWsAdmissionResponse::Hello(hello) => Err(format!(
+            "unexpected direct websocket hello role: {:?}",
+            hello.role
+        )),
+        DirectWsAdmissionResponse::Error(error) => Err(error.message),
     }
 }
 
-async fn ws_wait_for_sync_error(ws: &mut WsStream) -> Result<SyncError, String> {
-    for _ in 0..8 {
-        let event = ws_recv_server_event(ws).await?;
-        if let jazz_tools::transport_protocol::ServerEvent::SyncUpdate { payload, .. } = event
-            && let SyncPayload::Error(error) = *payload
-        {
-            return Ok(error);
-        }
+async fn direct_ws_rejects(
+    server: &TestServer,
+    peer_identity: jazz::ids::AuthorId,
+    auth: AuthConfig,
+) -> Result<String, String> {
+    let response = direct_ws_admit(server, peer_identity, auth).await?;
+    match response {
+        DirectWsAdmissionResponse::Error(error) => Ok(error.message),
+        DirectWsAdmissionResponse::Hello(_) => Err("direct websocket admitted client".to_string()),
     }
-
-    Err("expected SyncUpdate error event".to_string())
 }
 
-/// Perform a WS handshake against `ws://host/ws` with the given auth config.
-///
-/// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` if the
-/// server sends an error frame or closes the connection unexpectedly.
-async fn ws_handshake(server: &TestServer, auth: AuthConfig) -> Result<ConnectedResponse, String> {
-    let (_ws, response) = ws_handshake_open(server, auth).await?;
-    Ok(response)
+async fn ws_handshake(
+    server: &TestServer,
+    peer_identity: jazz::ids::AuthorId,
+    auth: AuthConfig,
+) -> Result<WireHello, String> {
+    direct_ws_connect(server, peer_identity, auth).await
+}
+
+async fn ws_rejects(
+    server: &TestServer,
+    peer_identity: jazz::ids::AuthorId,
+    auth: AuthConfig,
+) -> Result<String, String> {
+    direct_ws_rejects(server, peer_identity, auth).await
 }
 
 /// Build AuthConfig with a JWT token.
@@ -284,6 +275,24 @@ mod integration_tests {
         Client::new()
     }
 
+    async fn publish_minimal_schema(server: &TestServer) {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("auth_probe").column("id", ColumnType::Uuid))
+            .build();
+        let response = http_client()
+            .post(format!(
+                "{}/apps/{}/admin/schemas",
+                server.base_url(),
+                server.app_id()
+            ))
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .json(&json!({ "schema": schema, "permissions": null }))
+            .send()
+            .await
+            .expect("publish minimal schema for direct websocket auth test");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
     /// Test that unauthenticated requests work for non-protected endpoints.
     #[tokio::test]
     async fn test_health_no_auth() {
@@ -302,9 +311,15 @@ mod integration_tests {
     #[tokio::test]
     async fn test_jwt_auth_ws_handshake() {
         let server = TestServer::start().await;
-        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x11);
+        let token = make_jwt(
+            &author_uuid_string(identity),
+            json!({"role": "user"}),
+            JWT_SECRET,
+        );
 
-        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        let result = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(
             result.is_ok(),
             "JWT auth should succeed on WS handshake; got: {result:?}"
@@ -321,9 +336,15 @@ mod integration_tests {
             "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JWT_SECRET.as_bytes()),
         }))
         .await;
-        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x12);
+        let token = make_jwt(
+            &author_uuid_string(identity),
+            json!({"role": "user"}),
+            JWT_SECRET,
+        );
 
-        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        let result = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(
             result.is_ok(),
             "static JWT public key auth should succeed on WS handshake; got: {result:?}"
@@ -339,10 +360,11 @@ mod integration_tests {
     #[tokio::test]
     async fn test_invalid_jwt_rejected_on_ws_handshake() {
         let server = TestServer::start().await;
+        let identity = test_author_id(0x13);
 
-        let result = ws_handshake(&server, jwt_auth("invalid-token")).await;
+        let result = ws_rejects(&server, identity, jwt_auth("invalid-token")).await;
         assert!(
-            result.is_err(),
+            result.is_ok(),
             "Invalid JWT should be rejected on WS handshake"
         );
     }
@@ -351,10 +373,11 @@ mod integration_tests {
     #[tokio::test]
     async fn test_ws_handshake_requires_auth() {
         let server = TestServer::start().await;
+        let identity = test_author_id(0x14);
 
-        let result = ws_handshake(&server, no_auth()).await;
+        let result = ws_rejects(&server, identity, no_auth()).await;
         assert!(
-            result.is_err(),
+            result.is_ok(),
             "WS handshake without credentials should be rejected"
         );
     }
@@ -363,9 +386,11 @@ mod integration_tests {
     #[tokio::test]
     async fn test_backend_impersonation_valid() {
         let server = TestServer::start().await;
-        let session = Session::new("impersonated-user");
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x15);
+        let session = Session::new(author_uuid_string(identity));
 
-        let result = ws_handshake(&server, backend_auth(BACKEND_SECRET, &session)).await;
+        let result = ws_handshake(&server, identity, backend_auth(BACKEND_SECRET, &session)).await;
         assert!(
             result.is_ok(),
             "Backend impersonation should succeed with valid secret; got: {result:?}"
@@ -376,11 +401,12 @@ mod integration_tests {
     #[tokio::test]
     async fn test_backend_impersonation_invalid_secret() {
         let server = TestServer::start().await;
-        let session = Session::new("impersonated-user");
+        let identity = test_author_id(0x16);
+        let session = Session::new(author_uuid_string(identity));
 
-        let result = ws_handshake(&server, backend_auth("wrong-secret", &session)).await;
+        let result = ws_rejects(&server, identity, backend_auth("wrong-secret", &session)).await;
         assert!(
-            result.is_err(),
+            result.is_ok(),
             "Backend impersonation with wrong secret should be rejected"
         );
     }
@@ -389,8 +415,14 @@ mod integration_tests {
     #[tokio::test]
     async fn test_backend_priority_over_jwt() {
         let server = TestServer::start().await;
-        let jwt_token = make_jwt("jwt-user", json!({}), JWT_SECRET);
-        let session = Session::new("backend-user");
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x17);
+        let jwt_token = make_jwt(
+            &author_uuid_string(test_author_id(0x18)),
+            json!({}),
+            JWT_SECRET,
+        );
+        let session = Session::new(author_uuid_string(identity));
 
         // Both JWT and backend auth provided — backend should win (no error expected).
         let auth = AuthConfig {
@@ -399,7 +431,7 @@ mod integration_tests {
             backend_session: Some(serde_json::to_value(&session).unwrap()),
             ..Default::default()
         };
-        let result = ws_handshake(&server, auth).await;
+        let result = ws_handshake(&server, identity, auth).await;
         assert!(
             result.is_ok(),
             "Backend auth should take priority over JWT; got: {result:?}"
@@ -423,8 +455,10 @@ mod integration_tests {
     #[tokio::test]
     async fn test_admin_secret_ws_handshake() {
         let server = TestServer::start().await;
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x19);
 
-        let result = ws_handshake(&server, admin_auth(ADMIN_SECRET)).await;
+        let result = ws_handshake(&server, identity, admin_auth(ADMIN_SECRET)).await;
         assert!(
             result.is_ok(),
             "admin secret should allow WS handshake; got: {result:?}"
@@ -435,13 +469,15 @@ mod integration_tests {
     #[tokio::test]
     async fn test_admin_secret_short_circuits_invalid_jwt_on_ws_handshake() {
         let server = TestServer::start().await;
+        publish_minimal_schema(&server).await;
+        let identity = test_author_id(0x1a);
 
         let auth = AuthConfig {
             jwt_token: Some("invalid-token".to_string()),
             admin_secret: Some(ADMIN_SECRET.to_string()),
             ..Default::default()
         };
-        let result = ws_handshake(&server, auth).await;
+        let result = ws_handshake(&server, identity, auth).await;
         assert!(
             result.is_ok(),
             "valid admin secret should win over an invalid JWT on WS handshake; got: {result:?}"
@@ -452,73 +488,23 @@ mod integration_tests {
     #[tokio::test]
     async fn test_invalid_admin_secret_rejects_valid_jwt_on_ws_handshake() {
         let server = TestServer::start().await;
-        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+        let identity = test_author_id(0x1b);
+        let token = make_jwt(
+            &author_uuid_string(identity),
+            json!({"role": "user"}),
+            JWT_SECRET,
+        );
 
         let auth = AuthConfig {
             jwt_token: Some(token),
             admin_secret: Some("wrong-admin-secret".to_string()),
             ..Default::default()
         };
-        let result = ws_handshake(&server, auth).await;
+        let result = ws_rejects(&server, identity, auth).await;
         assert!(
-            result.is_err(),
+            result.is_ok(),
             "invalid admin secret should reject the handshake even when JWT is valid"
         );
-    }
-
-    /// A WS connection authenticated with admin secret should behave like a strict
-    /// backend client and reject structural schema catalogue sync.
-    #[tokio::test]
-    async fn test_admin_secret_ws_connection_rejects_structural_schema_catalogue_sync() {
-        let server = TestServer::start().await;
-        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
-        let auth = AuthConfig {
-            jwt_token: Some(token),
-            admin_secret: Some(ADMIN_SECRET.to_string()),
-            ..Default::default()
-        };
-        let (mut ws, _connected) = ws_handshake_open(&server, auth)
-            .await
-            .expect("handshake with admin secret");
-
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("todos").column("title", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let object_id = schema_hash.to_object_id();
-        let entry = CatalogueEntry {
-            object_id,
-            metadata: HashMap::from([
-                (
-                    MetadataKey::Type.to_string(),
-                    ObjectType::CatalogueSchema.to_string(),
-                ),
-                (
-                    MetadataKey::AppId.to_string(),
-                    "00000000-0000-0000-0000-000000000001".to_string(),
-                ),
-                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-            ]),
-            content: encode_schema(&schema),
-        };
-
-        ws_send_sync_payload(&mut ws, SyncPayload::CatalogueEntryUpdated { entry })
-            .await
-            .expect("send structural schema catalogue payload");
-
-        let error = ws_wait_for_sync_error(&mut ws)
-            .await
-            .expect("receive server response for structural schema sync");
-        assert_eq!(
-            error,
-            SyncError::CatalogueWriteDenied {
-                object_id,
-                branch_name: jazz_tools::object::BranchName::new("main"),
-            },
-            "admin-secret-authenticated WS clients should be treated as strict backend clients"
-        );
-
-        let _ = ws.close(None).await;
     }
 
     // ========================================================================
@@ -561,10 +547,12 @@ mod integration_tests {
             test_server::hs256_jwks("kid-new", "secret-new"),
         ])
         .await;
+        publish_minimal_schema(&server).await;
 
-        let token = make_jwt_with_kid("user-rotation", "kid-new", "secret-new");
+        let identity = test_author_id(0x21);
+        let token = make_jwt_with_kid(&author_uuid_string(identity), "kid-new", "secret-new");
 
-        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        let result = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(
             result.is_ok(),
             "JWT with rotated key should succeed after JWKS refresh; got: {result:?}"
@@ -586,11 +574,12 @@ mod integration_tests {
         ])
         .await;
 
-        let token = make_jwt_with_kid("user-invalid", "kid-sig", "wrong-secret");
+        let identity = test_author_id(0x22);
+        let token = make_jwt_with_kid(&author_uuid_string(identity), "kid-sig", "wrong-secret");
 
-        let result = ws_handshake(&server, jwt_auth(&token)).await;
+        let result = ws_rejects(&server, identity, jwt_auth(&token)).await;
         assert!(
-            result.is_err(),
+            result.is_ok(),
             "invalid signature must stay rejected after refresh"
         );
         assert_eq!(
@@ -613,11 +602,16 @@ mod integration_tests {
             .unwrap()
             .as_secs()
             - 60;
-        let token =
-            make_jwt_with_kid_and_exp("user-expired", "kid-expired", "secret-expired", expired);
+        let identity = test_author_id(0x23);
+        let token = make_jwt_with_kid_and_exp(
+            &author_uuid_string(identity),
+            "kid-expired",
+            "secret-expired",
+            expired,
+        );
 
-        let result = ws_handshake(&server, jwt_auth(&token)).await;
-        assert!(result.is_err(), "expired JWT should be rejected");
+        let result = ws_rejects(&server, identity, jwt_auth(&token)).await;
+        assert!(result.is_ok(), "expired JWT should be rejected");
     }
 
     /// Consecutive valid requests should use the cached JWKS without refetching.
@@ -628,13 +622,15 @@ mod integration_tests {
             "secret-cached",
         )])
         .await;
+        publish_minimal_schema(&server).await;
 
-        let token = make_jwt_with_kid("user-cached", "kid-cached", "secret-cached");
+        let identity = test_author_id(0x24);
+        let token = make_jwt_with_kid(&author_uuid_string(identity), "kid-cached", "secret-cached");
 
-        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        let first = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(first.is_ok(), "first WS handshake should succeed");
 
-        let second = ws_handshake(&server, jwt_auth(&token)).await;
+        let second = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(second.is_ok(), "second WS handshake should succeed");
 
         assert_eq!(
@@ -668,12 +664,12 @@ mod integration_tests {
         // Startup fetch = hit 1. Now send 5 requests with different fabricated kids.
         for i in 0..5 {
             let token = make_jwt_with_kid(
-                "user-dos",
+                &author_uuid_string(test_author_id(0x25)),
                 &format!("kid-fabricated-{i}"),
                 "irrelevant-secret",
             );
-            let result = ws_handshake(&server, jwt_auth(&token)).await;
-            assert!(result.is_err(), "fabricated kid should be rejected");
+            let result = ws_rejects(&server, test_author_id(0x25), jwt_auth(&token)).await;
+            assert!(result.is_ok(), "fabricated kid should be rejected");
         }
 
         // Without cooldown: 1 (startup) + 5 (one forced refresh per request) = 6
@@ -707,11 +703,13 @@ mod integration_tests {
             1, // 1-second TTL
         )
         .await;
+        publish_minimal_schema(&server).await;
 
-        let token = make_jwt_with_kid("user-stale", "kid-stale", "secret-stale");
+        let identity = test_author_id(0x26);
+        let token = make_jwt_with_kid(&author_uuid_string(identity), "kid-stale", "secret-stale");
 
         // First handshake: cache hit, validates OK.
-        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        let first = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(
             first.is_ok(),
             "first WS handshake should succeed with cached JWKS"
@@ -721,7 +719,7 @@ mod integration_tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         // Second handshake: TTL expired, fetch fails (empty keys), should serve stale.
-        let second = ws_handshake(&server, jwt_auth(&token)).await;
+        let second = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(
             second.is_ok(),
             "WS handshake should succeed with stale JWKS when endpoint is down"
@@ -742,20 +740,22 @@ mod integration_tests {
             1, // max_stale
         )
         .await;
+        publish_minimal_schema(&server).await;
 
-        let token = make_jwt_with_kid("user-expiry", "kid-expiry", "secret-expiry");
+        let identity = test_author_id(0x27);
+        let token = make_jwt_with_kid(&author_uuid_string(identity), "kid-expiry", "secret-expiry");
 
         // First handshake: cache hit, validates OK.
-        let first = ws_handshake(&server, jwt_auth(&token)).await;
+        let first = ws_handshake(&server, identity, jwt_auth(&token)).await;
         assert!(first.is_ok(), "first WS handshake should succeed");
 
         // Wait beyond TTL + max_stale (2s total).
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
         // Handshake should now fail — stale keyset is too old.
-        let expired = ws_handshake(&server, jwt_auth(&token)).await;
+        let expired = ws_rejects(&server, identity, jwt_auth(&token)).await;
         assert!(
-            expired.is_err(),
+            expired.is_ok(),
             "stale keyset beyond max_stale should not be served"
         );
     }

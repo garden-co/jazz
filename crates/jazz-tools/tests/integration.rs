@@ -11,20 +11,25 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use jazz_tools::sync_manager::ClientId;
-use jazz_tools::transport_manager::{
-    AuthConfig, AuthHandshake, ConnectedResponse, SYNC_PROTOCOL_VERSION,
+use jazz::wire::{
+    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello, WirePeerRole,
+    decode_frame, encode_frame,
 };
+use jazz_tools::transport_manager::AuthConfig;
+use jazz_tools::{ColumnType, SchemaBuilder, TableSchema};
 use reqwest::Client;
+use serde_json::json;
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const TEST_APP_ID: &str = "00000000-0000-0000-0000-000000000001";
+const TEST_ADMIN_SECRET: &str = "test-admin-secret";
+const TEST_SEED: [u8; 32] = [42u8; 32];
+const DIRECT_WS_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 
 fn mint_test_token(audience: &str) -> String {
-    let seed = [42u8; 32];
     jazz_tools::identity::mint_jazz_self_signed_token(
-        &seed,
+        &TEST_SEED,
         jazz_tools::identity::LOCAL_FIRST_ISSUER,
         audience,
         3600,
@@ -32,69 +37,85 @@ fn mint_test_token(audience: &str) -> String {
     .unwrap()
 }
 
-fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    let compressed = lz4_flex::compress_prepend_size(payload);
-    let mut out = Vec::with_capacity(4 + compressed.len());
-    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
-    out.extend_from_slice(&compressed);
-    out
+fn test_peer_identity() -> String {
+    let user_id = jazz_tools::identity::derive_user_id(&TEST_SEED);
+    hex::encode(user_id.as_bytes())
 }
 
-fn frame_decode(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 4 {
-        return None;
-    }
-    let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-    if data.len() < 4 + len {
-        return None;
-    }
-    lz4_flex::decompress_size_prepended(&data[4..4 + len]).ok()
-}
-
-/// Perform a WS handshake against `ws://host/apps/<appId>/ws` using a local-first JWT token.
-///
-/// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` on failure.
-async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, String> {
-    let ws_url = format!("ws://127.0.0.1:{port}/apps/{TEST_APP_ID}/ws");
-    let (mut ws, _) = connect_async(&ws_url)
-        .await
-        .map_err(|e| format!("ws connect failed: {e}"))?;
-
-    let handshake = AuthHandshake {
-        sync_protocol_version: SYNC_PROTOCOL_VERSION,
-        client_id: ClientId::new().to_string(),
-        auth: AuthConfig {
+fn direct_ws_prelude(jwt_token: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "peer_identity": test_peer_identity(),
+        "auth": AuthConfig {
             jwt_token: Some(jwt_token.to_string()),
             ..Default::default()
         },
-        catalogue_state_hash: None,
-        declared_schema_hash: None,
-    };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
-    ws.send(Message::Binary(frame_encode(&payload).into()))
-        .await
-        .map_err(|e| format!("ws send failed: {e}"))?;
+    }))
+    .expect("serialize direct ws prelude")
+}
 
-    match ws.next().await {
-        Some(Ok(Message::Binary(bytes))) => {
-            let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(&inner) {
-                return Ok(connected);
-            }
-            let msg = serde_json::from_slice::<serde_json::Value>(&inner)
-                .ok()
-                .and_then(|v| {
-                    v.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "auth rejected".to_string());
-            Err(msg)
-        }
-        Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
-        Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),
-        Some(Err(e)) => Err(format!("ws recv error: {e}")),
-    }
+fn direct_ws_client_hello_batch() -> Vec<u8> {
+    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, DIRECT_WS_FEATURES));
+    let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
+    postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+}
+
+async fn direct_ws_handshake(
+    port: u16,
+    jwt_token: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let ws_url = format!("ws://127.0.0.1:{port}/apps/{TEST_APP_ID}/ws");
+    let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
+
+    ws.send(Message::Binary(direct_ws_prelude(jwt_token).into()))
+        .await
+        .expect("send direct ws auth prelude");
+    ws.send(Message::Binary(direct_ws_client_hello_batch().into()))
+        .await
+        .expect("send direct ws hello");
+
+    ws
+}
+
+async fn expect_direct_server_hello(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout waiting for direct server hello")
+        .expect("stream ended")
+        .expect("ws recv error");
+    let Message::Binary(response) = response else {
+        panic!("expected binary direct server hello, got {response:?}");
+    };
+    let frames: Vec<Vec<u8>> =
+        postcard::from_bytes(&response).expect("decode direct ws response batch");
+    assert_eq!(frames.len(), 1);
+    let WireFrame::Hello(server_hello) =
+        decode_frame(&frames[0]).expect("decode direct server hello")
+    else {
+        panic!("expected direct server hello");
+    };
+    assert_eq!(server_hello.role, WirePeerRole::Core);
+    assert_eq!(server_hello.features, DIRECT_WS_FEATURES);
+}
+
+async fn publish_test_schema(server: &TestServer) {
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+        .build();
+    let response = Client::new()
+        .post(format!(
+            "{}/apps/{TEST_APP_ID}/admin/schemas",
+            server.base_url()
+        ))
+        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
+        .json(&json!({ "schema": schema, "permissions": null }))
+        .send()
+        .await
+        .expect("publish test schema");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 }
 
 /// Test server handle - kills process on drop.
@@ -125,6 +146,8 @@ impl TestServer {
                 &port.to_string(),
                 "--data-dir",
                 configured_data_dir.to_str().unwrap(),
+                "--admin-secret",
+                TEST_ADMIN_SECRET,
             ])
             .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
             .stdout(Stdio::piped())
@@ -168,6 +191,8 @@ impl TestServer {
                 "--data-dir",
                 configured_data_dir.to_str().unwrap(),
                 "--in-memory",
+                "--admin-secret",
+                TEST_ADMIN_SECRET,
             ])
             .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
             .stdout(Stdio::piped())
@@ -331,63 +356,29 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
 }
 
 #[tokio::test]
-async fn test_ws_connection_receives_connected_response() {
+async fn test_ws_connection_receives_server_hello() {
     let server = TestServer::start(0).await;
+    publish_test_schema(&server).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let resp = tokio::time::timeout(Duration::from_secs(5), ws_handshake(server.port, &token))
-        .await
-        .expect("timeout waiting for ConnectedResponse")
-        .expect("WS handshake failed");
+    let mut ws = direct_ws_handshake(server.port, &token).await;
 
-    assert!(
-        !resp.connection_id.is_empty(),
-        "connection_id should be non-empty"
-    );
-    assert!(!resp.client_id.is_empty(), "client_id should be non-empty");
-    assert!(
-        resp.catalogue_state_hash.is_some(),
-        "ConnectedResponse should include catalogue_state_hash"
-    );
+    expect_direct_server_hello(&mut ws).await;
 }
 
 #[tokio::test]
 async fn test_ws_connection_stays_open_after_handshake() {
     let server = TestServer::start(0).await;
+    publish_test_schema(&server).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let ws_url = format!("ws://127.0.0.1:{}/apps/{TEST_APP_ID}/ws", server.port);
-    let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
+    let mut ws = direct_ws_handshake(server.port, &token).await;
 
-    let handshake = AuthHandshake {
-        sync_protocol_version: SYNC_PROTOCOL_VERSION,
-        client_id: ClientId::new().to_string(),
-        auth: AuthConfig {
-            jwt_token: Some(token),
-            ..Default::default()
-        },
-        catalogue_state_hash: None,
-        declared_schema_hash: None,
-    };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
-    ws.send(Message::Binary(frame_encode(&payload).into()))
-        .await
-        .expect("ws send handshake");
-
-    // Read the ConnectedResponse frame.
-    let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
-        .await
-        .expect("timeout waiting for ConnectedResponse")
-        .expect("stream ended")
-        .expect("ws recv error");
-    assert!(
-        matches!(first, Message::Binary(_)),
-        "expected Binary ConnectedResponse frame"
-    );
+    expect_direct_server_hello(&mut ws).await;
 
     // Drain frames for 100ms, confirming the connection stays open the whole time.
-    // The server may push SyncUpdate frames (e.g. initial catalogue sync) immediately
-    // after the handshake — those are expected and should not fail this test.
+    // The server may push direct WireFrame batches immediately after negotiation;
+    // those are expected and should not fail this test.
     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -405,26 +396,4 @@ async fn test_ws_connection_stays_open_after_handshake() {
             Ok(None) => panic!("ws stream ended unexpectedly"),
         }
     }
-}
-
-#[tokio::test]
-async fn test_ws_handshake_returns_valid_connection_id() {
-    let server = TestServer::start(0).await;
-
-    let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let resp = tokio::time::timeout(Duration::from_secs(5), ws_handshake(server.port, &token))
-        .await
-        .expect("timeout waiting for ConnectedResponse")
-        .expect("WS handshake failed");
-
-    // connection_id is a non-empty String UUID assigned by the server.
-    assert!(
-        !resp.connection_id.is_empty(),
-        "server should assign a valid connection_id"
-    );
-    // client_id echoed back must match the UUID format (non-empty string).
-    assert!(
-        !resp.client_id.is_empty(),
-        "server should echo back the client_id"
-    );
 }
