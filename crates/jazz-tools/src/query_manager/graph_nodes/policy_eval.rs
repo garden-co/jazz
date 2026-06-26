@@ -630,3 +630,43 @@ fn collect_relation_tables(rel: &RelExpr, tables: &mut HashSet<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ValueRef,
+    };
+    use crate::query_manager::types::{RowDescriptor, TableName, Value};
+
+    #[test]
+    fn exists_rel_policy_dependencies_include_all_joined_relation_tables() {
+        let policy = PolicyExpr::ExistsRel {
+            rel: RelExpr::Filter {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::TableScan {
+                        table: TableName::new("document_grants"),
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("group_memberships"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("document_grants", "group_slug"),
+                        right: ColumnRef::scoped("group_memberships", "group_slug"),
+                    }],
+                    join_kind: JoinKind::Inner,
+                }),
+                predicate: PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("document_grants", "document_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Uuid(ObjectId::new())),
+                },
+            },
+        };
+
+        let tables = collect_policy_dependency_tables(&policy, &RowDescriptor::new(vec![]));
+
+        assert!(tables.contains("document_grants"));
+        assert!(tables.contains("group_memberships"));
+    }
+}

@@ -141,7 +141,9 @@ Current browser scenarios:
 
 Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
-- native: `bench-out/native/manifest.json`
+- native RocksDB: `bench-out/native/rocksdb/manifest.json`
+- native SQLite: `bench-out/native/sqlite/manifest.json`
+- jazz-sim: `bench-out/native/jazz-sim/manifest.json`
 - browser: `bench-out/browser/manifest.json`
 
 The workflow currently:
@@ -152,6 +154,7 @@ The workflow currently:
 - keeps a checked-in skip set at `dev/benchmarks/realistic/ci_skip_set.json`
 - only activates configured skips after 3 timed-out observations for the same benchmark id
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
+- records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; these artifacts have a manifest and feed skip/status summaries, but `update_history.mjs` does not yet ingest JSONL metrics into the static site history
 - records browser outputs per scenario when they complete within budget
 
 The `site` job:
