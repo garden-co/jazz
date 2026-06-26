@@ -3,6 +3,10 @@ name = "jazz-napi"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["jazz_tools/rocksdb", "jazz-server/rocksdb"]
+
 [lib]
 crate-type = ["cdylib"]
 

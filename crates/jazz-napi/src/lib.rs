@@ -1100,9 +1100,18 @@ impl JazzServer {
         if in_memory {
             server_builder = server_builder.with_storage(StorageBackend::InMemory);
         } else {
-            server_builder = server_builder.with_storage(StorageBackend::Sqlite {
-                path: data_dir.clone().into(),
-            });
+            #[cfg(feature = "rocksdb")]
+            {
+                server_builder = server_builder.with_storage(StorageBackend::RocksDb {
+                    path: data_dir.clone().into(),
+                });
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            {
+                server_builder = server_builder.with_storage(StorageBackend::Sqlite {
+                    path: data_dir.clone().into(),
+                });
+            }
         }
 
         let built = server_builder

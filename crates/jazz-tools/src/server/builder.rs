@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use jazz::schema::JazzSchema;
+use jazz_server::StorageConfig;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -27,6 +28,7 @@ use crate::transport_manager::TransportRetryConfig;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
+const DIRECT_CORE_ROCKSDB_DIR: &str = "direct-core.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -254,7 +256,10 @@ impl ServerBuilder {
     ) -> Result<Option<crate::server::direct_core::DirectCoreServer>, String> {
         if let Some(schema) = &self.direct_core_schema {
             return Ok(Some(
-                crate::server::direct_core::DirectCoreServer::in_memory(schema.clone())?,
+                crate::server::direct_core::DirectCoreServer::start_with_storage(
+                    schema.clone(),
+                    self.build_direct_core_storage_config()?,
+                )?,
             ));
         }
 
@@ -268,8 +273,44 @@ impl ServerBuilder {
         let schema = crate::server::direct_schema::convert_alpha_schema(&schema)
             .map_err(|error| format!("failed to build direct core schema: {error}"))?;
         Ok(Some(
-            crate::server::direct_core::DirectCoreServer::in_memory(schema)?,
+            crate::server::direct_core::DirectCoreServer::start_with_storage(
+                schema,
+                self.build_direct_core_storage_config()?,
+            )?,
         ))
+    }
+
+    fn build_direct_core_storage_config(&self) -> Result<StorageConfig, String> {
+        match &self.storage_backend {
+            StorageBackend::InMemory => Ok(StorageConfig::InMemory),
+            StorageBackend::Persistent { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+
+                #[cfg(feature = "rocksdb")]
+                {
+                    Ok(StorageConfig::RocksDb {
+                        path: path.join(DIRECT_CORE_ROCKSDB_DIR),
+                    })
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                {
+                    Err("direct core persistent storage requires the rocksdb feature".to_owned())
+                }
+            }
+            #[cfg(feature = "rocksdb")]
+            StorageBackend::RocksDb { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                Ok(StorageConfig::RocksDb {
+                    path: path.join(DIRECT_CORE_ROCKSDB_DIR),
+                })
+            }
+            #[cfg(feature = "sqlite")]
+            StorageBackend::Sqlite { .. } => {
+                Err("direct core storage does not support sqlite yet".to_owned())
+            }
+        }
     }
 
     fn latest_published_schema(
@@ -801,6 +842,47 @@ mod tests {
             .expect("build dynamic server from rehydrated catalogue");
 
         assert!(rebuilt.state.direct_core.is_some());
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn rocksdb_builder_starts_direct_core_with_separate_persistent_storage_after_restart() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-direct-core-restart");
+        let schema = crate::query_manager::types::SchemaBuilder::new()
+            .table(
+                crate::query_manager::types::TableSchema::builder("todos")
+                    .column("id", crate::query_manager::types::ColumnType::Uuid)
+                    .column("title", crate::query_manager::types::ColumnType::Text),
+            )
+            .build();
+
+        {
+            let built = ServerBuilder::new(app_id)
+                .with_schema(schema.clone())
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build RocksDB server with direct core");
+
+            assert!(built.state.direct_core.is_some());
+            assert!(data_dir.path().join("jazz.rocksdb").exists());
+            assert!(data_dir.path().join(DIRECT_CORE_ROCKSDB_DIR).exists());
+        }
+
+        let rebuilt = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("rebuild RocksDB server with direct core");
+
+        assert!(rebuilt.state.direct_core.is_some());
+        assert!(data_dir.path().join(DIRECT_CORE_ROCKSDB_DIR).exists());
     }
 
     #[tokio::test]

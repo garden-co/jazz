@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { WasmSchema } from "../../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
@@ -21,11 +24,15 @@ const schema = {
 describe("DirectWasmRuntime server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
   const clients: JazzClient[] = [];
+  const tempRoots: string[] = [];
 
   afterEach(async () => {
     await Promise.allSettled(clients.splice(0).map((client) => client.shutdown()));
     await server?.stop();
     server = null;
+    await Promise.allSettled(
+      tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    );
     globalThis.WebSocket = previousWebSocket;
   });
 
@@ -93,6 +100,93 @@ describe("DirectWasmRuntime server convergence", () => {
       });
     },
     15_000,
+  );
+
+  maybeIt(
+    "persists direct websocket writes across server restart",
+    async () => {
+      globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+      const tempRoot = await mkdtemp(join(tmpdir(), "jazz-direct-wasm-restart-"));
+      tempRoots.push(tempRoot);
+      const dataDir = join(tempRoot, "server-data");
+      const appId = "00000000-0000-0000-0000-00000000c002";
+      const adminSecret = "direct-wasm-restart-admin";
+
+      server = await startLocalJazzServer({
+        appId,
+        dataDir,
+        adminSecret,
+        schema: encodeDirectSchema(schema),
+      });
+
+      const writer = await createClient({ appId, serverUrl: server.url, peer: "writer" });
+      clients.push(writer);
+      writer.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+      const inserted = writer.insert("todos", {
+        title: { type: "Text", value: "direct websocket restart" },
+        done: { type: "Boolean", value: true },
+      });
+      await waitForPromise(
+        inserted.wait({ tier: "edge" }),
+        "writer insert did not settle at edge before restart",
+      );
+
+      await writer.shutdown();
+      clients.splice(clients.indexOf(writer), 1);
+      const port = server.port;
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        port,
+        dataDir,
+        adminSecret,
+        schema: encodeDirectSchema(schema),
+      });
+
+      const reader = await createClient({ appId, serverUrl: server.url, peer: "reader" });
+      clients.push(reader);
+      reader.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+      const replayedToSubscription = new Promise<string>((resolve) => {
+        reader.subscribe(
+          JSON.stringify({ table: "todos" }),
+          (delta) => {
+            if (!Array.isArray(delta)) return;
+            for (const change of delta) {
+              if ("row" in change && change.row?.id === inserted.value.id) {
+                const firstValue = change.row.values[0];
+                if (firstValue?.type === "Text") {
+                  resolve(firstValue.value);
+                }
+              }
+            }
+          },
+          { tier: "local" },
+        );
+      });
+      await waitForPromise(
+        replayedToSubscription,
+        "reader subscription did not replay the persisted direct WASM insert after restart",
+      );
+
+      const persistedRow = await waitFor(async () => {
+        const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+        return rows.find((row) => row.id === inserted.value.id);
+      });
+
+      expect(persistedRow).toMatchObject({
+        id: inserted.value.id,
+        values: [
+          { type: "Text", value: "direct websocket restart" },
+          { type: "Boolean", value: true },
+        ],
+      });
+    },
+    20_000,
   );
 });
 
