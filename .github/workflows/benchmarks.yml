@@ -98,6 +98,25 @@ jobs:
             cp bench-out/native/uname.txt "bench-out/native/${engine}/uname.txt"
             cp bench-out/native/lscpu.txt "bench-out/native/${engine}/lscpu.txt"
           done
+          mkdir -p bench-out/native/jazz-sim
+          printf '%s\n' \
+            '{' \
+            "  \"workflow\": \"${GITHUB_WORKFLOW}\"," \
+            "  \"run_id\": \"${GITHUB_RUN_ID}\"," \
+            "  \"run_attempt\": \"${GITHUB_RUN_ATTEMPT}\"," \
+            "  \"repository\": \"${GITHUB_REPOSITORY}\"," \
+            "  \"sha\": \"${BENCH_SHA}\"," \
+            "  \"ref\": \"${BENCH_REF}\"," \
+            "  \"branch\": \"${BENCH_BRANCH}\"," \
+            "  \"profile\": \"${BENCH_PROFILE}\"," \
+            "  \"runner_name\": \"${RUNNER_NAME}\"," \
+            "  \"runner_os\": \"${RUNNER_OS}\"," \
+            "  \"runner_arch\": \"${RUNNER_ARCH}\"," \
+            "  \"storage_engine\": null" \
+            '}' > bench-out/native/jazz-sim/metadata.json
+          cp bench-out/native/rustc.txt bench-out/native/jazz-sim/rustc.txt
+          cp bench-out/native/uname.txt bench-out/native/jazz-sim/uname.txt
+          cp bench-out/native/lscpu.txt bench-out/native/jazz-sim/lscpu.txt
 
       - name: Build native benchmark binaries
         run: |
@@ -209,6 +228,48 @@ jobs:
                 ]
               }' > "${dir}/manifest.json"
           done
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          import crypto from "node:crypto";
+          import { JAZZ_SIM_BENCHMARKS } from "./dev/benchmarks/realistic/ci_benchmarks.mjs";
+
+          const dir = "bench-out/native/jazz-sim";
+          const sha256 = (file) =>
+            fs.existsSync(file) ? crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") : null;
+          const fileEntry = (relativePath) => ({
+            path: relativePath,
+            sha256: sha256(path.join(dir, relativePath)),
+          });
+          const benchmarkFiles = JAZZ_SIM_BENCHMARKS.flatMap((benchmark) => [
+            fileEntry(benchmark.output_path),
+            fileEntry(benchmark.log_path),
+          ]);
+          const manifest = {
+            kind: "realistic-bench-jazz-sim",
+            generated_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+            workflow: process.env.GITHUB_WORKFLOW,
+            run_id: process.env.GITHUB_RUN_ID,
+            run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            repository: process.env.GITHUB_REPOSITORY,
+            sha: process.env.BENCH_SHA,
+            ref: process.env.BENCH_REF,
+            branch: process.env.BENCH_BRANCH,
+            profile: process.env.BENCH_PROFILE,
+            storage_engine: null,
+            files: [
+              { path: "metadata.json" },
+              { path: "rustc.txt" },
+              { path: "uname.txt" },
+              { path: "lscpu.txt" },
+              fileEntry("suite_status.json"),
+              fileEntry("summary.md"),
+              fileEntry("skip_candidates.json"),
+              ...benchmarkFiles,
+            ],
+          };
+          fs.writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
 
       - name: Upload native artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
