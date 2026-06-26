@@ -6,7 +6,7 @@ import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
-import { DirectCoreRuntime } from "../runtime/direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "../runtime/direct-core/runtime.js";
 import { SYSTEM_AUTHOR_ID } from "../runtime/system-identity.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {

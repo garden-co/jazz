@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadWasmModule } from "../../src/runtime/client.js";
-import { DirectCoreRuntime } from "../../src/runtime/direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "../../src/runtime/direct-core/runtime.js";
 import {
   createSyntheticRuntimeSchema,
   runSchemaMarshallingBench,

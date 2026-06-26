@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
-import { DirectCoreRuntime } from "../direct-wasm/runtime.js";
+import { DirectCoreRuntime } from "../direct-core/runtime.js";
 
 export type TestRuntime = Runtime & { free?(): void };
 

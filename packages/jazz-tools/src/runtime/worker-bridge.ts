@@ -4,7 +4,7 @@ import type { WasmRow } from "../drivers/types.js";
 import {
   DirectWebSocketCarrier,
   directWireAuthFailureReason,
-} from "./direct-wasm/direct-websocket.js";
+} from "./direct-core/direct-websocket.js";
 import type { AuthFailureReason } from "./auth-state.js";
 
 /** Page lifecycle hint forwarded to the worker runtime. */
