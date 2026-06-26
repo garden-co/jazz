@@ -1,21 +1,9 @@
 /**
- * Dedicated Worker entry point for Jazz — thin WASM-bootstrap shim.
+ * Dedicated Worker entry point for Jazz.
  *
- * The worker-side runtime host lives entirely in Rust
- * (`crates/jazz-wasm/src/worker_host.rs`). This file's only responsibility
- * is the bootstrap-handoff dance:
- *
- *  1. Post `{type:"ready"}` so the main thread knows it can send the init.
- *  2. Buffer the first `init` message and any subsequent messages while WASM
- *     is initialising — Rust takes over `self.onmessage` synchronously inside
- *     `runAsWorker`, so messages arriving *during* the bootstrap call still
- *     hit our handler and land in `pendingMessages`.
- *  3. Resolve `runtimeSources` (bundler-specific JS modules / wasm URLs) and
- *     initialise the WASM module.
- *  4. Install JS-side WASM tracing telemetry (it imports `subscribeTraceEntries`
- *     and lives in JS by design).
- *  5. Hand the buffered init + pending messages to `wasmModule.runAsWorker`.
- *     After that call, Rust owns `self.onmessage` / `self.postMessage`.
+ * The tab leader election/broker stays in TypeScript. Once this worker is
+ * elected leader it opens the durable browser `WasmDb` and exchanges direct
+ * sync frames with in-memory tab runtimes.
  */
 
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
@@ -36,12 +24,16 @@ import { isWasmTeardownTrap } from "../runtime/wasm-teardown-trap-suppressor.js"
  */
 interface InitMessage {
   type: "init";
+  options?: WorkerInitOptions;
+}
+
+interface WorkerInitOptions {
   schemaJson: string;
   appId: string;
   env: string;
   userBranch: string;
   dbName: string;
-  clientId: string;
+  clientId?: string;
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
@@ -50,6 +42,10 @@ interface InitMessage {
   workerLockName?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
+  directOpen?: {
+    schema: Uint8Array;
+    config: Uint8Array;
+  };
 }
 
 declare const self: {
@@ -101,12 +97,10 @@ ensureVitestWorkerImportShim();
 );
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
-let initMessage: InitMessage | null = null;
-// Pre-handoff buffer. Init arrives as a JS object; everything else now arrives
-// as Uint8Array (postcard-encoded `MainToWorkerWire`). Rust parses each entry
-// post-handoff inside `runAsWorker`.
+let initMessage: WorkerInitOptions | null = null;
 const pendingMessages: unknown[] = [];
 let wasmInitialized = false;
+let host: DirectWorkerHost | null = null;
 
 self.onmessage = (event: MessageEvent) => {
   const data = event.data;
@@ -117,12 +111,18 @@ self.onmessage = (event: MessageEvent) => {
     !(data instanceof Uint8Array) &&
     (data as { type?: unknown }).type === "init"
   ) {
-    initMessage = data as InitMessage;
+    initMessage = normalizeInitMessage(data as InitMessage);
     void bootstrapAndHandoff(initMessage);
     return;
   }
-  pendingMessages.push(data);
+  if (host) host.handle(data);
+  else pendingMessages.push(data);
 };
+
+function normalizeInitMessage(message: InitMessage | WorkerInitOptions): WorkerInitOptions {
+  if ("options" in message && message.options) return message.options;
+  return message as WorkerInitOptions;
+}
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -157,7 +157,7 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
 
 async function ensureWasmInitialized(
   wasmModule: any,
-  msg: Pick<InitMessage, "runtimeSources" | "fallbackWasmUrl"> | undefined,
+  msg: Pick<WorkerInitOptions, "runtimeSources" | "fallbackWasmUrl"> | undefined,
 ): Promise<void> {
   if (wasmInitialized) return;
 
@@ -196,7 +196,7 @@ async function ensureWasmInitialized(
   wasmInitialized = true;
 }
 
-async function bootstrapAndHandoff(init: InitMessage): Promise<void> {
+async function bootstrapAndHandoff(init: WorkerInitOptions): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = init.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
@@ -215,17 +215,17 @@ async function bootstrapAndHandoff(init: InitMessage): Promise<void> {
   }
 }
 
-async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage): Promise<void> {
-  const handoff = () => {
-    // Hand control to Rust. `runAsWorker` synchronously installs its own
-    // `self.onmessage` (replacing ours), then spawns an async task that
-    // opens the runtime, drains the buffered messages, and posts `init-ok`.
-    wasmModule.runAsWorker(init, pendingMessages.slice());
+async function runWorkerHostWithOptionalLock(wasmModule: any, init: WorkerInitOptions): Promise<void> {
+  const handoff = async () => {
+    host = await DirectWorkerHost.open(wasmModule, init);
+    for (const message of pendingMessages.splice(0)) {
+      host.handle(message);
+    }
     pendingMessages.length = 0;
   };
 
   if (!init.workerLockName) {
-    handoff();
+    await handoff();
     return;
   }
 
@@ -254,7 +254,7 @@ async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage)
         }
 
         lockGranted = true;
-        handoff();
+        await handoff();
         await new Promise<void>(() => undefined);
       },
     );
@@ -288,6 +288,197 @@ async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage)
         },
       }),
     );
+  }
+}
+
+type WorkerInbound =
+  | { type: "sync"; frames: Uint8Array[] }
+  | { type: "server-in"; frame: Uint8Array }
+  | { type: "update-auth"; jwtToken?: string | null }
+  | { type: "lifecycle"; event: string }
+  | { type: "attach-follower-port"; peerId: string; leadershipId: number; port: MessagePort }
+  | { type: "detach-follower-port"; peerId: string; leadershipId: number }
+  | { type: "simulate-crash" }
+  | { type: "shutdown" };
+
+type WorkerOutbound =
+  | { type: "init-ok"; clientId: string }
+  | { type: "sync"; frames: Uint8Array[] }
+  | { type: "server-out"; frames: Uint8Array[] }
+  | { type: "follower-port-attached"; peerId: string; leadershipId: number }
+  | { type: "follower-port-closed"; peerId: string; leadershipId: number }
+  | { type: "shutdown-ok" }
+  | { type: "error"; message: string };
+
+type DirectTransport = {
+  close(): boolean;
+  recvWireFrames(): unknown[];
+  sendWireFrame(frame: Uint8Array): void;
+  tick(): number;
+};
+
+type DirectDb = {
+  connectUpstream(): DirectTransport;
+  tick(): void;
+};
+
+function isUint8Array(value: unknown): value is Uint8Array {
+  return value instanceof Uint8Array;
+}
+
+function normalizeFrames(value: unknown): Uint8Array[] {
+  return Array.isArray(value) ? value.filter(isUint8Array) : [];
+}
+
+function post(message: WorkerOutbound, transfer: Transferable[] = []): void {
+  self.postMessage(message, transfer);
+}
+
+function frameTransfers(frames: Uint8Array[]): Transferable[] {
+  return frames.map((frame) => frame.buffer).filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
+}
+
+class DirectWorkerHost {
+  private readonly peers = new Map<string, { port: MessagePort; transport: DirectTransport }>();
+  private pumpScheduled = false;
+
+  private constructor(
+    private readonly db: DirectDb,
+    private readonly mainTransport: DirectTransport,
+    private readonly serverTransport: DirectTransport | null,
+    private readonly clientId: string,
+  ) {}
+
+  static async open(wasmModule: any, init: WorkerInitOptions): Promise<DirectWorkerHost> {
+    if (!init.directOpen) {
+      throw new Error("worker init is missing direct WasmDb open bytes");
+    }
+    if (!wasmModule.WasmDb?.openBrowser) {
+      throw new Error("jazz-wasm does not expose direct WasmDb.openBrowser");
+    }
+    const db = await wasmModule.WasmDb.openBrowser(
+      init.dbName,
+      init.directOpen.schema,
+      init.directOpen.config,
+    ) as DirectDb;
+    const mainTransport = db.connectUpstream();
+    const serverTransport = init.serverUrl ? db.connectUpstream() : null;
+    const host = new DirectWorkerHost(
+      db,
+      mainTransport,
+      serverTransport,
+      init.clientId ?? crypto.randomUUID(),
+    );
+    self.onmessage = (event: MessageEvent) => host.handle(event.data);
+    post({ type: "init-ok", clientId: host.clientId });
+    host.schedulePump();
+    return host;
+  }
+
+  handle(data: unknown): void {
+    if (!data || typeof data !== "object") return;
+    const message = data as WorkerInbound;
+    switch (message.type) {
+      case "sync":
+        for (const frame of normalizeFrames(message.frames)) {
+          this.mainTransport.sendWireFrame(frame);
+        }
+        this.schedulePump();
+        return;
+      case "server-in":
+        if (message.frame instanceof Uint8Array) {
+          this.serverTransport?.sendWireFrame(message.frame);
+          this.schedulePump();
+        }
+        return;
+      case "attach-follower-port":
+        this.attachFollowerPort(message.peerId, message.leadershipId, message.port);
+        return;
+      case "detach-follower-port":
+        this.detachFollowerPort(message.peerId, message.leadershipId);
+        return;
+      case "lifecycle":
+        if (message.event === "pagehide") {
+          (globalThis as Record<string, unknown>).__jazzWorkerTearingDown = true;
+        }
+        return;
+      case "simulate-crash":
+        self.close();
+        return;
+      case "shutdown":
+        this.shutdown();
+        return;
+      default:
+        return;
+    }
+  }
+
+  private attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void {
+    const existing = this.peers.get(peerId);
+    existing?.transport.close();
+    const transport = this.db.connectUpstream();
+    this.peers.set(peerId, { port, transport });
+    port.addEventListener("message", (event: MessageEvent) => {
+      const msg = event.data as { type?: string; frames?: unknown };
+      if (msg.type === "sync") {
+        for (const frame of normalizeFrames(msg.frames)) {
+          transport.sendWireFrame(frame);
+        }
+        this.schedulePump();
+      } else if (msg.type === "close") {
+        this.detachFollowerPort(peerId, leadershipId);
+      }
+    });
+    port.start?.();
+    post({ type: "follower-port-attached", peerId, leadershipId });
+    this.schedulePump();
+  }
+
+  private detachFollowerPort(peerId: string, leadershipId: number): void {
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    peer.transport.close();
+    peer.port.postMessage({ type: "close" });
+    this.peers.delete(peerId);
+    post({ type: "follower-port-closed", peerId, leadershipId });
+  }
+
+  private shutdown(): void {
+    this.mainTransport.close();
+    this.serverTransport?.close();
+    for (const [peerId] of this.peers) {
+      this.detachFollowerPort(peerId, 0);
+    }
+    post({ type: "shutdown-ok" });
+    self.close();
+  }
+
+  private schedulePump(): void {
+    if (this.pumpScheduled) return;
+    this.pumpScheduled = true;
+    queueMicrotask(() => {
+      this.pumpScheduled = false;
+      this.pump();
+    });
+  }
+
+  private pump(): void {
+    this.db.tick();
+    this.pumpTransport(this.mainTransport, (frames) => post({ type: "sync", frames }, frameTransfers(frames)));
+    if (this.serverTransport) {
+      this.pumpTransport(this.serverTransport, (frames) => post({ type: "server-out", frames }, frameTransfers(frames)));
+    }
+    for (const { port, transport } of this.peers.values()) {
+      this.pumpTransport(transport, (frames) => {
+        port.postMessage({ type: "sync", frames }, frameTransfers(frames));
+      });
+    }
+  }
+
+  private pumpTransport(transport: DirectTransport, send: (frames: Uint8Array[]) => void): void {
+    transport.tick();
+    const frames = normalizeFrames(transport.recvWireFrames());
+    if (frames.length > 0) send(frames);
   }
 }
 

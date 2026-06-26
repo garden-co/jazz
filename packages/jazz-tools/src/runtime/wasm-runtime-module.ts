@@ -12,6 +12,7 @@ import {
   type DbRuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./db-runtime-module.js";
+import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -21,20 +22,28 @@ function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
 }
 
 function mintWasmToken(
-  wasmModule: WasmModule,
-  secret: string,
-  issuer: string,
-  audience: string,
-  ttlSeconds: number,
-  nowSeconds: bigint,
+  _wasmModule: WasmModule,
+  _secret: string,
+  _issuer: string,
+  _audience: string,
+  _ttlSeconds: number,
+  _nowSeconds: bigint,
 ): string {
-  return wasmModule.WasmRuntime.mintJazzSelfSignedToken(
-    secret,
-    issuer,
-    audience,
-    BigInt(ttlSeconds),
-    nowSeconds,
-  );
+  throw new Error("Direct jazz-wasm does not expose local JWT minting yet");
+}
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    const view = new DataView(bytes.buffer);
+    view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
 }
 
 export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
@@ -64,14 +73,23 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       nonDurableClientRuntime: hasWorker,
     };
 
-    const client = JazzClient.connectSync(
-      this.wasmModule,
+    const runtime = new DirectWasmRuntime(
+      this.wasmModule.WasmDb,
+      schema,
+      deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`),
+      deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`),
+      1,
+      !hasWorker,
+    );
+
+    void bufferOutboxWithoutSyncSender;
+
+    return JazzClient.connectWithRuntime(
+      runtime,
       {
         appId: config.appId,
         schema,
         driver: config.driver,
-        // In worker mode, the main thread's client is not connected to the server directly,
-        // but rather through the worker.
         serverUrl: config.serverUrl,
         env: config.env,
         userBranch: config.userBranch,
@@ -79,18 +97,10 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
         tier: hasWorker ? undefined : "local",
-        // Keep worker-bridged browser clients on local durability by default.
-        // For direct (non-worker) clients connected to a server, default to edge.
         defaultDurabilityTier: hasWorker ? undefined : config.serverUrl ? "edge" : undefined,
       },
       runtimeOptions,
     );
-
-    if (bufferOutboxWithoutSyncSender) {
-      client.getRuntime().enableOutboxBufferingWithoutSyncSender?.();
-    }
-
-    return client;
   }
 
   override installTelemetry({

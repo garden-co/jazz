@@ -7,7 +7,7 @@
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
-import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
@@ -17,6 +17,7 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
 
 /**
  * Minimal request shape supported by backend request helpers.
@@ -30,10 +31,7 @@ export interface RequestLike {
 }
 
 /**
- * Common interface for WASM and NAPI runtimes.
- *
- * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
- * satisfy this interface, allowing `JazzClient` to work with either backend.
+ * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
   insert(
@@ -79,12 +77,6 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  /**
-   * Construct a Rust-owned worker bridge attached to this runtime. Returns
-   * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
-   * Options are parsed at attach time; `bridge.init()` is parameter-less.
-   */
-  createWorkerBridge?(worker: Worker, options: object): unknown;
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
@@ -96,8 +88,6 @@ export interface Runtime {
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
-  /** @internal Enable senderless outbox buffering for brokered browser-tab runtimes. */
-  enableOutboxBufferingWithoutSyncSender?(): void;
 }
 
 /**
@@ -335,12 +325,18 @@ function resolveQueryJson(query: string | QueryInput): string {
   return translateQuery(builtQuery, schema);
 }
 
-function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
-  if (!tier) return undefined;
-  if (Array.isArray(tier)) {
-    return tier[0];
+function deterministicRuntimeBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
   }
-  return tier;
+  return bytes;
 }
 
 function isBrowserRuntime(): boolean {
@@ -623,16 +619,13 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
-      schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      resolveNodeTier(context.tier),
-      runtimeOptions?.useBinaryEncoding ?? false,
-      runtimeOptions?.nonDurableClientRuntime ?? false,
+    const runtime = new DirectWasmRuntime(
+      wasmModule.WasmDb,
+      context.schema,
+      deterministicRuntimeBytes(`${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:node`),
+      deterministicRuntimeBytes(`${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:author`),
+      1,
+      !runtimeOptions?.nonDurableClientRuntime,
     );
 
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
