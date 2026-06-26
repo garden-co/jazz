@@ -267,12 +267,13 @@ export async function createSyncedDb(
   testingServer?: JazzServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl } = testingServer ?? (await getJazzServerInfo());
+  const { appId, serverUrl, adminSecret } = testingServer ?? (await getJazzServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
+      adminSecret,
       secret: localFirstSecret,
     }),
   );

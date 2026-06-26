@@ -1,5 +1,5 @@
 import type { Runtime } from "./client.js";
-import type { RuntimeSourcesConfig } from "./context.js";
+import type { RuntimeSourcesConfig, Session } from "./context.js";
 import { mapAuthReason } from "./auth-state.js";
 import { DirectWebSocketCarrier, type DirectWireError } from "./direct-wasm/direct-websocket.js";
 import type { AuthFailureReason } from "./sync-transport.js";
@@ -21,6 +21,8 @@ export interface WorkerBridgeOptions {
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
+  backendSecret?: string;
+  cookieSession?: Session;
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   workerLockName?: string;
@@ -72,6 +74,7 @@ interface RuntimeWithDirectTransport extends Runtime {
 type WorkerInbound =
   | { type: "init"; options: WorkerBridgeOptions }
   | { type: "sync"; frames: Uint8Array[] }
+  | { type: "update-auth"; jwtToken?: string | null }
   | { type: "settle"; id: number }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: WorkerLifecycleEvent }
@@ -191,11 +194,19 @@ export class WorkerBridge {
     return this.clientIdPromise;
   }
 
-  updateAuth(auth: { jwtToken?: string }): void {
-    if (!this.serverCarrierOptions) return;
+  updateAuth(auth: WorkerBridgeAuthUpdate): void {
+    if (!this.serverCarrierOptions) {
+      this.postToWorker({
+        type: "update-auth",
+        jwtToken: auth.jwtToken ?? null,
+      });
+      return;
+    }
     this.serverCarrierOptions = {
       ...this.serverCarrierOptions,
       jwtToken: auth.jwtToken ?? undefined,
+      backendSecret: auth.backendSecret,
+      cookieSession: auth.cookieSession,
     };
     void this.reopenServerCarrier();
   }
@@ -489,12 +500,29 @@ function directWireAuthFailureReason(error: DirectWireError): AuthFailureReason 
   return mapAuthReason(error.message);
 }
 
+interface WorkerBridgeAuthUpdate {
+  jwtToken?: string;
+  backendSecret?: string;
+  cookieSession?: Session;
+}
+
 function buildWorkerBridgeAuthJson(options: WorkerBridgeOptions): string {
-  const payload: { jwt_token: string | null; admin_secret?: string } = {
+  const payload: {
+    jwt_token: string | null;
+    admin_secret?: string;
+    backend_secret?: string;
+    backend_session?: Session;
+  } = {
     jwt_token: options.jwtToken ?? null,
   };
   if (options.adminSecret) {
     payload.admin_secret = options.adminSecret;
+  }
+  if (options.backendSecret) {
+    payload.backend_secret = options.backendSecret;
+    if (options.cookieSession) {
+      payload.backend_session = options.cookieSession;
+    }
   }
   return JSON.stringify(payload);
 }

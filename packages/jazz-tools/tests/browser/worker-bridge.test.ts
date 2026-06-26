@@ -40,7 +40,6 @@ import {
   publishStoredSchema,
   type PublishedTableLens,
 } from "../../src/runtime/schema-fetch.js";
-import { encodeDirectSchema } from "../../src/runtime/direct-wasm/runtime.js";
 import { toValue } from "../../src/runtime/value-converter.js";
 
 // ---------------------------------------------------------------------------
@@ -1298,8 +1297,8 @@ describe("Worker Bridge with OPFS", () => {
   // 7. Server sync through worker
   // -------------------------------------------------------------------------
 
-  it("propagates synced row from client A to client B", async () => {
-    const syncServer = await startFixedSchemaSyncServer("sync-a-to-b");
+  it("propagates synced row from client A to client B through a published schema", async () => {
+    const syncServer = await startPublishedSchemaSyncServer("sync-a-to-b");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken, syncServer);
@@ -1323,8 +1322,8 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnB.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
-  it("propagates synced row from client B to client A", async () => {
-    const syncServer = await startFixedSchemaSyncServer("sync-b-to-a");
+  it("propagates synced row from client B to client A through a published schema", async () => {
+    const syncServer = await startPublishedSchemaSyncServer("sync-b-to-a");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken, syncServer);
@@ -1348,8 +1347,8 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
-  it("propagates synced row to a separate browser context", async () => {
-    const syncServer = await startFixedSchemaSyncServer("sync-remote-context");
+  it("propagates synced row to a separate browser context through a published schema", async () => {
+    const syncServer = await startPublishedSchemaSyncServer("sync-remote-context");
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl, adminSecret } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-remote-a", sharedLocalAuthToken, syncServer);
@@ -2985,9 +2984,36 @@ async function publishSyncServerSchemaAndPermissions(
   return testingServer;
 }
 
-async function startFixedSchemaSyncServer(scope: string, schema?: Schema): Promise<JazzServerInfo> {
-  const appId = uniqueDbName(`worker-bridge-${scope}`);
-  return getJazzServerInfo(appId, encodeDirectSchema(schema ?? app.wasmSchema));
+async function startPublishedSchemaSyncServer(
+  scope: string,
+  schema?: Schema,
+): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  await publishPermissionsForServer(
+    testingServer,
+    {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+      projects: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+    },
+    schema,
+  );
+  return testingServer;
 }
 
 async function publishPermissionsForServer(

@@ -30,6 +30,7 @@ vi.mock("./direct-wasm/direct-websocket.js", () => ({
 
 import { MessagePortRuntimeBridge, WorkerBridge } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
+import type { Session } from "./context.js";
 
 function testPort(): MessagePort & { sent: unknown[]; emit(message: unknown): void } {
   let listener: ((event: MessageEvent) => void) | null = null;
@@ -103,6 +104,11 @@ describe("WorkerBridge", () => {
     const { runtime } = testDirectRuntime();
     const worker = testWorker();
     const bridge = new WorkerBridge(worker, runtime);
+    const cookieSession: Session = {
+      user_id: "auth-forwarding-user",
+      claims: { role: "member" },
+      authMode: "external",
+    };
 
     const initPromise = bridge.init({
       schemaJson: "{}",
@@ -113,6 +119,8 @@ describe("WorkerBridge", () => {
       serverUrl: "http://localhost:4200",
       jwtToken: "jwt-initial",
       adminSecret: "admin-secret",
+      backendSecret: "backend-secret",
+      cookieSession,
     });
     worker.emit({ type: "init-ok", clientId: "worker-client" });
 
@@ -125,6 +133,8 @@ describe("WorkerBridge", () => {
       authJson: JSON.stringify({
         jwt_token: "jwt-initial",
         admin_secret: "admin-secret",
+        backend_secret: "backend-secret",
+        backend_session: cookieSession,
       }),
     });
   });
@@ -156,6 +166,16 @@ describe("WorkerBridge", () => {
     const { runtime } = testDirectRuntime();
     const worker = testWorker();
     const bridge = new WorkerBridge(worker, runtime);
+    const initialSession: Session = {
+      user_id: "auth-refresh-user",
+      claims: { role: "member" },
+      authMode: "external",
+    };
+    const refreshedSession: Session = {
+      user_id: "auth-refresh-user",
+      claims: { role: "member", refresh: 1 },
+      authMode: "external",
+    };
 
     const initPromise = bridge.init({
       schemaJson: "{}",
@@ -166,12 +186,18 @@ describe("WorkerBridge", () => {
       serverUrl: "http://localhost:4200",
       jwtToken: "jwt-initial",
       adminSecret: "admin-secret",
+      backendSecret: "backend-secret",
+      cookieSession: initialSession,
     });
     worker.emit({ type: "init-ok", clientId: "worker-client" });
     await initPromise;
     worker.sent.splice(0);
 
-    bridge.updateAuth({ jwtToken: "jwt-refresh" });
+    bridge.updateAuth({
+      jwtToken: "jwt-refresh",
+      backendSecret: "backend-secret",
+      cookieSession: refreshedSession,
+    });
 
     expect(directWebSocketCarrierMock.instances).toHaveLength(2);
     expect(directWebSocketCarrierMock.instances[0]!.close).toHaveBeenCalledTimes(1);
@@ -179,6 +205,8 @@ describe("WorkerBridge", () => {
       JSON.stringify({
         jwt_token: "jwt-refresh",
         admin_secret: "admin-secret",
+        backend_secret: "backend-secret",
+        backend_session: refreshedSession,
       }),
     );
     expect(worker.sent).not.toContainEqual({ type: "update-auth", jwtToken: "jwt-refresh" });
