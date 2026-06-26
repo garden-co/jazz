@@ -68,6 +68,7 @@ declare module "jazz-wasm" {
     restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     tick(): void;
     connectUpstream(): WasmTransport;
+    acceptSubscriber(identity: Uint8Array): WasmTransport;
     mergeableTx(): WasmTx;
   }
 }

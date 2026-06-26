@@ -607,6 +607,27 @@ impl WasmDb {
         WasmTransport { inner, queues }
     }
 
+    #[wasm_bindgen(js_name = acceptSubscriber)]
+    pub fn accept_subscriber(&self, identity: Vec<u8>) -> Result<WasmTransport, JsValue> {
+        let identity = author_id_from_bytes(&identity)?;
+        let queues = WasmWireQueues::default();
+        let transport = Box::new(WireTransportAdapter::current(WasmWireTransport {
+            queues: queues.clone(),
+        }));
+        let inner = match &self.inner {
+            WasmDbInner::Memory(db) => WasmTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.accept_subscriber(transport, identity)),
+            },
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => WasmTransportInner::Browser {
+                db: Rc::clone(db),
+                connection: Some(db.accept_subscriber(transport, identity)),
+            },
+        };
+        Ok(WasmTransport { inner, queues })
+    }
+
     #[wasm_bindgen(js_name = mergeableTx)]
     pub fn mergeable_tx(&self) -> WasmTx {
         WasmTx {
