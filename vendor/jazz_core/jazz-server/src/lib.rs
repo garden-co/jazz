@@ -286,6 +286,7 @@ impl ShellDb {
             (Self::Rocks(db), ShellPeerConnection::Rocks(connection)) => {
                 db.detach_connection(connection)
             }
+            #[cfg(feature = "rocksdb")]
             _ => false,
         }
     }
@@ -834,6 +835,7 @@ fn catalogue_acks(messages: Vec<SyncMessage>) -> ShellResult<Vec<CatalogueAck>> 
         .collect())
 }
 
+#[cfg(feature = "rocksdb")]
 fn db_storage_error(error: impl fmt::Display) -> ShellError {
     ShellError::Storage(error.to_string())
 }

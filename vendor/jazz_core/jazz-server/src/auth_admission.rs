@@ -418,9 +418,7 @@ fn json_claim_to_policy_claim(
         serde_json::Value::Array(values) => {
             let mut claims = Vec::with_capacity(values.len());
             for value in values {
-                let Some(value) = json_claim_to_policy_claim(value) else {
-                    return None;
-                };
+                let value = json_claim_to_policy_claim(value)?;
                 match value {
                     Ok(value) => claims.push(value),
                     Err(error) => return Some(Err(error)),

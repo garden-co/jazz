@@ -478,7 +478,7 @@ fn drain_state_name(drain_state: DrainState) -> &'static str {
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex input has odd length".to_owned());
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);

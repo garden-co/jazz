@@ -113,13 +113,17 @@ mod tests {
     };
     use axum::body;
     use axum::routing::{get, post};
-    use futures::StreamExt as _;
+    use futures::{SinkExt as _, StreamExt as _};
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
 
     use crate::middleware::AuthConfig;
     use crate::server::{ServerBuilder, ServerState, StorageBackend};
+    use jazz::wire::{
+        FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
+        WirePeerRole, decode_frame, encode_frame,
+    };
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -2003,6 +2007,60 @@ mod tests {
         .await
         .expect("websocket cleanup");
 
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_ws_negotiates_against_fixed_schema_core_route() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = create_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind direct ws listener");
+        let addr = listener.local_addr().expect("direct ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve direct ws app");
+        });
+
+        let ws_url = format!(
+            "ws://{addr}{}?identity=0102030405060708090a0b0c0d0e0f10",
+            test_app_route("/ws")
+        );
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
+        let hello = WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+        ));
+        let encoded = vec![encode_frame(&hello).expect("encode hello")];
+        let batch = postcard::to_allocvec(&encoded).expect("encode direct ws batch");
+        ws.send(WsMessage::Binary(batch))
+            .await
+            .expect("send direct ws hello");
+
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for direct hello")
+            .expect("direct ws frame")
+            .expect("direct ws result");
+        let WsMessage::Binary(response) = response else {
+            panic!("expected binary direct hello, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> =
+            postcard::from_bytes(&response).expect("decode direct ws response batch");
+        assert_eq!(frames.len(), 1);
+        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode hello") else {
+            panic!("expected server hello");
+        };
+        assert_eq!(server_hello.role, WirePeerRole::Core);
+        assert_eq!(
+            server_hello.features,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
+        );
+
+        let _ = ws.close(None).await;
         server_task.abort();
     }
 }

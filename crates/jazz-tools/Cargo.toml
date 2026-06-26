@@ -57,6 +57,7 @@ otel = ["cli", "otel-core"]
 
 [dependencies]
 jazz = { workspace = true }
+jazz-server = { workspace = true }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }

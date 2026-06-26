@@ -20,6 +20,7 @@ exclude = [
 [workspace.dependencies]
 groove = { path = "vendor/jazz_core/groove", default-features = false }
 jazz = { path = "vendor/jazz_core/jazz", default-features = false }
+jazz-server = { path = "vendor/jazz_core/jazz-server", default-features = false }
 
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
