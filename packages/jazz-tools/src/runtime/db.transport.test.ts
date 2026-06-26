@@ -311,8 +311,8 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards follower auth refreshes through the follower port bridge", () => {
-    const followerPortBridge = {
+  it("forwards auth refreshes through the connection manager", () => {
+    const connection = {
       updateAuth: vi.fn(),
     };
     const db = new TestDb({
@@ -321,12 +321,11 @@ describe("runtime/Db direct path upstream wiring", () => {
       jwtToken: makeJwt({ sub: "alice" }),
     });
 
-    (db as unknown as { followerPortBridge: typeof followerPortBridge }).followerPortBridge =
-      followerPortBridge;
+    (db as unknown as { connection: typeof connection }).connection = connection;
 
     const refreshed = makeJwt({ sub: "alice", refresh: 1 });
     db.updateAuthToken(refreshed);
 
-    expect(followerPortBridge.updateAuth).toHaveBeenCalledWith({ jwtToken: refreshed });
+    expect(connection.updateAuth).toHaveBeenCalledWith({ jwtToken: refreshed });
   });
 });

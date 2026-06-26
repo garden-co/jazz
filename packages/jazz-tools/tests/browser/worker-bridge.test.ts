@@ -129,6 +129,33 @@ interface WorkerMessageProbe {
   snapshot(): WorkerMessageDebugEvent[];
 }
 
+function getBrowserConnection(db: Db): any {
+  return (db as any).connection;
+}
+
+function getActiveRoleBridge(db: Db): any {
+  return getBrowserConnection(db)?.activeRoleBridge ?? null;
+}
+
+function getPrivateWorker(db: Db): Worker | null {
+  return getActiveRoleBridge(db)?.worker ?? null;
+}
+
+function getPrivateWorkerBridge(db: Db): any {
+  return getActiveRoleBridge(db)?.workerBridge ?? null;
+}
+
+function getFollowerPortBridge(db: Db): any {
+  return getActiveRoleBridge(db)?.followerPortBridge ?? null;
+}
+
+function clearPrivateWorkerBridge(db: Db): void {
+  const roleBridge = getActiveRoleBridge(db);
+  if (roleBridge) {
+    roleBridge.workerBridge = null;
+  }
+}
+
 function summarizeWorkerMessage(
   data: { type?: string; [key: string]: unknown } | undefined,
 ): Record<string, unknown> | undefined {
@@ -157,7 +184,7 @@ function summarizeWorkerMessage(
 }
 
 function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
-  const worker = (db as unknown as { worker?: Worker | null }).worker;
+  const worker = getPrivateWorker(db);
   const startedAt = Date.now();
   const events: WorkerMessageDebugEvent[] = [];
 
@@ -300,15 +327,11 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   function getTabRole(db: Db): "leader" | "follower" | null {
-    const role = (db as any).tabRole;
+    const role = getBrowserConnection(db)?.tabRole;
     if (role === "leader" || role === "follower") {
       return role;
     }
     return null;
-  }
-
-  function getPrivateWorker(db: Db): Worker | null {
-    return (db as unknown as { worker?: Worker | null }).worker ?? null;
   }
 
   async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
@@ -486,8 +509,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // @ts-expect-error - worker is private
-    const worker = db1.worker as Worker;
+    const worker = getPrivateWorker(db1) as Worker;
     const originalPostMessage = worker.postMessage.bind(worker);
     worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
       const typed = message as { type?: string } | undefined;
@@ -513,10 +535,8 @@ describe("Worker Bridge with OPFS", () => {
     expect(id).toBeDefined();
 
     worker.postMessage = originalPostMessage;
-    // Shutdown fails to ensure bridge is ready, but steps down as leader before that
-    await expect(db1.shutdown()).rejects.toThrow(
-      "Worker init failed: forced bridge init failure for test",
-    );
+    // Shutdown should clean up the failed leader bridge without persisting the optimistic write.
+    await db1.shutdown();
 
     untrack(db1);
 
@@ -542,8 +562,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // @ts-expect-error - worker is private
-    const worker = db.worker as Worker;
+    const worker = getPrivateWorker(db) as Worker;
     const originalPostMessage = worker.postMessage.bind(worker);
     worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
       const typed = message as { type?: string } | undefined;
@@ -711,12 +730,11 @@ describe("Worker Bridge with OPFS", () => {
     // (Real worker.terminate() doesn't reliably release OPFS exclusive
     // locks within the same page session — only a full page reload does.)
     await (db1 as any).ensureBridgeReady();
-    const worker = (db1 as any).worker as Worker;
-    await (db1 as any).workerBridge.simulateCrash();
-    worker.terminate();
+    const worker = getPrivateWorker(db1);
+    await getActiveRoleBridge(db1).simulateCrash();
+    worker?.terminate();
     // Null out dead worker bridge so Db shutdown only frees client-side resources.
-    (db1 as any).worker = null;
-    (db1 as any).workerBridge = null;
+    clearPrivateWorkerBridge(db1);
     await db1.shutdown();
 
     // New Db with same dbName — worker must recover from OPFS WAL
@@ -1167,15 +1185,13 @@ describe("Worker Bridge with OPFS", () => {
     );
     (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
     await waitForCondition(
-      async () => Boolean((fresh as unknown as { worker?: Worker | null }).worker?.onmessage),
+      async () => Boolean(getPrivateWorker(fresh)?.onmessage),
       5000,
       `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
-        tabRole: (fresh as unknown as { tabRole?: unknown }).tabRole,
-        workerExists: Boolean((fresh as unknown as { worker?: Worker | null }).worker),
-        workerOnMessage: Boolean(
-          (fresh as unknown as { worker?: Worker | null }).worker?.onmessage,
-        ),
-        bridge: Boolean((fresh as unknown as { workerBridge?: unknown }).workerBridge),
+        tabRole: getTabRole(fresh),
+        workerExists: Boolean(getPrivateWorker(fresh)),
+        workerOnMessage: Boolean(getPrivateWorker(fresh)?.onmessage),
+        bridge: Boolean(getPrivateWorkerBridge(fresh)),
         clientsType: typeof (fresh as unknown as { clients?: unknown }).clients,
         clientKeys: Object.keys((fresh as unknown as { clients?: object }).clients ?? {}),
       })}`,
@@ -1303,9 +1319,10 @@ describe("Worker Bridge with OPFS", () => {
     db.insert(todos, { title: "Prime bridge", done: false });
     await (db as any).ensureBridgeReady();
 
-    const bridge = (db as any).workerBridge;
+    const bridge = getPrivateWorkerBridge(db);
     expect(bridge).toBeTruthy();
 
+    const connection = getBrowserConnection(db);
     const seenEvents: string[] = [];
     const originalSendLifecycleHint = bridge.sendLifecycleHint.bind(bridge);
     bridge.sendLifecycleHint = (event: string) => {
@@ -1313,9 +1330,9 @@ describe("Worker Bridge with OPFS", () => {
       originalSendLifecycleHint(event);
     };
 
-    (db as any).onPageHide();
-    (db as any).onPageFreeze();
-    (db as any).onPageResume();
+    connection.onPageHide();
+    connection.onPageFreeze();
+    connection.onPageResume();
 
     expect(seenEvents).toEqual(["pagehide", "freeze", "resume"]);
   });
@@ -1919,10 +1936,10 @@ describe("Worker Bridge with OPFS", () => {
     await unblockJazzServerNetwork(serverUrl);
     await sleep(250);
 
-    (dbA as any).sendLifecycleHint?.("freeze");
+    getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");
     await sleep(50);
-    (dbA as any).sendLifecycleHint?.("resume");
-    (dbA as any).workerBridge?.replayServerConnection?.();
+    getBrowserConnection(dbA)?.sendLifecycleHint?.("resume");
+    getActiveRoleBridge(dbA)?.replayServerConnection?.();
 
     const recoveredTitle = `network-recovered-${Date.now()}`;
     await withTimeout(
@@ -2050,7 +2067,7 @@ describe("Worker Bridge with OPFS", () => {
     // Disconnect the WS transport so the block takes effect immediately.
     // Playwright route blocking only intercepts new connections; the existing
     // WebSocket must be closed explicitly for the offline simulation to hold.
-    (dbA as any).workerBridge?.disconnectUpstream?.();
+    getActiveRoleBridge(dbA)?.disconnectUpstream?.();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
@@ -2079,13 +2096,13 @@ describe("Worker Bridge with OPFS", () => {
 
     await unblockJazzServerNetwork(serverUrl);
     // Re-establish the worker's upstream WebSocket now that the network is live again.
-    (dbA as any).workerBridge?.reconnectUpstream?.();
+    getActiveRoleBridge(dbA)?.reconnectUpstream?.();
     await sleep(250);
 
-    (dbA as any).sendLifecycleHint?.("freeze");
+    getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");
     await sleep(50);
-    (dbA as any).sendLifecycleHint?.("resume");
-    (dbA as any).workerBridge?.replayServerConnection?.();
+    getBrowserConnection(dbA)?.sendLifecycleHint?.("resume");
+    getActiveRoleBridge(dbA)?.replayServerConnection?.();
 
     const postReconnectTitle = `post-reconnect-control-${Date.now()}`;
     await withTimeout(
@@ -2499,11 +2516,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(follower.getAuthState().error).toBeUndefined();
 
     leader.updateAuthToken(invalidJwt);
-    (
-      leader as unknown as {
-        workerBridge?: { replayServerConnection?: () => void };
-      }
-    ).workerBridge?.replayServerConnection?.();
+    getActiveRoleBridge(leader)?.replayServerConnection?.();
 
     await waitForCondition(
       async () => leader.getAuthState().error === "invalid",
@@ -2582,11 +2595,11 @@ describe("Worker Bridge with OPFS", () => {
     await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => {
-        void (follower as any).followerReady?.catch(() => {});
+        void getBrowserConnection(follower)?.followerReady?.catch(() => {});
         await follower.all(allTodos, { tier: "local" });
         return (
-          Boolean((follower as any).followerPortBridge) &&
-          (follower as any).resolveFollowerReady === null
+          Boolean(getFollowerPortBridge(follower)) &&
+          getBrowserConnection(follower)?.resolveFollowerReady === null
         );
       },
       8000,
@@ -2595,7 +2608,7 @@ describe("Worker Bridge with OPFS", () => {
 
     // The follower stays alive: the write must not be lost if the leader
     // crashes before confirming local durability.
-    (follower as any).closeFollowerPortState(undefined, {
+    getBrowserConnection(follower).closeActiveRoleBridge(undefined, {
       preserveOutbox: true,
     });
 
@@ -2615,10 +2628,9 @@ describe("Worker Bridge with OPFS", () => {
     expect(pendingWriteState).toBe("pending");
 
     const leaderWorker = getPrivateWorker(leader);
-    await (leader as any).workerBridge?.simulateCrash?.();
+    await getActiveRoleBridge(leader)?.simulateCrash?.();
     leaderWorker?.terminate();
-    (leader as any).worker = null;
-    (leader as any).workerBridge = null;
+    clearPrivateWorkerBridge(leader);
     await leader.shutdown();
     untrack(leader);
 
@@ -2743,14 +2755,13 @@ describe("Worker Bridge with OPFS", () => {
     // failover retransmit still drives it to durability; either way the wait
     // must resolve.)
     const leaderWorker = getPrivateWorker(leader);
-    await (leader as any).workerBridge.simulateCrash();
+    await getActiveRoleBridge(leader).simulateCrash();
     leaderWorker?.terminate();
     // Null the dead bridge so shutdown only frees client-side resources, then
     // shut the leader down so its tab releases its Web Locks. A real
     // closed/crashed tab releases them automatically; releasing them here is
     // what lets the broker elect the surviving follower.
-    (leader as any).worker = null;
-    (leader as any).workerBridge = null;
+    clearPrivateWorkerBridge(leader);
     await leader.shutdown();
     untrack(leader);
 
@@ -2984,7 +2995,7 @@ function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unkn
 
 async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
   await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
+  const worker = getPrivateWorker(db);
   if (!worker) {
     throw new Error("Expected worker instance to exist");
   }
@@ -3027,7 +3038,7 @@ async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<Debu
 
 async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
   await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
+  const worker = getPrivateWorker(db);
   if (!worker) {
     throw new Error("Expected worker instance to exist");
   }
