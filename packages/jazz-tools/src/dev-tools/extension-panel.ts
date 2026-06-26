@@ -292,7 +292,16 @@ async function ensureDevtoolsPort(): Promise<DevtoolsBridgePort> {
         return;
       }
       const delta = payload.delta;
-      if (!Array.isArray(delta)) {
+      // The callback is the Db's decoding handleDelta, which accepts both wire
+      // deltas (arrays) and native row deltas ({ __jazzNativeRowDelta, ... }) and
+      // decodes the latter using the query's output columns. Only forward those
+      // two shapes; older code dropped everything non-array, which silently
+      // discarded native row deltas and left the data explorer showing no rows.
+      const isNativeRowDelta =
+        !!delta &&
+        typeof delta === "object" &&
+        (delta as { __jazzNativeRowDelta?: unknown }).__jazzNativeRowDelta === true;
+      if (!Array.isArray(delta) && !isNativeRowDelta) {
         return;
       }
       callback(delta as Parameters<SubscriptionCallback>[0]);
