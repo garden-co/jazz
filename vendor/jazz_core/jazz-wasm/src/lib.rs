@@ -291,6 +291,22 @@ impl WasmDbInner {
         }
     }
 
+    fn propagate_query(&self, query: &PreparedQuery, opts: ReadOpts) {
+        match self {
+            Self::Memory(db) => db.propagate_query_with_opts(query, opts),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.propagate_query_with_opts(query, opts),
+        }
+    }
+
+    fn query_is_covered(&self, query: &PreparedQuery) -> bool {
+        match self {
+            Self::Memory(db) => db.query_is_covered(query),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.query_is_covered(query),
+        }
+    }
+
     fn insert(&self, table: &str, cells: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(db.insert(table, cells).map_err(to_js_error)?),
@@ -618,6 +634,22 @@ impl WasmDb {
             .subscribe(&query.inner, opts)
             .map_err(to_js_error)?;
         readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+    }
+
+    #[wasm_bindgen(js_name = propagateQuery)]
+    pub fn propagate_query(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<(), JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        self.inner.propagate_query(&query.inner, opts);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = queryIsCovered)]
+    pub fn query_is_covered(&self, query: &WasmPreparedQuery) -> bool {
+        self.inner.query_is_covered(&query.inner)
     }
 
     #[wasm_bindgen(js_name = insertEncoded)]

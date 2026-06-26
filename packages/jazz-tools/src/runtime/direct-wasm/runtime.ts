@@ -436,6 +436,7 @@ export class DirectCoreRuntime implements Runtime {
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
     const source = subscriptionSource(this.db.subscribe(query, readOptions(tier)));
+    this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
     this.subscriptions.set(handle, {
       source,
       rows: [],
@@ -586,6 +587,17 @@ export class DirectCoreRuntime implements Runtime {
     if (!this.db.propagateQuery) return;
     this.db.propagateQuery(query, readOptions(tier));
     await this.waitForQueryCoverage(query);
+  }
+
+  private propagateSubscriptionQueryIfNeeded(
+    tier: string | null | undefined,
+    optionsJson: string | null | undefined,
+    query: DirectPreparedQuery,
+  ): void {
+    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
+    if (options.propagation != null && options.propagation !== "full") return;
+    if (!this.db.propagateQuery) return;
+    this.db.propagateQuery(query, readOptions(tier === "local" ? "edge" : tier));
   }
 
   private async waitForQueryCoverage(query: DirectPreparedQuery): Promise<void> {
