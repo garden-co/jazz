@@ -1,10 +1,6 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import {
-  attachOverlayMiddleware,
-  overlayHtmlTransform,
-  type OverlayResponse,
-} from "./inspector-overlay/serve.js";
+import { attachOverlayMiddleware, type OverlayResponse } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -156,7 +152,5 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         await runtime.dispose();
       });
     },
-
-    transformIndexHtml: overlayHtmlTransform,
   };
 }

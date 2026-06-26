@@ -2,48 +2,54 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import * as React from "react";
 
-const { attachSpy } = vi.hoisted(() => ({ attachSpy: vi.fn().mockResolvedValue({}) }));
-vi.mock("../dev-tools/dev-tools.js", () => ({ attachDevTools: attachSpy }));
-const fakeDb = {};
+const { startSpy } = vi.hoisted(() => ({ startSpy: vi.fn() }));
+vi.mock("../dev/inspector-overlay/loader.js", () => ({ startInspectorOverlay: startSpy }));
+
+let currentDb: object = {};
 vi.mock("../react-core/provider.js", () => ({
   JazzProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useDb: () => fakeDb,
-  useJazzClient: () => ({ db: fakeDb }),
+  useDb: () => currentDb,
+  useJazzClient: () => ({ db: currentDb }),
   useSession: () => null,
 }));
 import { JazzProvider } from "./provider.js";
-const fakeSchema = { tableA: {} } as never;
 
 describe("JazzProvider dev auto-attach", () => {
   beforeEach(() => {
-    attachSpy.mockClear();
+    startSpy.mockClear();
+    // Fresh db each test so the once-per-db guard (markDevToolsAttached) doesn't carry over.
+    currentDb = {};
     (process.env as Record<string, string>).NODE_ENV = "development";
   });
-  it("auto-attaches in dev when wasmSchema is provided", async () => {
+
+  it("mounts the inspector overlay in dev (no schema needed)", async () => {
     render(
-      <JazzProvider config={{} as never} wasmSchema={fakeSchema}>
+      <JazzProvider config={{} as never}>
         <div />
       </JazzProvider>,
     );
-    await waitFor(() => expect(attachSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(startSpy).toHaveBeenCalledTimes(1));
+    expect(startSpy).toHaveBeenCalledWith(currentDb);
   });
-  it("does not auto-attach with autoAttachDevTools={false}", async () => {
+
+  it("does not mount with autoAttachDevTools={false}", async () => {
     render(
-      <JazzProvider config={{} as never} wasmSchema={fakeSchema} autoAttachDevTools={false}>
+      <JazzProvider config={{} as never} autoAttachDevTools={false}>
         <div />
       </JazzProvider>,
     );
     await new Promise((r) => setTimeout(r, 20));
-    expect(attachSpy).not.toHaveBeenCalled();
+    expect(startSpy).not.toHaveBeenCalled();
   });
-  it("does not attach when NODE_ENV=production", async () => {
+
+  it("does not mount when NODE_ENV=production", async () => {
     (process.env as Record<string, string>).NODE_ENV = "production";
     render(
-      <JazzProvider config={{} as never} wasmSchema={fakeSchema}>
+      <JazzProvider config={{} as never}>
         <div />
       </JazzProvider>,
     );
     await new Promise((r) => setTimeout(r, 20));
-    expect(attachSpy).not.toHaveBeenCalled();
+    expect(startSpy).not.toHaveBeenCalled();
   });
 });

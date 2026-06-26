@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { attachOverlayMiddleware, overlayHtmlTransform } from "./inspector-overlay/serve.js";
+import { attachOverlayMiddleware } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
@@ -190,8 +190,6 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         `${LOG_PREFIX} Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).`,
       );
     },
-
-    transformIndexHtml: overlayHtmlTransform,
   };
 }
 

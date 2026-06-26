@@ -1,6 +1,5 @@
 import { createContext, useContext, type JSX, type Accessor, Show, createEffect } from "solid-js";
 import type { Session } from "../runtime/context.js";
-import type { WasmSchema } from "../index.js";
 import {
   isPendingSolidJazzClientReady,
   type SolidJazzClient,
@@ -18,7 +17,6 @@ export type JazzProviderProps = {
   fallback?: JSX.Element;
   children: JSX.Element;
   autoAttachDevTools?: boolean;
-  wasmSchema?: WasmSchema;
 };
 
 export function JazzProvider(props: JazzProviderProps) {
@@ -28,12 +26,11 @@ export function JazzProvider(props: JazzProviderProps) {
   if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools !== false) {
     createEffect(() => {
       const client = clientReady();
-      if (!client || !props.wasmSchema) return;
+      if (!client) return;
       const db = client.db;
       if (!markDevToolsAttached(db as object)) return;
-      const wasmSchema = props.wasmSchema;
-      void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
-        attachDevTools({ db }, wasmSchema),
+      void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
+        startInspectorOverlay(db as object),
       );
     });
   }

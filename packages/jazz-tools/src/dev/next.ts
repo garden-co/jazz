@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { copyFile, cp, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
-import { bundleOverlayLoaderScript, resolveEmbeddedDir } from "./inspector-overlay/serve.js";
+import { resolveEmbeddedDir } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -90,7 +90,6 @@ async function copyOverlayToPublic(appRoot: string): Promise<void> {
   const overlayDest = join(appRoot, OVERLAY_PUBLIC_DIR);
   await mkdir(overlayDest, { recursive: true });
   await cp(embeddedDir, join(overlayDest, "embedded"), { recursive: true });
-  await writeFile(join(overlayDest, "loader.js"), await bundleOverlayLoaderScript());
 }
 
 function warnOverlayInProductionBuild(appRoot: string): void {
