@@ -7,6 +7,8 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+#[cfg(feature = "rocksdb")]
+use std::path::Path;
 use std::rc::Rc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -16,14 +18,20 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::MemoryStorage;
+#[cfg(feature = "rocksdb")]
+use jazz::groove::storage::RocksDbStorage;
+use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::{TransportError, WireTransport};
+#[cfg(feature = "rocksdb")]
+use tempfile::TempDir;
 
 type BenchDb = Db<MemoryStorage>;
+#[cfg(feature = "rocksdb")]
+type RocksBenchDb = Db<RocksDbStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -160,6 +168,41 @@ fn open_core_db(seed: u64) -> BenchDb {
 }
 
 fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+    open_db_with_storage(
+        seed,
+        author,
+        history_complete,
+        |refs| MemoryStorage::new(refs),
+        "open direct realistic benchmark db",
+    )
+}
+
+#[cfg(feature = "rocksdb")]
+fn open_rocks_db_with_author(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    path: &Path,
+) -> RocksBenchDb {
+    open_db_with_storage(
+        seed,
+        author,
+        history_complete,
+        |refs| RocksDbStorage::open(path, refs).expect("open realistic RocksDB storage"),
+        "open direct realistic RocksDB benchmark db",
+    )
+}
+
+fn open_db_with_storage<S>(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    storage: impl FnOnce(&[&str]) -> S,
+    context: &str,
+) -> Db<S>
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -169,7 +212,7 @@ fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> B
 
     let config = DbConfig::new(
         schema,
-        MemoryStorage::new(&refs),
+        storage(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([seed as u8; 16]),
             author,
@@ -182,7 +225,7 @@ fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> B
     } else {
         block_on(Db::open(config))
     };
-    opened.expect("open direct realistic benchmark db")
+    opened.expect(context)
 }
 
 struct ByteDuplexTransport {
@@ -233,7 +276,10 @@ fn row_uuid(tag: u8, index: usize) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn wait_local(write: jazz::db::WriteHandle<MemoryStorage>) {
+fn wait_local<S>(write: jazz::db::WriteHandle<S>)
+where
+    S: OrderedKvStorage,
+{
     block_on(write.wait(DurabilityTier::Local)).expect("write should be local");
 }
 
@@ -374,7 +420,10 @@ struct Fixture {
     tasks: Vec<RowUuid>,
 }
 
-fn seed_fixture(db: &BenchDb, profile: SmallProfile) -> Fixture {
+fn seed_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     let users = (0..profile.users)
         .map(|index| {
             let row = row_uuid(0x11, index);
@@ -464,12 +513,18 @@ fn seed_fixture(db: &BenchDb, profile: SmallProfile) -> Fixture {
     }
 }
 
-fn project_board_query(db: &BenchDb, project: RowUuid) -> jazz::db::PreparedQuery {
+fn project_board_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     db.prepare_query(&Query::from("tasks").filter(eq(col("project"), lit(project.0))))
         .expect("prepare project board query")
 }
 
-fn my_work_query(db: &BenchDb, user: RowUuid) -> jazz::db::PreparedQuery {
+fn my_work_query<S>(db: &Db<S>, user: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     db.prepare_query(&Query::from("tasks").filter(all_of([
         eq(col("assignee"), lit(user.0)),
         eq(col("status"), lit("doing")),
@@ -477,12 +532,18 @@ fn my_work_query(db: &BenchDb, user: RowUuid) -> jazz::db::PreparedQuery {
     .expect("prepare my work query")
 }
 
-fn task_comments_query(db: &BenchDb, task: RowUuid) -> jazz::db::PreparedQuery {
+fn task_comments_query<S>(db: &Db<S>, task: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     db.prepare_query(&Query::from("comments").filter(eq(col("task"), lit(task.0))))
         .expect("prepare task comments query")
 }
 
-fn activity_feed_query(db: &BenchDb, project: RowUuid) -> jazz::db::PreparedQuery {
+fn activity_feed_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
     db.prepare_query(&Query::from("activity").filter(eq(col("project"), lit(project.0))))
         .expect("prepare activity feed query")
 }
@@ -581,6 +642,41 @@ fn r2_reads(c: &mut Criterion) {
 
     group.finish();
 }
+
+#[cfg(feature = "rocksdb")]
+fn r3_rocksdb_cold_load(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r3_rocksdb_cold_load");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(profile.tasks as u64));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
+                let db_path = tempdir.path().join("realistic_phase1_direct.rocksdb");
+                let project = {
+                    let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+                    let fixture = seed_fixture(&db, profile);
+                    fixture.projects[0]
+                };
+
+                b.iter(|| {
+                    let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
+                    let query = project_board_query(&db, project);
+                    let rows = db.read(&query).expect("read cold project board");
+                    assert!(!rows.is_empty());
+                    black_box(rows.len())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+#[cfg(not(feature = "rocksdb"))]
+fn r3_rocksdb_cold_load(_c: &mut Criterion) {}
 
 fn r4_hot_task_history(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1_direct/r4_hot_task_history");
@@ -814,6 +910,6 @@ fn r10_direct_sync_fanout(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout
 }
 criterion_main!(benches);
