@@ -180,6 +180,10 @@ export type DirectQueryPredicate = {
 };
 
 export type DirectQueryPredicateOp = "Eq" | "Ne" | "Gt" | "Gte" | "Lt" | "Lte";
+export type DirectQueryOrder = {
+  column: string;
+  direction: "Asc" | "Desc";
+};
 
 export function queryWithEqFilters(
   table: string,
@@ -196,10 +200,15 @@ export function queryWithEqFilters(
 export function queryWithPredicates(
   table: string,
   predicates: DirectQueryPredicate[],
-  limit?: number,
+  options: number | { limit?: number; offset?: number; orderBy?: DirectQueryOrder[] } = {},
 ): Uint8Array {
+  const queryOptions = typeof options === "number" ? { limit: options } : options;
+  const { limit, offset = 0, orderBy = [] } = queryOptions;
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("query offset must be a non-negative safe integer");
   }
   const writer = new PostcardWriter();
   writer.string(table);
@@ -211,14 +220,18 @@ export function queryWithPredicates(
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.none();
-  writer.vec(() => undefined, 0);
+  writer.vec((order, index) => {
+    const term = orderBy[index]!;
+    order.string(term.column);
+    order.u64(term.direction === "Asc" ? 0 : 1);
+  }, orderBy.length);
   writer.none();
   if (limit == null) {
     writer.none();
   } else {
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
-  writer.u64(0);
+  writer.u64(offset);
   return writer.finish();
 }
 

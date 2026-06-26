@@ -26,6 +26,7 @@ import {
   writeValueType,
   type AbiRowBatch,
   type AbiRemovedRow,
+  type DirectQueryOrder,
   type DirectQueryLiteral,
   type DirectQueryPredicate,
   type DescriptorField,
@@ -912,7 +913,13 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   return queryWithPredicates(
     parsed.table,
     encoded.predicates,
-    encoded.hasPostFilter ? undefined : readLimitIfPresent(parsed.limit),
+    encoded.hasPostFilter
+      ? {}
+      : {
+          limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
+          offset: encoded.offset,
+          orderBy: encoded.orderBy,
+        },
   );
 }
 
@@ -926,7 +933,13 @@ function encodeSimpleRelationQuery(
   table: string,
   relationIr: unknown,
   schema: WasmSchema,
-): { predicates: DirectQueryPredicate[]; hasPostFilter: boolean } {
+): {
+  predicates: DirectQueryPredicate[];
+  hasPostFilter: boolean;
+  limit?: number;
+  offset: number;
+  orderBy: DirectQueryOrder[];
+} {
   const unwrapped = unwrapSimpleRelation(table, relationIr);
   if (!unwrapped) throw unsupportedRelationQueryError();
   const unsupportedIdComparator = unwrapped.predicates.find(
@@ -940,6 +953,9 @@ function encodeSimpleRelationQuery(
   const hasPostFilter = unwrapped.predicates.some((filter) => filter.column === "id");
   return {
     hasPostFilter,
+    limit: unwrapped.limit,
+    offset: unwrapped.offset,
+    orderBy: unwrapped.orderBy,
     predicates: unwrapped.predicates
       .filter((filter) => filter.column !== "id")
       .map((filter) => ({
@@ -952,7 +968,7 @@ function encodeSimpleRelationQuery(
 function unwrapSimpleRelationOrThrow(
   table: string,
   relationIr: unknown,
-): { predicates: DirectQueryPredicate[] } {
+): { predicates: DirectQueryPredicate[]; offset: number; orderBy: DirectQueryOrder[] } {
   const unwrapped = unwrapSimpleRelation(table, relationIr);
   if (!unwrapped) throw unsupportedRelationQueryError();
   return unwrapped;
@@ -961,8 +977,13 @@ function unwrapSimpleRelationOrThrow(
 function unwrapSimpleRelation(
   table: string,
   relationIr: unknown,
-): { predicates: DirectQueryPredicate[] } | null {
-  if (relationIr == null) return { predicates: [] };
+): {
+  predicates: DirectQueryPredicate[];
+  limit?: number;
+  offset: number;
+  orderBy: DirectQueryOrder[];
+} | null {
+  if (relationIr == null) return { predicates: [], offset: 0, orderBy: [] };
   if (typeof relationIr !== "object") return null;
   const relation = relationIr as Record<string, unknown>;
   const tableScan = relation.TableScan;
@@ -971,12 +992,29 @@ function unwrapSimpleRelation(
     typeof tableScan === "object" &&
     (tableScan as { table?: unknown }).table === table
   ) {
-    return { predicates: [] };
+    return { predicates: [], offset: 0, orderBy: [] };
   }
   const limit = relation.Limit;
   if (limit && typeof limit === "object") {
-    const limitRecord = limit as { input?: unknown };
-    return unwrapSimpleRelation(table, limitRecord.input);
+    const limitRecord = limit as { input?: unknown; limit?: unknown };
+    const input = unwrapSimpleRelation(table, limitRecord.input);
+    if (!input) return null;
+    return { ...input, limit: readLimit(limitRecord.limit) };
+  }
+  const offset = relation.Offset;
+  if (offset && typeof offset === "object") {
+    const offsetRecord = offset as { input?: unknown; offset?: unknown };
+    const input = unwrapSimpleRelation(table, offsetRecord.input);
+    if (!input) return null;
+    return { ...input, offset: readOffset(offsetRecord.offset) };
+  }
+  const orderBy = relation.OrderBy;
+  if (orderBy && typeof orderBy === "object") {
+    const orderByRecord = orderBy as { input?: unknown; terms?: unknown };
+    const input = unwrapSimpleRelation(table, orderByRecord.input);
+    const terms = readOrderByTerms(orderByRecord.terms);
+    if (!input || !terms) return null;
+    return { ...input, orderBy: input.orderBy.concat(terms) };
   }
   const filter = relation.Filter;
   if (!filter || typeof filter !== "object") return null;
@@ -984,7 +1022,20 @@ function unwrapSimpleRelation(
   const input = unwrapSimpleRelation(table, filterRecord.input);
   if (!input) return null;
   const predicates = predicateToFilters(filterRecord.predicate);
-  return predicates ? { predicates: input.predicates.concat(predicates) } : null;
+  return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
+}
+
+function readOrderByTerms(value: unknown): DirectQueryOrder[] | null {
+  if (!Array.isArray(value)) return null;
+  const terms: DirectQueryOrder[] = [];
+  for (const term of value) {
+    if (!term || typeof term !== "object") return null;
+    const record = term as { column?: unknown; direction?: unknown };
+    const column = readColumnRef(record.column);
+    if (!column || (record.direction !== "Asc" && record.direction !== "Desc")) return null;
+    terms.push({ column, direction: record.direction });
+  }
+  return terms;
 }
 
 function coerceQueryLiteral(
@@ -1083,6 +1134,13 @@ function readLimit(value: unknown): number {
 
 function readLimitIfPresent(value: unknown): number | undefined {
   return value == null ? undefined : readLimit(value);
+}
+
+function readOffset(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("query offset must be a non-negative safe integer");
+  }
+  return value;
 }
 
 function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {

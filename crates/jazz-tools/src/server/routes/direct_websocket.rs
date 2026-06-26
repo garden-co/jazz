@@ -1464,7 +1464,7 @@ mod tests {
     // admission registry as the user-visible socket closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_direct_peer_identity_connections_are_bounded_by_eviction() {
-        let state = make_direct_ws_test_state().await;
+        let state = make_direct_ws_convergence_test_state().await;
         let addr = start_direct_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x42; 16]);
         let key = DirectWsAdmissionKey {
@@ -1529,7 +1529,7 @@ mod tests {
     // direct protocol boundary and its admission registry.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn direct_peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
-        let state = make_direct_ws_test_state().await;
+        let state = make_direct_ws_convergence_test_state().await;
         let addr = start_direct_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x24; 16]);
         let key = DirectWsAdmissionKey {
@@ -1566,7 +1566,7 @@ mod tests {
     // core server has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn direct_peer_identity_eviction_does_not_affect_other_identities() {
-        let state = make_direct_ws_test_state().await;
+        let state = make_direct_ws_convergence_test_state().await;
         let addr = start_direct_ws_test_server(state.clone()).await;
         let noisy_identity = AuthorId::from_bytes([0x31; 16]);
         let quiet_identity = AuthorId::from_bytes([0x32; 16]);
@@ -1618,7 +1618,7 @@ mod tests {
     // the cap, not only the first overflow.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn repeated_direct_peer_identity_evictions_keep_live_admissions_at_cap() {
-        let state = make_direct_ws_test_state().await;
+        let state = make_direct_ws_convergence_test_state().await;
         let addr = start_direct_ws_test_server(state.clone()).await;
         let identity = AuthorId::from_bytes([0x33; 16]);
         let key = DirectWsAdmissionKey {

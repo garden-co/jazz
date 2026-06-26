@@ -797,6 +797,84 @@ describe("CoreRuntime server transport", () => {
 
     expect(readPreparedLimit(preparedBytes!)).toBeUndefined();
   });
+
+  it("lowers root order and pagination into the prepared core query", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new CoreRuntime(
+      {
+        openMemory: () => ({
+          all: () => new Uint8Array([0]),
+          prepareQuery: (query: Uint8Array) => {
+            preparedBytes = query;
+            return {};
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "priority", column_type: { type: "Integer" }, nullable: false },
+          ],
+        },
+      },
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Limit: {
+            input: {
+              Offset: {
+                input: {
+                  OrderBy: {
+                    input: {
+                      Filter: {
+                        input: { TableScan: { table: "todos" } },
+                        predicate: {
+                          Cmp: {
+                            left: { column: "title" },
+                            op: "Eq",
+                            right: { Literal: { type: "Text", value: "ship it" } },
+                          },
+                        },
+                      },
+                    },
+                    terms: [
+                      { column: { column: "priority" }, direction: "Desc" },
+                      { column: { column: "title" }, direction: "Asc" },
+                    ],
+                  },
+                },
+                offset: 5,
+              },
+            },
+            limit: 10,
+          },
+        },
+      }),
+    );
+
+    expect(readPreparedQueryShape(preparedBytes!)).toEqual({
+      table: "todos",
+      predicates: [{ column: "title", opTag: 3, literalTag: 6, value: "ship it" }],
+      orderBy: [
+        { column: "priority", directionTag: 1 },
+        { column: "title", directionTag: 0 },
+      ],
+      limit: 10,
+      offset: 5,
+    });
+  });
 });
 
 const testSchema = {
@@ -876,6 +954,40 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   return reader.option((optionReader) => optionReader.u64());
+}
+
+function readPreparedQueryShape(query: Uint8Array): {
+  table: string;
+  predicates: Array<{ column: string; opTag: number; literalTag: number; value: string }>;
+  orderBy: Array<{ column: string; directionTag: number }>;
+  limit: number | undefined;
+  offset: number;
+} {
+  const reader = new PostcardReader(query);
+  const table = reader.string();
+  const predicateCount = reader.u64();
+  const predicates = Array.from({ length: predicateCount }, () => {
+    const opTag = reader.u64();
+    expect(reader.u64()).toBe(0);
+    const column = reader.string();
+    expect(reader.u64()).toBe(3);
+    const literalTag = reader.u64();
+    const value = reader.string();
+    return { column, opTag, literalTag, value };
+  });
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  const orderByCount = reader.u64();
+  const orderBy = Array.from({ length: orderByCount }, () => ({
+    column: reader.string(),
+    directionTag: reader.u64(),
+  }));
+  reader.option(() => undefined);
+  const limit = reader.option((optionReader) => optionReader.u64());
+  const offset = reader.u64();
+  return { table, predicates, orderBy, limit, offset };
 }
 
 function unsupportedJoinRelationIr(): unknown {
