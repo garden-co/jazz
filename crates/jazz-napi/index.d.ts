@@ -19,8 +19,12 @@ export declare class NapiDirectDb {
   allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
   delete(table: string, rowId: Uint8Array): WasmWrite
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
   tick(): void
+  connectUpstream(): WasmTransport
+  mergeableTx(): WasmTx
   close(): void
 }
 
@@ -82,6 +86,25 @@ export declare class WasmPreparedQuery {
 
 }
 export type NapiDirectPreparedQuery = WasmPreparedQuery
+
+export declare class WasmTransport {
+  sendWireFrame(frame: Uint8Array): void
+  recvWireFrames(): Array<Uint8Array>
+  tick(): number
+  close(): boolean
+}
+export type NapiDirectTransport = WasmTransport
+
+export declare class WasmTx {
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
+  delete(table: string, rowId: Uint8Array): void
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void
+  commit(): WasmWrite
+  rollback(): void
+}
+export type NapiDirectTx = WasmTx
 
 export declare class WasmWrite {
   get payload(): Uint8Array

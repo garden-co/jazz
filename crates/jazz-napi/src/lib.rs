@@ -33,7 +33,7 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -43,9 +43,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
     Db as DirectDb, DbConfig as DirectDbConfig, DbIdentity as DirectDbIdentity,
-    LocalUpdates as DirectLocalUpdates, PreparedQuery as DirectPreparedQueryInner,
-    Propagation as DirectPropagation, ReadOpts as DirectReadOpts, RowCells as DirectRowCells,
-    SeededRowIdSource as DirectSeededRowIdSource, WriteHandle as DirectWriteHandle,
+    LocalUpdates as DirectLocalUpdates, PeerConnection as DirectPeerConnection,
+    PreparedQuery as DirectPreparedQueryInner, Propagation as DirectPropagation,
+    ReadOpts as DirectReadOpts, RowCells as DirectRowCells,
+    SeededRowIdSource as DirectSeededRowIdSource,
+    WireTransportAdapter as DirectWireTransportAdapter, WriteHandle as DirectWriteHandle,
     block_on as direct_block_on,
 };
 use jazz::groove::records::{BorrowedRecord as DirectBorrowedRecord, RecordDescriptor};
@@ -57,6 +59,7 @@ use jazz::ids::{AuthorId as DirectAuthorId, NodeUuid as DirectNodeUuid, RowUuid 
 use jazz::query::Query as DirectQuery;
 use jazz::schema::JazzSchema;
 use jazz::tx::{DurabilityTier as DirectDurabilityTier, TxId as DirectTxId};
+use jazz::wire::{TransportError as DirectTransportError, WireTransport as DirectWireTransport};
 use jazz_tools::binding_support::{
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
@@ -273,13 +276,69 @@ struct DirectWriteResult {
 type DirectNapiDbInner = Rc<RefCell<Option<DirectNapiDb>>>;
 
 enum DirectNapiDb {
-    Memory(DirectDb<DirectMemoryStorage>),
-    Persistent(DirectDb<DirectRocksDbStorage>),
+    Memory(Rc<DirectDb<DirectMemoryStorage>>),
+    Persistent(Rc<DirectDb<DirectRocksDbStorage>>),
 }
 
 enum DirectNapiWrite {
     Memory(DirectWriteHandle<DirectMemoryStorage>),
     Persistent(DirectWriteHandle<DirectRocksDbStorage>),
+    MemoryTx {
+        db: Rc<DirectDb<DirectMemoryStorage>>,
+        tx_id: DirectTxId,
+    },
+    PersistentTx {
+        db: Rc<DirectDb<DirectRocksDbStorage>>,
+        tx_id: DirectTxId,
+    },
+}
+
+enum DirectNapiTxWrite {
+    Insert {
+        table: String,
+        row_id: DirectRowUuid,
+        cells: DirectRowCells,
+    },
+    Update {
+        table: String,
+        row_id: DirectRowUuid,
+        patch: DirectRowCells,
+    },
+    Upsert {
+        table: String,
+        row_id: DirectRowUuid,
+        cells: DirectRowCells,
+    },
+    Delete {
+        table: String,
+        row_id: DirectRowUuid,
+    },
+    Restore {
+        table: String,
+        row_id: DirectRowUuid,
+        cells: DirectRowCells,
+    },
+}
+
+#[derive(Clone, Default)]
+struct DirectWireQueues {
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+struct NapiWireTransport {
+    queues: DirectWireQueues,
+}
+
+impl DirectWireTransport for NapiWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), DirectTransportError> {
+        self.queues.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues.inbound.borrow_mut().pop_front()
+    }
 }
 
 #[napi(js_name = "WasmPreparedQuery")]
@@ -291,6 +350,29 @@ pub struct NapiDirectPreparedQuery {
 pub struct NapiDirectWrite {
     payload: Vec<u8>,
     inner: Option<DirectNapiWrite>,
+}
+
+#[napi(js_name = "WasmTransport")]
+pub struct NapiDirectTransport {
+    inner: DirectNapiTransportInner,
+    queues: DirectWireQueues,
+}
+
+enum DirectNapiTransportInner {
+    Memory {
+        db: Rc<DirectDb<DirectMemoryStorage>>,
+        connection: Option<Rc<RefCell<DirectPeerConnection<DirectMemoryStorage>>>>,
+    },
+    Persistent {
+        db: Rc<DirectDb<DirectRocksDbStorage>>,
+        connection: Option<Rc<RefCell<DirectPeerConnection<DirectRocksDbStorage>>>>,
+    },
+}
+
+#[napi(js_name = "WasmTx")]
+pub struct NapiDirectTx {
+    db: DirectNapiDb,
+    writes: Option<Vec<DirectNapiTxWrite>>,
 }
 
 #[napi]
@@ -305,13 +387,176 @@ impl NapiDirectWrite {
         let tier = direct_durability_tier_from_str(&tier)?;
         if let Some(write) = &self.inner {
             match write {
-                DirectNapiWrite::Memory(write) => direct_block_on(write.wait(tier))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                DirectNapiWrite::Persistent(write) => direct_block_on(write.wait(tier))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            };
+                DirectNapiWrite::Memory(write) => {
+                    direct_block_on(write.wait(tier))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                }
+                DirectNapiWrite::Persistent(write) => {
+                    direct_block_on(write.wait(tier))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                }
+                DirectNapiWrite::MemoryTx { db, tx_id } => direct_wait_for_tx(db, *tx_id, tier)?,
+                DirectNapiWrite::PersistentTx { db, tx_id } => {
+                    direct_wait_for_tx(db, *tx_id, tier)?
+                }
+            }
         }
         Ok(())
+    }
+}
+
+#[napi]
+impl NapiDirectTransport {
+    #[napi(js_name = "sendWireFrame")]
+    pub fn send_wire_frame(&self, frame: Uint8Array) {
+        self.queues.inbound.borrow_mut().push_back(frame.to_vec());
+    }
+
+    #[napi(js_name = "recvWireFrames")]
+    pub fn recv_wire_frames(&self) -> Vec<Uint8Array> {
+        let mut frames = Vec::new();
+        let mut outbound = self.queues.outbound.borrow_mut();
+        while let Some(frame) = outbound.pop_front() {
+            frames.push(Uint8Array::new(frame));
+        }
+        frames
+    }
+
+    #[napi]
+    pub fn tick(&self) -> napi::Result<u32> {
+        match &self.inner {
+            DirectNapiTransportInner::Memory { connection, .. } => {
+                direct_tick_connection(connection)
+            }
+            DirectNapiTransportInner::Persistent { connection, .. } => {
+                direct_tick_connection(connection)
+            }
+        }
+    }
+
+    #[napi]
+    pub fn close(&mut self) -> bool {
+        match &mut self.inner {
+            DirectNapiTransportInner::Memory { db, connection } => {
+                let Some(connection) = connection.take() else {
+                    return false;
+                };
+                db.detach_connection(&connection)
+            }
+            DirectNapiTransportInner::Persistent { db, connection } => {
+                let Some(connection) = connection.take() else {
+                    return false;
+                };
+                db.detach_connection(&connection)
+            }
+        }
+    }
+}
+
+#[napi]
+impl NapiDirectTx {
+    #[napi(js_name = "insertWithIdEncoded")]
+    pub fn insert_with_id_encoded(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<()> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        self.pending_writes()?.push(DirectNapiTxWrite::Insert {
+            table,
+            row_id,
+            cells,
+        });
+        Ok(())
+    }
+
+    #[napi(js_name = "updateEncoded")]
+    pub fn update_encoded(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+    ) -> napi::Result<()> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_direct_cells(&patch)?;
+        self.pending_writes()?.push(DirectNapiTxWrite::Update {
+            table,
+            row_id,
+            patch,
+        });
+        Ok(())
+    }
+
+    #[napi(js_name = "upsertEncoded")]
+    pub fn upsert_encoded(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<()> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        self.pending_writes()?.push(DirectNapiTxWrite::Upsert {
+            table,
+            row_id,
+            cells,
+        });
+        Ok(())
+    }
+
+    #[napi(js_name = "delete")]
+    pub fn delete_encoded(&mut self, table: String, row_id: Uint8Array) -> napi::Result<()> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        self.pending_writes()?
+            .push(DirectNapiTxWrite::Delete { table, row_id });
+        Ok(())
+    }
+
+    #[napi(js_name = "restoreEncoded")]
+    pub fn restore_encoded(
+        &mut self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<()> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        self.pending_writes()?.push(DirectNapiTxWrite::Restore {
+            table,
+            row_id,
+            cells,
+        });
+        Ok(())
+    }
+
+    #[napi]
+    pub fn commit(&mut self) -> napi::Result<NapiDirectWrite> {
+        let writes = self
+            .writes
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
+        match &self.db {
+            DirectNapiDb::Memory(db) => direct_commit_tx_memory(db, writes),
+            DirectNapiDb::Persistent(db) => direct_commit_tx_persistent(db, writes),
+        }
+    }
+
+    #[napi]
+    pub fn rollback(&mut self) -> napi::Result<()> {
+        self.writes
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
+        Ok(())
+    }
+}
+
+impl NapiDirectTx {
+    fn pending_writes(&mut self) -> napi::Result<&mut Vec<DirectNapiTxWrite>> {
+        self.writes
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 }
 
@@ -330,7 +575,7 @@ impl NapiDirectDb {
         let db = open_direct_db(schema, DirectMemoryStorage::new(&refs), config)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Memory(db)))),
+            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Memory(Rc::new(db))))),
         })
     }
 
@@ -348,7 +593,7 @@ impl NapiDirectDb {
         let db = open_direct_db(schema, storage, config)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Persistent(db)))),
+            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Persistent(Rc::new(db))))),
         })
     }
 
@@ -472,6 +717,31 @@ impl NapiDirectDb {
         }
     }
 
+    #[napi(js_name = "upsertEncoded")]
+    pub fn upsert_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => direct_write_memory(
+                db.upsert(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => direct_write_persistent(
+                db.upsert(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "delete")]
     pub fn delete_encoded(
         &self,
@@ -495,6 +765,31 @@ impl NapiDirectDb {
         }
     }
 
+    #[napi(js_name = "restoreEncoded")]
+    pub fn restore_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => direct_write_memory(
+                db.restore(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => direct_write_persistent(
+                db.restore(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi]
     pub fn tick(&self) -> napi::Result<()> {
         let db = self.inner.borrow();
@@ -506,6 +801,44 @@ impl NapiDirectDb {
             DirectNapiDb::Persistent(db) => db.tick(),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "connectUpstream")]
+    pub fn connect_upstream(&self) -> napi::Result<NapiDirectTransport> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let queues = DirectWireQueues::default();
+        let transport = Box::new(DirectWireTransportAdapter::current(NapiWireTransport {
+            queues: queues.clone(),
+        }));
+        let inner = match db {
+            DirectNapiDb::Memory(db) => DirectNapiTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            DirectNapiDb::Persistent(db) => DirectNapiTransportInner::Persistent {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+        };
+        Ok(NapiDirectTransport { inner, queues })
+    }
+
+    #[napi(js_name = "mergeableTx")]
+    pub fn mergeable_tx(&self) -> napi::Result<NapiDirectTx> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        Ok(NapiDirectTx {
+            db: match db {
+                DirectNapiDb::Memory(db) => DirectNapiDb::Memory(Rc::clone(db)),
+                DirectNapiDb::Persistent(db) => DirectNapiDb::Persistent(Rc::clone(db)),
+            },
+            writes: Some(Vec::new()),
+        })
     }
 
     #[napi]
@@ -603,6 +936,131 @@ fn direct_write_persistent(
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         inner: Some(DirectNapiWrite::Persistent(write)),
     })
+}
+
+fn direct_tx_write(
+    tx_id: DirectTxId,
+    inner: Option<DirectNapiWrite>,
+) -> napi::Result<NapiDirectWrite> {
+    let result = DirectWriteResult {
+        row_id: DirectRowUuid::from_bytes([0; 16]),
+        tx_id,
+    };
+    Ok(NapiDirectWrite {
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        inner,
+    })
+}
+
+fn direct_tick_connection<S>(
+    connection: &Option<Rc<RefCell<DirectPeerConnection<S>>>>,
+) -> napi::Result<u32>
+where
+    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+{
+    let Some(connection) = connection else {
+        return Ok(0);
+    };
+    let stats = connection
+        .borrow_mut()
+        .tick()
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(stats.subscription_events as u32)
+}
+
+fn direct_wait_for_tx<S>(
+    db: &DirectDb<S>,
+    tx_id: DirectTxId,
+    tier: DirectDurabilityTier,
+) -> napi::Result<()>
+where
+    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+{
+    if tier <= DirectDurabilityTier::Local {
+        return Ok(());
+    }
+    let state = db
+        .write_state(tx_id)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    if state.durability >= tier {
+        return Ok(());
+    }
+    Err(napi::Error::from_reason(format!(
+        "transaction has not reached requested tier {tier:?}"
+    )))
+}
+
+fn direct_commit_tx<S>(db: &DirectDb<S>, writes: Vec<DirectNapiTxWrite>) -> napi::Result<DirectTxId>
+where
+    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+{
+    let mut tx = db.mergeable_tx();
+    for write in writes {
+        match write {
+            DirectNapiTxWrite::Insert {
+                table,
+                row_id,
+                cells,
+            } => tx
+                .insert_with_id(&table, row_id, cells)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            DirectNapiTxWrite::Update {
+                table,
+                row_id,
+                patch,
+            } => tx
+                .update(&table, row_id, patch)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            DirectNapiTxWrite::Upsert {
+                table,
+                row_id,
+                cells,
+            } => tx
+                .update(&table, row_id, cells)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            DirectNapiTxWrite::Delete { table, row_id } => tx
+                .delete(&table, row_id)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            DirectNapiTxWrite::Restore {
+                table,
+                row_id,
+                cells,
+            } => tx
+                .restore(&table, row_id, cells)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        }
+    }
+    tx.commit()
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+fn direct_commit_tx_memory(
+    db: &Rc<DirectDb<DirectMemoryStorage>>,
+    writes: Vec<DirectNapiTxWrite>,
+) -> napi::Result<NapiDirectWrite> {
+    let tx_id = direct_commit_tx(db, writes)?;
+    direct_tx_write(
+        tx_id,
+        Some(DirectNapiWrite::MemoryTx {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+fn direct_commit_tx_persistent(
+    db: &Rc<DirectDb<DirectRocksDbStorage>>,
+    writes: Vec<DirectNapiTxWrite>,
+) -> napi::Result<NapiDirectWrite> {
+    let tx_id = direct_commit_tx(db, writes)?;
+    direct_tx_write(
+        tx_id,
+        Some(DirectNapiWrite::PersistentTx {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
 }
 
 fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectReadOpts> {
