@@ -22,6 +22,7 @@ import {
 } from "./support.js";
 import {
   blockJazzServerNetwork,
+  getDirectJazzServerInfo,
   getJazzServerInfo,
   getJazzServerJwtForUser,
   type JazzServerInfo,
@@ -38,6 +39,7 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
+import { encodeDirectSchema } from "../../src/runtime/direct-wasm/runtime.js";
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -1256,46 +1258,52 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("propagates synced row from client A to client B", async () => {
-    const syncServer = await publishSyncServerSchemaAndPermissions("sync-a-to-b");
+    const syncServer = await startDirectSyncServer("sync-a-to-b");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken, syncServer);
+    await ensureDirectWorkerBridgeReady(dbA);
+    await ensureDirectWorkerBridgeReady(dbB);
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const rowsOnBPromise = waitForSubscribedTodos(
+      dbB,
+      (rows) => rows.some((row) => row.title === title),
+      "A -> B propagation",
+      20000,
+    );
     await withTimeout(
       dbA.insert(todos, { title, done: false }).wait({ tier: "local" }),
       10000,
       "A insert(worker) did not resolve",
     );
 
-    const rowsOnB = await waitForTodos(
-      dbB,
-      (rows) => rows.some((row) => row.title === title),
-      "A -> B propagation",
-      20000,
-    );
+    const rowsOnB = await rowsOnBPromise;
     expect(rowsOnB.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
   it("propagates synced row from client B to client A", async () => {
-    const syncServer = await publishSyncServerSchemaAndPermissions("sync-b-to-a");
+    const syncServer = await startDirectSyncServer("sync-b-to-a");
     const sharedLocalAuthToken = generateAuthSecret();
     const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken, syncServer);
     const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken, syncServer);
+    await ensureDirectWorkerBridgeReady(dbA);
+    await ensureDirectWorkerBridgeReady(dbB);
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const rowsOnAPromise = waitForSubscribedTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === title),
+      "B -> A propagation",
+      20000,
+    );
     await withTimeout(
       dbB.insert(todos, { title, done: true }).wait({ tier: "local" }),
       10000,
       "B insert(worker) did not resolve",
     );
 
-    const rowsOnA = await waitForTodos(
-      dbA,
-      (rows) => rows.some((row) => row.title === title),
-      "B -> A propagation",
-      20000,
-    );
+    const rowsOnA = await rowsOnAPromise;
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
@@ -2826,6 +2834,40 @@ async function waitForTodos(
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
 
+async function waitForSubscribedTodos(
+  db: Db,
+  predicate: (rows: Todo[]) => boolean,
+  label: string,
+  timeoutMs = 15000,
+): Promise<Todo[]> {
+  return new Promise<Todo[]>((resolve, reject) => {
+    let lastRows: Todo[] = [];
+    let unsubscribe: () => void = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(
+        new Error(
+          `${label}: timed out after ${timeoutMs}ms; ` +
+            `lastRowsCount=${lastRows.length}; lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
+      );
+    }, timeoutMs);
+    unsubscribe = db.subscribeAll(allTodos, (delta) => {
+      lastRows = [...delta.all];
+      if (predicate(lastRows)) {
+        clearTimeout(timeout);
+        unsubscribe();
+        resolve(lastRows);
+      }
+    });
+  });
+}
+
+async function ensureDirectWorkerBridgeReady(db: Db): Promise<void> {
+  (db as unknown as { getClient(schema: unknown): unknown }).getClient(app.wasmSchema);
+  await (db as unknown as { ensureBridgeReady(): Promise<void> }).ensureBridgeReady();
+}
+
 async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
@@ -2854,6 +2896,11 @@ async function publishSyncServerSchemaAndPermissions(
   };
   await publishPermissionsForServer(testingServer, permissionsToPublish, schema);
   return testingServer;
+}
+
+async function startDirectSyncServer(scope: string, schema?: Schema): Promise<JazzServerInfo> {
+  const appId = uniqueDbName(`worker-bridge-${scope}`);
+  return getDirectJazzServerInfo(appId, encodeDirectSchema(schema ?? app.wasmSchema));
 }
 
 async function publishPermissionsForServer(

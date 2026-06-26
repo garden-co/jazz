@@ -446,17 +446,7 @@ async fn handle_connection(
 }
 
 fn websocket_path_matches(request_path: &str, expected_path: &str) -> bool {
-    request_path == expected_path || is_app_websocket_path(request_path)
-}
-
-fn is_app_websocket_path(path: &str) -> bool {
-    let Some(app_id) = path
-        .strip_prefix("/apps/")
-        .and_then(|rest| rest.strip_suffix("/ws"))
-    else {
-        return false;
-    };
-    !app_id.is_empty() && !app_id.contains('/')
+    request_path == expected_path
 }
 
 async fn admit_socket(
@@ -617,6 +607,18 @@ async fn service_connection(
                         let mut shell = shell.lock().await;
                         if shell.receive_frames(session, frames).is_err() || shell.tick().is_err() {
                             break;
+                        }
+                        match shell.take_frames(session) {
+                            Ok(frames) if !frames.is_empty() => {
+                                let Ok(batch) = encode_frame_batch(&frames) else {
+                                    break;
+                                };
+                                if socket.send(Message::Binary(batch.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(_) => break,
                         }
                     }
                     Ok(Message::Close(_)) => break,

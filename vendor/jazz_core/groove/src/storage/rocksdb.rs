@@ -283,7 +283,7 @@ impl OrderedKvStorage for RocksDbStorage {
             }
         }
 
-        Ok(self.db.write_opt(batch, &self.write_options)?)
+        Ok(self.db.write_opt(&batch, &self.write_options)?)
     }
 }
 

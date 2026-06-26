@@ -71,6 +71,7 @@ where
 /// [`PeerConnection`], so an inbound sync update can push subscription events
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
+type PendingUpstreamSubscriptions = Rc<RefCell<Vec<(ValidatedQuery, Binding)>>>;
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
 /// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
@@ -473,11 +474,10 @@ where
         // If this Db is attached to upstreams, ask them to carry this shape so
         // the subscription fills from synced rows, not just local writes. The consumer
         // sees only the handle; the request flows out on the next `tick`.
-        for connection in self.node.connections.borrow().iter() {
-            connection
-                .borrow_mut()
-                .announce_subscription(prepared.shape.clone(), prepared.binding.clone());
-        }
+        self.node
+            .upstream_subscriptions
+            .borrow_mut()
+            .push((prepared.shape.clone(), prepared.binding.clone()));
         Ok(SubscriptionStream {
             receiver,
             _state: state,
@@ -1144,6 +1144,7 @@ where
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
     outbox: Outbox,
+    upstream_subscriptions: PendingUpstreamSubscriptions,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
 }
 
@@ -1157,6 +1158,7 @@ where
             node: Rc::new(RefCell::new(node)),
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
+            upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             connections: RefCell::new(Vec::new()),
         }
     }
@@ -1180,7 +1182,7 @@ where
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         // Carry any already-registered subscriptions upstream immediately.
-        let pending = self
+        let pending: Vec<(ValidatedQuery, Binding)> = self
             .subscriptions
             .borrow()
             .iter()
@@ -1190,12 +1192,16 @@ where
                 (state.shape.clone(), state.binding.clone())
             })
             .collect();
+        self.upstream_subscriptions
+            .borrow_mut()
+            .extend(pending.iter().cloned());
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             link: ConnectionLink::Upstream {
                 pending,
+                upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 announced: BTreeSet::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
@@ -1283,6 +1289,8 @@ where
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext { identity, trust },
+                outbox: Rc::clone(&self.outbox),
+                upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
                 served_current_rows: BTreeMap::new(),
             },
@@ -1581,6 +1589,8 @@ enum ConnectionLink {
     Upstream {
         /// Shapes registered locally but not yet announced upstream.
         pending: Vec<(ValidatedQuery, Binding)>,
+        /// Shapes registered through downstream subscribers.
+        upstream_subscriptions: PendingUpstreamSubscriptions,
         /// Subscriptions already announced (dedup across ticks).
         announced: BTreeSet<SubscriptionKey>,
         /// Locally-authored transactions to upload (shared with the `Db`).
@@ -1593,6 +1603,10 @@ enum ConnectionLink {
     Subscriber {
         peer: PeerState,
         ingest_context: CommitUnitIngestContext,
+        /// Accepted subscriber commit units awaiting upstream relay.
+        outbox: Outbox,
+        /// Subscriber-maintained views that must be announced upstream.
+        upstream_subscriptions: PendingUpstreamSubscriptions,
         /// Subscriptions this subscriber registered, served each tick.
         served: BTreeMap<SubscriptionKey, (ValidatedQuery, Binding)>,
         /// Whole-table current-row views explicitly served through the facade.
@@ -1615,14 +1629,6 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Queue a shape to be announced upstream on the next tick. No-op on a
-    /// subscriber link (a serving Db does not subscribe through its servees).
-    fn announce_subscription(&mut self, shape: ValidatedQuery, binding: Binding) {
-        if let ConnectionLink::Upstream { pending, .. } = &mut self.link {
-            pending.push((shape, binding));
-        }
-    }
-
     /// Serve a whole-table current-row view to this subscriber immediately and
     /// refresh it on later ticks.
     pub fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
@@ -1671,10 +1677,12 @@ where
         match &mut self.link {
             ConnectionLink::Upstream {
                 pending,
+                upstream_subscriptions,
                 announced,
                 outbox,
                 uploaded,
             } => {
+                pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let pending_index = 0;
                 while pending_index < pending.len() {
                     let (shape, binding) = &pending[pending_index];
@@ -1738,6 +1746,8 @@ where
             ConnectionLink::Subscriber {
                 peer,
                 ingest_context,
+                outbox,
+                upstream_subscriptions,
                 served,
                 served_current_rows,
             } => {
@@ -1776,11 +1786,20 @@ where
                                         shape_id,
                                         binding_id,
                                     },
-                                    (shape.clone(), binding),
+                                    (shape.clone(), binding.clone()),
                                 );
+                                upstream_subscriptions
+                                    .borrow_mut()
+                                    .push((shape.clone(), binding));
                             }
                         }
                         other => {
+                            let relay_upload = match &other {
+                                SyncMessage::CommitUnit { tx, .. } => {
+                                    Some((tx.tx_id, other.clone()))
+                                }
+                                _ => None,
+                            };
                             // RegisterShape (registers the shape ahead of its
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
@@ -1799,6 +1818,15 @@ where
                                     self.transport.as_mut(),
                                     response,
                                 )?;
+                            }
+                            if let Some((tx_id, unit)) = relay_upload {
+                                let mut outbox = outbox.borrow_mut();
+                                if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+                                    outbox.push(PendingUpload {
+                                        tx_id,
+                                        unit: Some(unit),
+                                    });
+                                }
                             }
                         }
                     }

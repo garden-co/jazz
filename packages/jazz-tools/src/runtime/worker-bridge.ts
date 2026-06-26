@@ -107,7 +107,7 @@ type PortOutbound =
   | { type: "close" };
 
 function isUint8Array(value: unknown): value is Uint8Array {
-  return value instanceof Uint8Array;
+  return ArrayBuffer.isView(value) && value.constructor.name === "Uint8Array";
 }
 
 function normalizeFrames(frames: unknown): Uint8Array[] {
@@ -123,6 +123,7 @@ export class WorkerBridge {
   private serverCarrier: DirectWebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
   private serverCarrierOptions: WorkerBridgeOptions | null = null;
+  private readonly queuedServerFrames: Uint8Array[] = [];
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
   private disposed = false;
@@ -466,7 +467,10 @@ export class WorkerBridge {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(() => carrier);
+    this.serverCarrierPromise = carrier.ready().then(() => {
+      this.flushQueuedServerFrames(carrier);
+      return carrier;
+    });
     this.serverCarrierPromise.catch((error) => {
       this.rejectPendingServerWork(`Direct websocket connection failed: ${stringifyUnknown(error)}`);
     });
@@ -492,7 +496,18 @@ export class WorkerBridge {
       this.pendingForwarder?.(frame);
     }
     const carrier = this.serverCarrier;
-    if (!carrier) return;
+    if (!carrier) {
+      this.queuedServerFrames.push(...frames);
+      return;
+    }
+    void carrier.sendBatch(frames).catch((error) => {
+      this.rejectPendingServerWork(`Direct websocket send failed: ${stringifyUnknown(error)}`);
+    });
+  }
+
+  private flushQueuedServerFrames(carrier: DirectWebSocketCarrier): void {
+    if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
+    const frames = this.queuedServerFrames.splice(0);
     void carrier.sendBatch(frames).catch((error) => {
       this.rejectPendingServerWork(`Direct websocket send failed: ${stringifyUnknown(error)}`);
     });

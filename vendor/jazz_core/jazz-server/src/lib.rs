@@ -21,7 +21,9 @@ use jazz::db::{
     SeededRowIdSource, WireTransportAdapter,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::{MemoryStorage, RocksDbStorage};
+use jazz::groove::storage::MemoryStorage;
+#[cfg(feature = "rocksdb")]
+use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, RowUuid, SchemaVersionId};
 use jazz::protocol::{CatalogueAck, CurrentWriteSchema, SchemaVersion, SyncMessage};
 use jazz::schema::JazzSchema;
@@ -169,6 +171,7 @@ pub struct AbiTransportDiagnostics {
 
 enum ShellDb {
     Memory(Db<MemoryStorage>),
+    #[cfg(feature = "rocksdb")]
     Rocks(Db<RocksDbStorage>),
 }
 
@@ -182,6 +185,7 @@ struct ServerSessionState {
 
 enum ShellPeerConnection {
     Memory(Rc<RefCell<PeerConnection<MemoryStorage>>>),
+    #[cfg(feature = "rocksdb")]
     Rocks(Rc<RefCell<PeerConnection<RocksDbStorage>>>),
 }
 
@@ -211,6 +215,7 @@ impl fmt::Debug for ShellDb {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory(_) => f.write_str("ShellDb::Memory(..)"),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(_) => f.write_str("ShellDb::Rocks(..)"),
         }
     }
@@ -231,6 +236,7 @@ impl ShellDb {
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.publish_schema(schema).map_err(Into::into),
         }
     }
@@ -241,6 +247,7 @@ impl ShellDb {
     ) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.set_current_write_schema(pointer).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.set_current_write_schema(pointer).map_err(Into::into),
         }
     }
@@ -259,9 +266,11 @@ impl ShellDb {
             (Self::Memory(db), None) => ShellPeerConnection::Memory(
                 db.accept_subscriber_with_claims(transport, identity, claims),
             ),
+            #[cfg(feature = "rocksdb")]
             (Self::Rocks(db), Some(cursor)) => ShellPeerConnection::Rocks(
                 db.accept_subscriber_with_resume(transport, identity, cursor),
             ),
+            #[cfg(feature = "rocksdb")]
             (Self::Rocks(db), None) => ShellPeerConnection::Rocks(
                 db.accept_subscriber_with_claims(transport, identity, claims),
             ),
@@ -273,6 +282,7 @@ impl ShellDb {
             (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
                 db.detach_connection(connection)
             }
+            #[cfg(feature = "rocksdb")]
             (Self::Rocks(db), ShellPeerConnection::Rocks(connection)) => {
                 db.detach_connection(connection)
             }
@@ -283,6 +293,7 @@ impl ShellDb {
     fn tick_stats(&self) -> ShellResult<jazz::db::DbTickStats> {
         match self {
             Self::Memory(db) => db.tick_stats().map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.tick_stats().map_err(Into::into),
         }
     }
@@ -299,6 +310,7 @@ impl ShellDb {
                 .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
                 .map(|_| ())
                 .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db
                 .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
                 .map(|_| ())
@@ -311,6 +323,7 @@ impl ShellPeerConnection {
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
             Self::Memory(connection) => connection.borrow_mut().take_resume_cursor(),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(connection) => connection.borrow_mut().take_resume_cursor(),
         }
     }
@@ -318,6 +331,7 @@ impl ShellPeerConnection {
     fn last_resume_bytes(&self) -> Option<usize> {
         match self {
             Self::Memory(connection) => connection.borrow().last_resume_bytes(),
+            #[cfg(feature = "rocksdb")]
             Self::Rocks(connection) => connection.borrow().last_resume_bytes(),
         }
     }
@@ -345,6 +359,7 @@ impl InMemoryServerShell {
                 }
                 ShellDb::Memory(jazz::db::block_on(Db::open_history_complete(db_config))?)
             }
+            #[cfg(feature = "rocksdb")]
             StorageConfig::RocksDb { path } => {
                 let refs = config.schema.column_families();
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -357,6 +372,12 @@ impl InMemoryServerShell {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
                 ShellDb::Rocks(jazz::db::block_on(Db::open_history_complete(db_config))?)
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            StorageConfig::RocksDb { .. } => {
+                return Err(ShellError::UnsupportedStorage {
+                    storage: storage_config,
+                });
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {

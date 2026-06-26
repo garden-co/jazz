@@ -335,7 +335,7 @@ type DirectDb = {
 };
 
 function isUint8Array(value: unknown): value is Uint8Array {
-  return value instanceof Uint8Array;
+  return ArrayBuffer.isView(value) && value.constructor.name === "Uint8Array";
 }
 
 function normalizeFrames(value: unknown): Uint8Array[] {
