@@ -1,4 +1,6 @@
 import { httpUrlToWs } from "../url.js";
+import { mapAuthReason } from "../auth-state.js";
+import type { AuthFailureReason } from "../sync-transport.js";
 import { PostcardReader, PostcardWriter } from "./direct-codec.js";
 
 export type DirectWebSocketFrameHandler = (frame: Uint8Array) => void;
@@ -88,6 +90,11 @@ export function decodeDirectWireError(frame: Uint8Array): DirectWireError {
     retry: wireRetryName(reader.u64()),
     message: reader.string(),
   };
+}
+
+export function directWireAuthFailureReason(error: DirectWireError): AuthFailureReason | null {
+  if (error.code !== "auth_failed") return null;
+  return mapAuthReason(error.message);
 }
 
 export class DirectWebSocketCarrier {

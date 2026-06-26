@@ -26,6 +26,11 @@ const directWebSocketCarrierMock = vi.hoisted(() => {
 
 vi.mock("./direct-wasm/direct-websocket.js", () => ({
   DirectWebSocketCarrier: directWebSocketCarrierMock.DirectWebSocketCarrier,
+  directWireAuthFailureReason: (error: { code: string; message: string }) => {
+    if (error.code !== "auth_failed") return null;
+    if (error.message.includes("expired")) return "expired";
+    return "invalid";
+  },
 }));
 
 import { MessagePortRuntimeBridge, WorkerBridge } from "./worker-bridge.js";

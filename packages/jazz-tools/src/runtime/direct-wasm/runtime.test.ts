@@ -78,7 +78,7 @@ describe("DirectWasmRuntime server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
-  it("reports direct websocket wire errors through the auth failure callback", async () => {
+  it("reports direct websocket auth failures through the auth failure callback", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -114,9 +114,47 @@ describe("DirectWasmRuntime server transport", () => {
     );
     await Promise.resolve();
 
-    expect(authFailures).toEqual([
-      "direct websocket error: auth_failed (after_auth): token expired",
-    ]);
+    expect(authFailures).toEqual(["expired"]);
+    expect(transport.received).toEqual([]);
+  });
+
+  it("does not report non-auth direct websocket errors as auth failures", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          connectUpstream: () => transport,
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+
+    sockets[0]!.emitMessage(
+      encodeDirectWebSocketFrameBatch([encodeDirectWireError(5, 3, "conflicting commit unit")]),
+    );
+    await Promise.resolve();
+
+    expect(authFailures).toEqual([]);
     expect(transport.received).toEqual([]);
   });
 
