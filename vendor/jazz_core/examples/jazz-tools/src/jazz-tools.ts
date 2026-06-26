@@ -8,11 +8,9 @@ import {
   PostcardReader,
   assertBytes,
   decodeRecordBool,
-  decodeRecordBytes,
   decodeRecordString,
   openConfig,
   queryFromTable,
-  readAbiRelationSubscriptionEdge,
   type SubscriptionStreamChunk,
   utf8,
 } from "./direct-codec.js";
@@ -151,7 +149,7 @@ export type DbOptions = {
   nextRowId?: number;
 };
 
-export type Subscription<Row> = {
+export type Subscription<_Row> = {
   unsubscribe(): void;
 };
 
@@ -828,14 +826,12 @@ class DirectAbiDb implements Db {
   readonly #preparedQueries = new Map<string, WasmPreparedQuery>();
   readonly #authStore: AuthStateStore;
   readonly #subscriptions = new Set<DirectAbiSubscription<unknown>>();
-  #jwtToken?: string;
   #nextRowId: number;
   #closed = false;
 
   constructor(Runtime: WasmDbConstructor, options: ResolvedDbOptions) {
     this.#schema = options.schema;
     this.#nextRowId = options.nextRowId ?? 1;
-    this.#jwtToken = options.jwtToken;
     this.#authStore = createAuthStateStore(options);
     this.#db = Runtime.openMemory(
       encodeSchema(this.#schema),
@@ -1076,8 +1072,7 @@ class DirectAbiDb implements Db {
   updateAuthToken(jwtToken: string | null): void {
     this.#assertOpen();
     const nextToken = jwtToken ?? undefined;
-    const changed = this.#authStore.applyJwtToken(nextToken);
-    if (changed) this.#jwtToken = nextToken;
+    this.#authStore.applyJwtToken(nextToken);
   }
 
   _connectUpstreamTransport(): WasmTransport {
@@ -1086,7 +1081,7 @@ class DirectAbiDb implements Db {
   }
 
   #pumpSubscriptions(): void {
-    for (const subscription of [...this.#subscriptions]) subscription.pumpDelta();
+    for (const subscription of this.#subscriptions) subscription.pumpDelta();
   }
 
   async close(): Promise<void> {
@@ -1980,38 +1975,6 @@ function descriptorValueType(
       ? undefined
       : schema?.[table]?.columns.find((candidate) => candidate.name === fieldName);
   return column ? columnValueType(column) : field.valueType;
-}
-
-function rowsFromEvents(events: unknown[]): AbiRowBatch[] {
-  const rows = events
-    .filter(isRecord)
-    .map((event) => event.kind)
-    .filter(isRecord)
-    .find((event) => event.type === "rows")?.payload;
-  return readRowBatches(assertBytes(isRecord(rows) ? rows.rows : rows, "rows payload"));
-}
-
-function relationSubscriptionSnapshotFromEvents(
-  events: unknown[],
-): AbiRelationSubscriptionSnapshot | undefined {
-  const graph = events
-    .filter(isRecord)
-    .map((event) => event.kind)
-    .filter(isRecord)
-    .find(
-      (event) =>
-        event.type === "relation_subscription_opened" ||
-        event.type === "RelationSubscriptionOpened",
-    )?.payload;
-  if (graph == null) return undefined;
-  const reader = new PostcardReader(
-    assertBytes(isRecord(graph) ? graph.graph : graph, "relation subscription graph"),
-  );
-  return {
-    cursor: reader.u64(),
-    rows: reader.readVec(readAbiRowBatchWithArrays),
-    edges: reader.readVec(readAbiRelationSubscriptionEdge),
-  };
 }
 
 function readRowBatches(payload: Uint8Array): AbiRowBatch[] {
@@ -3368,20 +3331,6 @@ function maybeReverseRelation(
   return matches[0];
 }
 
-function reverseRelation(
-  schema: SchemaDefinition,
-  table: string,
-  name: string,
-): RelationDefinition {
-  const relation = maybeReverseRelation(schema, table, name);
-  if (!relation) {
-    throw new Error(
-      `unknown or ambiguous alpha include ${table}.${name}; add schema.table(..., { relations: { ${name}: { table, column } } })`,
-    );
-  }
-  return relation;
-}
-
 function normalizeIncludeOptions(include: boolean | IncludeOptions | undefined): IncludeOptions {
   if (include === true || include === undefined) return {};
   if (include === false)
@@ -3645,15 +3594,16 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     propertyOrIncludes: Property | QueryIncludeMap,
   ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>> {
     if (typeof propertyOrIncludes !== "string") {
-      let query: QueryBuilder<Row> = this;
-      for (const [property, include] of Object.entries(propertyOrIncludes)) {
-        if (include === undefined) continue;
-        query = (query as DirectAbiQueryBuilder<Row>).includeSpecInternal(
-          property,
-          include,
-        ) as QueryBuilder<Row>;
-      }
-      return query as QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
+      return Object.entries(propertyOrIncludes).reduce<QueryBuilder<Row>>(
+        (query, [property, include]) =>
+          include === undefined
+            ? query
+            : ((query as DirectAbiQueryBuilder<Row>).includeSpecInternal(
+                property,
+                include,
+              ) as QueryBuilder<Row>),
+        this,
+      ) as QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
     }
     const property = propertyOrIncludes;
     includeRelation(this._schema, this._table, property);
@@ -3693,11 +3643,10 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   }
 
   #whereObject(conditions: QueryWhere<Row>): QueryBuilder<Row> {
-    let query: QueryBuilder<Row> = this;
-    for (const [column, condition] of Object.entries(conditions) as Array<
-      [keyof Row & string, QueryWhereValue]
-    >) {
-      if (condition === undefined) continue;
+    return (Object.entries(conditions) as Array<[keyof Row & string, QueryWhereValue]>).reduce<
+      QueryBuilder<Row>
+    >((query, [column, condition]) => {
+      if (condition === undefined) return query;
       if (isWhereOperatorObject(condition)) {
         if (condition.eq !== undefined) query = query.where(column, "eq", condition.eq);
         if (condition.ne !== undefined) query = query.where(column, "ne", condition.ne);
@@ -3710,11 +3659,10 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
           query = query.where(column, "contains", condition.contains);
         if (condition.isNull === true) query = query.where(column, "isNull");
         if (condition.isNull === false) query = query.where(column, "isNotNull");
-        continue;
+        return query;
       }
-      query = query.where(column, "eq", condition);
-    }
-    return query;
+      return query.where(column, "eq", condition);
+    }, this);
   }
 
   requireIncludes<const Properties extends readonly string[]>(
