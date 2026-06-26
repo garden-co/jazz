@@ -12,7 +12,7 @@ pub mod otel;
 pub mod query_manager;
 pub mod row_format;
 pub mod row_histories;
-pub mod runtime_core;
+pub(crate) mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;

@@ -5,8 +5,8 @@
 //!
 //! # Architecture
 //!
-//! - `NapiDirectDb` exposes the vendored Jazz core DB over an encoded-row
-//!   boundary used by the TypeScript `CoreRuntime`.
+//! - `NapiDirectDb` exposes the vendored Jazz core DB directly over an
+//!   encoded-row boundary for the TypeScript client packages.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
 //! - Local-first JWT helpers stay here as package-level native utilities.
