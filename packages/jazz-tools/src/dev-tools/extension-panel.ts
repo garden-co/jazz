@@ -13,7 +13,12 @@ import {
   Value,
   WasmSchema,
 } from "../index.js";
-import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
+import {
+  DirectInsertResult,
+  DirectMutationResult,
+  WriteHandle,
+  WriteResult,
+} from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -55,6 +60,11 @@ let devtoolsPort: DevtoolsBridgePort | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
 const pendingRequests = new Map<string, PendingRequest>();
+// Durable writes issued via db.insert/update/delete().wait() in devtools mode.
+// db applies the column transform then calls client.insert/update/delete, which
+// stash the bridge call here keyed by batchId; WriteHandle.wait() runs it via
+// waitForBatch (the runtime executes the actual durable mutation).
+const pendingDurableWrites = new Map<string, (tier: DurabilityTier) => Promise<unknown>>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
@@ -528,8 +538,14 @@ class DevToolsJazzClient {
     this.fallbackSchema = schema;
   }
 
+  insert(table: string, values: InsertValues): DirectInsertResult {
+    // The grid awaits .wait() but ignores the returned row; carry the input
+    // values as a stand-in so db.insert's mapValue transform has a row to map.
+    const value = { ...(values as Record<string, unknown>) } as unknown as Row;
+    return this.deferDurableInsert(value, (tier) => this.createDurable(table, values, { tier }));
+  }
   create(table: string, values: InsertValues): DirectInsertResult {
-    throw new Error("DevTools client does not support non-durable create().");
+    return this.insert(table, values);
   }
   async createDurable(
     table: string,
@@ -560,7 +576,7 @@ class DevToolsJazzClient {
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
   ): DirectMutationResult {
-    throw new Error("DevTools client does not support non-durable update().");
+    return this.deferDurableWrite((tier) => this.updateDurable(objectId, updates, { tier }));
   }
   async updateDurable(
     objectId: string,
@@ -575,7 +591,32 @@ class DevToolsJazzClient {
     });
   }
   delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
-    throw new Error("DevTools client does not support non-durable delete().");
+    return this.deferDurableWrite((tier) => this.deleteDurable(objectId, { tier }));
+  }
+  private deferDurableWrite(run: (tier: DurabilityTier) => Promise<unknown>): DirectMutationResult {
+    const batchId = randomId();
+    pendingDurableWrites.set(batchId, run);
+    return new WriteHandle(
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectMutationResult;
+  }
+  private deferDurableInsert(
+    value: Row,
+    run: (tier: DurabilityTier) => Promise<unknown>,
+  ): DirectInsertResult {
+    const batchId = randomId();
+    pendingDurableWrites.set(batchId, run);
+    return new WriteResult(
+      value,
+      batchId,
+      this as unknown as JazzClient,
+    ) as unknown as DirectInsertResult;
+  }
+  async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    const run = pendingDurableWrites.get(batchId);
+    pendingDurableWrites.delete(batchId);
+    if (run) await run(tier);
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
     await ensureDevtoolsAnnounced();
