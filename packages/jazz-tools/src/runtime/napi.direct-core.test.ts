@@ -63,6 +63,97 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
+  it("supports direct runtime parity writes, mergeable transactions, and upstream transport", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const runtime = new DirectWasmRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-parity:node"),
+      deterministicBytes("jazz-napi-direct-core-parity:author"),
+      2,
+      true,
+    );
+
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "direct napi parity row" },
+      done: { type: "Boolean", value: false },
+    });
+    runtime.delete("todos", inserted.id);
+    runtime.restore("todos", inserted.id, {
+      title: { type: "Text", value: "direct napi restored row" },
+      done: { type: "Boolean", value: false },
+    });
+    runtime.upsert("todos", "11111111-1111-4111-8111-111111111111", {
+      title: { type: "Text", value: "direct napi upserted row" },
+      done: { type: "Boolean", value: false },
+    });
+
+    const tx = runtime.beginTransaction("mergeable");
+    runtime.update(
+      "todos",
+      inserted.id,
+      { done: { type: "Boolean", value: true } },
+      JSON.stringify({ batch_id: tx }),
+    );
+    runtime.upsert(
+      "todos",
+      inserted.id,
+      {
+        title: { type: "Text", value: "direct napi tx upserted row" },
+        done: { type: "Boolean", value: true },
+      },
+      JSON.stringify({ batch_id: tx }),
+    );
+    runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "direct napi tx row" },
+        done: { type: "Boolean", value: false },
+      },
+      JSON.stringify({ batch_id: tx }),
+      "22222222-2222-4222-8222-222222222222",
+    );
+    runtime.commitTransaction(tx);
+    await runtime.waitForTransaction(tx, "local");
+
+    const rows = await runtime.query(JSON.stringify({ table: "todos" }));
+    expect(rows).toHaveLength(3);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        {
+          id: inserted.id,
+          table: "todos",
+          values: [
+            { type: "Text", value: "direct napi tx upserted row" },
+            { type: "Boolean", value: true },
+          ],
+        },
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          table: "todos",
+          values: [
+            { type: "Text", value: "direct napi upserted row" },
+            { type: "Boolean", value: false },
+          ],
+        },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          table: "todos",
+          values: [
+            { type: "Text", value: "direct napi tx row" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      ]),
+    );
+
+    const transport = runtime.connectUpstreamPeer();
+    expect(transport.tick()).toBeGreaterThanOrEqual(0);
+    expect(transport.recvWireFrames()).toEqual(expect.any(Array));
+    expect(transport.close()).toBe(true);
+    expect(transport.close()).toBe(false);
+  });
+
   it("reopens a persistent direct DB and reads previously written rows", async () => {
     const { NapiDirectDb } = await loadNapiModule();
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-"));
