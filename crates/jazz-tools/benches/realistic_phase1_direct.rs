@@ -22,7 +22,7 @@ use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::RocksDbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{Query, all_of, col, eq, lit};
+use jazz::query::{Query, all_of, claim, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::{
@@ -162,6 +162,55 @@ fn schema() -> JazzSchema {
     ])
 }
 
+fn recursive_permissions_schema() -> JazzSchema {
+    let recursive_policy = Policy::shape(Query::from("docs").reachable_via(
+        "doc_access",
+        "doc",
+        "team",
+        claim("sub"),
+        "team_edges",
+        "member",
+        "parent",
+        [],
+    ));
+
+    JazzSchema::new([
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("kind", ColumnType::String),
+            ],
+        )
+        .with_read_policy(recursive_policy),
+        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "doc_access",
+            [
+                ColumnSchema::new("doc", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("doc", "docs")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_edges",
+            [
+                ColumnSchema::new("member", ColumnType::Uuid),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("member", "teams")
+        .with_reference("parent", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn open_db(seed: u64) -> BenchDb {
     open_db_with_author(seed, AUTHOR, false)
 }
@@ -171,10 +220,20 @@ fn open_core_db(seed: u64) -> BenchDb {
 }
 
 fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+    open_db_with_schema(seed, author, history_complete, schema())
+}
+
+fn open_db_with_schema(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    schema: JazzSchema,
+) -> BenchDb {
     open_db_with_storage(
         seed,
         author,
         history_complete,
+        schema,
         |refs| MemoryStorage::new(refs),
         "open direct realistic benchmark db",
     )
@@ -191,6 +250,7 @@ fn open_rocks_db_with_author(
         seed,
         author,
         history_complete,
+        schema(),
         |refs| RocksDbStorage::open(path, refs).expect("open realistic RocksDB storage"),
         "open direct realistic RocksDB benchmark db",
     )
@@ -200,13 +260,13 @@ fn open_db_with_storage<S>(
     seed: u64,
     author: AuthorId,
     history_complete: bool,
+    schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
     context: &str,
 ) -> Db<S>
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
-    let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -644,6 +704,115 @@ where
 {
     db.prepare_query(&Query::from("activity").filter(eq(col("project"), lit(project.0))))
         .expect("prepare activity feed query")
+}
+
+const RECURSIVE_DOC_DIRECT: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
+const RECURSIVE_DOC_CLOSURE: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
+const RECURSIVE_DOC_HIDDEN: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
+const RECURSIVE_READER_TEAM: RowUuid = RowUuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const RECURSIVE_PARENT_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000002"));
+const RECURSIVE_HIDDEN_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
+
+fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("kind".to_owned(), Value::String(kind.to_owned())),
+    ])
+}
+
+fn recursive_team_cells(name: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
+}
+
+fn recursive_doc_access_cells(doc: RowUuid, team: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("doc".to_owned(), Value::Uuid(doc.0)),
+        ("team".to_owned(), Value::Uuid(team.0)),
+    ])
+}
+
+fn recursive_team_edge_cells(member: RowUuid, parent: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("member".to_owned(), Value::Uuid(member.0)),
+        ("parent".to_owned(), Value::Uuid(parent.0)),
+    ])
+}
+
+fn open_recursive_permissions_db(seed: u64) -> BenchDb {
+    open_db_with_schema(
+        seed,
+        AuthorId::SYSTEM,
+        false,
+        recursive_permissions_schema(),
+    )
+}
+
+fn seed_recursive_permissions_fixture(db: &BenchDb) {
+    for (team, name) in [
+        (RECURSIVE_READER_TEAM, "reader"),
+        (RECURSIVE_PARENT_TEAM, "parent"),
+        (RECURSIVE_HIDDEN_TEAM, "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("teams", team, recursive_team_cells(name))
+                .expect("seed recursive team"),
+        );
+    }
+
+    for (doc, title, kind) in [
+        (RECURSIVE_DOC_DIRECT, "direct", "visible"),
+        (RECURSIVE_DOC_CLOSURE, "closure", "visible"),
+        (RECURSIVE_DOC_HIDDEN, "hidden", "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
+                .expect("seed recursive doc"),
+        );
+    }
+
+    for (doc, team) in [
+        (RECURSIVE_DOC_DIRECT, RECURSIVE_READER_TEAM),
+        (RECURSIVE_DOC_CLOSURE, RECURSIVE_PARENT_TEAM),
+        (RECURSIVE_DOC_HIDDEN, RECURSIVE_HIDDEN_TEAM),
+    ] {
+        wait_local(
+            db.insert("doc_access", recursive_doc_access_cells(doc, team))
+                .expect("seed recursive doc access"),
+        );
+    }
+
+    wait_local(
+        db.insert(
+            "team_edges",
+            recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+        )
+        .expect("seed recursive team edge"),
+    );
+}
+
+fn recursive_docs_query<S>(db: &Db<S>) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("docs"))
+        .expect("prepare recursive docs query")
+}
+
+fn assert_recursive_docs_visible(rows: &[jazz::node::CurrentRow]) {
+    assert!(
+        rows.iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_DIRECT)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_CLOSURE)
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_HIDDEN)
+    );
+    assert_eq!(rows.len(), 2);
 }
 
 fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
@@ -1140,9 +1309,41 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
     group.finish();
 }
 
+fn r12_recursive_permissions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r12_recursive_permissions");
+    group.throughput(Throughput::Elements(2));
+
+    group.bench_function("docs_recursive_read_s", |b| {
+        let db = open_recursive_permissions_db(120);
+        seed_recursive_permissions_fixture(&db);
+        let query = recursive_docs_query(&db);
+        let read_opts = ReadOpts::default();
+
+        b.iter(|| {
+            let rows = block_on(db.all_for_identity(&query, read_opts, READER_AUTHOR))
+                .expect("read recursive docs for reader");
+            assert_recursive_docs_visible(&rows);
+
+            let mut subscription =
+                block_on(db.subscribe_for_identity(&query, read_opts, READER_AUTHOR))
+                    .expect("subscribe recursive docs for reader");
+            match block_on(subscription.next_event()) {
+                Some(SubscriptionEvent::Opened { current, .. }) => {
+                    assert_recursive_docs_visible(&current);
+                }
+                other => panic!("expected recursive docs opened event, got {other:?}"),
+            }
+
+            black_box(rows.len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions
 }
 criterion_main!(benches);
