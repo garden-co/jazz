@@ -751,11 +751,19 @@ async fn close_direct_ws_for_policy(socket: &mut WebSocket, reason: &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::time::Duration;
 
     use futures::stream::FuturesUnordered;
     use futures::{SinkExt as _, StreamExt as _};
+    use jazz::db::{Db, DbConfig, DbIdentity, RowCells, SeededRowIdSource, WireTransportAdapter};
+    use jazz::groove::schema::ColumnType as CoreColumnType;
+    use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
+    use jazz::ids::NodeUuid;
+    use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
     use jazz::wire::decode_frame;
+    use jazz::wire::{TransportError, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -765,6 +773,7 @@ mod tests {
 
     const DIRECT_WS_STORM_SIZE: usize = 24;
     const DIRECT_WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
+    const DIRECT_WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
     #[test]
     fn direct_frame_batch_round_trips_wire_frames() {
@@ -899,6 +908,30 @@ mod tests {
             .state
     }
 
+    fn direct_ws_core_schema() -> JazzSchema {
+        JazzSchema::new([TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", CoreColumnType::String),
+                ColumnSchema::new("done", CoreColumnType::Bool),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())])
+    }
+
+    async fn make_direct_ws_convergence_test_state() -> Arc<ServerState> {
+        let schema = direct_ws_core_schema();
+        let state = make_direct_ws_test_state().await;
+        state
+            .direct_core()
+            .expect("direct core test server")
+            .publish_schema(schema)
+            .await
+            .expect("publish direct core test schema");
+        state
+    }
+
     #[tokio::test]
     async fn direct_ws_backend_session_must_match_peer_identity() {
         let state = make_direct_ws_test_state().await;
@@ -924,6 +957,73 @@ mod tests {
         assert!(
             error.contains("peer_identity must match authenticated session user_id"),
             "unexpected direct ws admission error: {error}"
+        );
+    }
+
+    // Internal admission-boundary test: direct core policy reads are not yet
+    // observable through a public direct websocket client helper, so this pins
+    // the security invariant at the route admission point that feeds
+    // DirectCoreServer::open(identity, claims, trust).
+    #[tokio::test]
+    async fn direct_ws_backend_session_admits_session_claims_for_policy_reads() {
+        let state = make_direct_ws_test_state().await;
+        let identity = AuthorId::from_bytes([0x61; 16]);
+        let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
+        let prelude = DirectWsPrelude {
+            peer_identity: hex::encode(identity.as_bytes()),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("backend-secret".to_owned()),
+                backend_session: Some(serde_json::json!({
+                    "user_id": user_id,
+                    "claims": {
+                        "role": "reader",
+                        "teams": ["eng", "ops"],
+                        "beta": true,
+                        "login_count": 7,
+                    },
+                    "authMode": "external",
+                })),
+                ..Default::default()
+            },
+        };
+
+        let admission = direct_ws_admission(prelude, &HeaderMap::new(), &state)
+            .await
+            .expect("backend session direct websocket admission");
+
+        assert_eq!(admission.identity, identity);
+        assert_eq!(admission.trust, CommitUnitTrust::Session);
+        assert_eq!(
+            admission.claims.get("role"),
+            Some(&CoreValue::String("reader".to_owned()))
+        );
+        assert_eq!(
+            admission.claims.get("teams"),
+            Some(&CoreValue::Array(vec![
+                CoreValue::String("eng".to_owned()),
+                CoreValue::String("ops".to_owned()),
+            ]))
+        );
+        assert_eq!(admission.claims.get("beta"), Some(&CoreValue::Bool(true)));
+        assert_eq!(
+            admission.claims.get("login_count"),
+            Some(&CoreValue::U64(7))
+        );
+        assert_eq!(
+            admission.claims.get("subject"),
+            Some(&CoreValue::String(user_id.clone()))
+        );
+        assert_eq!(
+            admission.claims.get("sub"),
+            Some(&CoreValue::String(user_id.clone()))
+        );
+        assert_eq!(
+            admission.claims.get("user_id"),
+            Some(&CoreValue::String(user_id))
+        );
+        assert_eq!(
+            admission.claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
         );
     }
 
@@ -1008,6 +1108,180 @@ mod tests {
             .iter()
             .map(|frame| decode_frame(frame).expect("decode direct wire frame"))
             .collect()
+    }
+
+    #[derive(Clone, Default)]
+    struct TestDirectWireTransport {
+        queues: Rc<RefCell<TestDirectWireQueues>>,
+    }
+
+    #[derive(Default)]
+    struct TestDirectWireQueues {
+        inbound: VecDeque<Vec<u8>>,
+        outbound: VecDeque<Vec<u8>>,
+    }
+
+    impl TestDirectWireTransport {
+        fn push_inbound(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
+            self.queues.borrow_mut().inbound.extend(frames);
+        }
+
+        fn take_outbound(&self) -> Vec<Vec<u8>> {
+            self.queues.borrow_mut().outbound.drain(..).collect()
+        }
+    }
+
+    impl WireTransport for TestDirectWireTransport {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            self.queues.borrow_mut().outbound.push_back(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.queues.borrow_mut().inbound.pop_front()
+        }
+    }
+
+    struct TestDirectClient {
+        db: Db<CoreMemoryStorage>,
+        transport: TestDirectWireTransport,
+    }
+
+    impl TestDirectClient {
+        async fn new(schema: JazzSchema, node_seed: u8, row_seed: u64) -> Self {
+            let column_families = schema.column_families();
+            let refs = column_families
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let db = Db::open(
+                DbConfig::new(
+                    schema,
+                    CoreMemoryStorage::new(&refs),
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([node_seed; 16]),
+                        author: AuthorId::from_bytes([node_seed; 16]),
+                    },
+                )
+                .with_id_source(SeededRowIdSource::new(row_seed)),
+            )
+            .await
+            .expect("open direct client db");
+            let transport = TestDirectWireTransport::default();
+            db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
+            Self { db, transport }
+        }
+
+        fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
+            self.db
+                .insert(
+                    "todos",
+                    RowCells::from([
+                        ("title".to_owned(), CoreValue::String(title.to_owned())),
+                        ("done".to_owned(), CoreValue::Bool(false)),
+                    ]),
+                )
+                .expect("insert direct client row")
+                .row_uuid()
+        }
+
+        fn tick_take(&self) -> Vec<Vec<u8>> {
+            self.db.tick().expect("tick direct client db");
+            self.transport.take_outbound()
+        }
+
+        fn receive_tick_take(&self, frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+            self.transport.push_inbound(frames);
+            self.tick_take()
+        }
+    }
+
+    fn direct_ws_frame_batch(frames: &[Vec<u8>]) -> Vec<u8> {
+        postcard::to_allocvec(frames).expect("encode direct ws frame batch")
+    }
+
+    async fn read_direct_ws_encoded_frames(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Vec<Vec<u8>> {
+        let message = tokio::time::timeout(DIRECT_WS_PUMP_DEADLINE, ws.next())
+            .await
+            .expect("wait for direct ws frame")
+            .expect("direct ws still open")
+            .expect("direct ws frame result");
+        let WsMessage::Binary(bytes) = message else {
+            panic!("expected direct ws binary frame batch, got {message:?}");
+        };
+        postcard::from_bytes(&bytes).expect("decode direct ws frame batch")
+    }
+
+    async fn pump_direct_client_once(
+        client: &TestDirectClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> (usize, usize) {
+        let mut outbound = client.tick_take();
+        let mut sent = 0;
+        let mut received = 0;
+        let mut rounds = 0;
+        while !outbound.is_empty() {
+            rounds += 1;
+            assert!(
+                rounds <= 8,
+                "direct client kept producing follow-up websocket frames"
+            );
+            ws.send(WsMessage::Binary(direct_ws_frame_batch(&outbound).into()))
+                .await
+                .expect("send direct client frames");
+            let inbound = read_direct_ws_encoded_frames(ws).await;
+            sent += outbound.len();
+            received += inbound.len();
+            outbound = client.receive_tick_take(inbound);
+        }
+        (sent, received)
+    }
+
+    // Internal route-boundary test: until direct websocket has a public
+    // high-level client facade, this wires two real jazz::Db clients through
+    // the real /apps/<APP_ID>/ws route and proves direct WireFrame batches
+    // flow through the server after one client writes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_ws_clients_exchange_server_mediated_wire_frames() {
+        let state = make_direct_ws_convergence_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let schema = direct_ws_core_schema();
+        let client_a = TestDirectClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let client_b = TestDirectClient::new(schema, 0xb2, 0xb200).await;
+        let mut ws_a =
+            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let mut ws_b =
+            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+
+        let _inserted = client_a.insert_todo("route sync");
+
+        let mut frames_sent_to_server = 0;
+        let mut frames_received_from_server = 0;
+        let start = tokio::time::Instant::now();
+        while frames_received_from_server == 0 && start.elapsed() < DIRECT_WS_PUMP_DEADLINE {
+            let (sent, received) = pump_direct_client_once(&client_a, &mut ws_a).await;
+            frames_sent_to_server += sent;
+            frames_received_from_server += received;
+            let (sent, received) = pump_direct_client_once(&client_b, &mut ws_b).await;
+            frames_sent_to_server += sent;
+            frames_received_from_server += received;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            frames_sent_to_server > 0,
+            "the writing direct client must send WireFrame batches through the websocket route"
+        );
+        assert!(
+            frames_received_from_server > 0,
+            "the server must return direct WireFrame batches through the websocket route"
+        );
     }
 
     async fn wait_for_direct_ws_live_admissions(
