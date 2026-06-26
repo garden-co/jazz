@@ -504,6 +504,7 @@ impl NapiRuntime {
     #[napi]
     pub fn update(
         &self,
+        _table: String,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
@@ -557,6 +558,7 @@ impl NapiRuntime {
     #[napi(js_name = "delete")]
     pub fn delete_row(
         &self,
+        _table: String,
         object_id: String,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {

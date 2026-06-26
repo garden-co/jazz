@@ -858,7 +858,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const { client, transactionId, session, attribution } = this.requireBinding("update");
-    client.updateInternal(id, updates, undefined, session, attribution, transactionId);
+    client.updateInternal(
+      table._table,
+      id,
+      updates,
+      undefined,
+      session,
+      attribution,
+      transactionId,
+    );
   }
 
   /**
@@ -869,7 +877,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     const { client, transactionId, session, attribution } = this.bindTable(table);
-    client.deleteInternal(id, undefined, session, attribution, transactionId);
+    client.deleteInternal(table._table, id, undefined, session, attribution, transactionId);
   }
 
   /**
@@ -2397,7 +2405,7 @@ export class Db {
     const updates = toWriteRecord(transformedData, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.update(id, updates, options, context?.session, context?.attribution),
+      client.update(table._table, id, updates, options, context?.session, context?.attribution),
     );
   }
 
@@ -2409,7 +2417,9 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
+    return this.wrapWriteWait(
+      client.delete(table._table, id, options, context?.session, context?.attribution),
+    );
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {

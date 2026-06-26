@@ -95,8 +95,9 @@ describe("JazzRnRuntimeAdapter", () => {
       undefined,
     );
 
-    adapter.update("row-1", { done: { type: "Boolean", value: true } });
+    adapter.update("todos", "row-1", { done: { type: "Boolean", value: true } });
     expect(binding.update).toHaveBeenCalledWith(
+      "todos",
       "row-1",
       JSON.stringify({ done: { type: "Boolean", value: true } }),
       undefined,
@@ -110,8 +111,8 @@ describe("JazzRnRuntimeAdapter", () => {
       undefined,
     );
 
-    adapter.delete("row-1");
-    expect(binding.delete_).toHaveBeenCalledWith("row-1", undefined);
+    adapter.delete("todos", "row-1");
+    expect(binding.delete_).toHaveBeenCalledWith("todos", "row-1", undefined);
 
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
   });
@@ -253,15 +254,16 @@ describe("JazzRnRuntimeAdapter", () => {
       writeContextJson,
     );
 
-    adapter.update("row-1", { done: { type: "Boolean", value: true } }, writeContextJson);
+    adapter.update("todos", "row-1", { done: { type: "Boolean", value: true } }, writeContextJson);
     expect(binding.update).toHaveBeenCalledWith(
+      "todos",
       "row-1",
       JSON.stringify({ done: { type: "Boolean", value: true } }),
       writeContextJson,
     );
 
-    adapter.delete("row-1", writeContextJson);
-    expect(binding.delete_).toHaveBeenCalledWith("row-1", writeContextJson);
+    adapter.delete("todos", "row-1", writeContextJson);
+    expect(binding.delete_).toHaveBeenCalledWith("todos", "row-1", writeContextJson);
   });
 
   it("bridges 2-phase createSubscription + executeSubscription with handle conversion", () => {
@@ -387,7 +389,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const updateError = (() => {
       try {
-        adapter.update("row-1", { done: { type: "Boolean", value: true } });
+        adapter.update("todos", "row-1", { done: { type: "Boolean", value: true } });
         return null;
       } catch (error) {
         return error;
@@ -401,7 +403,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const deleteError = (() => {
       try {
-        adapter.delete("row-1");
+        adapter.delete("todos", "row-1");
         return null;
       } catch (error) {
         return error;

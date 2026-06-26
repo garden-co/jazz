@@ -46,15 +46,17 @@ function makeFakeRuntime() {
         };
       },
     ),
-    update: vi.fn((objectId: string, values: any, writeContextJson?: string | null) => ({
-      transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-update",
-    })),
+    update: vi.fn(
+      (_table: string, _objectId: string, _values: any, writeContextJson?: string | null) => ({
+        transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-update",
+      }),
+    ),
     upsert: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => ({
         transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-upsert",
       }),
     ),
-    delete: vi.fn((objectId: string, writeContextJson?: string | null) => ({
+    delete: vi.fn((_table: string, _objectId: string, writeContextJson?: string | null) => ({
       transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-delete",
     })),
     query:

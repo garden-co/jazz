@@ -75,6 +75,57 @@ describe("DirectWasmRuntime server transport", () => {
 
     expect(sockets[1]!.closed).toBe(true);
   });
+
+  it("uses the caller-supplied table for update and delete", () => {
+    const calls: unknown[] = [];
+    const write = {
+      payload: new Uint8Array(),
+      wait: () => undefined,
+      writeState: () => ({}),
+    };
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () => Uint8Array.from([0]),
+          prepareQuery: () => ({}),
+          updateEncoded: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
+            calls.push(["update", table, rowId, patch]);
+            return write;
+          },
+          delete: (table: string, rowId: Uint8Array) => {
+            calls.push(["delete", table, rowId]);
+            return write;
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      {
+        todos: {
+          columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+        },
+        projects: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+      },
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.update("projects", "00000000-0000-0000-0000-000000000001", {
+      name: { type: "Text", value: "Project" },
+    });
+    runtime.delete("projects", "00000000-0000-0000-0000-000000000001");
+
+    expect(calls.map((call) => (call as unknown[]).slice(0, 2))).toEqual([
+      ["update", "projects"],
+      ["delete", "projects"],
+    ]);
+  });
 });
 
 const testSchema = {

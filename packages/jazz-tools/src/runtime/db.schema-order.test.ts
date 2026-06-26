@@ -357,6 +357,7 @@ describe("Db runtime schema order", () => {
       undefined,
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },
@@ -430,6 +431,7 @@ describe("Db runtime schema order", () => {
       undefined,
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },

@@ -7,9 +7,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     [string, Record<string, unknown>, string | undefined, string | undefined]
   > = [];
   const restoreCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
-  const updateCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
+  const updateCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
   const upsertCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
-  const deleteCalls: Array<[string, string | undefined]> = [];
+  const deleteCalls: Array<[string, string, string | undefined]> = [];
 
   const runtimeBase: Runtime = {
     beginTransaction: (mode) => `transaction-${mode}`,
@@ -44,11 +44,12 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       };
     },
     update: (
+      table: string,
       objectId: string,
       updates: Record<string, unknown>,
       writeContextJson?: string | null,
     ) => {
-      updateCalls.push([objectId, updates, writeContextJson ?? undefined]);
+      updateCalls.push([table, objectId, updates, writeContextJson ?? undefined]);
       return {
         transactionId: writeContextJson
           ? "update-with-context-transaction-id"
@@ -68,8 +69,8 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
           : "upsert-transaction-id",
       };
     },
-    delete: (objectId: string, writeContextJson?: string | null) => {
-      deleteCalls.push([objectId, writeContextJson ?? undefined]);
+    delete: (table: string, objectId: string, writeContextJson?: string | null) => {
+      deleteCalls.push([table, objectId, writeContextJson ?? undefined]);
       return {
         transactionId: writeContextJson
           ? "delete-with-context-transaction-id"
@@ -127,12 +128,12 @@ describe("JazzClient write attribution", () => {
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
     client.insert("todos", insertValues, undefined, undefined, "alice");
-    client.update("row-1", updates, undefined, undefined, "alice");
-    client.delete("row-1", undefined, undefined, "alice");
+    client.update("todos", "row-1", updates, undefined, undefined, "alice");
+    client.delete("todos", "row-1", undefined, undefined, "alice");
 
     expect(insertCalls).toEqual([["todos", insertValues, attributedContext, undefined]]);
-    expect(updateCalls).toEqual([["row-1", updates, attributedContext]]);
-    expect(deleteCalls).toEqual([["row-1", attributedContext]]);
+    expect(updateCalls).toEqual([["todos", "row-1", updates, attributedContext]]);
+    expect(deleteCalls).toEqual([["todos", "row-1", attributedContext]]);
   });
 
   it("encodes session and attribution together when both are provided", () => {

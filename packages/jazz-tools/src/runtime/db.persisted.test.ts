@@ -147,6 +147,7 @@ describe("Db write handles", () => {
     const deleted = db.delete(table, "todo-1");
 
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },
@@ -155,7 +156,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined);
+    expect(remove).toHaveBeenCalledWith("todos", "todo-1", undefined, undefined, undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
     expect(updateClient.waitForTransaction).toHaveBeenCalledWith("transaction-update", "edge");
@@ -217,6 +218,7 @@ describe("Db write handles", () => {
       "alice@writer",
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-2",
       {
         done: { type: "Boolean", value: false },
@@ -225,7 +227,7 @@ describe("Db write handles", () => {
       session,
       "alice@writer",
     );
-    expect(deleteRow).toHaveBeenCalledWith("todo-2", undefined, session, "alice@writer");
+    expect(deleteRow).toHaveBeenCalledWith("todos", "todo-2", undefined, session, "alice@writer");
     expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",

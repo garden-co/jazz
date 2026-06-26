@@ -72,7 +72,13 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   executeSubscription(handle: bigint, callback: { onUpdate(deltaJson: string): void }): void;
   unsubscribe(handle: bigint): void;
-  update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
+  update(
+    table: string,
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
+  delete_(table: string, objectId: string, writeContextJson: string | undefined): string;
   commitTransaction(transactionId: string): void;
   uniffiDestroy?(): void;
 }
@@ -213,12 +219,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   update(
+    table: string,
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult {
     try {
       const resultJson = this.binding.update(
+        table,
         object_id,
         encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
@@ -248,9 +256,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
-  delete(object_id: string, write_context_json?: string | null): DirectMutationResult {
+  delete(
+    table: string,
+    object_id: string,
+    write_context_json?: string | null,
+  ): DirectMutationResult {
     try {
-      const resultJson = this.binding.delete_(object_id, write_context_json ?? undefined);
+      const resultJson = this.binding.delete_(table, object_id, write_context_json ?? undefined);
       return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
