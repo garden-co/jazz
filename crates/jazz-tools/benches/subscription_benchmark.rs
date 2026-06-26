@@ -290,15 +290,18 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                 let mut next = scale + (scale % 2);
 
                 b.iter(|| {
+                    let mut tx = db.mergeable_tx();
                     for _ in 0..batch_size {
                         next += 2;
-                        db.insert("documents", filtered_cells(next))
-                            .expect("direct batch insert should succeed");
+                        tx.insert("documents", filtered_cells(next))
+                            .expect("direct batch insert should stage");
                     }
-                    let added = (0..batch_size)
-                        .map(|_| read_added_len(block_on(subscription.next_event())))
-                        .sum::<usize>();
-                    assert_eq!(added, batch_size);
+                    tx.commit().expect("direct batch insert should commit");
+                    assert_eq!(
+                        read_added_len(block_on(subscription.next_event())),
+                        batch_size
+                    );
+                    assert!(subscription.try_next_event().is_none());
                 });
 
                 assert!(initial_len <= scale);
