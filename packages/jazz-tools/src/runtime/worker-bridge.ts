@@ -125,10 +125,13 @@ export class WorkerBridge {
   private pendingForwarder: ServerPayloadForwarder | null = null;
   private serverCarrier: DirectWebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
+  private serverCarrierReady = false;
   private serverCarrierOptions: WorkerBridgeOptions | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
+  private clearPendingInit: (() => void) | null = null;
+  private rejectPendingInit: ((error: Error) => void) | null = null;
   private disposed = false;
   private unsubscribeSyncNeeded: (() => void) | null = null;
 
@@ -185,21 +188,30 @@ export class WorkerBridge {
     };
 
     this.clientIdPromise = new Promise<string>((resolve, reject) => {
+      this.rejectPendingInit = reject;
       const timeout = setTimeout(() => reject(new Error("WorkerBridge init timed out")), 30_000);
+      const clearPendingInit = () => {
+        clearTimeout(timeout);
+        this.worker.removeEventListener("message", onMessage);
+        if (this.clearPendingInit === clearPendingInit) {
+          this.clearPendingInit = null;
+          this.rejectPendingInit = null;
+        }
+      };
       const onMessage = (event: MessageEvent<WorkerOutbound>) => {
         const msg = event.data;
+        if (this.disposed) return;
         if (msg.type === "init-ok") {
-          clearTimeout(timeout);
-          this.worker.removeEventListener("message", onMessage);
+          clearPendingInit();
           this.workerClientId = msg.clientId;
           this.schedulePump();
           resolve(msg.clientId);
         } else if (msg.type === "error") {
-          clearTimeout(timeout);
-          this.worker.removeEventListener("message", onMessage);
+          clearPendingInit();
           reject(new Error(msg.message));
         }
       };
+      this.clearPendingInit = clearPendingInit;
       this.worker.addEventListener("message", onMessage);
       this.postToWorker({ type: "init", options: initOptions });
       this.openServerCarrier(initOptions);
@@ -233,6 +245,11 @@ export class WorkerBridge {
     if (this.disposed) return;
     this.pumpTransport();
     this.disposed = true;
+    const rejectPendingInit = this.rejectPendingInit;
+    this.clearPendingInit?.();
+    this.clearPendingInit = null;
+    rejectPendingInit?.(new Error("WorkerBridge init was shut down"));
+    this.rejectPendingInit = null;
     this.unsubscribeSyncNeeded?.();
     this.unsubscribeSyncNeeded = null;
     this.closeServerCarrier();
@@ -500,6 +517,8 @@ export class WorkerBridge {
     });
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then(() => {
+      if (carrier !== this.serverCarrier || this.disposed) return carrier;
+      this.serverCarrierReady = true;
       this.flushQueuedServerFrames(carrier);
       return carrier;
     });
@@ -522,6 +541,7 @@ export class WorkerBridge {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
+    this.serverCarrierReady = false;
   }
 
   private forwardServerFrames(frames: Uint8Array[]): void {
@@ -530,7 +550,7 @@ export class WorkerBridge {
       this.pendingForwarder?.(frame);
     }
     const carrier = this.serverCarrier;
-    if (!carrier) {
+    if (!carrier || !this.serverCarrierReady) {
       this.queuedServerFrames.push(...frames);
       return;
     }

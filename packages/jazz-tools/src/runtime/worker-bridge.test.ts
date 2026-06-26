@@ -1,27 +1,51 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const directWebSocketCarrierMock = vi.hoisted(() => {
-  const instances: Array<{ options: any; close: ReturnType<typeof vi.fn> }> = [];
+  const instances: Array<{
+    options: any;
+    close: ReturnType<typeof vi.fn>;
+    sendBatch: ReturnType<typeof vi.fn>;
+    resolveReady(): void;
+    rejectReady(error: unknown): void;
+  }> = [];
+  const autoReady = { current: true };
 
   class DirectWebSocketCarrier {
     readonly options: any;
     readonly close = vi.fn();
+    readonly sendBatchMock = vi.fn((_frames: Uint8Array[]) => Promise.resolve());
+    private readonly readyPromise: Promise<DirectWebSocketCarrier>;
+    private resolveReady!: () => void;
+    private rejectReady!: (error: unknown) => void;
 
     constructor(options: any) {
       this.options = options;
-      instances.push({ options, close: this.close });
+      this.readyPromise = new Promise((resolve, reject) => {
+        this.resolveReady = () => resolve(this);
+        this.rejectReady = reject;
+      });
+      instances.push({
+        options,
+        close: this.close,
+        sendBatch: this.sendBatchMock,
+        resolveReady: this.resolveReady,
+        rejectReady: this.rejectReady,
+      });
+      if (autoReady.current) {
+        this.resolveReady();
+      }
     }
 
     ready(): Promise<DirectWebSocketCarrier> {
-      return Promise.resolve(this);
+      return this.readyPromise;
     }
 
-    sendBatch(): Promise<void> {
-      return Promise.resolve();
+    sendBatch(frames: Uint8Array[]): Promise<void> {
+      return this.sendBatchMock(frames);
     }
   }
 
-  return { DirectWebSocketCarrier, instances };
+  return { DirectWebSocketCarrier, autoReady, instances };
 });
 
 vi.mock("./core-runtime/direct-websocket.js", () => ({
@@ -68,7 +92,15 @@ function testRuntime() {
   return { runtime, transport };
 }
 
-function testDirectRuntime() {
+type DirectRuntimeForTest = Runtime & {
+  connectUpstreamPeer: ReturnType<typeof vi.fn>;
+  getDirectOpenPayload: ReturnType<typeof vi.fn>;
+};
+
+function testDirectRuntime(): {
+  runtime: DirectRuntimeForTest;
+  transport: ReturnType<typeof testRuntime>["transport"];
+} {
   const { runtime, transport } = testRuntime();
   return {
     runtime: {
@@ -79,13 +111,29 @@ function testDirectRuntime() {
         config: new Uint8Array([2]),
         peerIdentity: new Uint8Array([3, 4]),
       })),
-    } as unknown as Runtime,
+    } as unknown as DirectRuntimeForTest,
     transport,
   };
 }
 
+function workerBridgeOptions(overrides: Partial<Parameters<WorkerBridge["init"]>[0]> = {}) {
+  return {
+    schemaJson: "{}",
+    appId: "test-app",
+    env: "dev",
+    userBranch: "main",
+    dbName: "test-db",
+    ...overrides,
+  };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 function testWorker(): Worker & { emit(message: unknown): void; sent: unknown[] } {
-  let listener: ((event: MessageEvent) => void) | null = null;
+  const listeners = new Set<(event: MessageEvent) => void>();
   const sent: unknown[] = [];
   return {
     sent,
@@ -93,19 +141,155 @@ function testWorker(): Worker & { emit(message: unknown): void; sent: unknown[] 
       sent.push(message);
     }),
     addEventListener: vi.fn((_type: string, next: (event: MessageEvent) => void) => {
-      listener = next;
+      listeners.add(next);
     }),
-    removeEventListener: vi.fn(),
+    removeEventListener: vi.fn((_type: string, next: (event: MessageEvent) => void) => {
+      listeners.delete(next);
+    }),
     terminate: vi.fn(),
     emit(message: unknown) {
-      listener?.({ data: message } as MessageEvent);
+      for (const listener of listeners) {
+        listener({ data: message } as MessageEvent);
+      }
     },
   } as unknown as Worker & { emit(message: unknown): void; sent: unknown[] };
 }
 
 describe("WorkerBridge", () => {
-  it("passes worker bridge auth JSON to direct websocket carriers", async () => {
+  afterEach(() => {
+    directWebSocketCarrierMock.autoReady.current = true;
     directWebSocketCarrierMock.instances.splice(0);
+  });
+
+  it("memoizes in-flight init and resolves every caller with the worker client id", async () => {
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const firstInit = bridge.init(workerBridgeOptions({ appId: "memoized-app" }));
+    const secondInit = bridge.init(workerBridgeOptions({ appId: "ignored-app" }));
+
+    expect(firstInit).toBe(secondInit);
+    expect(runtime.connectUpstreamPeer).toHaveBeenCalledTimes(1);
+    expect(
+      worker.sent.filter((message) => (message as { type?: string }).type === "init"),
+    ).toHaveLength(1);
+
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+
+    await expect(firstInit).resolves.toBe("worker-client");
+    await expect(secondInit).resolves.toBe("worker-client");
+    expect(bridge.getWorkerClientId()).toBe("worker-client");
+  });
+
+  it("propagates worker init errors to every memoized init caller", async () => {
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const firstInit = bridge.init(workerBridgeOptions({ appId: "error-app" }));
+    const secondInit = bridge.init(workerBridgeOptions({ appId: "ignored-error-app" }));
+
+    worker.emit({ type: "error", message: "direct runtime failed to open" });
+
+    await expect(firstInit).rejects.toThrow("direct runtime failed to open");
+    await expect(secondInit).rejects.toThrow("direct runtime failed to open");
+    expect(bridge.getWorkerClientId()).toBeNull();
+  });
+
+  it("rejects init on shutdown and ignores a stale init-ok afterwards", async () => {
+    const { runtime, transport } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init(workerBridgeOptions({ appId: "shutdown-during-init-app" }));
+    const shutdownPromise = bridge.shutdown();
+    worker.emit({ type: "shutdown-ok" });
+    worker.emit({ type: "init-ok", clientId: "stale-worker-client" });
+
+    await expect(initPromise).rejects.toThrow("WorkerBridge init was shut down");
+    await shutdownPromise;
+    expect(bridge.getWorkerClientId()).toBeNull();
+    expect(transport.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues server frames until the page-owned carrier is ready", async () => {
+    directWebSocketCarrierMock.autoReady.current = false;
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init(
+      workerBridgeOptions({
+        appId: "queued-server-frames-app",
+        serverUrl: "http://localhost:4200",
+      }),
+    );
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+
+    const firstFrame = new Uint8Array([1, 2, 3]);
+    const secondFrame = new Uint8Array([4, 5, 6]);
+    worker.emit({ type: "server-out", frames: [firstFrame] });
+
+    expect(directWebSocketCarrierMock.instances).toHaveLength(1);
+    expect(directWebSocketCarrierMock.instances[0]!.sendBatch).not.toHaveBeenCalled();
+
+    worker.emit({ type: "server-out", frames: [secondFrame] });
+    expect(directWebSocketCarrierMock.instances[0]!.sendBatch).not.toHaveBeenCalled();
+
+    directWebSocketCarrierMock.instances[0]!.resolveReady();
+    await flushMicrotasks();
+
+    expect(directWebSocketCarrierMock.instances[0]!.sendBatch).toHaveBeenCalledTimes(1);
+    expect(directWebSocketCarrierMock.instances[0]!.sendBatch).toHaveBeenCalledWith([
+      firstFrame,
+      secondFrame,
+    ]);
+  });
+
+  it("flushes queued server frames to the refreshed-auth carrier after reopen readiness", async () => {
+    directWebSocketCarrierMock.autoReady.current = false;
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init(
+      workerBridgeOptions({
+        appId: "auth-refresh-queued-server-frames-app",
+        serverUrl: "http://localhost:4200",
+        jwtToken: "jwt-initial",
+      }),
+    );
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+    directWebSocketCarrierMock.instances[0]!.resolveReady();
+    await flushMicrotasks();
+
+    bridge.updateAuth({ jwtToken: "jwt-refresh" });
+    expect(directWebSocketCarrierMock.instances).toHaveLength(2);
+    expect(directWebSocketCarrierMock.instances[0]!.close).toHaveBeenCalledTimes(1);
+
+    const frame = new Uint8Array([7, 8, 9]);
+    worker.emit({ type: "server-out", frames: [frame] });
+
+    expect(directWebSocketCarrierMock.instances[0]!.sendBatch).not.toHaveBeenCalled();
+    expect(directWebSocketCarrierMock.instances[1]!.sendBatch).not.toHaveBeenCalled();
+
+    directWebSocketCarrierMock.instances[0]!.resolveReady();
+    await flushMicrotasks();
+    expect(directWebSocketCarrierMock.instances[1]!.sendBatch).not.toHaveBeenCalled();
+
+    directWebSocketCarrierMock.instances[1]!.resolveReady();
+    await flushMicrotasks();
+
+    expect(directWebSocketCarrierMock.instances[1]!.options.authJson).toBe(
+      JSON.stringify({ jwt_token: "jwt-refresh" }),
+    );
+    expect(directWebSocketCarrierMock.instances[1]!.sendBatch).toHaveBeenCalledWith([frame]);
+  });
+
+  it("passes worker bridge auth JSON to direct websocket carriers", async () => {
     const { runtime } = testDirectRuntime();
     const worker = testWorker();
     const bridge = new WorkerBridge(worker, runtime);
