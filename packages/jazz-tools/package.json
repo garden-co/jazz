@@ -167,6 +167,7 @@
     "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
+    "undici": "^7.24.4",
     "vite": "catalog:default",
     "vite-plugin-solid": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
