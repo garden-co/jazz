@@ -616,33 +616,36 @@ where
                 let mut right_by_key =
                     std::collections::BTreeMap::<Vec<u8>, Vec<&RecordDelta>>::new();
                 for right_delta in &right.deltas {
-                    right_by_key
-                        .entry(super::join::join_key(
-                            &join.right_descriptor,
-                            right_delta.raw(),
-                            &right_on,
-                        )?)
-                        .or_default()
-                        .push(right_delta);
+                    for key in super::join::join_keys(
+                        &join.right_descriptor,
+                        right_delta.raw(),
+                        &right_on,
+                    )? {
+                        right_by_key.entry(key).or_default().push(right_delta);
+                    }
                 }
                 let mut deltas = Vec::new();
                 for left_delta in &left.deltas {
-                    let key =
-                        super::join::join_key(&join.left_descriptor, left_delta.raw(), &left_on)?;
-                    let Some(matches) = right_by_key.get(&key) else {
-                        continue;
-                    };
-                    for right_delta in matches {
-                        deltas.push(RecordDelta {
-                            record: super::join::create_join_record(
-                                &join.left_descriptor,
-                                left_delta.raw(),
-                                &join.right_descriptor,
-                                right_delta.raw(),
-                                &output_desc,
-                            )?,
-                            weight: left_delta.weight * right_delta.weight,
-                        });
+                    for key in super::join::join_keys(
+                        &join.left_descriptor,
+                        left_delta.raw(),
+                        &left_on,
+                    )? {
+                        let Some(matches) = right_by_key.get(&key) else {
+                            continue;
+                        };
+                        for right_delta in matches {
+                            deltas.push(RecordDelta {
+                                record: super::join::create_join_record(
+                                    &join.left_descriptor,
+                                    left_delta.raw(),
+                                    &join.right_descriptor,
+                                    right_delta.raw(),
+                                    &output_desc,
+                                )?,
+                                weight: left_delta.weight * right_delta.weight,
+                            });
+                        }
                     }
                 }
                 Ok(RecordDeltas {

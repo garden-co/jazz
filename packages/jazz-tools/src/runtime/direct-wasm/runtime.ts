@@ -1076,9 +1076,46 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Bytea":
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
+      return { type: "Array", value: decodeArrayBytes(type.element, bytes) };
     case "Row":
       return { type: "Bytea", value: bytes.slice() };
   }
+}
+
+function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
+  const elementWidth = fixedValueSize(columnTypeToValueType(elementType));
+  if (elementWidth != null) {
+    if (elementWidth === 0) return [];
+    if (bytes.length % elementWidth !== 0) {
+      throw new Error(`invalid fixed-width array byte length ${bytes.length}`);
+    }
+    const values: Value[] = [];
+    for (let offset = 0; offset < bytes.length; offset += elementWidth) {
+      values.push(decodeBytes(elementType, bytes.subarray(offset, offset + elementWidth)));
+    }
+    return values;
+  }
+
+  if (bytes.length < 4) {
+    throw new Error("invalid variable-width array byte length");
+  }
+
+  const length = readU32Le(bytes, 0);
+  const offsetTableEnd = 4 + Math.max(0, length - 1) * 4;
+  if (offsetTableEnd > bytes.length) {
+    throw new Error("invalid variable-width array offset table");
+  }
+
+  const values: Value[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const start = index === 0 ? offsetTableEnd : readU32Le(bytes, 4 + (index - 1) * 4);
+    const end = index === length - 1 ? bytes.length : readU32Le(bytes, 4 + index * 4);
+    if (start > end || end > bytes.length) {
+      throw new Error("invalid variable-width array element offset");
+    }
+    values.push(decodeBytes(elementType, bytes.subarray(start, end)));
+  }
+  return values;
 }
 
 function normalizeSubscriptionChunk(
@@ -1171,6 +1208,15 @@ function formatUuid(bytes: Uint8Array): string {
     "",
   );
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function readU32Le(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]! |
+    (bytes[offset + 1]! << 8) |
+    (bytes[offset + 2]! << 16) |
+    (bytes[offset + 3]! << 24)
+  );
 }
 
 function bytesKey(bytes: Uint8Array): string {

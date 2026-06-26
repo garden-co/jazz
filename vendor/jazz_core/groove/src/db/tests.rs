@@ -341,6 +341,28 @@ fn albums_artists_schema() -> DatabaseSchema {
     ])
 }
 
+fn files_parts_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "files",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("part_ids", ColumnType::Uuid.array_of()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "file_parts",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("part_uuid", ColumnType::Uuid),
+                ColumnSchema::new("data", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
 fn albums_blockers_schema() -> DatabaseSchema {
     DatabaseSchema::new([
         TableSchema::new(
@@ -4177,6 +4199,159 @@ fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
             ],
             1
         )]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Uuid(part_b),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(11),
+            Value::Uuid(part_c),
+            Value::Bytes(b"c".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                Value::U64(1),
+                Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+                Value::U64(10),
+                Value::Uuid(part_b),
+                Value::Bytes(b"b".to_vec()),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_persisted_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![
+                Value::Uuid(part_b),
+                Value::Uuid(part_b),
+                Value::Uuid(part_a),
+            ]),
+        ],
+    );
+    batch.insert("files", vec![Value::U64(2), Value::Array(vec![])]);
+    database.commit_batch(batch).unwrap();
+    assert!(subscription_id.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Uuid(part_b),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(11),
+            Value::Uuid(part_a),
+            Value::Bytes(b"a".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(12),
+            Value::Uuid(part_c),
+            Value::Bytes(b"c".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::Array(vec![
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_a),
+                    ]),
+                    Value::U64(10),
+                    Value::Uuid(part_b),
+                    Value::Bytes(b"b".to_vec()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::Array(vec![
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_a),
+                    ]),
+                    Value::U64(11),
+                    Value::Uuid(part_a),
+                    Value::Bytes(b"a".to_vec()),
+                ],
+                1,
+            ),
+        ]
     );
 }
 

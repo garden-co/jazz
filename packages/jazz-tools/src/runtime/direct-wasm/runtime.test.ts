@@ -270,11 +270,71 @@ describe("DirectWasmRuntime server transport", () => {
       ],
     );
   });
+
+  it("decodes fixed-width array columns from direct row batches", async () => {
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () => encodeFileRows(),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      fileSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "files" }))).resolves.toEqual([
+      {
+        table: "files",
+        id: "00000000-0000-0000-0000-000000000010",
+        values: [
+          {
+            type: "Array",
+            value: [
+              { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" },
+              { type: "Uuid", value: "00000000-0000-0000-0000-000000000002" },
+            ],
+          },
+          {
+            type: "Array",
+            value: [
+              { type: "Double", value: 65536 },
+              { type: "Double", value: 1234 },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
 });
 
 const testSchema = {
   todos: {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+  },
+} satisfies WasmSchema;
+
+const fileSchema = {
+  files: {
+    columns: [
+      {
+        name: "partIds",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+      },
+      {
+        name: "partSizes",
+        column_type: { type: "Array", element: { type: "Double" } },
+        nullable: false,
+      },
+    ],
   },
 } satisfies WasmSchema;
 
@@ -351,4 +411,55 @@ function encodeRows(rows: Array<{ table: string; rowId: Uint8Array; title: strin
     }, rows.length);
   }, 1);
   return writer.finish();
+}
+
+function encodeFileRows(): Uint8Array {
+  const descriptor = [
+    { name: "partIds", valueType: { tag: 11, inner: { tag: 8 } } },
+    { name: "partSizes", valueType: { tag: 11, inner: { tag: 4 } } },
+  ];
+  const writer = new PostcardWriter();
+  writer.vec((batch) => {
+    batch.string("files");
+    writeDescriptor(batch, descriptor);
+    batch.vec((row) => {
+      row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));
+      row.bool(false);
+      row.bytes(
+        createRecord(descriptor, [
+          concatBytes([
+            uuidBytes("00000000-0000-0000-0000-000000000001"),
+            uuidBytes("00000000-0000-0000-0000-000000000002"),
+          ]),
+          concatBytes([doubleBytes(65536), doubleBytes(1234)]),
+        ]),
+      );
+    }, 1);
+  }, 1);
+  return writer.finish();
+}
+
+function uuidBytes(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function doubleBytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setFloat64(0, value, true);
+  return bytes;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }

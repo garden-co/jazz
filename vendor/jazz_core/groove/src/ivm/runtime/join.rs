@@ -404,15 +404,13 @@ fn keyed_join_deltas<'a>(
     fields: &[String],
     deltas: &'a [RecordDelta],
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
-    deltas
-        .iter()
-        .map(|delta| {
-            Ok(KeyedRecordDelta {
-                delta,
-                key: join_key(descriptor, delta.raw(), fields)?,
-            })
-        })
-        .collect()
+    let mut keyed = Vec::new();
+    for delta in deltas {
+        for key in join_keys(descriptor, delta.raw(), fields)? {
+            keyed.push(KeyedRecordDelta { delta, key });
+        }
+    }
+    Ok(keyed)
 }
 
 fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sign: i64) {
@@ -444,16 +442,40 @@ fn append_bucket_diff(
     }
 }
 
-pub(super) fn join_key(
+pub(super) fn join_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
     fields: &[String],
-) -> Result<Vec<u8>, IvmRuntimeError> {
-    let mut key = Vec::new();
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    let mut keys = vec![Vec::new()];
+    let mut seen = HashSet::new();
+
     for field in fields {
-        encode_key_part(&mut key, &descriptor.get(record, field)?)?;
+        let values = descriptor.get(record, field)?;
+        let parts = match values {
+            crate::records::Value::Array(values) => values,
+            value => vec![value],
+        };
+
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
+        for key in &keys {
+            for value in &parts {
+                let mut next = key.clone();
+                encode_key_part(&mut next, value)?;
+                if seen.insert(next.clone()) {
+                    next_keys.push(next);
+                }
+            }
+        }
+        keys = next_keys;
+        seen.clear();
     }
-    Ok(key)
+
+    Ok(keys)
 }
 
 pub(super) fn create_join_record(
