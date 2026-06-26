@@ -18,6 +18,7 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
+mod direct_schema;
 pub mod routes;
 mod shutdown;
 #[cfg(feature = "test-utils")]
