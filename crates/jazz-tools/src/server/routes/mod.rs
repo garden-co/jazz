@@ -1520,6 +1520,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_schema_rejects_signed_integer_columns_with_direct_core_blocker() {
+        let initial_schema = Schema::new();
+        let state = make_state_with_schema(initial_schema).await;
+        let app = make_test_router(state);
+        let unsupported_schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column(
+                        "partSizes",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Integer),
+                        },
+                    )
+                    .column("score", ColumnType::Integer),
+            )
+            .build();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": unsupported_schema }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("schema publish body");
+        let json: Value = serde_json::from_slice(&body).expect("schema publish json");
+        let message = json["error"].as_str().expect("error message");
+        assert!(
+            message.contains("$.users.partSizes: INTEGER is signed, but direct core fixed schemas only support unsigned integer columns"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn edge_mode_forwards_admin_catalogue_publishing() {
         use std::sync::{Arc, Mutex};
 
