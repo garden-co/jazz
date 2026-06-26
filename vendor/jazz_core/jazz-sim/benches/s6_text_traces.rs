@@ -1465,7 +1465,9 @@ fn read_doc(node: &mut NodeState<RocksDbStorage>) -> String {
 
 fn read_db_doc(db: &Db<RocksDbStorage>, schema: &JazzSchema) -> String {
     let table = table_schema(schema, DOCS);
-    db.read(&Query::from(DOCS))
+    let query = Query::from(DOCS);
+    let prepared = db.prepare_query(&query).expect("prepare docs query");
+    db.read(&prepared)
         .expect("db read docs")
         .into_iter()
         .find(|row| row.row_uuid() == doc_row())
@@ -1551,7 +1553,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
             version_bundles,
-            complete_tx_refs,
+            peer_payload_inventory,
             result_row_adds,
             result_row_removes,
             ..
@@ -1561,7 +1563,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .flat_map(|bundle| bundle.versions.iter())
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
-                + (complete_tx_refs.len() as u64 * 24)
+                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
                 + ((result_row_adds.len() + result_row_removes.len()) as u64 * 64)
         }
         _ => 0,
