@@ -1142,9 +1142,6 @@ export class Db {
       backendSecret: this.config.backendSecret,
       cookieSession: this.config.cookieSession,
     });
-    this.followerPortBridge?.updateAuth({
-      jwtToken,
-    });
 
     return true;
   }
@@ -1170,9 +1167,6 @@ export class Db {
       jwtToken: this.config.jwtToken,
       backendSecret: this.config.backendSecret,
       cookieSession,
-    });
-    this.followerPortBridge?.updateAuth({
-      jwtToken: this.config.jwtToken,
     });
 
     return true;
