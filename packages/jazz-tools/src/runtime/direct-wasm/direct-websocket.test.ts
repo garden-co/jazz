@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { PostcardWriter } from "./direct-codec.js";
 import {
+  DirectWebSocketCarrier,
+  decodeDirectWireError,
   decodeDirectWebSocketFrameBatch,
   directWebSocketEndpointUrl,
   directWebSocketUrl,
@@ -56,4 +59,65 @@ describe("direct websocket frame carrier", () => {
     expect(isDirectWireHello(hello)).toBe(true);
     expect(isDirectWireMessage(hello)).toBe(false);
   });
+
+  it("decodes structured wire error frames", () => {
+    expect(decodeDirectWireError(encodeDirectWireError(3, 1, "bad credentials"))).toEqual({
+      code: "auth_failed",
+      retry: "after_auth",
+      message: "bad credentials",
+    });
+  });
+
+  it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    new DirectWebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url);
+          socket = this;
+        }
+      },
+    });
+
+    socket!.emitMessage(encodeDirectWebSocketFrameBatch([encodeDirectWireError(3, 1, "expired")]));
+    await Promise.resolve();
+
+    expect(frames).toEqual([]);
+    expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
+  });
 });
+
+function encodeDirectWireError(code: number, retry: number, message: string): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(2);
+  writer.u64(code);
+  writer.u64(retry);
+  writer.string(message);
+  return writer.finish();
+}
+
+class MessageWebSocket {
+  binaryType: "arraybuffer" | "blob" = "arraybuffer";
+  readonly readyState = 1;
+  private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
+
+  constructor(readonly url: string) {}
+
+  send(_data: Uint8Array): void {}
+
+  close(): void {}
+
+  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
+    if (type === "message") this.messageListeners.push(listener);
+  }
+
+  emitMessage(data: Uint8Array): void {
+    for (const listener of this.messageListeners) listener({ data });
+  }
+}

@@ -372,6 +372,11 @@ export class DirectWasmRuntime implements Runtime {
         transport.sendWireFrame(frame);
         this.scheduleServerPump();
       },
+      onError: (error) => {
+        this.handleServerTransportError(
+          new Error(`direct websocket error: ${error.code} (${error.retry}): ${error.message}`),
+        );
+      },
     });
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then(() => {

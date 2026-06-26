@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
+import { PostcardWriter } from "./direct-codec.js";
 import {
   decodeDirectWebSocketFrameBatch,
   encodeDirectWebSocketPrelude,
+  encodeDirectWebSocketFrameBatch,
   isDirectWireHello,
 } from "./direct-websocket.js";
 import { DirectWasmRuntime, type DirectTransport } from "./runtime.js";
@@ -76,6 +78,48 @@ describe("DirectWasmRuntime server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("reports direct websocket wire errors through the auth failure callback", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          connectUpstream: () => transport,
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+
+    sockets[0]!.emitMessage(
+      encodeDirectWebSocketFrameBatch([encodeDirectWireError(3, 1, "token expired")]),
+    );
+    await Promise.resolve();
+
+    expect(authFailures).toEqual([
+      "direct websocket error: auth_failed (after_auth): token expired",
+    ]);
+    expect(transport.received).toEqual([]);
+  });
+
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
     const write = {
@@ -136,6 +180,7 @@ const testSchema = {
 
 class FakeTransport implements DirectTransport {
   closed = false;
+  readonly received: Uint8Array[] = [];
 
   constructor(private readonly outgoing: Uint8Array[]) {}
 
@@ -148,7 +193,9 @@ class FakeTransport implements DirectTransport {
     return this.outgoing.splice(0);
   }
 
-  sendWireFrame(_frame: Uint8Array): void {}
+  sendWireFrame(frame: Uint8Array): void {
+    this.received.push(frame);
+  }
 
   tick(): number {
     return 0;
@@ -159,6 +206,7 @@ class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Uint8Array[] = [];
+  private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
   constructor(readonly url: string) {}
@@ -171,5 +219,20 @@ class FakeWebSocket {
     this.closed = true;
   }
 
-  addEventListener(_type: string, _listener: (event?: unknown) => void): void {}
+  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
+    if (type === "message") this.messageListeners.push(listener);
+  }
+
+  emitMessage(data: Uint8Array): void {
+    for (const listener of this.messageListeners) listener({ data });
+  }
+}
+
+function encodeDirectWireError(code: number, retry: number, message: string): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(2);
+  writer.u64(code);
+  writer.u64(retry);
+  writer.string(message);
+  return writer.finish();
 }

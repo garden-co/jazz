@@ -2,6 +2,13 @@ import { httpUrlToWs } from "../url.js";
 import { PostcardReader, PostcardWriter } from "./direct-codec.js";
 
 export type DirectWebSocketFrameHandler = (frame: Uint8Array) => void;
+export type DirectWebSocketErrorHandler = (error: DirectWireError) => void;
+
+export type DirectWireError = {
+  code: string;
+  retry: string;
+  message: string;
+};
 
 export type DirectWebSocketCarrierOptions = {
   serverUrl?: string;
@@ -10,6 +17,7 @@ export type DirectWebSocketCarrierOptions = {
   peerIdentity: Uint8Array;
   authJson?: string;
   onFrame: DirectWebSocketFrameHandler;
+  onError?: DirectWebSocketErrorHandler;
   WebSocket?: DirectWebSocketConstructor;
 };
 
@@ -71,10 +79,22 @@ export function isDirectWireError(frame: Uint8Array): boolean {
   return new PostcardReader(frame).u64() === 2;
 }
 
+export function decodeDirectWireError(frame: Uint8Array): DirectWireError {
+  const reader = new PostcardReader(frame);
+  const tag = reader.u64();
+  if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  return {
+    code: wireErrorCodeName(reader.u64()),
+    retry: wireRetryName(reader.u64()),
+    message: reader.string(),
+  };
+}
+
 export class DirectWebSocketCarrier {
   readonly url: string;
   private readonly socket: DirectBrowserWebSocket;
   private readonly onFrame: DirectWebSocketFrameHandler;
+  private readonly onError?: DirectWebSocketErrorHandler;
   private readonly opened: Promise<void>;
 
   constructor(options: DirectWebSocketCarrierOptions) {
@@ -87,6 +107,7 @@ export class DirectWebSocketCarrier {
           options.peerIdentity,
         );
     this.onFrame = options.onFrame;
+    this.onError = options.onError;
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = waitForOpen(this.socket).then(() => {
@@ -121,7 +142,10 @@ export class DirectWebSocketCarrier {
   private async handleMessage(data: unknown): Promise<void> {
     for (const frame of decodeDirectWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
       if (isDirectWireHello(frame)) continue;
-      if (isDirectWireError(frame)) continue;
+      if (isDirectWireError(frame)) {
+        this.onError?.(decodeDirectWireError(frame));
+        continue;
+      }
       this.onFrame(frame);
     }
   }
@@ -169,6 +193,40 @@ function browserWebSocketConstructor(): DirectWebSocketConstructor {
 function required(value: string | undefined, name: string): string {
   if (value == null) throw new Error(`DirectWebSocketCarrier requires ${name}`);
   return value;
+}
+
+function wireErrorCodeName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "unsupported_protocol_version";
+    case 1:
+      return "unsupported_feature";
+    case 2:
+      return "malformed_frame";
+    case 3:
+      return "auth_failed";
+    case 4:
+      return "backpressure";
+    case 5:
+      return "internal";
+    default:
+      return `unknown_${tag}`;
+  }
+}
+
+function wireRetryName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "never";
+    case 1:
+      return "after_auth";
+    case 2:
+      return "after_resume";
+    case 3:
+      return "later";
+    default:
+      return `unknown_${tag}`;
+  }
 }
 
 function waitForOpen(socket: DirectBrowserWebSocket): Promise<void> {
