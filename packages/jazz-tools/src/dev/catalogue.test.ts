@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { createNapiRuntime } from "../runtime/testing/napi-runtime-test-utils.js";
+import { structuralSchemaHash } from "./schema-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -65,6 +67,35 @@ describe("dev catalogue API exports", () => {
     const testing = await import("../testing/index.js");
 
     expect(testing.deploy).toBe(dev.deploy);
+  });
+});
+
+describe("dev catalogue schema hash parity", () => {
+  it("matches the native runtime hash for representative public schema shapes", async () => {
+    const schema = {
+      users: s.table({
+        name: s.string(),
+      }),
+      files: s.table({
+        ownerId: s.ref("users"),
+        contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
+        mediaType: s.enum("image/png", "text/plain").default("text/plain"),
+        tags: s.array(s.string()).default(["draft", "review"]),
+      }),
+      comments: s
+        .table({
+          fileId: s.ref("files"),
+          authorId: s.ref("users").optional().default(null),
+          body: s.string(),
+          attachmentIds: s.array(s.ref("files")).default([]),
+          status: s.enum("open", "resolved").default("open"),
+        })
+        .indexOnly(["fileId", "status"]),
+    };
+    const app = s.defineApp(schema);
+    const runtime = await createNapiRuntime(app.wasmSchema);
+
+    expect(structuralSchemaHash(app.wasmSchema)).toBe(runtime.getSchemaHash());
   });
 });
 
