@@ -14,6 +14,10 @@ const OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES: usize = 16;
 const OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES: usize = blake3::OUT_LEN * 2;
 const OVERFLOW_INDEX_VALUE_TRAILER_BYTES: usize =
     1 + OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES + OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES;
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 const RAW_TABLE_KEY_PREFIX: &str = "raw:";
 const INDEX_RAW_TABLE_PREFIX: &str = "idx:";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -70,14 +74,18 @@ fn decode_hex_batch_id(raw: &str, context: &str) -> Result<BatchId, StorageError
     Ok(BatchId(bytes))
 }
 
-fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
-    RAW_TABLE_KEY_PREFIX.len() + table.len() + 1 + key_len
-}
-
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 fn raw_table_prefix_len(table: &str) -> usize {
     RAW_TABLE_KEY_PREFIX.len() + table.len() + 1
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(super) fn raw_table_entry_key(table: &str, key: &str) -> String {
     let mut storage_key = String::with_capacity(raw_table_prefix_len(table) + key.len());
     storage_key.push_str(RAW_TABLE_KEY_PREFIX);
@@ -87,6 +95,10 @@ pub(super) fn raw_table_entry_key(table: &str, key: &str) -> String {
     storage_key
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(super) fn raw_table_prefix(table: &str) -> String {
     let mut prefix = String::with_capacity(raw_table_prefix_len(table));
     prefix.push_str(RAW_TABLE_KEY_PREFIX);
@@ -95,6 +107,10 @@ pub(super) fn raw_table_prefix(table: &str) -> String {
     prefix
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(super) fn raw_table_scan_prefix(table: &str, prefix: &str) -> String {
     let mut storage_prefix = String::with_capacity(raw_table_prefix_len(table) + prefix.len());
     storage_prefix.push_str(RAW_TABLE_KEY_PREFIX);
@@ -104,6 +120,10 @@ pub(super) fn raw_table_scan_prefix(table: &str, prefix: &str) -> String {
     storage_prefix
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(super) fn strip_raw_table_key<'a>(table: &str, storage_key: &'a str) -> Option<&'a str> {
     storage_key
         .strip_prefix(RAW_TABLE_KEY_PREFIX)?
@@ -132,14 +152,7 @@ fn index_entry_key_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    raw_table_key_bytes(
-        "",
-        index_raw_table_len(table, column, branch)
-            + value_segment_len
-            + 1
-            + INDEX_ENTRY_UUID_HEX_BYTES,
-    ) - RAW_TABLE_KEY_PREFIX.len()
-        - 1
+    index_raw_table_len(table, column, branch) + value_segment_len + 1 + INDEX_ENTRY_UUID_HEX_BYTES
 }
 
 fn index_value_prefix_bytes(
@@ -148,11 +161,7 @@ fn index_value_prefix_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    raw_table_key_bytes(
-        "",
-        index_raw_table_len(table, column, branch) + value_segment_len + 1,
-    ) - RAW_TABLE_KEY_PREFIX.len()
-        - 1
+    index_raw_table_len(table, column, branch) + value_segment_len + 1
 }
 
 fn index_key_too_large_error(
