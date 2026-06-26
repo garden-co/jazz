@@ -6,7 +6,7 @@ import {
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
 import { Db } from "../runtime/db.js";
-import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
+import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 type JazzClientContextValue = SolidJazzClient;
 
@@ -26,12 +26,7 @@ export function JazzProvider(props: JazzProviderProps) {
   if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools !== false) {
     createEffect(() => {
       const client = clientReady();
-      if (!client) return;
-      const db = client.db;
-      if (!markDevToolsAttached(db as object)) return;
-      void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
-        startInspectorOverlay(db as object),
-      );
+      if (client) startInspectorOnce(client.db as object);
     });
   }
 

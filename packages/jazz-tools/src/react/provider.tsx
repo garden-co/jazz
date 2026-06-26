@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
+import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -27,16 +27,13 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-// Dev-only: mount the inspector overlay + attach the bridge for this db. The
-// overlay code is a lazily-loaded, side-effect-free chunk that is absent from
-// production bundles (gated below) and only starts when this effect runs.
+// Dev-only: mount the inspector overlay + attach the bridge for this db. Only
+// rendered when shouldAutoAttach is true, so the lazy overlay chunk is dropped
+// from production bundles.
 function DevToolsAutoAttach() {
   const { db } = useCoreJazzClient() as JazzClientContextValue;
   useEffect(() => {
-    if (!markDevToolsAttached(db as object)) return;
-    void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
-      startInspectorOverlay(db as object),
-    );
+    startInspectorOnce(db as object);
   }, [db]);
   return null;
 }
