@@ -5,11 +5,14 @@
 
 #![allow(clippy::single_element_loop)]
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -18,10 +21,12 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz::wire::{TransportError, WireTransport};
 
 type BenchDb = Db<MemoryStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 #[derive(Debug, Clone, Copy)]
 struct SmallProfile {
@@ -147,6 +152,14 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
+    open_db_with_author(seed, AUTHOR, false)
+}
+
+fn open_core_db(seed: u64) -> BenchDb {
+    open_db_with_author(seed, AuthorId::SYSTEM, true)
+}
+
+fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -154,18 +167,64 @@ fn open_db(seed: u64) -> BenchDb {
         .map(String::as_str)
         .collect::<Vec<_>>();
 
-    block_on(Db::open(
-        DbConfig::new(
-            schema,
-            MemoryStorage::new(&refs),
-            DbIdentity {
-                node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
-            },
-        )
-        .with_id_source(SeededRowIdSource::new(seed)),
-    ))
-    .expect("open direct realistic benchmark db")
+    let config = DbConfig::new(
+        schema,
+        MemoryStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([seed as u8; 16]),
+            author,
+        },
+    )
+    .with_id_source(SeededRowIdSource::new(seed));
+
+    let opened = if history_complete {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    };
+    opened.expect("open direct realistic benchmark db")
+}
+
+struct ByteDuplexTransport {
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+impl WireTransport for ByteDuplexTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+fn byte_duplex() -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let left_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&left),
+        inbound: Rc::clone(&right),
+    };
+    let right_transport = ByteDuplexTransport {
+        outbound: right,
+        inbound: left,
+    };
+    (
+        Box::new(WireTransportAdapter::current(left_transport)),
+        Box::new(WireTransportAdapter::current(right_transport)),
+    )
+}
+
+fn global_subscribe_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+    }
 }
 
 fn row_uuid(tag: u8, index: usize) -> RowUuid {
@@ -667,9 +726,94 @@ fn r9_subscribed_write(c: &mut Criterion) {
     group.finish();
 }
 
+fn r10_direct_sync_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r10_direct_sync_fanout");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let writer = open_db(10);
+                let server = open_core_db(11);
+                let reader = open_db_with_author(12, READER_AUTHOR, false);
+
+                let fixture = seed_fixture(&writer, profile);
+                let project = fixture.projects[0];
+                let subscribed_row = fixture.tasks[0];
+
+                let (writer_transport, server_writer_transport) = byte_duplex();
+                let _writer_upstream = writer.connect_upstream(writer_transport);
+                let _writer_subscriber = server.accept_subscriber(server_writer_transport, AUTHOR);
+
+                let (reader_transport, server_reader_transport) = byte_duplex();
+                let _reader_upstream = reader.connect_upstream(reader_transport);
+                let _reader_subscriber =
+                    server.accept_subscriber(server_reader_transport, READER_AUTHOR);
+
+                let query = project_board_query(&reader, project);
+                let mut subscription = block_on(reader.subscribe(&query, global_subscribe_opts()))
+                    .expect("subscribe reader project board");
+                assert!(drain_opened(block_on(subscription.next_event()), "reader board") == 0);
+
+                writer.tick().expect("ship seeded writer rows");
+                server.tick().expect("ingest seeded writer rows");
+                reader.tick().expect("announce reader subscription");
+                server.tick().expect("serve reader subscription");
+                reader.tick().expect("apply reader subscription snapshot");
+                assert!(
+                    drain_delta(block_on(subscription.next_event()), "reader board seeded") > 0
+                );
+
+                let mut update_index = 0usize;
+                b.iter(|| {
+                    wait_local(
+                        writer
+                            .update(
+                                "tasks",
+                                subscribed_row,
+                                BTreeMap::from([
+                                    (
+                                        "status".to_owned(),
+                                        Value::String(
+                                            if update_index % 2 == 0 {
+                                                "doing"
+                                            } else {
+                                                "review"
+                                            }
+                                            .to_owned(),
+                                        ),
+                                    ),
+                                    (
+                                        "updated_at".to_owned(),
+                                        Value::U64((profile.tasks + update_index) as u64),
+                                    ),
+                                ]),
+                            )
+                            .expect("writer project-board update"),
+                    );
+                    update_index += 1;
+
+                    writer.tick().expect("ship writer update");
+                    server.tick().expect("fan out writer update");
+                    reader.tick().expect("apply reader update");
+
+                    let delivered =
+                        drain_delta(block_on(subscription.next_event()), "reader board update");
+                    assert!(delivered > 0);
+                    black_box(delivered)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r4_hot_task_history, r9_subscribed_write
+    targets = r1_crud, r2_reads, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout
 }
 criterion_main!(benches);
