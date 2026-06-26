@@ -45,6 +45,7 @@ interface WorkerInitOptions {
   directOpen?: {
     schema: Uint8Array;
     config: Uint8Array;
+    peerIdentity: Uint8Array;
   };
 }
 
@@ -296,6 +297,8 @@ async function runWorkerHostWithOptionalLock(
 
 type WorkerInbound =
   | { type: "sync"; frames: Uint8Array[] }
+  | { type: "settle"; id: number }
+  | { type: "query"; id: number; query: Uint8Array }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "update-auth"; jwtToken?: string | null }
   | { type: "lifecycle"; event: string }
@@ -308,6 +311,9 @@ type WorkerOutbound =
   | { type: "init-ok"; clientId: string }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "server-out"; frames: Uint8Array[] }
+  | { type: "settled"; id: number }
+  | { type: "query-result"; id: number; rows: Uint8Array }
+  | { type: "query-error"; id: number; message: string }
   | { type: "follower-port-attached"; peerId: string; leadershipId: number }
   | { type: "follower-port-closed"; peerId: string; leadershipId: number }
   | { type: "shutdown-ok" }
@@ -322,6 +328,9 @@ type DirectTransport = {
 
 type DirectDb = {
   connectUpstream(): DirectTransport;
+  acceptSubscriber(identity: Uint8Array): DirectTransport;
+  prepareQuery(query: Uint8Array): object;
+  all(query: object, opts: unknown): Uint8Array;
   tick(): void;
 };
 
@@ -353,6 +362,7 @@ class DirectWorkerHost {
     private readonly db: DirectDb,
     private readonly mainTransport: DirectTransport,
     private readonly serverTransport: DirectTransport | null,
+    private readonly peerIdentity: Uint8Array,
     private readonly clientId: string,
   ) {}
 
@@ -368,12 +378,13 @@ class DirectWorkerHost {
       init.directOpen.schema,
       init.directOpen.config,
     )) as DirectDb;
-    const mainTransport = db.connectUpstream();
+    const mainTransport = db.acceptSubscriber(init.directOpen.peerIdentity);
     const serverTransport = init.serverUrl ? db.connectUpstream() : null;
     const host = new DirectWorkerHost(
       db,
       mainTransport,
       serverTransport,
+      init.directOpen.peerIdentity,
       init.clientId ?? crypto.randomUUID(),
     );
     self.onmessage = (event: MessageEvent) => host.handle(event.data);
@@ -392,6 +403,14 @@ class DirectWorkerHost {
           this.pendingDurabilityTick = true;
         }
         this.schedulePump();
+        return;
+      case "settle":
+        this.pendingDurabilityTick = true;
+        this.pump();
+        post({ type: "settled", id: message.id });
+        return;
+      case "query":
+        this.handleQuery(message.id, message.query);
         return;
       case "server-in":
         if (message.frame instanceof Uint8Array) {
@@ -425,7 +444,7 @@ class DirectWorkerHost {
   private attachFollowerPort(peerId: string, leadershipId: number, port: MessagePort): void {
     const existing = this.peers.get(peerId);
     existing?.transport.close();
-    const transport = this.db.connectUpstream();
+    const transport = this.db.acceptSubscriber(this.peerIdentity);
     this.peers.set(peerId, { port, transport });
     port.addEventListener("message", (event: MessageEvent) => {
       const msg = event.data as { type?: string; frames?: unknown };
@@ -442,6 +461,19 @@ class DirectWorkerHost {
     port.start?.();
     post({ type: "follower-port-attached", peerId, leadershipId });
     this.schedulePump();
+  }
+
+  private handleQuery(id: number, queryBytes: Uint8Array): void {
+    try {
+      this.pendingDurabilityTick = true;
+      this.pump();
+      const query = this.db.prepareQuery(queryBytes);
+      const rows = this.db.all(query, { tier: "local" });
+      post({ type: "query-result", id, rows }, [rows.buffer]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      post({ type: "query-error", id, message });
+    }
   }
 
   private detachFollowerPort(peerId: string, leadershipId: number): void {

@@ -1352,11 +1352,18 @@ export class Db {
     await this.workerBridge.waitForUpstreamServerConnection();
   }
 
+  private async waitForDurableWorkerSettle(): Promise<void> {
+    await this.ensureBridgeReady();
+    await this.workerBridge?.waitForDurableSettle();
+  }
+
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
     const wait = handle.wait.bind(handle);
     handle.wait = (async (options: { tier: DurabilityTier }) => {
       await this.ensureWriteWaitReady(options);
-      return wait(options);
+      const result = await wait(options);
+      await this.waitForDurableWorkerSettle();
+      return result;
     }) as THandle["wait"];
     return handle;
   }

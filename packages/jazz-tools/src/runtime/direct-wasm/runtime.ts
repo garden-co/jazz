@@ -46,10 +46,12 @@ type DirectWasmDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
   connectUpstream(): DirectTransport;
+  acceptSubscriber(identity: Uint8Array): DirectTransport;
   tick(): void;
 };
 
 type DirectPreparedQuery = object;
+type DurableQueryExecutor = (query: Uint8Array) => Promise<Uint8Array>;
 
 type DirectWrite = {
   payload: Uint8Array;
@@ -77,6 +79,7 @@ export type DirectTransport = {
 export type DirectOpenPayload = {
   schema: Uint8Array;
   config: Uint8Array;
+  peerIdentity: Uint8Array;
 };
 
 type PendingTx = {
@@ -109,6 +112,7 @@ export class DirectWasmRuntime implements Runtime {
   private readonly db: DirectWasmDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
+  private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
   private readonly preparedQueries = new Map<string, DirectPreparedQuery>();
   private readonly pendingTxs = new Map<string, PendingTx>();
@@ -116,6 +120,7 @@ export class DirectWasmRuntime implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private durableQueryExecutor: DurableQueryExecutor | null = null;
   private readonly syncNeededCallbacks = new Set<() => void>();
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
@@ -130,16 +135,33 @@ export class DirectWasmRuntime implements Runtime {
   ) {
     this.schemaBytes = encodeSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
+    this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
     this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
   }
 
   getDirectOpenPayload(): DirectOpenPayload {
-    return { schema: this.schemaBytes, config: this.configBytes };
+    return { schema: this.schemaBytes, config: this.configBytes, peerIdentity: this.peerIdentity };
   }
 
   connectUpstreamPeer(): DirectTransport {
     return this.db.connectUpstream();
+  }
+
+  encodeDirectQuery(queryJson: string): Uint8Array {
+    return encodeQueryJson(queryJson, this.schema);
+  }
+
+  decodeDirectRows(payload: Uint8Array, queryJson: string): RowState[] {
+    return filterRows(
+      rowsFromBatches(readRowBatches(payload), this.schema),
+      queryFiltersFromJson(queryJson, this.schema),
+      this.schema,
+    );
+  }
+
+  setDurableQueryExecutor(executor: DurableQueryExecutor | null): void {
+    this.durableQueryExecutor = executor;
   }
 
   onDirectSyncNeeded(callback: () => void): () => void {
@@ -280,15 +302,15 @@ export class DirectWasmRuntime implements Runtime {
   async query(
     queryJson: string,
     _sessionJson?: string | null,
-    _tier?: string | null,
+    tier?: string | null,
     _optionsJson?: string | null,
   ): Promise<unknown> {
+    if ((tier == null || tier === "local") && this.durableQueryExecutor) {
+      const payload = await this.durableQueryExecutor(this.encodeDirectQuery(queryJson));
+      return this.decodeDirectRows(payload, queryJson);
+    }
     const query = this.prepareQuery(queryJson);
-    return filterRows(
-      rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema),
-      queryFiltersFromJson(queryJson, this.schema),
-      this.schema,
-    );
+    return this.decodeDirectRows(this.db.all(query, readOptions()), queryJson);
   }
 
   createSubscription(
@@ -386,7 +408,7 @@ export class DirectWasmRuntime implements Runtime {
   }
 
   private prepareQuery(queryJson: string): DirectPreparedQuery {
-    const queryBytes = encodeQueryJson(queryJson, this.schema);
+    const queryBytes = this.encodeDirectQuery(queryJson);
     const key = bytesKey(queryBytes);
     let query = this.preparedQueries.get(key);
     if (!query) {
