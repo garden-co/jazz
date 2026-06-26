@@ -60,10 +60,20 @@ describe("DirectWasmRuntime server transport", () => {
     ]);
     expect(transport.closed).toBe(false);
 
+    runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]!.closed).toBe(true);
+    expect(JSON.parse(new TextDecoder().decode(sockets[1]!.sent[0]))).toEqual({
+      peer_identity: "01010101010101010101010101010101",
+      auth: { jwt_token: "fresh.jwt" },
+    });
+
     runtime.disconnect();
 
-    expect(transport.closed).toBe(true);
-    expect(sockets[0]!.closed).toBe(true);
+    expect(sockets[1]!.closed).toBe(true);
   });
 });
 
