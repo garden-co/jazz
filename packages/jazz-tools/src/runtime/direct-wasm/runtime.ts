@@ -125,6 +125,7 @@ export class DirectWasmRuntime implements Runtime {
   private serverTransport: DirectTransport | null = null;
   private serverCarrier: DirectWebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
+  private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly syncNeededCallbacks = new Set<() => void>();
   private serverPumpScheduled = false;
@@ -358,6 +359,7 @@ export class DirectWasmRuntime implements Runtime {
 
   connect(url: string, authJson: string): void {
     this.disconnect();
+    this.serverEndpointUrl = url;
     const transport = this.db.connectUpstream();
     this.serverTransport = transport;
     const carrier = new DirectWebSocketCarrier({
@@ -386,12 +388,16 @@ export class DirectWasmRuntime implements Runtime {
     this.serverCarrierPromise = null;
     this.serverTransport?.close();
     this.serverTransport = null;
+    this.serverEndpointUrl = null;
     this.queuedServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
   }
 
-  updateAuth(_authJson: string): void {}
+  updateAuth(authJson: string): void {
+    if (!this.serverEndpointUrl) return;
+    this.connect(this.serverEndpointUrl, authJson);
+  }
 
   onAuthFailure(callback: (reason: string) => void): void {
     this.authFailureCallback = callback;
