@@ -4,7 +4,9 @@ members = [
   "crates/jazz-tools",
   "crates/jazz-wasm",
   "crates/jazz-napi",
-  "crates/jazz-rn/rust",
+  # React Native is paused while we decide whether the new core runtime should
+  # use RocksDB on mobile or a dedicated mobile storage backend.
+  # "crates/jazz-rn/rust",
   "crates/wasm-tracing",
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
