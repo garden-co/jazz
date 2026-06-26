@@ -8,11 +8,7 @@ import {
   type AbiRowBatch,
 } from "./direct-codec.js";
 
-export {
-  PostcardWriter,
-  openConfig,
-  queryFromTable,
-};
+export { PostcardWriter, openConfig, queryFromTable };
 
 export type ObjectKind = "db" | "query" | "subscription" | "write" | "transport";
 export type ObjectHandle<K extends ObjectKind = ObjectKind> = { kind: K; id: number };
@@ -92,7 +88,7 @@ type PendingRequest = {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
-export class BrowserWasmWorkerClient {
+export class BrowserWasmAbiSmokeClient {
   private nextMessageId = 1;
   private readonly pending = new Map<number, PendingRequest>();
 
@@ -107,7 +103,8 @@ export class BrowserWasmWorkerClient {
 
   async init(): Promise<void> {
     const response = await this.request({ id: this.takeMessageId(), type: "load" });
-    if (response.type !== "ready") throw new Error(`browser db worker init failed: ${JSON.stringify(response)}`);
+    if (response.type !== "ready")
+      throw new Error(`browser db worker init failed: ${JSON.stringify(response)}`);
   }
 
   openMemoryDb(schema: Uint8Array, config: Uint8Array): Promise<DbHandle> {
@@ -134,7 +131,12 @@ export class BrowserWasmWorkerClient {
     return this.call("readOne", db, query, opts) as Promise<AbiRowBatch[]>;
   }
 
-  readAllForIdentity(db: DbHandle, query: QueryHandle, identity: Uint8Array, opts?: unknown): Promise<AbiRowBatch[]> {
+  readAllForIdentity(
+    db: DbHandle,
+    query: QueryHandle,
+    identity: Uint8Array,
+    opts?: unknown,
+  ): Promise<AbiRowBatch[]> {
     return this.call("readAllForIdentity", db, query, identity, opts) as Promise<AbiRowBatch[]>;
   }
 
@@ -154,19 +156,42 @@ export class BrowserWasmWorkerClient {
     return this.call("canInsertEncoded", db, table, cells) as Promise<boolean>;
   }
 
-  canUpdateEncodedForIdentity(db: DbHandle, table: string, rowId: Uint8Array, patch: Uint8Array, identity: Uint8Array): Promise<boolean> {
-    return this.call("canUpdateEncodedForIdentity", db, table, rowId, patch, identity) as Promise<boolean>;
+  canUpdateEncodedForIdentity(
+    db: DbHandle,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    identity: Uint8Array,
+  ): Promise<boolean> {
+    return this.call(
+      "canUpdateEncodedForIdentity",
+      db,
+      table,
+      rowId,
+      patch,
+      identity,
+    ) as Promise<boolean>;
   }
 
   insertEncoded(db: DbHandle, table: string, cells: Uint8Array): Promise<WriteHandle> {
     return this.call("insertEncoded", db, table, cells) as Promise<WriteHandle>;
   }
 
-  insertWithIdEncoded(db: DbHandle, table: string, rowId: Uint8Array, cells: Uint8Array): Promise<WriteHandle> {
+  insertWithIdEncoded(
+    db: DbHandle,
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+  ): Promise<WriteHandle> {
     return this.call("insertWithIdEncoded", db, table, rowId, cells) as Promise<WriteHandle>;
   }
 
-  updateEncoded(db: DbHandle, table: string, rowId: Uint8Array, patch: Uint8Array): Promise<WriteHandle> {
+  updateEncoded(
+    db: DbHandle,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+  ): Promise<WriteHandle> {
     return this.call("updateEncoded", db, table, rowId, patch) as Promise<WriteHandle>;
   }
 
@@ -182,7 +207,11 @@ export class BrowserWasmWorkerClient {
     return this.callVoid("waitWrite", write, tier);
   }
 
-  connectTransport(db: DbHandle, direction = "upstream", hints = new Uint8Array()): Promise<TransportHandle> {
+  connectTransport(
+    db: DbHandle,
+    direction = "upstream",
+    hints = new Uint8Array(),
+  ): Promise<TransportHandle> {
     return this.call("connectTransport", db, direction, hints) as Promise<TransportHandle>;
   }
 
@@ -190,7 +219,10 @@ export class BrowserWasmWorkerClient {
     return this.callVoid("transportSendWireFrame", transport, frame);
   }
 
-  transportRecvWireFrames(transport: TransportHandle, budget: { max_frames: number; max_bytes: number }): Promise<Uint8Array[]> {
+  transportRecvWireFrames(
+    transport: TransportHandle,
+    budget: { max_frames: number; max_bytes: number },
+  ): Promise<Uint8Array[]> {
     return this.call("transportRecvWireFrames", transport, budget) as Promise<Uint8Array[]>;
   }
 
@@ -213,7 +245,8 @@ export class BrowserWasmWorkerClient {
   async shutdown(): Promise<void> {
     try {
       const response = await this.request({ id: this.takeMessageId(), type: "shutdown" });
-      if (response.type !== "closed") throw new Error(`browser db worker shutdown failed: ${JSON.stringify(response)}`);
+      if (response.type !== "closed")
+        throw new Error(`browser db worker shutdown failed: ${JSON.stringify(response)}`);
     } finally {
       this.rejectPending(new Error("browser db worker shutdown"));
     }
@@ -245,7 +278,8 @@ export class BrowserWasmWorkerClient {
       args,
     });
     if (response.type === "error") throw new Error(response.error);
-    if (response.type !== "result") throw new Error(`unexpected browser db response ${JSON.stringify(response)}`);
+    if (response.type !== "result")
+      throw new Error(`unexpected browser db response ${JSON.stringify(response)}`);
     return response.result;
   }
 
@@ -255,7 +289,11 @@ export class BrowserWasmWorkerClient {
       if (this.requestTimeoutMs > 0) {
         pending.timeout = setTimeout(() => {
           if (this.takePending(request.id)) {
-            reject(new Error(`browser db request ${request.id} timed out after ${this.requestTimeoutMs}ms`));
+            reject(
+              new Error(
+                `browser db request ${request.id} timed out after ${this.requestTimeoutMs}ms`,
+              ),
+            );
           }
         }, this.requestTimeoutMs);
       }
@@ -288,10 +326,7 @@ export function rowsFromPayload(value: unknown): AbiRowBatch[] {
 
 export function rowsFromDeltaPayload(value: unknown): AbiRowBatch[] {
   const reader = new PostcardReader(assertBytes(value, "delta payload"));
-  return [
-    ...reader.readVec(readAbiRowBatch),
-    ...reader.readVec(readAbiRowBatch),
-  ];
+  return [...reader.readVec(readAbiRowBatch), ...reader.readVec(readAbiRowBatch)];
 }
 
 export function normalizeBytes(value: unknown): Uint8Array {
@@ -308,14 +343,23 @@ export function reviveBytes(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(reviveBytes);
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    return new Uint8Array(
+      value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
+    );
   }
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, reviveBytes(entry)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, reviveBytes(entry)]),
+    );
   }
   return value;
 }
 
 function isPayloadBytes(value: unknown): value is { type: "payload"; payload: unknown } {
-  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "payload" && "payload" in value;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "payload" &&
+    "payload" in value
+  );
 }

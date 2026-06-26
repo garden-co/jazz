@@ -44,19 +44,20 @@ async function run(): Promise<void> {
   writeLog("browser storage port: openBrowserDb(namespace)");
   const search = new URLSearchParams(window.location.search);
   const smoke = search.get("smoke");
-  const result = smoke === "websocket-boundary"
-    ? await runWebSocketBoundarySmoke(writeLog)
-    : smoke === "websocket-rust"
-      ? await runWebSocketRustSmoke(requireQueryParam(search, "ws"), writeLog)
-    : smoke === "db-all-bytea-order"
-      ? await runDbAllByteaOrderSmoke(writeLog)
-    : smoke === "browser-concurrency"
-      ? await runBrowserStorageConcurrencySmoke(search.get("ns") ?? "", writeLog)
-    : smoke === "browser-batch-durability"
-      ? await runBrowserBatchDurabilitySmoke(search.get("ns") ?? "", writeLog)
-    : isReloadPersistenceSmokeMode(smoke)
-      ? await runReloadPersistenceSmoke(smoke, search.get("ns") ?? "", writeLog)
-      : await runWorkerBackedTour(writeLog, updateProgress);
+  const result =
+    smoke === "websocket-boundary"
+      ? await runWebSocketBoundarySmoke(writeLog)
+      : smoke === "websocket-rust"
+        ? await runWebSocketRustSmoke(requireQueryParam(search, "ws"), writeLog)
+        : smoke === "db-all-bytea-order"
+          ? await runDbAllByteaOrderSmoke(writeLog)
+          : smoke === "browser-concurrency"
+            ? await runBrowserStorageConcurrencySmoke(search.get("ns") ?? "", writeLog)
+            : smoke === "browser-batch-durability"
+              ? await runBrowserBatchDurabilitySmoke(search.get("ns") ?? "", writeLog)
+              : isReloadPersistenceSmokeMode(smoke)
+                ? await runReloadPersistenceSmoke(smoke, search.get("ns") ?? "", writeLog)
+                : await runWorkerBackedTour(writeLog, updateProgress);
   summary.textContent = result.message;
   summary.classList.add("ready");
 }
@@ -120,21 +121,23 @@ function updateProgress(event: ScenarioProgress): void {
 }
 
 function renderTodos(todos: TodoView[]): void {
-  todosBody.replaceChildren(...todos.map((todo) => {
-    const row = document.createElement("div");
-    row.className = "todo-row";
-    row.role = "row";
-    row.dataset.title = todo.title;
-    row.dataset.done = String(todo.done);
+  todosBody.replaceChildren(
+    ...todos.map((todo) => {
+      const row = document.createElement("div");
+      row.className = "todo-row";
+      row.role = "row";
+      row.dataset.title = todo.title;
+      row.dataset.done = String(todo.done);
 
-    row.append(
-      cell(todo.title, "cell strong"),
-      cell(todo.done ? "done" : "open", `cell badge ${todo.done ? "done" : "open"}`),
-      cell(rowIdLabel(todo.rowId), "cell muted code"),
-    );
-    row.title = `encoded todo ${rowIdLabel(todo.rowId)} decoded on the main thread`;
-    return row;
-  }));
+      row.append(
+        cell(todo.title, "cell strong"),
+        cell(todo.done ? "done" : "open", `cell badge ${todo.done ? "done" : "open"}`),
+        cell(rowIdLabel(todo.rowId), "cell muted code"),
+      );
+      row.title = `encoded todo ${rowIdLabel(todo.rowId)} decoded on the main thread`;
+      return row;
+    }),
+  );
   rowCount.textContent = `${todos.length} ${todos.length === 1 ? "todo" : "todos"}`;
 }
 

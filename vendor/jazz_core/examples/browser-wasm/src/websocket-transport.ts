@@ -21,7 +21,10 @@ export function webSocketConstructor(unavailableMessage: string): WebSocketConst
   return candidate;
 }
 
-export async function connectWebSocket(WebSocketCtor: WebSocketConstructor, url: string): Promise<MinimalWebSocket> {
+export async function connectWebSocket(
+  WebSocketCtor: WebSocketConstructor,
+  url: string,
+): Promise<MinimalWebSocket> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const socket = new WebSocketCtor(url);
@@ -61,8 +64,10 @@ export function decodeFrameBatch(batch: Uint8Array): Uint8Array[] {
 
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  if (typeof Blob !== "undefined" && data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+  if (ArrayBuffer.isView(data))
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (typeof Blob !== "undefined" && data instanceof Blob)
+    return new Uint8Array(await data.arrayBuffer());
   throw new Error(`expected binary websocket message, got ${typeof data}`);
 }
 
@@ -81,7 +86,9 @@ function waitForOpen(socket: MinimalWebSocket): Promise<void> {
     }, 5_000);
     socket.addEventListener("open", () => settle(resolve));
     socket.addEventListener("error", (event) => settle(() => reject(event)));
-    socket.addEventListener("close", () => settle(() => reject(new Error("websocket closed before open"))));
+    socket.addEventListener("close", () =>
+      settle(() => reject(new Error("websocket closed before open"))),
+    );
   });
 }
 
