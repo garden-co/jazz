@@ -171,6 +171,7 @@ impl ServerBuilder {
 
         let state = Arc::new(ServerState {
             runtime,
+            catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
@@ -804,7 +805,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
+    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn dynamic_builder_starts_direct_core_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
@@ -820,7 +821,7 @@ mod tests {
         {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage(StorageBackend::Sqlite {
+                .with_storage(StorageBackend::RocksDb {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
@@ -841,7 +842,7 @@ mod tests {
         }
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::Sqlite {
+            .with_storage(StorageBackend::RocksDb {
                 path: data_dir.path().to_path_buf(),
             })
             .build()

@@ -19,6 +19,7 @@ use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 use jazz_server::StorageConfig;
 
 mod builder;
+mod catalogue;
 mod direct_core;
 mod direct_schema;
 pub mod routes;
@@ -27,6 +28,7 @@ mod shutdown;
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
+pub(crate) use catalogue::ServerCatalogue;
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "test-utils")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
@@ -406,6 +408,7 @@ impl ServerTopology {
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub runtime: TokioRuntime<DynStorage>,
+    pub(crate) catalogue: ServerCatalogue,
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
@@ -762,6 +765,7 @@ mod tests {
         .expect("build schema manager");
         Arc::new(ServerState {
             runtime: TokioRuntime::new(schema_manager, storage, |_| {}),
+            catalogue: ServerCatalogue,
             app_id,
             connections: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
