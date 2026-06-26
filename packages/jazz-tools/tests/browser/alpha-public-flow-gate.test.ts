@@ -26,11 +26,34 @@ const app = schema.defineApp({
   }),
 });
 
+const fileApp = schema.defineApp({
+  file_parts: schema.table({
+    data: schema.bytes(),
+  }),
+  files: schema.table({
+    name: schema.string(),
+    mimeType: schema.string(),
+    partIds: schema.array(schema.ref("file_parts")),
+    partSizes: schema.array(schema.float()),
+  }),
+});
+
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.always(),
   policy.todos.allowInsert.always(),
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.always(),
+]);
+
+const filePermissions = schema.definePermissions(fileApp, ({ policy }) => [
+  policy.file_parts.allowRead.always(),
+  policy.file_parts.allowInsert.always(),
+  policy.file_parts.allowUpdate.always(),
+  policy.file_parts.allowDelete.always(),
+  policy.files.allowRead.always(),
+  policy.files.allowInsert.always(),
+  policy.files.allowUpdate.always(),
+  policy.files.allowDelete.always(),
 ]);
 
 type Todo = RowOf<typeof app.todos>;
@@ -104,6 +127,80 @@ describe("alpha public package flow", () => {
       ),
     ).toBe(true);
   });
+
+  it.skip("repro: public file/blob helpers do not settle through direct server while UUID[] partIds hit unsupported join key", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-file-flow");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
+
+    const sharedSecret = generateAuthSecret();
+    const persistentDbName = uniqueDbName("alpha-public-file-opfs");
+    const sourceBytes = makeLargeProbeBytes();
+    const sourceBlob = new Blob([sourceBytes], { type: "application/x-jazz-probe" });
+    const sourceFile = new File([sourceBlob], "probe.bin", { type: sourceBlob.type });
+
+    const db = await openAlphaDb(appId, serverUrl, adminSecret, persistentDbName, sharedSecret, {
+      uniqueLabel: false,
+    });
+    const file = await withTimeout(
+      db.createFileFromBlob(fileApp, sourceFile, {
+        chunkSizeBytes: 64 * 1024,
+        tier: "edge",
+      }),
+      20_000,
+      "file blob chunks were not accepted at the server",
+    );
+
+    expect(file.name).toBe("probe.bin");
+    expect(file.mimeType).toBe("application/x-jazz-probe");
+    expect(file.partIds.length).toBeGreaterThan(1);
+    expect(file.partSizes.reduce((sum, size) => sum + size, 0)).toBe(sourceBytes.length);
+
+    await withTimeout(
+      waitForFileParts(db, file.partIds),
+      10_000,
+      "created file parts were not readable locally",
+    );
+
+    await db.shutdown();
+    ctx.untrack(db);
+
+    const reopenedDb = await openAlphaDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      persistentDbName,
+      sharedSecret,
+      { uniqueLabel: false },
+    );
+    const reopenedBlob = await withTimeout(
+      reopenedDb.loadFileAsBlob(fileApp, file.id, { tier: "local" }),
+      10_000,
+      "file was not readable from persistent OPFS after reopen",
+    );
+    expect(reopenedBlob.type).toBe("application/x-jazz-probe");
+    await expectBlobBytes(reopenedBlob, sourceBytes);
+
+    const secondDb = await openAlphaDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "alpha-public-file-b",
+      sharedSecret,
+    );
+    await withTimeout(
+      waitForFileParts(secondDb, file.partIds, "edge"),
+      20_000,
+      "file parts did not converge to the second websocket client",
+    );
+    const secondClientBlob = await withTimeout(
+      secondDb.loadFileAsBlob(fileApp, file.id, { tier: "edge" }),
+      20_000,
+      "file was not readable from second websocket client",
+    );
+    expect(secondClientBlob.type).toBe("application/x-jazz-probe");
+    await expectBlobBytes(secondClientBlob, sourceBytes);
+  });
 });
 
 async function openAlphaDb(
@@ -112,6 +209,7 @@ async function openAlphaDb(
   adminSecret: string,
   label: string,
   secret: string,
+  options: { uniqueLabel?: boolean } = {},
 ): Promise<Db> {
   return ctx.track(
     await createDb({
@@ -119,7 +217,10 @@ async function openAlphaDb(
       serverUrl,
       adminSecret,
       secret,
-      driver: { type: "persistent", dbName: uniqueDbName(label) },
+      driver: {
+        type: "persistent",
+        dbName: options.uniqueLabel === false ? label : uniqueDbName(label),
+      },
     }),
   );
 }
@@ -129,11 +230,12 @@ async function publishSchemaAndPermissions(
   serverUrl: string,
   adminSecret: string,
   permissions: CompiledPermissions,
+  schemaApp: { wasmSchema: typeof app.wasmSchema } = app,
 ): Promise<void> {
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
     appId,
     adminSecret,
-    schema: app.wasmSchema,
+    schema: schemaApp.wasmSchema,
   });
   const { head } = await fetchPermissionsHead(serverUrl, {
     appId,
@@ -220,4 +322,35 @@ function summary(todo: Todo): string {
 
 function byTitle(left: Todo, right: Todo): number {
   return left.title.localeCompare(right.title);
+}
+
+async function waitForFileParts(
+  db: Db,
+  partIds: string[],
+  tier: "local" | "edge" = "local",
+): Promise<void> {
+  for (const partId of partIds) {
+    await waitForQuery(
+      db,
+      fileApp.file_parts.where({ id: partId }),
+      (parts) => parts.length === 1,
+      `file part ${partId}`,
+      15_000,
+      tier,
+    );
+  }
+}
+
+async function expectBlobBytes(blob: Blob, expected: Uint8Array): Promise<void> {
+  const actual = new Uint8Array(await blob.arrayBuffer());
+  expect(actual.length).toBe(expected.length);
+  expect(Array.from(actual)).toEqual(Array.from(expected));
+}
+
+function makeLargeProbeBytes(): Uint8Array {
+  const bytes = new Uint8Array(170_000);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = (index * 31 + (index >>> 8)) % 256;
+  }
+  return bytes;
 }
