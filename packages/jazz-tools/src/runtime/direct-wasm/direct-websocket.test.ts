@@ -3,7 +3,11 @@ import {
   decodeDirectWebSocketFrameBatch,
   directWebSocketEndpointUrl,
   directWebSocketUrl,
+  encodeDirectWireClientHello,
+  encodeDirectWebSocketAuthPrelude,
   encodeDirectWebSocketFrameBatch,
+  isDirectWireHello,
+  isDirectWireMessage,
 } from "./direct-websocket.js";
 
 describe("direct websocket frame carrier", () => {
@@ -31,5 +35,18 @@ describe("direct websocket frame carrier", () => {
         Uint8Array.from([0, 1, 10, 255]),
       ),
     ).toBe("ws://127.0.0.1:4200/apps/app-a/ws?identity=00010aff");
+  });
+
+  it("encodes auth prelude as alpha-shaped JSON bytes", () => {
+    expect(new TextDecoder().decode(encodeDirectWebSocketAuthPrelude('{"admin_secret":"s"}'))).toBe(
+      '{"admin_secret":"s"}',
+    );
+  });
+
+  it("encodes the client wire hello as a websocket-negotiation frame", () => {
+    const hello = encodeDirectWireClientHello();
+
+    expect(isDirectWireHello(hello)).toBe(true);
+    expect(isDirectWireMessage(hello)).toBe(false);
   });
 });

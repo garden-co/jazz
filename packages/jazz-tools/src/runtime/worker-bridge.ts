@@ -172,7 +172,8 @@ export class WorkerBridge {
     }
 
     this.transport = connectUpstreamPeer.call(this.runtime);
-    this.unsubscribeSyncNeeded = this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
+    this.unsubscribeSyncNeeded =
+      this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
     this.runtime.setDurableQueryExecutor?.((query) => this.queryDurable(query));
     const directOpen = getDirectOpenPayload.call(this.runtime);
     const initOptions: WorkerBridgeOptions = {
@@ -461,6 +462,7 @@ export class WorkerBridge {
       serverUrl: options.serverUrl,
       appId: options.appId,
       peerIdentity: options.directOpen.peerIdentity,
+      authJson: buildWorkerBridgeAuthJson(options),
       onFrame: (frame) => {
         this.applyIncomingServerPayload(frame);
         this.schedulePump();
@@ -472,7 +474,9 @@ export class WorkerBridge {
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
-      this.rejectPendingServerWork(`Direct websocket connection failed: ${stringifyUnknown(error)}`);
+      this.rejectPendingServerWork(
+        `Direct websocket connection failed: ${stringifyUnknown(error)}`,
+      );
     });
   }
 
@@ -533,6 +537,16 @@ function stringifyUnknown(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function buildWorkerBridgeAuthJson(options: WorkerBridgeOptions): string {
+  const payload: { jwt_token: string | null; admin_secret?: string } = {
+    jwt_token: options.jwtToken ?? null,
+  };
+  if (options.adminSecret) {
+    payload.admin_secret = options.adminSecret;
+  }
+  return JSON.stringify(payload);
+}
+
 export class MessagePortRuntimeBridge {
   private readonly port: MessagePort;
   private readonly runtime: RuntimeWithDirectTransport;
@@ -554,7 +568,8 @@ export class MessagePortRuntimeBridge {
       throw new Error("MessagePortRuntimeBridge requires a direct WasmDb runtime");
     }
     this.transport = connectUpstreamPeer.call(this.runtime);
-    this.unsubscribeSyncNeeded = this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
+    this.unsubscribeSyncNeeded =
+      this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
     this.port.addEventListener("message", (event: MessageEvent<PortOutbound>) => {
       this.handlePortMessage(event.data);
     });

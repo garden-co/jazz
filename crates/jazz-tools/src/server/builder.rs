@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use jazz::schema::JazzSchema;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -68,6 +69,7 @@ pub struct ServerBuilder {
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
+    direct_core_schema: Option<JazzSchema>,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
@@ -85,6 +87,7 @@ impl ServerBuilder {
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
+            direct_core_schema: None,
             sync_tracer: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
@@ -124,6 +127,11 @@ impl ServerBuilder {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_schema(mut self, schema: Schema) -> Self {
         self.schema_mode = ServerSchemaMode::Fixed(schema);
+        self
+    }
+
+    pub fn with_direct_core_schema(mut self, schema: JazzSchema) -> Self {
+        self.direct_core_schema = Some(schema);
         self
     }
 
@@ -244,6 +252,12 @@ impl ServerBuilder {
         &self,
         runtime: &TokioRuntime<DynStorage>,
     ) -> Result<Option<crate::server::direct_core::DirectCoreServer>, String> {
+        if let Some(schema) = &self.direct_core_schema {
+            return Ok(Some(
+                crate::server::direct_core::DirectCoreServer::in_memory(schema.clone())?,
+            ));
+        }
+
         let schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
             ServerSchemaMode::Dynamic => self.latest_published_schema(runtime)?,

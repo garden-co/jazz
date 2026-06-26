@@ -10,8 +10,10 @@ use std::sync::Arc;
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     extract::{Query, State},
+    http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use jazz::groove::records::Value as CoreValue;
 use jazz::ids::AuthorId;
 use jazz::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError,
@@ -22,6 +24,7 @@ use crate::server::ServerState;
 
 const DIRECT_WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+const DIRECT_WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Direct jazz_core websocket endpoint.
 ///
@@ -33,6 +36,7 @@ pub(super) async fn direct_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
     if state.shutdown.is_shutting_down() {
         return (
@@ -44,24 +48,232 @@ pub(super) async fn direct_ws_handler(
             .into_response();
     }
 
-    let identity = match direct_ws_identity(&params) {
-        Ok(identity) => identity,
-        Err(error) => {
+    let legacy_identity = match params.get("identity").map(|_| direct_ws_identity(&params)) {
+        Some(Ok(identity)) => Some(identity),
+        Some(Err(error)) => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 axum::Json(crate::jazz_transport::ErrorResponse::unauthorized(error)),
             )
                 .into_response();
         }
+        None => None,
     };
 
-    ws.on_upgrade(move |socket| handle_direct_ws_connection(socket, state, identity))
+    ws.on_upgrade(move |socket| {
+        handle_direct_ws_connection(socket, state, headers, legacy_identity)
+    })
+}
+
+#[derive(Clone, Debug)]
+struct DirectWsAdmission {
+    identity: AuthorId,
+    claims: BTreeMap<String, CoreValue>,
+}
+
+async fn direct_ws_admission(
+    auth_bytes: &[u8],
+    request_headers: &HeaderMap,
+    state: &Arc<ServerState>,
+    legacy_identity: Option<AuthorId>,
+) -> Result<DirectWsAdmission, String> {
+    let auth = serde_json::from_slice::<crate::transport_manager::AuthConfig>(auth_bytes)
+        .map_err(|error| format!("invalid direct websocket auth prelude: {error}"))?;
+
+    if let Some(admin_secret) = auth.admin_secret.as_deref() {
+        crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
+            .map_err(|(_, message)| message.to_owned())?;
+        return Ok(DirectWsAdmission {
+            identity: legacy_identity.unwrap_or(AuthorId::SYSTEM),
+            claims: BTreeMap::new(),
+        });
+    }
+
+    let mut headers = request_headers.clone();
+    if let Some(jwt) = auth.jwt_token.as_deref() {
+        let value = axum::http::HeaderValue::from_str(&format!("Bearer {jwt}"))
+            .map_err(|error| format!("invalid jwt_token header value: {error}"))?;
+        headers.insert(axum::http::header::AUTHORIZATION, value);
+    }
+    if let Some(secret) = auth.backend_secret.as_deref() {
+        let value = axum::http::HeaderValue::from_str(secret)
+            .map_err(|error| format!("invalid backend_secret header value: {error}"))?;
+        headers.insert("X-Jazz-Backend-Secret", value);
+    }
+    if let Some(session_value) = auth.backend_session.as_ref() {
+        use base64::Engine as _;
+        let json = serde_json::to_string(session_value)
+            .map_err(|error| format!("failed to serialise backend_session: {error}"))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let value = axum::http::HeaderValue::from_str(&b64)
+            .map_err(|error| format!("invalid backend_session header value: {error}"))?;
+        headers.insert("X-Jazz-Session", value);
+    }
+
+    let has_jwt = headers.get(axum::http::header::AUTHORIZATION).is_some();
+    let has_session_header = headers.get("X-Jazz-Session").is_some();
+    let backend_secret = headers
+        .get("X-Jazz-Backend-Secret")
+        .and_then(|value| value.to_str().ok());
+    if backend_secret.is_some() && !has_jwt && !has_session_header {
+        crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
+            .map_err(|(_, message)| message.to_owned())?;
+        return Ok(DirectWsAdmission {
+            identity: legacy_identity.unwrap_or(AuthorId::SYSTEM),
+            claims: BTreeMap::new(),
+        });
+    }
+
+    let session = crate::middleware::auth::extract_session(
+        &headers,
+        state.app_id,
+        &state.auth_config,
+        state.jwt_verifier.as_deref(),
+    )
+    .await
+    .map_err(|error| {
+        serde_json::to_string(&error).unwrap_or_else(|_| "authentication failed".to_owned())
+    })?;
+
+    let Some(session) = session else {
+        if let Some(identity) = legacy_identity {
+            return Ok(DirectWsAdmission {
+                identity,
+                claims: BTreeMap::new(),
+            });
+        }
+        return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
+    };
+
+    let identity = uuid::Uuid::parse_str(session.user_id.trim())
+        .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
+        .map_err(|_| "direct websocket session user_id must be a UUID".to_owned())?;
+    Ok(DirectWsAdmission {
+        identity: legacy_identity.unwrap_or(identity),
+        claims: session_claims(session)?,
+    })
+}
+
+fn session_claims(
+    session: crate::query_manager::session::Session,
+) -> Result<BTreeMap<String, CoreValue>, String> {
+    let mut json = match session.claims {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    json.insert(
+        "subject".to_owned(),
+        serde_json::Value::String(session.user_id),
+    );
+    json.insert(
+        "authMode".to_owned(),
+        serde_json::Value::String(
+            match session.auth_mode {
+                crate::query_manager::session::AuthMode::External => "external",
+                crate::query_manager::session::AuthMode::LocalFirst => "local-first",
+                crate::query_manager::session::AuthMode::Anonymous => "anonymous",
+            }
+            .to_owned(),
+        ),
+    );
+    json.into_iter()
+        .map(|(key, value)| json_claim_to_core_value(value).map(|value| (key, value)))
+        .collect()
+}
+
+fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, String> {
+    match value {
+        serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
+        serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
+        serde_json::Value::Number(value) => value
+            .as_u64()
+            .map(CoreValue::U64)
+            .or_else(|| value.as_f64().map(CoreValue::F64))
+            .ok_or_else(|| "claims only support unsigned integers and f64 numbers".to_owned()),
+        serde_json::Value::String(value) => Ok(CoreValue::String(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(json_claim_to_core_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map(CoreValue::Array),
+        serde_json::Value::Object(_) => {
+            Err("nested claim objects are not supported yet".to_owned())
+        }
+    }
+}
+
+fn direct_ws_identity(params: &HashMap<String, String>) -> Result<AuthorId, String> {
+    let Some(identity) = params.get("identity") else {
+        return Err("direct websocket requires identity".to_owned());
+    };
+    if identity.len() != 32 {
+        return Err("identity must be 32 hex characters".to_owned());
+    }
+    let bytes: [u8; 16] = hex::decode(identity)
+        .map_err(|_| "identity contains non-hex digit".to_owned())?
+        .try_into()
+        .map_err(|_| "identity must be 32 hex characters".to_owned())?;
+    Ok(AuthorId::from_bytes(bytes))
+}
+
+async fn read_direct_auth_prelude(
+    socket: &mut WebSocket,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
+    state: &ServerState,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
+                Some(Ok(Message::Text(text))) => Some(text.as_bytes().to_vec()),
+                _ => None,
+            },
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && state.shutdown.is_shutting_down() {
+                    close_direct_ws_for_shutdown(socket).await;
+                }
+                None
+            }
+        }
+    })
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(_) => None,
+    }
+}
+
+async fn read_direct_wire_frame_batch(
+    socket: &mut WebSocket,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
+    state: &ServerState,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+        tokio::select! {
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
+                _ => None,
+            },
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && state.shutdown.is_shutting_down() {
+                    close_direct_ws_for_shutdown(socket).await;
+                }
+                None
+            }
+        }
+    })
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(_) => None,
+    }
 }
 
 async fn handle_direct_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
-    identity: AuthorId,
+    request_headers: HeaderMap,
+    legacy_identity: Option<AuthorId>,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
@@ -69,22 +281,27 @@ async fn handle_direct_ws_connection(
         return;
     };
 
-    let first = tokio::select! {
-        msg = socket.recv() => match msg {
-            Some(Ok(Message::Binary(bytes))) => bytes,
-            _ => {
+    let Some(auth_bytes) = read_direct_auth_prelude(&mut socket, &mut shutdown_rx, &state).await
+    else {
+        return;
+    };
+    let admission =
+        match direct_ws_admission(&auth_bytes, &request_headers, &state, legacy_identity).await {
+            Ok(admission) => admission,
+            Err(error) => {
+                send_direct_wire_error(
+                    &mut socket,
+                    WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
+                )
+                .await;
                 let _ = socket.close().await;
                 return;
             }
-        },
-        changed = shutdown_rx.changed() => {
-            if changed.is_ok() && state.shutdown.is_shutting_down() {
-                close_direct_ws_for_shutdown(&mut socket).await;
-            } else {
-                let _ = socket.close().await;
-            }
-            return;
-        }
+        };
+
+    let Some(first) = read_direct_wire_frame_batch(&mut socket, &mut shutdown_rx, &state).await
+    else {
+        return;
     };
 
     let Some(WireFrame::Hello(remote_hello)) = decode_single_direct_frame(&first).ok() else {
@@ -93,7 +310,7 @@ async fn handle_direct_ws_connection(
             WireError::new(
                 WireErrorCode::MalformedFrame,
                 WireRetry::Never,
-                "direct websocket expects first frame to be WireFrame::Hello",
+                "direct websocket expects first wire frame to be WireFrame::Hello",
             ),
         )
         .await;
@@ -128,19 +345,6 @@ async fn handle_direct_ws_connection(
         }
     };
 
-    let server_hello = WireFrame::Hello(WireHello {
-        min_protocol_version: negotiated.protocol_version,
-        max_protocol_version: negotiated.protocol_version,
-        features: negotiated.features,
-        role: WirePeerRole::Core,
-    });
-    if send_direct_wire_frames(&mut socket, &[server_hello])
-        .await
-        .is_err()
-    {
-        return;
-    }
-
     let Some(direct_core) = state.direct_core.clone() else {
         send_direct_wire_error(
             &mut socket,
@@ -154,7 +358,7 @@ async fn handle_direct_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match direct_core.open(identity, BTreeMap::new()).await {
+    let session = match direct_core.open(admission.identity, admission.claims).await {
         Ok(session) => session,
         Err(error) => {
             send_direct_wire_error(
@@ -166,11 +370,35 @@ async fn handle_direct_ws_connection(
             return;
         }
     };
+    let server_hello =
+        WireFrame::Hello(WireHello::current(WirePeerRole::Core, negotiated.features));
+    let server_hello = match encode_frame(&server_hello) {
+        Ok(frame) => frame,
+        Err(error) => {
+            send_direct_wire_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Never,
+                    format!("failed to encode direct websocket server hello: {error}"),
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    if send_direct_encoded_frames(&mut socket, &[server_hello])
+        .await
+        .is_err()
+    {
+        return;
+    }
 
     tracing::info!(
         protocol_version = negotiated.protocol_version,
         features = negotiated.features,
-        ?identity,
+        identity = ?admission.identity,
         "direct jazz_core ws negotiated"
     );
 
@@ -237,20 +465,6 @@ async fn handle_direct_ws_connection(
 
     direct_core.close(session);
     let _ = socket.close().await;
-}
-
-fn direct_ws_identity(params: &HashMap<String, String>) -> Result<AuthorId, String> {
-    let Some(identity) = params.get("identity") else {
-        return Err("direct websocket requires identity".to_owned());
-    };
-    if identity.len() != 32 {
-        return Err("identity must be 32 hex characters".to_owned());
-    }
-    let bytes: [u8; 16] = hex::decode(identity)
-        .map_err(|_| "identity contains non-hex digit".to_owned())?
-        .try_into()
-        .map_err(|_| "identity must be 32 hex characters".to_owned())?;
-    Ok(AuthorId::from_bytes(bytes))
 }
 
 fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
