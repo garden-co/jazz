@@ -12,6 +12,9 @@ pub mod otel;
 pub mod query_manager;
 pub mod row_format;
 pub mod row_histories;
+#[cfg(feature = "test-utils")]
+pub mod runtime_core;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod runtime_core;
 pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]

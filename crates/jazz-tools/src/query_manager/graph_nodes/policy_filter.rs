@@ -590,7 +590,9 @@ mod tests {
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::policy::{CmpOp, PolicyValue};
     use crate::query_manager::relation_ir::RelExpr;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, Value};
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, TableName, TablePolicies, TableSchema, Value,
+    };
     use serde_json::json;
 
     fn test_descriptor() -> RowDescriptor {
@@ -879,6 +881,109 @@ mod tests {
 
         assert!(!allowed);
         assert_eq!(seen, vec![(parent_id, Some(TableName::new("folders")))]);
+    }
+
+    #[test]
+    fn process_with_context_grants_forward_inherited_select_from_parent_policy() {
+        let folder_id = ObjectId::new();
+        let document_id = ObjectId::new();
+        let folder_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "owners",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+        let document_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor {
+                name: "folder_id".into(),
+                column_type: ColumnType::Uuid,
+                nullable: false,
+                references: Some(TableName::new("folders")),
+                default: None,
+                merge_strategy: None,
+            },
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("folders"),
+            TableSchema::with_policies(
+                folder_descriptor.clone(),
+                TablePolicies::new().with_select(PolicyExpr::Contains {
+                    column: "owners".into(),
+                    value: PolicyValue::SessionRef(vec!["user_id".into()]),
+                }),
+            ),
+        );
+        schema.insert(
+            TableName::new("documents"),
+            TableSchema::with_policies(
+                document_descriptor.clone(),
+                TablePolicies::new().with_select(PolicyExpr::Inherits {
+                    operation: Operation::Select,
+                    via_column: "folder_id".into(),
+                    max_depth: None,
+                }),
+            ),
+        );
+
+        let folder_data = encode_row(
+            &folder_descriptor,
+            &[
+                Value::Array(vec![Value::Text("alice".into()), Value::Text("bob".into())]),
+                Value::Text("Shared".into()),
+            ],
+        )
+        .unwrap();
+        let document_data = encode_row(
+            &document_descriptor,
+            &[Value::Uuid(folder_id), Value::Text("Shared Doc".into())],
+        )
+        .unwrap();
+        let batch_id = crate::row_histories::BatchId([0; 16]);
+        let provenance = crate::metadata::RowProvenance::for_insert("jazz:test", 0);
+        let document_tuple = Tuple::new(vec![TupleElement::Row {
+            id: document_id,
+            content: document_data.into(),
+            batch_id,
+            row_provenance: provenance.clone(),
+        }]);
+
+        let mut node = PolicyFilterNode::new_with_branch(
+            document_descriptor,
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "folder_id".into(),
+                max_depth: None,
+            },
+            Session::new("alice"),
+            schema,
+            "documents",
+            "main",
+        );
+        let storage = crate::storage::MemoryStorage::new();
+
+        let mut input = TupleDelta::default();
+        input.added.push(document_tuple.clone());
+
+        let delta = node.process_with_context(input, &storage, &mut |id, hint| {
+            if id == folder_id && hint == Some(TableName::new("folders")) {
+                Some(LoadedRow::new(
+                    folder_data.clone(),
+                    provenance.clone(),
+                    Default::default(),
+                    batch_id,
+                ))
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(delta.added, vec![document_tuple]);
     }
 
     #[test]
