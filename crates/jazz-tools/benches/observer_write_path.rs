@@ -39,7 +39,10 @@ fn schema() -> JazzSchema {
 fn open_db(seed: u64) -> BenchDb {
     let schema = schema();
     let column_families = schema.column_families();
-    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     block_on(Db::open(
         DbConfig::new(
@@ -57,7 +60,10 @@ fn open_db(seed: u64) -> BenchDb {
 
 fn document_cells(index: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("title".to_owned(), Value::String(format!("Document {index}"))),
+        (
+            "title".to_owned(),
+            Value::String(format!("Document {index}")),
+        ),
         (
             "content".to_owned(),
             Value::String(format!("Content body for document {index}")),

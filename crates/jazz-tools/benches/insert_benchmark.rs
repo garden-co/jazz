@@ -11,13 +11,13 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use jazz::db::{block_on, Db, DbConfig, DbIdentity, SeededRowIdSource};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{claim, col, eq, Query};
+use jazz::query::{Query, claim, col, eq};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
