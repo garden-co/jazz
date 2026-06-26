@@ -516,13 +516,13 @@ async fn handle_direct_ws_connection(
         }
     };
 
-    let Some(direct_core) = state.direct_core.clone() else {
+    let Some(direct_core) = state.direct_core() else {
         send_direct_wire_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::Internal,
                 WireRetry::Never,
-                "direct websocket requires a fixed schema server",
+                "direct websocket requires a published schema",
             ),
         )
         .await;
@@ -722,6 +722,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use futures::stream::FuturesUnordered;
     use futures::{SinkExt as _, StreamExt as _};
     use jazz::wire::decode_frame;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -730,6 +731,9 @@ mod tests {
     use crate::query_manager::types::Schema;
     use crate::schema_manager::AppId;
     use crate::server::{ServerBuilder, StorageBackend};
+
+    const DIRECT_WS_STORM_SIZE: usize = 24;
+    const DIRECT_WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
 
     #[test]
     fn direct_frame_batch_round_trips_wire_frames() {
@@ -908,6 +912,19 @@ mod tests {
             .collect()
     }
 
+    async fn wait_for_direct_ws_live_admissions(
+        key: DirectWsAdmissionKey,
+        predicate: impl Fn(usize) -> bool,
+    ) -> usize {
+        let start = tokio::time::Instant::now();
+        let mut live = direct_ws_live_admissions_for(key);
+        while !predicate(live) && start.elapsed() < DIRECT_WS_SETTLE_DEADLINE {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            live = direct_ws_live_admissions_for(key);
+        }
+        live
+    }
+
     // Internal route-boundary test: direct websocket liveness is not exposed
     // through the public JazzClient API yet, so this observes the direct
     // admission registry as the user-visible socket closes.
@@ -937,7 +954,8 @@ mod tests {
                 for frame in decode_direct_ws_message(&msg) {
                     if let WireFrame::Error(error) = frame {
                         saw_backpressure = error.code == WireErrorCode::Backpressure
-                            && error.retry == WireRetry::Later;
+                            && error.retry == WireRetry::Later
+                            && error.message.contains("connection cap exceeded");
                     }
                 }
                 if let WsMessage::Close(Some(close)) = msg {
@@ -970,6 +988,133 @@ mod tests {
             direct_ws_live_admissions_for(key),
             DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
         );
+    }
+
+    // Internal route-boundary test: direct websocket peer admission is not
+    // observable through the public JazzClient API yet, so this tests the
+    // direct protocol boundary and its admission registry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn direct_peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let identity = AuthorId::from_bytes([0x24; 16]);
+        let key = DirectWsAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+
+        let mut pending = FuturesUnordered::new();
+        for _ in 0..DIRECT_WS_STORM_SIZE {
+            pending.push(open_negotiated_direct_ws(addr, &state, identity));
+        }
+
+        let mut sockets = Vec::with_capacity(DIRECT_WS_STORM_SIZE);
+        while let Some(ws) = pending.next().await {
+            sockets.push(ws);
+        }
+        assert_eq!(
+            sockets.len(),
+            DIRECT_WS_STORM_SIZE,
+            "direct ws cap must evict older sockets, not reject new handshakes"
+        );
+
+        let live = wait_for_direct_ws_live_admissions(key, |count| {
+            count <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+        })
+        .await;
+        assert!(
+            live <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+            "direct ws must bound live admissions per peer_identity to {DIRECT_WS_PER_IDENTITY_CONNECTION_CAP}; got {live}"
+        );
+    }
+
+    // Internal route-boundary test: identity isolation is enforced before the
+    // direct core has a higher-level public client surface to observe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn direct_peer_identity_eviction_does_not_affect_other_identities() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let noisy_identity = AuthorId::from_bytes([0x31; 16]);
+        let quiet_identity = AuthorId::from_bytes([0x32; 16]);
+        let noisy_key = DirectWsAdmissionKey {
+            app_id: state.app_id,
+            identity: noisy_identity,
+        };
+        let quiet_key = DirectWsAdmissionKey {
+            app_id: state.app_id,
+            identity: quiet_identity,
+        };
+
+        let mut quiet_sockets = Vec::with_capacity(DIRECT_WS_PER_IDENTITY_CONNECTION_CAP);
+        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+            quiet_sockets.push(open_negotiated_direct_ws(addr, &state, quiet_identity).await);
+        }
+        assert_eq!(
+            direct_ws_live_admissions_for(quiet_key),
+            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+        );
+
+        let mut pending = FuturesUnordered::new();
+        for _ in 0..DIRECT_WS_STORM_SIZE {
+            pending.push(open_negotiated_direct_ws(addr, &state, noisy_identity));
+        }
+        let mut noisy_sockets = Vec::with_capacity(DIRECT_WS_STORM_SIZE);
+        while let Some(ws) = pending.next().await {
+            noisy_sockets.push(ws);
+        }
+
+        let noisy_live = wait_for_direct_ws_live_admissions(noisy_key, |count| {
+            count <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+        })
+        .await;
+        assert!(
+            noisy_live <= DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+            "noisy identity live admissions must be bounded; got {noisy_live}"
+        );
+        assert_eq!(
+            direct_ws_live_admissions_for(quiet_key),
+            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+            "quiet identity admissions must not be evicted by another peer_identity storm"
+        );
+        assert_eq!(quiet_sockets.len(), DIRECT_WS_PER_IDENTITY_CONNECTION_CAP);
+        assert_eq!(noisy_sockets.len(), DIRECT_WS_STORM_SIZE);
+    }
+
+    // Internal route-boundary test: repeated reconnects should keep applying
+    // the cap, not only the first overflow.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn repeated_direct_peer_identity_evictions_keep_live_admissions_at_cap() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let identity = AuthorId::from_bytes([0x33; 16]);
+        let key = DirectWsAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+
+        let mut sockets = Vec::new();
+        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
+        }
+        assert_eq!(
+            wait_for_direct_ws_live_admissions(key, |count| {
+                count == DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+            })
+            .await,
+            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+        );
+
+        for cycle in 0..(DIRECT_WS_PER_IDENTITY_CONNECTION_CAP * 3) {
+            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
+            let live = wait_for_direct_ws_live_admissions(key, |count| {
+                count == DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+            })
+            .await;
+            assert_eq!(
+                live, DIRECT_WS_PER_IDENTITY_CONNECTION_CAP,
+                "live direct admissions must stay at cap after reconnect cycle {cycle}; got {live}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

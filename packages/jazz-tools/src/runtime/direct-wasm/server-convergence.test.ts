@@ -121,6 +121,26 @@ describe("DirectWasmRuntime server convergence", () => {
       });
       const published = await publishSchema(server);
 
+      const immediateWriter = await createClient({
+        appId,
+        serverUrl: server.url,
+        peer: "immediate-writer",
+      });
+      clients.push(immediateWriter);
+      immediateWriter.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+      const immediateInsert = immediateWriter.insert("todos", {
+        title: { type: "Text", value: "direct websocket dynamic activation" },
+        done: { type: "Boolean", value: false },
+      });
+      await waitForPromise(
+        immediateInsert.wait({ tier: "edge" }),
+        "writer insert did not settle at edge after dynamic schema publish",
+      );
+
+      await immediateWriter.shutdown();
+      clients.splice(clients.indexOf(immediateWriter), 1);
+
       const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/schemas`, {
         method: "POST",
         headers: {

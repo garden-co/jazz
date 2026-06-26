@@ -2,7 +2,7 @@ use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
@@ -16,6 +16,7 @@ use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
+use jazz_server::StorageConfig;
 
 mod builder;
 mod direct_core;
@@ -429,7 +430,8 @@ pub struct ServerState {
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     /// Server-side jazz_core peer loop for the direct websocket route.
-    pub(crate) direct_core: Option<direct_core::DirectCoreServer>,
+    pub(crate) direct_core: StdRwLock<Option<direct_core::DirectCoreServer>>,
+    pub(crate) direct_core_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
 
@@ -439,6 +441,31 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
+    pub(crate) fn direct_core(&self) -> Option<direct_core::DirectCoreServer> {
+        self.direct_core.read().unwrap().clone()
+    }
+
+    pub(crate) fn start_direct_core(
+        &self,
+        schema: jazz::schema::JazzSchema,
+    ) -> Result<direct_core::DirectCoreServer, String> {
+        if let Some(direct_core) = self.direct_core() {
+            return Ok(direct_core);
+        }
+
+        let storage_config = self
+            .direct_core_storage_config
+            .clone()
+            .ok_or_else(|| "direct core storage is not configured".to_owned())?;
+        let mut direct_core = self.direct_core.write().unwrap();
+        if let Some(existing) = direct_core.clone() {
+            return Ok(existing);
+        }
+        let started = direct_core::DirectCoreServer::start_with_storage(schema, storage_config)?;
+        *direct_core = Some(started.clone());
+        Ok(started)
+    }
+
     pub async fn run_shutdown_finalization(&self) -> ShutdownPhase {
         if !self.shutdown.try_begin_finalization() {
             return self.shutdown.phase();
@@ -749,7 +776,8 @@ mod tests {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: None,
-            direct_core: None,
+            direct_core: StdRwLock::new(None),
+            direct_core_storage_config: None,
             shutdown: ShutdownController::new(timeout),
         })
     }
