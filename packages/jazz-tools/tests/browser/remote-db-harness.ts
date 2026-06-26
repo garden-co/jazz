@@ -39,28 +39,6 @@ function getRemoteStateStore(): Map<string, RemoteBrowserDbState> {
   return window.__jazzRemoteBrowserDbs__;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(`${label} after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
-}
-
 function makeAllRowsQuery(
   table: string,
   schema: WasmSchema,
@@ -113,35 +91,31 @@ export async function waitForRemoteBrowserDbTitle(
     throw new Error(`Remote browser db "${input.id}" was not initialized`);
   }
 
-  const deadline = Date.now() + input.timeoutMs;
-  let lastRows: Record<string, unknown>[] = [];
-  let lastError: unknown = undefined;
-
-  while (Date.now() < deadline) {
-    try {
-      const remainingMs = Math.max(1, deadline - Date.now());
-      const queryTimeoutMs = Math.min(5000, remainingMs);
-      const rows = await withTimeout(
-        state.db.all(state.query, { tier: input.tier }),
-        queryTimeoutMs,
-        `Remote browser db "${input.id}" query did not resolve`,
+  return await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+    let lastRows: Record<string, unknown>[] = [];
+    let unsubscribe: () => void = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(
+        new Error(
+          `Remote browser db "${input.id}" did not observe title "${input.title}" within ${input.timeoutMs}ms; ` +
+            `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
       );
-      if (rows.some((row) => row.title === input.title)) {
-        return rows;
-      }
-      lastRows = rows;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(100);
-  }
-
-  const lastErrorMessage =
-    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
-  throw new Error(
-    `Remote browser db "${input.id}" did not observe title "${input.title}" within ${input.timeoutMs}ms; ` +
-      `lastRows=${JSON.stringify(lastRows.slice(0, 10))}; lastError=${lastErrorMessage}`,
-  );
+    }, input.timeoutMs);
+    unsubscribe = state.db.subscribeAll(
+      state.query,
+      (delta) => {
+        lastRows = [...delta.all];
+        if (lastRows.some((row) => row.title === input.title)) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve(lastRows);
+        }
+      },
+      input.tier ? { tier: input.tier } : undefined,
+    );
+  });
 }
 
 export async function closeRemoteBrowserDb(id: string): Promise<void> {

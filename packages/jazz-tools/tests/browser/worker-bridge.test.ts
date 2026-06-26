@@ -1306,6 +1306,42 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
+  it("propagates synced row to a separate browser context", async () => {
+    const syncServer = await startFixedSchemaSyncServer("sync-remote-context");
+    const sharedLocalAuthToken = generateAuthSecret();
+    const { appId, serverUrl, adminSecret } = syncServer;
+    const dbA = await createSyncedDb(ctx, "sync-remote-a", sharedLocalAuthToken, syncServer);
+    await ensureDirectWorkerBridgeReady(dbA);
+
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-remote-b"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId,
+      dbName: uniqueDbName("sync-remote-b"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      serverUrl,
+      adminSecret,
+      localFirstSecret: sharedLocalAuthToken,
+    });
+
+    const title = `sync-remote-context-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const rowsOnBPromise = waitForRemoteTodoTitle(
+      remoteDbId,
+      title,
+      "remote context sees row",
+      20000,
+    );
+    await withTimeout(
+      dbA.insert(todos, { title, done: false }).wait({ tier: "local" }),
+      10000,
+      "A insert(worker) did not resolve",
+    );
+
+    const rowsOnB = await rowsOnBPromise;
+    expect(rowsOnB.some((row) => row.title === title)).toBe(true);
+  }, 60000);
+
   it("resolves insert wait at edge tier through the worker bridge", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-wait-edge");
     const sharedLocalAuthToken = generateAuthSecret();
