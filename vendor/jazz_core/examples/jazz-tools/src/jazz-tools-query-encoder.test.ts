@@ -10,9 +10,12 @@ import {
 import { queryFromTable } from "./direct-codec.js";
 
 const app = defineApp({
-  users: schema.table({
-    name: schema.text(),
-  }),
+  users: schema.table(
+    {
+      name: schema.text(),
+    },
+    { relations: { ownedTodos: { table: "todos", column: "owner_id" } } },
+  ),
   todos: schema.table({
     title: schema.text(),
     owner_id: schema.uuid({ references: "users" }),
@@ -39,6 +42,30 @@ test("keeps table-root fallback for plain table-shaped builders", () => {
 
 test("subscribe guard accepts simple forward include builders", () => {
   const query = app.todos.include("owner");
+
+  assert.doesNotThrow(() => assertSubscribeQuerySupportedForTest(query));
+});
+
+test("query encoder accepts reverse includes supported by alpha include expansion", () => {
+  const query = app.users.include("ownedTodos");
+
+  assert.doesNotThrow(() => encodeBuiltQueryForTest(query._build(), app._schema));
+});
+
+test("query encoder accepts selected include projections supported by alpha include expansion", () => {
+  const query = app.todos.include({ owner: { select: ["name"] } });
+
+  assert.doesNotThrow(() => encodeBuiltQueryForTest(query._build(), app._schema));
+});
+
+test("subscribe guard accepts reverse includes supported by alpha include expansion", () => {
+  const query = app.users.include("ownedTodos");
+
+  assert.doesNotThrow(() => assertSubscribeQuerySupportedForTest(query));
+});
+
+test("subscribe guard accepts selected include projections supported by alpha include expansion", () => {
+  const query = app.todos.include({ owner: { select: ["name"] } });
 
   assert.doesNotThrow(() => assertSubscribeQuerySupportedForTest(query));
 });
