@@ -382,7 +382,7 @@ async fn read_direct_auth_prelude(
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+    tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -398,10 +398,7 @@ async fn read_direct_auth_prelude(
         }
     })
     .await
-    {
-        Ok(bytes) => bytes,
-        Err(_) => None,
-    }
+    .unwrap_or_default()
 }
 
 async fn read_direct_wire_frame_batch(
@@ -409,7 +406,7 @@ async fn read_direct_wire_frame_batch(
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
+    tokio::time::timeout(DIRECT_WS_HANDSHAKE_READ_TIMEOUT, async {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -424,10 +421,7 @@ async fn read_direct_wire_frame_batch(
         }
     })
     .await
-    {
-        Ok(bytes) => bytes,
-        Err(_) => None,
-    }
+    .unwrap_or_default()
 }
 
 async fn handle_direct_ws_connection(

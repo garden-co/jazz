@@ -56,48 +56,48 @@ the alpha API yet:
 9. expose a small memory-only Node HTTP/SSE wrapper around that facade,
    including identity-shaped policy reads and update denial;
 10. add a snapshot-backed restart subsection to the HTTP example, where two todos
-   are created through HTTP, the underlying memory storage bytes are exported,
-   the first server closes, and a fresh server imports those bytes before
-   `dbOpenMemory` so `GET /todos` returns both rows;
+    are created through HTTP, the underlying memory storage bytes are exported,
+    the first server closes, and a fresh server imports those bytes before
+    `dbOpenMemory` so `GET /todos` returns both rows;
 11. add a memory-only chat-lite scenario with `rooms`, `room_members`, and
-   `messages`, where message reads are scoped by a related membership table via
-   `dbReadForIdentity`;
+    `messages`, where message reads are scoped by a related membership table via
+    `dbReadForIdentity`;
 12. add a memory-only shared-todo scenario with `todos` and `todo_shares`,
-   where creator access is represented by an initial owner share row and
-   recipient reads are granted and revoked through real `dbReadForIdentity`
-   policy checks, including an alpha-style shared-with-me include view over
-   already-authorized share rows and todos;
+    where creator access is represented by an initial owner share row and
+    recipient reads are granted and revoked through real `dbReadForIdentity`
+    policy checks, including an alpha-style shared-with-me include view over
+    already-authorized share rows and todos;
 13. add a memory-only files/blob slice that deliberately diverges from the
-   current alpha `files`/`file_parts` tables by storing each file on one
-   file-like `files` row with `mime_type` and native binary large-value
-   `data`, then exercise
-   `createFileFromBlob` -> `loadFileAsBlob`/raw byte reads -> delete in the
-   Node demo check;
+    current alpha `files`/`file_parts` tables by storing each file on one
+    file-like `files` row with `mime_type` and native binary large-value
+    `data`, then exercise
+    `createFileFromBlob` -> `loadFileAsBlob`/raw byte reads -> delete in the
+    Node demo check;
 14. add a TypeScript WebSocket transport smoke check that owns a local `upstream`
-   transport, passes subscriber identity through the WebSocket URL, and pumps
-   binary ABI `WireFrame` messages without decoding rows; by default it spawns
-   a Rust `jazz-server` sync server process and asserts two-client todo
-   convergence through that listener, then proves fresh reconnect catch-up by
-   closing one client's sync, writing while it is offline, and reconnecting it
-   with a new WebSocket/upstream transport;
+    transport, passes subscriber identity through the WebSocket URL, and pumps
+    binary ABI `WireFrame` messages without decoding rows; by default it spawns
+    a Rust `jazz-server` sync server process and asserts two-client todo
+    convergence through that listener, then proves fresh reconnect catch-up by
+    closing one client's sync, writing while it is offline, and reconnecting it
+    with a new WebSocket/upstream transport;
 15. add a shared-todo WebSocket policy smoke check over the same process boundary:
-   owner and recipient clients connect with deterministic identities, the owner
-   creates a shared todo plus share rows, and the smoke asserts that the
-   recipient cannot read before grant, can read after grant, and hydrates the
-   authorized todo on a fresh connection after grant;
+    owner and recipient clients connect with deterministic identities, the owner
+    creates a shared todo plus share rows, and the smoke asserts that the
+    recipient cannot read before grant, can read after grant, and hydrates the
+    authorized todo on a fresh connection after grant;
 16. add a chat WebSocket policy smoke check over the same process boundary: owner and
-   member clients connect with deterministic identities, the owner creates a
-   room, membership rows, and a message, the member hydrates and reads the
-   message through sync, and a fresh outsider identity reads no messages through
-   the existing membership policy;
+    member clients connect with deterministic identities, the owner creates a
+    room, membership rows, and a message, the member hydrates and reads the
+    message through sync, and a fresh outsider identity reads no messages through
+    the existing membership policy;
 17. run all of the above in automated Node checks, with the WebSocket checks
-   included in `npm test`.
+    included in `npm test`.
 18. add a dedicated `npm run test:alpha-public-flow` check for the smallest
-   alpha-like public flow that can run today through `jazz-tools.ts`: define an
-   app/schema, create the DB, use table/query objects, subscribe through
-   `db.subscribe(query, callback)`, insert/update/delete/restore
-   with write handles, one-shot `all`/`one` reads, limit, and delete through the
-   public surface.
+    alpha-like public flow that can run today through `jazz-tools.ts`: define an
+    app/schema, create the DB, use table/query objects, subscribe through
+    `db.subscribe(query, callback)`, insert/update/delete/restore
+    with write handles, one-shot `all`/`one` reads, limit, and delete through the
+    public surface.
 19. add a durable chat WebSocket restart check: write room membership
     relation state and a visible message before restart, restart the Rust
     listener with the same data directory, hydrate that message into a fresh
@@ -110,11 +110,11 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
 
 ## Gap matrix from first upstream targets
 
-| Upstream target | Covered now | Still missing |
-| --- | --- | --- |
-| `crates/jazz-wasm/tests/wasm.rs` | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo. | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package. |
-| `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks. | A local `jazz-tools` runtime_core surface, default materialization API parity, durable restart through the exact runtime_core harness, and the exact Rust runtime_core test harness are still absent. |
-| `packages/jazz-tools/tests/browser/db.all.test.ts` | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, and simple forward include subscription callbacks rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, nested/reverse include subscriptions, hop/gather subscriptions, broader nested include query lowering/subscriptions, and binary-large-value file helpers are missing. |
+| Upstream target                                     | Covered now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Still missing                                                                                                                                                                                                                              |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `crates/jazz-wasm/tests/wasm.rs`                    | WASM module loading from TypeScript, schema bytes, deterministic row IDs, `WasmDb` create/update/delete, and query reads are covered by `npm run test:alpha-public-flow` plus the broader demo.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Rust-side `wasm-pack test --node` parity, exported `generate_id`, `current_timestamp`, `parse_schema`, and public query-builder API tests are not present in this repo's WASM package.                                                     |
+| `crates/jazz-tools/src/runtime_core/tests/basic.rs` | WasmDb-shaped insert/query, update/delete, callback subscription rows, restart-by-snapshot, owner-policy reads, and Rust WebSocket server durable restart are represented in the `WasmDb` binding checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | A local `jazz-tools` runtime_core surface, default materialization API parity, durable restart through the exact runtime_core harness, and the exact Rust runtime_core test harness are still absent.                                      |
+| `packages/jazz-tools/tests/browser/db.all.test.ts`  | `jazz-tools.ts` covers `createDb`, `defineApp`/schema tokens, table/query objects, `insert`, `update`, `delete`, `restore`, row-like write results with `.value`/`.handle`/`.wait(...)`, `all`, `one`, `allForIdentity`, `subscribe(query, callback)`, boolean/text/integer equality, scalar boolean/text/integer `in`, array-element `in`, integer/text `gt`/`gte`/`lt`/`lte`, nullable UUID `isNull`/`isNotNull`, nullable literal equality/inequality and mixed nullable `in`, text inequality, chained positional and object-style filters, one-shot text and array `contains`/`limit`, selected projections, result ordering, offset pagination, text-array insert/update/readback, whole-array `eq`/`in`, Bytea `eq`/`in`, one-shot facade include/hop/gather reads over schema references, required object-style includes, one-shot nested include selection for scalar/reference paths, and simple/nested forward include subscription callbacks rebuilt from subscription rows. The browser example now proves reload persistence through `WasmDb.openBrowser(namespace, schema, config)` OPFS storage and keeps a subscription useful after reload/update. | Full browser `jazz-tools` test runner, reverse include subscriptions, hop/gather subscriptions, selected include projection subscriptions, broader relation query lowering/subscriptions, and binary-large-value file helpers are missing. |
 
 ## Current gaps versus alpha
 
@@ -158,8 +158,8 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
   `gather` facade reads. Relation reads are resolved after a base
   `db.all`/`allForIdentity` read using schema `references`, plus explicit
   `schema.table(..., { relations })` aliases for reverse include names.
-  Maintained relation subscriptions and nested include lowering into the core
-  query engine remain query-builder gaps.
+  Maintained reverse relation subscriptions and selected include projection
+  subscriptions remain query-builder gaps.
 - Title `contains` is covered for one-shot reads and maintained subscriptions.
   Maintained subscriptions also support unordered `limit(1)` with offset `0`,
   lowering through Groove `ArgMinBy` over `row_uuid`; this closes one maintained
@@ -174,15 +174,13 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
   maintained subscription view proof for `sharedTodos.include(owner)` relation
   deltas without full recompute, and ABI subscription snapshot/delta row batches now carry
   flat included closure rows as ordinary descriptor/raw records. The TS direct-WasmDb
-  `subscribe(query, callback)` facade now accepts simple forward includes such
-  as `todos.include("owner")` and materializes the alpha-shaped included object
-  without recursive TypeScript reads. Nested/reverse includes, hops, and gather
-  subscriptions remain query-builder gaps. A nested-forward subscription attempt
-  showed that TS can encode paths such as `team_id.parent_id` and the ABI
-  materializer can walk multi-segment include paths when root rows are supplied,
-  but the prepared subscription returned an empty root snapshot; the next slice
-  should add a Rust prepared subscription regression before adding more TS
-  materialization.
+  `subscribe(query, callback)` facade now accepts simple and nested forward
+  includes such as `todos.include("owner")` and `users.include({ team: { include:
+{ parent: true } } })`, and materializes the alpha-shaped included object from
+  flat subscription rows. Reverse includes, selected include projections, hops,
+  and gather subscriptions remain query-builder gaps. The nested-forward slice
+  is pinned by a Rust prepared subscription regression so root rows survive
+  multi-segment include paths.
 - Public transaction compatibility now has a first bounded slice over real ABI
   transaction handles: `beginTransaction`, synchronous `transaction(cb)`,
   transactional insert/update/upsert/delete/restore, commit with local write
@@ -304,10 +302,9 @@ grow a method-per-ABI forwarding layer or full alpha query builder.
    record reads/subscriptions and unreadable/missing include targets. Keep
    alpha `requireIncludes()` compatibility focused on required include match
    semantics; it must not imply a traversed/failed-path include payload mode.
-   For subscriptions, simple forward includes work; nested forward includes need
-   a Rust prepared subscription fix so root rows survive multi-segment include
-   paths, and reverse includes need a query/ABI representation for child-table
-   membership edges.
+   For subscriptions, simple and nested forward includes work. Reverse includes
+   need a query/ABI representation for child-table membership edges; hop/gather
+   subscriptions and selected include projections remain explicit gaps.
    This is large but should be mechanically clearer than filtered subscription
    completeness.
 7. **Expand file/blob API coverage.** Keep the intentional divergence from
