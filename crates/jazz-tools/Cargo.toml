@@ -167,6 +167,10 @@ name = "observer_write_path"
 harness = false
 
 [[bench]]
+name = "direct_core_benchmark"
+harness = false
+
+[[bench]]
 name = "insert_benchmark"
 harness = false
 

@@ -262,6 +262,9 @@ pub fn create_session(user_id: &str) -> Session {
 }
 
 pub fn create_runtime_with_storage<S: Storage>(storage: S) -> BenchRuntime<S> {
+    // RuntimeCore remains the benchmark target, and constructing one still requires
+    // wiring SchemaManager and SyncManager directly. Keep that integration-only
+    // dependency isolated here until a root-level runtime builder owns this setup.
     let sync_manager = SyncManager::new();
     let schema = create_schema();
     let schema_manager = SchemaManager::new(
