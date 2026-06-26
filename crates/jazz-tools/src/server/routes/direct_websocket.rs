@@ -757,11 +757,15 @@ mod tests {
 
     use futures::stream::FuturesUnordered;
     use futures::{SinkExt as _, StreamExt as _};
-    use jazz::db::{Db, DbConfig, DbIdentity, RowCells, SeededRowIdSource, WireTransportAdapter};
+    use jazz::db::{
+        Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, RowCells, SeededRowIdSource,
+        WireTransportAdapter,
+    };
     use jazz::groove::schema::ColumnType as CoreColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
     use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+    use jazz::tx::DurabilityTier;
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -908,8 +912,8 @@ mod tests {
             .state
     }
 
-    fn direct_ws_core_schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
+    fn direct_ws_todos_table_schema() -> TableSchema {
+        TableSchema::new(
             "todos",
             [
                 ColumnSchema::new("title", CoreColumnType::String),
@@ -917,19 +921,28 @@ mod tests {
             ],
         )
         .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public())])
+        .with_write_policy(Policy::public())
+    }
+
+    fn direct_ws_core_schema() -> JazzSchema {
+        JazzSchema::new([direct_ws_todos_table_schema()])
     }
 
     async fn make_direct_ws_convergence_test_state() -> Arc<ServerState> {
         let schema = direct_ws_core_schema();
-        let state = make_direct_ws_test_state().await;
-        state
-            .direct_core()
-            .expect("direct core test server")
-            .publish_schema(schema)
+        ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_direct_core_schema(schema)
+            .build()
             .await
-            .expect("publish direct core test schema");
-        state
+            .expect("build direct ws convergence test state")
+            .state
     }
 
     #[tokio::test]
@@ -1145,6 +1158,7 @@ mod tests {
     struct TestDirectClient {
         db: Db<CoreMemoryStorage>,
         transport: TestDirectWireTransport,
+        todos_table: TableSchema,
     }
 
     impl TestDirectClient {
@@ -1169,7 +1183,11 @@ mod tests {
             .expect("open direct client db");
             let transport = TestDirectWireTransport::default();
             db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
-            Self { db, transport }
+            Self {
+                db,
+                transport,
+                todos_table: direct_ws_todos_table_schema(),
+            }
         }
 
         fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
@@ -1194,26 +1212,62 @@ mod tests {
             self.transport.push_inbound(frames);
             self.tick_take()
         }
+
+        fn propagate_todos_query(&self) -> PreparedQuery {
+            let query = self
+                .db
+                .prepare_query(&self.db.table("todos"))
+                .expect("prepare todos query");
+            self.db.propagate_query_with_opts(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..Default::default()
+                },
+            );
+            query
+        }
+
+        fn edge_query_is_covered(&self, query: &PreparedQuery) -> bool {
+            self.db.query_is_covered(query)
+        }
+
+        async fn edge_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
+            self.db
+                .all(
+                    query,
+                    ReadOpts {
+                        tier: DurabilityTier::Edge,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("read edge todos")
+                .into_iter()
+                .filter_map(|row| match row.cell(&self.todos_table, "title") {
+                    Some(CoreValue::String(title)) => Some(title.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
     }
 
     fn direct_ws_frame_batch(frames: &[Vec<u8>]) -> Vec<u8> {
         postcard::to_allocvec(frames).expect("encode direct ws frame batch")
     }
 
-    async fn read_direct_ws_encoded_frames(
+    async fn try_receive_direct_ws_encoded_frames(
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> Vec<Vec<u8>> {
-        let message = tokio::time::timeout(DIRECT_WS_PUMP_DEADLINE, ws.next())
-            .await
-            .expect("wait for direct ws frame")
-            .expect("direct ws still open")
-            .expect("direct ws frame result");
-        let WsMessage::Binary(bytes) = message else {
-            panic!("expected direct ws binary frame batch, got {message:?}");
+        let Ok(message) = tokio::time::timeout(Duration::from_millis(25), ws.next()).await else {
+            return Vec::new();
         };
-        postcard::from_bytes(&bytes).expect("decode direct ws frame batch")
+        let Some(Ok(WsMessage::Binary(bytes))) = message else {
+            return Vec::new();
+        };
+        postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
     async fn pump_direct_client_once(
@@ -1235,10 +1289,14 @@ mod tests {
             ws.send(WsMessage::Binary(direct_ws_frame_batch(&outbound).into()))
                 .await
                 .expect("send direct client frames");
-            let inbound = read_direct_ws_encoded_frames(ws).await;
             sent += outbound.len();
-            received += inbound.len();
-            outbound = client.receive_tick_take(inbound);
+            let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+            if inbound.is_empty() {
+                outbound = client.tick_take();
+            } else {
+                received += inbound.len();
+                outbound = client.receive_tick_take(inbound);
+            }
         }
         (sent, received)
     }
@@ -1258,13 +1316,16 @@ mod tests {
             open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let mut ws_b =
             open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let client_b_todos = client_b.propagate_todos_query();
 
         let _inserted = client_a.insert_todo("route sync");
 
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
         let start = tokio::time::Instant::now();
-        while frames_received_from_server == 0 && start.elapsed() < DIRECT_WS_PUMP_DEADLINE {
+        while !client_b.edge_query_is_covered(&client_b_todos)
+            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+        {
             let (sent, received) = pump_direct_client_once(&client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
@@ -1281,6 +1342,12 @@ mod tests {
         assert!(
             frames_received_from_server > 0,
             "the server must return direct WireFrame batches through the websocket route"
+        );
+        let titles = client_b.edge_todo_titles(&client_b_todos).await;
+        assert_eq!(
+            titles,
+            vec!["route sync".to_owned()],
+            "the receiving direct client must materialize the row through the websocket route"
         );
     }
 
