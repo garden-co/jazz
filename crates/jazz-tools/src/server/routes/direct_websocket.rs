@@ -1301,6 +1301,39 @@ mod tests {
         (sent, received)
     }
 
+    async fn receive_direct_client_push_once(
+        client: &TestDirectClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> usize {
+        let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+        if inbound.is_empty() {
+            return 0;
+        }
+        let mut received = inbound.len();
+        let mut outbound = client.receive_tick_take(inbound);
+        let mut rounds = 0;
+        while !outbound.is_empty() {
+            rounds += 1;
+            assert!(
+                rounds <= 8,
+                "direct client kept producing pushed follow-up websocket frames"
+            );
+            ws.send(WsMessage::Binary(direct_ws_frame_batch(&outbound).into()))
+                .await
+                .expect("send direct client push follow-up frames");
+            let inbound = try_receive_direct_ws_encoded_frames(ws).await;
+            if inbound.is_empty() {
+                outbound = client.tick_take();
+            } else {
+                received += inbound.len();
+                outbound = client.receive_tick_take(inbound);
+            }
+        }
+        received
+    }
+
     // Internal route-boundary test: until direct websocket has a public
     // high-level client facade, this wires two real jazz::Db clients through
     // the real /apps/<APP_ID>/ws route and proves direct WireFrame batches
@@ -1348,6 +1381,68 @@ mod tests {
             titles,
             vec!["route sync".to_owned()],
             "the receiving direct client must materialize the row through the websocket route"
+        );
+    }
+
+    // Internal route-boundary test: this exercises the public direct websocket
+    // route with two real jazz::Db clients. The reader registers a query and
+    // receives empty coverage before the writer uploads a later row; convergence
+    // must arrive through the maintained subscription path without the reader
+    // re-propagating its query.
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_ws_empty_covered_reader_receives_later_writer_row_without_repropagating() {
+        let state = make_direct_ws_convergence_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let schema = direct_ws_core_schema();
+        let client_b = TestDirectClient::new(schema.clone(), 0xb2, 0xb200).await;
+        let mut ws_b =
+            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let client_b_todos = client_b.propagate_todos_query();
+
+        let start = tokio::time::Instant::now();
+        while !client_b.edge_query_is_covered(&client_b_todos)
+            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+        {
+            let _ = pump_direct_client_once(&client_b, &mut ws_b).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            client_b.edge_query_is_covered(&client_b_todos),
+            "reader query must be covered by the initial empty server response"
+        );
+        assert!(
+            client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
+            "reader should settle the initial covered result as empty"
+        );
+
+        let client_a = TestDirectClient::new(schema, 0xa1, 0xa100).await;
+        let mut ws_a =
+            open_negotiated_direct_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let _inserted = client_a.insert_todo("after empty coverage");
+
+        let start = tokio::time::Instant::now();
+        let mut writer_sent = 0;
+        let mut reader_received_push = 0;
+        while client_b.edge_todo_titles(&client_b_todos).await.is_empty()
+            && start.elapsed() < DIRECT_WS_PUMP_DEADLINE
+        {
+            let (sent, _) = pump_direct_client_once(&client_a, &mut ws_a).await;
+            writer_sent += sent;
+            reader_received_push += receive_direct_client_push_once(&client_b, &mut ws_b).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            writer_sent > 0,
+            "writer must upload the later row through the direct websocket route"
+        );
+        assert!(
+            reader_received_push > 0,
+            "reader must receive an unsolicited server push without re-propagating the query"
+        );
+        assert_eq!(
+            client_b.edge_todo_titles(&client_b_todos).await,
+            vec!["after empty coverage".to_owned()]
         );
     }
 

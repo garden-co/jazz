@@ -54,7 +54,10 @@ type DirectCoreDb = {
   propagateQuery?(query: DirectPreparedQuery, opts: unknown): void;
   queryIsCovered?(query: DirectPreparedQuery): boolean;
   prepareQuery(query: Uint8Array): DirectPreparedQuery;
-  subscribe?(query: DirectPreparedQuery, opts: unknown): ReadableStream<unknown>;
+  subscribe?(
+    query: DirectPreparedQuery,
+    opts: unknown,
+  ): ReadableStream<unknown> | DirectSubscription;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
   insertWithIdEncodedForIdentity(
     table: string,
@@ -93,6 +96,12 @@ type DirectCoreDb = {
 
 type DirectPreparedQuery = object;
 
+type DirectSubscription = {
+  readAll(): unknown[];
+  drain?(): unknown[];
+  close?(): boolean;
+};
+
 type DirectWrite = {
   payload: Uint8Array;
   wait(tier: string): void;
@@ -129,7 +138,7 @@ type PendingTx = {
 };
 
 type SubscriptionState = {
-  reader: ReadableStreamDefaultReader<unknown>;
+  source: ReadableStreamDefaultReader<unknown> | DirectSubscription;
   rows: RowState[];
   filters: RowFilter[];
   callback?: Function;
@@ -426,9 +435,9 @@ export class DirectCoreRuntime implements Runtime {
     }
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
-    const reader = this.db.subscribe(query, readOptions(tier)).getReader();
+    const source = subscriptionSource(this.db.subscribe(query, readOptions(tier)));
     this.subscriptions.set(handle, {
-      reader,
+      source,
       rows: [],
       filters: queryFiltersFromJson(queryJson, this.schema),
       cancelled: false,
@@ -450,7 +459,11 @@ export class DirectCoreRuntime implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.cancelled = true;
-    void subscription.reader.cancel();
+    if (isReadableSubscriptionReader(subscription.source)) {
+      void subscription.source.cancel();
+    } else {
+      subscription.source.close?.();
+    }
     this.subscriptions.delete(handle);
   }
 
@@ -611,31 +624,52 @@ export class DirectCoreRuntime implements Runtime {
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
     if (subscription.cancelled || subscription.reading || !subscription.callback) return;
+    if (!isReadableSubscriptionReader(subscription.source)) {
+      this.drainNativeSubscription(handle, subscription);
+      return;
+    }
     subscription.reading = true;
     void this.readSubscription(handle, subscription);
   }
 
   private async readSubscription(handle: number, subscription: SubscriptionState): Promise<void> {
+    if (!isReadableSubscriptionReader(subscription.source)) return;
     try {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const next = await subscription.reader.read();
+        const next = await subscription.source.read();
         if (next.done || subscription.cancelled) return;
-        const chunk = normalizeSubscriptionChunk(next.value);
-        if (chunk.type === "snapshot") {
-          subscription.rows = filterRows(
-            rowsFromBatches(chunk.rows, this.schema),
-            subscription.filters,
-            this.schema,
-          );
-          subscription.callback?.(nativeDeltaFromRows(subscription.rows));
-        } else {
-          subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
-          subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
-          subscription.callback?.(nativeDeltaFromRows(subscription.rows));
-        }
+        this.applySubscriptionChunk(subscription, next.value);
       }
     } finally {
       subscription.reading = false;
+    }
+  }
+
+  private drainNativeSubscription(handle: number, subscription: SubscriptionState): void {
+    if (isReadableSubscriptionReader(subscription.source)) return;
+    for (const event of subscription.source.readAll()) {
+      if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
+      this.applySubscriptionChunk(subscription, event);
+    }
+  }
+
+  private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
+    const chunk = normalizeSubscriptionChunk(value);
+    if (chunk.type === "closed") {
+      subscription.cancelled = true;
+      return;
+    }
+    if (chunk.type === "snapshot") {
+      subscription.rows = filterRows(
+        rowsFromBatches(chunk.rows, this.schema),
+        subscription.filters,
+        this.schema,
+      );
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
+    } else {
+      subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
+      subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
     }
   }
 
@@ -1363,9 +1397,13 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] };
-    } {
+    }
+  | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
   const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown };
+  if (record.type === "closed" || record.type === "Closed") {
+    return { type: "closed" };
+  }
   if (record.type === "snapshot" || record.type === "Snapshot") {
     return {
       type: "snapshot",
@@ -1381,6 +1419,22 @@ function normalizeSubscriptionChunk(chunk: unknown):
     };
   }
   throw new Error("unknown subscription chunk");
+}
+
+function subscriptionSource(
+  subscription: ReadableStream<unknown> | DirectSubscription,
+): ReadableStreamDefaultReader<unknown> | DirectSubscription {
+  const maybeReadable = subscription as Partial<ReadableStream<unknown>>;
+  if (typeof maybeReadable.getReader === "function") {
+    return maybeReadable.getReader();
+  }
+  return subscription as DirectSubscription;
+}
+
+function isReadableSubscriptionReader(
+  source: ReadableStreamDefaultReader<unknown> | DirectSubscription,
+): source is ReadableStreamDefaultReader<unknown> {
+  return "read" in source && typeof source.read === "function";
 }
 
 function nativeDeltaFromRows(rows: RowState[]): SubscriptionWireDelta {

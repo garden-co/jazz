@@ -127,6 +127,50 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
+  it("delivers direct NAPI subscription updates through the native handle", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const runtime = new DirectCoreRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-subscription:node"),
+      deterministicBytes("jazz-napi-direct-core-subscription:author"),
+      21,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const updates: unknown[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      updates.push(delta);
+    });
+
+    expect(updates).toEqual([[]]);
+
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "direct napi subscribed row" },
+      done: { type: "Boolean", value: false },
+    });
+
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toEqual([
+      {
+        kind: 0,
+        id: inserted.id,
+        index: 0,
+        row: {
+          id: inserted.id,
+          values: [
+            { type: "Text", value: "direct napi subscribed row" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      },
+    ]);
+
+    runtime.unsubscribe(handle);
+  });
+
   it("applies session ownership policy to local direct NAPI inserts and reads", async () => {
     const { NapiDirectDb } = await loadNapiModule();
     const runtime = new DirectCoreRuntime(

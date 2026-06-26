@@ -3059,6 +3059,11 @@ impl SubscriptionStream {
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
         std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
     }
+
+    /// Return the next queued materialized subscription event without waiting.
+    pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        self.receiver.try_recv().ok()
+    }
 }
 
 impl Stream for SubscriptionStream {
