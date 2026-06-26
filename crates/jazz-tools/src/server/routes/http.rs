@@ -332,9 +332,12 @@ pub(super) async fn schema_handler(
         }
     };
 
-    match state.runtime.known_schema(&schema_hash) {
+    match state.catalogue.known_schema(&state.runtime, &schema_hash) {
         Ok(Some(schema)) => {
-            let published_at = match state.runtime.schema_published_at(&schema_hash) {
+            let published_at = match state
+                .catalogue
+                .schema_published_at(&state.runtime, &schema_hash)
+            {
                 Ok(timestamp) => timestamp,
                 Err(err) => {
                     return (
@@ -407,11 +410,11 @@ pub(super) async fn schema_hashes_handler(
         };
     }
 
-    match state.runtime.known_schema_hashes() {
+    match state.catalogue.known_schema_hashes(&state.runtime) {
         Ok(hashes) => {
             let mut schemas = Vec::with_capacity(hashes.len());
             for hash in &hashes {
-                let published_at = match state.runtime.schema_published_at(hash) {
+                let published_at = match state.catalogue.schema_published_at(&state.runtime, hash) {
                     Ok(timestamp) => timestamp,
                     Err(err) => {
                         return Err((
@@ -501,9 +504,10 @@ pub(super) async fn schema_connectivity_handler(
         }
     };
 
-    match state.runtime.with_schema_manager(|schema_manager| {
-        schema_manager.are_schema_hashes_connected(from_hash, to_hash)
-    }) {
+    match state
+        .catalogue
+        .are_schema_hashes_connected(&state.runtime, from_hash, to_hash)
+    {
         Ok(connected) => (
             StatusCode::OK,
             Json(SchemaConnectivityResponse { connected }),
@@ -593,7 +597,10 @@ pub(super) async fn publish_schema_handler(
         };
 
     let schema_hash = SchemaHash::compute(&request.schema);
-    let object_id = match state.runtime.publish_schema(request.schema) {
+    let object_id = match state
+        .catalogue
+        .publish_schema(&state.runtime, request.schema)
+    {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
@@ -672,12 +679,11 @@ pub(super) async fn permissions_head_handler(
         };
     }
 
-    match state.runtime.with_schema_manager(|schema_manager| {
-        schema_manager
-            .current_permissions_head()
-            .map(permissions_head_view)
-    }) {
-        Ok(head) => (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response(),
+    match state.catalogue.current_permissions_head(&state.runtime) {
+        Ok(head) => {
+            let head = head.map(permissions_head_view);
+            (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
@@ -718,10 +724,7 @@ pub(super) async fn permissions_handler(
         };
     }
 
-    match state
-        .runtime
-        .with_schema_manager(|schema_manager| schema_manager.current_permissions())
-    {
+    match state.catalogue.current_permissions(&state.runtime) {
         Ok(current) => (
             StatusCode::OK,
             Json(match current {
@@ -814,7 +817,7 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    match state.runtime.known_schema(&schema_hash) {
+    match state.catalogue.known_schema(&state.runtime, &schema_hash) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return (
@@ -843,17 +846,15 @@ pub(super) async fn publish_permissions_handler(
         .map(|(table_name, policies)| (TableName::new(table_name), policies))
         .collect();
 
-    match state.runtime.publish_permissions_bundle(
+    match state.catalogue.publish_permissions_bundle(
+        &state.runtime,
         schema_hash,
         permissions,
         expected_parent_bundle_object_id,
     ) {
-        Ok(_) => match state.runtime.with_schema_manager(|schema_manager| {
-            schema_manager
-                .current_permissions_head()
-                .map(permissions_head_view)
-        }) {
+        Ok(_) => match state.catalogue.current_permissions_head(&state.runtime) {
             Ok(head) => {
+                let head = head.map(permissions_head_view);
                 (StatusCode::CREATED, Json(PermissionsHeadResponse { head })).into_response()
             }
             Err(err) => (
@@ -952,7 +953,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let source_schema = match state.runtime.known_schema(&source_hash) {
+    let source_schema = match state.catalogue.known_schema(&state.runtime, &source_hash) {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -975,7 +976,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let target_schema = match state.runtime.known_schema(&target_hash) {
+    let target_schema = match state.catalogue.known_schema(&state.runtime, &target_hash) {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -1119,7 +1120,7 @@ pub(super) async fn publish_migration_handler(
     }
 
     let lens = Lens::new(source_hash, target_hash, forward);
-    let object_id = match state.runtime.publish_lens(&lens) {
+    let object_id = match state.catalogue.publish_lens(&state.runtime, &lens) {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
