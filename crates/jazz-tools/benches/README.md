@@ -36,7 +36,15 @@ than old helper behavior:
   through `jazz::db::Db` directly. It also includes a byte-wire reconnect/resume
   canary that serves current task rows once, resumes after a disconnected
   upstream write is ingested by the server, and checks that the catch-up payload
-  is smaller than the full snapshot.
+  is smaller than the full snapshot. The `r12_recursive_permissions` group ports
+  the spirit of the old R5 recursive permission benchmark to direct public
+  `Db` APIs with a `docs`/`teams`/`doc_access`/`team_edges` schema, prepared
+  recursive read-policy query/subscription visibility. It does not currently
+  benchmark allowed/denied recursive write-policy settlement: direct
+  `update_for_identity` exposes a clean permission-subject write surface, but
+  the equivalent recursive `docs` write policy denies a visible-doc update in
+  this schema, so the active slice keeps that as an explicit direct write-policy
+  gap rather than adding a workaround.
 
 ## Intended next ports
 
