@@ -71,6 +71,8 @@ export declare class WasmDb {
   all(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
+  delete(table: string, rowId: Uint8Array): WasmWrite
   tick(): void
 }
 export type NapiDirectDb = WasmDb

@@ -386,6 +386,36 @@ impl NapiDirectDb {
         direct_write_memory(write)
     }
 
+    #[napi(js_name = "updateEncoded")]
+    pub fn update_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_direct_cells(&patch)?;
+        let db = self.inner.borrow();
+        let write = db
+            .update(&table, row_id, patch)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        direct_write_memory(write)
+    }
+
+    #[napi(js_name = "delete")]
+    pub fn delete_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let write = db
+            .delete(&table, row_id)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        direct_write_memory(write)
+    }
+
     #[napi]
     pub fn tick(&self) -> napi::Result<()> {
         let db = self.inner.borrow();

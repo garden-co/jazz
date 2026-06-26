@@ -13,7 +13,7 @@ const TEST_SCHEMA: WasmSchema = {
 };
 
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
-  it("opens, writes one row, and queries it through the direct WASM adapter shape", async () => {
+  it("opens, mutates one row, and queries it through the direct WASM adapter shape", async () => {
     const { WasmDb } = await loadNapiModule();
     const runtime = new DirectWasmRuntime(
       { openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never },
@@ -28,9 +28,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
       title: { type: "Text", value: "direct napi memory row" },
       done: { type: "Boolean", value: false },
     });
-    const rows = await runtime.query(JSON.stringify({ table: "todos" }));
 
-    expect(rows).toEqual([
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
       {
         id: inserted.id,
         table: "todos",
@@ -40,6 +39,25 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
         ],
       },
     ]);
+
+    runtime.update("todos", inserted.id, {
+      title: { type: "Text", value: "direct napi updated row" },
+    });
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "direct napi updated row" },
+          { type: "Boolean", value: false },
+        ],
+      },
+    ]);
+
+    runtime.delete("todos", inserted.id);
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 });
 
