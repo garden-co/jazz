@@ -1,0 +1,24 @@
+{
+  "name": "browser-wasm",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cd ../../jazz-wasm && RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\" --cfg web_sys_unstable_apis' wasm-pack build --target web --release --out-dir pkg-web",
+    "check": "tsc --noEmit",
+    "build": "vite build",
+    "build:package-root-import-gate": "vite build --config vite.package-root-import-gate.config.ts",
+    "dev": "vite --host 127.0.0.1",
+    "preview": "vite preview --host 127.0.0.1",
+    "smoke:built": "node scripts/smoke.mjs",
+    "smoke": "npm run build && npm run smoke:built",
+    "demo:bundle": "npm run build:wasm && npm run check && npm run build",
+    "demo": "npm run demo:bundle && npm run smoke:built",
+    "test": "npm run demo"
+  },
+  "devDependencies": {
+    "jazz-tools": "file:../jazz-tools",
+    "playwright": "^1.61.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

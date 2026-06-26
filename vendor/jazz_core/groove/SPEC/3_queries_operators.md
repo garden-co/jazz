@@ -1,0 +1,253 @@
+# groove — Specification · 3. Queries & operators
+
+Queries in groove describe incremental views. They implement a subset of SQL
+semantics, but the durable contract is not an execution plan in the traditional
+database sense. A query becomes a graph of *operators* that defines how weighted
+row changes move through the view. This chapter specifies the *what* of
+evaluation; chapter 4 specifies the *how* (the tick, arrangements, propagation).
+
+## 3.1 Queries become graphs that weighted deltas flow through
+
+The query graph is the canonical form of a view. It is a DAG whose nodes are
+operators and whose edges carry weighted `RecordDelta`s; each input and output is
+typed by a `RecordDescriptor` (ch. 2). The SQL-ish `Query` surface (§3.9) is one
+way to produce such a graph, but the graph shape is the real contract
+(`IvmGraph` in the reference implementation). The graph is acyclic: recursion is
+represented as a single `Recursive` node containing seed and step child graphs,
+not as a cycle in the DAG (ch. 6).
+
+Node identity is content-based so overlapping subscriptions can share work
+(ch. 4). A runtime node is identified by its full `NodeDescriptor`: the
+`operator`, ordered `inputs`, and `output` descriptor. Identical descriptors
+share one `NodeId` by hashing descriptor content; a hash collision between
+incompatible descriptors fails rather than silently sharing (`INV-QUERY-1`).
+Before the runtime accepts a node, it validates the `NodeDescriptor` for operator
+input arity, input/output descriptor compatibility, join-key arity, and
+field-index bounds (`INV-QUERY-2`).
+
+## 3.2 Source operators
+
+Source operators introduce rows from outside a graph or from a boundary between
+query mechanisms. Each source has a distinct origin and participates in the same
+weighted-delta flow as every downstream operator.
+
+- **Table source** (`GraphBuilder::Table`) — introduces a table's committed rows
+  as deltas into the graph (ch. 2, ch. 4).
+- **Index** (`GraphBuilder::Index`, `IndexByOp`) — exposes an indexed view of a
+  source; its durable persistence is ch. 2, its tick participation ch. 4.
+- **Binding source** (`BindingSourceOp`) — provides the parameter-as-data
+  weighted record set of a prepared shape; defined in ch. 5.
+- **Frontier source** (`FrontierSourceOp`) — provides the recursion entry point;
+  ch. 6.
+
+*Further invariants.* `INV-QUERY-19` — a `BindingSourceOp` appears only inside a
+prepared shape (ch. 5); a plain, non-prepared query — a parameterless subscription
+or one-shot read, still the common case — never evaluates one.
+
+## 3.3 Stateless operators
+
+Stateless operators transform or route deltas without keeping persistent
+operator state. They preserve weights while changing which rows pass through, how
+records are shaped, or how compatible streams are combined.
+
+**Filter** emits exactly the input deltas whose records satisfy its
+`PredicateExpr`, preserving bytes and weights (`INV-QUERY-3`). The predicate
+surface is `Eq`/`Neq`/`Gt`/`GtEq`/`Lt`/`LtEq`/`IsNull`/`IsNotNull` combined with
+`And`.
+
+**MapProject** emits one output delta for each input delta by copying the
+configured fields into the output descriptor. **UnwrapNullable** drops
+`Nullable(None)` deltas and unwraps `Nullable(Some(v))` to `v`.
+
+**Union** combines compatible inputs with bag (`UNION ALL`) semantics: duplicate
+derivations remain separate weighted deltas (`INV-QUERY-7`). Every input that
+carries rows must have the **same record shape**, and that shared shape is the
+union's output descriptor. Only inputs that produce identical record types can be
+combined with `UNION ALL`. An input that is empty for a tick, such as a frontier
+source with no bound deltas (ch. 6), contributes no rows and is exempt from the
+shape match.
+
+*Further invariants.* `INV-QUERY-5` — `MapProject` copies only configured fields
+and preserves the input weight. `INV-QUERY-6` — `UnwrapNullable` preserves the
+original delta weight.
+
+## 3.4 Joins
+
+Joins combine or suppress rows by key. groove executes the **inner equi-join**
+and the **anti-join**.
+
+An inner equi-join (`JoinOp`) emits records whose fields are ordered as *left
+fields followed by right fields*. The left and right key vectors must have equal
+length, and matching keys follow the product rule: the emitted record weight is
+`left_weight × right_weight`. A change arriving on either side is matched against
+the maintained contents of the opposite side (`INV-QUERY-9`). When both sides
+change in the same logical tick, the join must not double-count the left-delta ×
+right-delta cross term (`INV-QUERY-10`). This is the subtlety that makes
+incremental joins correct, and chapter 4 covers how shared arrangements enforce
+it.
+
+To see the double-count concretely, take key `k` with existing left row `L1`
+(weight +1) and existing right row `R1` (+1); the pre-tick join holds `L1·R1`.
+In one tick we insert `L2` (left Δ +1) and `R2` (right Δ +1) under `k`. The
+correct output delta is the three new pairs `L1·R2`, `L2·R1`, `L2·R2`, each +1.
+Applying each side's delta against the *maintained opposite side after this
+tick* gives left Δ × right-after = `L2·R1`, `L2·R2` and right Δ × left-after =
+`L1·R2`, `L2·R2` — so `L2·R2` (the left-Δ × right-Δ cross term) lands twice. The
+join must subtract exactly one copy of that cross term to recover the correct +1.
+
+An anti-join (`AntiJoin`) preserves the left descriptor. It shows a left row iff
+the total right-side multiplicity for that row's key is zero (`INV-QUERY-12`),
+and it emits a change only when a left row changes or the right count crosses
+zero.
+
+*Further invariants.* `INV-QUERY-8` — an inner join requires equal-length
+left/right key vectors. `INV-QUERY-11` — shared join arrangements apply a given
+logical-time delta at most once per arrangement key/scope (ch. 4).
+`INV-QUERY-13` — anti-join changes only when the right count crosses zero.
+`INV-QUERY-14` — same-tick arrivals suppress/emit a left row exactly once.
+
+## 3.5 `ArgMaxBy` / `ArgMinBy` (maintained per-group winners)
+
+Per-group winner selection maintains the current winning row for each group and
+emits only the winner changes for groups touched by an input change (`ArgMaxByOp`
+and `ArgMinByOp` in the reference implementation). These operators are
+executable and graph-only: each takes any single upstream graph input, including
+filtered, joined, or unioned inputs.
+
+For base-table inputs, the table primary key must equal the group columns
+followed by the order columns, in that exact order (`group_cols + order_cols`).
+For non-table inputs, `group_cols + order_cols` is the comparison key used to
+select the winner (`INV-QUERY-20`). `ArgMaxBy` selects the greatest comparison
+key; `ArgMinBy` selects the least comparison key. Ties are deterministic because
+the comparison key is the declared primary-key/comparison-field sequence.
+
+The names are module labels, not taxonomy claims: despite their `op_types` home
+under "aggregate," they are winner-selection operators over graph input, not
+general aggregates. jazz, an external consumer, uses `ArgMaxBy` to maintain
+current-row (latest-version) state and uses `ArgMinBy` as the narrow maintained
+primitive for unordered `limit(1)`: an empty group with `row_uuid` as the
+comparison key yields the stable least-`row_uuid` row from the visible result
+set.
+
+*Further invariants.* `INV-QUERY-21` — `ArgMaxBy`/`ArgMinBy` suppress
+non-winner and net-zero group deltas.
+
+## 3.6 `TopBy` (maintained ordered windows)
+
+`TopBy` is the general maintained ordered-window operator. It is the intended
+replacement for ad hoc ordered `LIMIT`/`OFFSET` handling and for consumers that
+need more than the single winner provided by `ArgMaxBy`/`ArgMinBy`.
+
+A `TopBy` operator has:
+
+- `partition_cols`: the fields that define independent groups. An empty list is
+  one global partition.
+- `order_cols`: the declared sort key, with per-column direction and null
+  ordering.
+- `tie_cols`: stable fields appended after `order_cols` to make the total order
+  deterministic.
+- `offset` and `limit`: the retained window bounds, where `limit` must be
+  finite for maintained subscriptions.
+- `output`: the original input record, optionally with implementation-defined
+  rank metadata only when the descriptor declares it.
+
+For each partition, `TopBy` maintains the weighted multiset of input records
+plus an ordered index over `(order_cols, tie_cols, full-record bytes)`. The
+operator's denotation is the records whose positive multiplicity falls in the
+half-open ordinal range `[offset, offset + limit)`. Duplicate equal records keep
+bag semantics: multiplicity affects how many copies occupy the ordered stream.
+If two distinct rows compare equal on `order_cols`, `tie_cols` MUST decide their
+relative order. If `tie_cols` are not enough to distinguish rows, the encoded
+full record bytes are the final deterministic tie-breaker. A planner should
+prefer a primary-key or otherwise stable identity field in `tie_cols`; relying
+on full-record bytes is correct but can be expensive.
+
+Input deltas follow the ordinary weighted rule. Inserts add copies, deletes
+remove copies, and updates arrive as `-old, +new` (§4.1). For every touched
+partition, `TopBy` compares the pre-tick and post-tick retained windows and
+emits the minimal consolidated weighted diff of output records. Rows that move
+within the retained window without entering or leaving do not emit unless rank
+metadata is part of the output descriptor. Rows outside the retained range can
+still cause deltas if they cross a boundary and displace retained rows.
+
+Hydration evaluates the same denotation from the current input snapshot. A
+commit/binding tick updates only partitions touched by input deltas; maintaining
+the ordered index is operator state, not a semantic rescan license.
+
+## 3.7 `Aggregate` (maintained grouped summaries)
+
+`Aggregate` maintains per-group summary rows over a weighted input multiset. It
+has `group_cols`, a list of aggregate functions, and an output descriptor
+containing the group fields followed by aggregate result fields. An empty
+`group_cols` list is one global group.
+
+Supported maintained aggregate functions are limited to summaries whose state
+can be updated by weighted deltas:
+
+- `count(*)`: signed total input multiplicity for the group.
+- `count(expr)`: signed total multiplicity where `expr` is non-null.
+- `sum(expr)`: weighted sum over numeric values.
+- `min(expr)` / `max(expr)`: extremum over positive-multiplicity values, backed
+  by an ordered value index with deterministic full-record tie accounting.
+- `any_value(expr)`: the value from the deterministic least ordered witness,
+  only when paired with an explicit `order_by`/tie key in the aggregate spec.
+
+`Aggregate` state is per group. It stores aggregate accumulators and, for
+retractable extrema or ordered witnesses, the value-to-record counts required to
+find the next winner after a deletion. A group exists in the output only while
+its input multiplicity is positive, unless the aggregate spec explicitly asks
+for an SQL-style empty global aggregate row. For maintained subscriptions,
+empty-group output should be capability-gated until the output null/default
+semantics are represented in the descriptor.
+
+Each input delta updates the affected group state. The operator computes the
+group's old output row and new output row and emits the minimal consolidated
+diff: `-old, +new` when a summary changes, `+new` when a group appears, `-old`
+when a group disappears, and no delta for net-zero state. Same-tick churn is
+consolidated by group before emission. Negative multiplicity below zero is a
+runtime error: it means the upstream weighted multiset retracted a row that was
+not present in that operator scope.
+
+Determinism is part of the contract. Aggregates whose result depends on witness
+choice (`min`/`max` with equal values, `any_value`) MUST use declared tie keys
+and then encoded full-record bytes as the final order. Floating-point aggregate
+functions are not part of the maintained contract until their replay
+determinism is specified.
+
+## 3.8 Reserved (non-executable) operators
+
+Some operator descriptors are reserved names, not executable query behavior.
+They are therefore **not part of the query contract** until runtime support
+lands: `Aggregate`, `SemiJoin`, `Distinct`, `Negate`, and the non-inner
+`JoinOpKind` variants (`Left`/`Right`/`Full`) carried by `OpType`. The
+`Aggregate` semantics above are an implementation target; until runtime support
+exists it must not be advertised as executable (`INV-QUERY-22`).
+
+## 3.9 The SQL-lowerable subset
+
+SQL lowering is intentionally conservative. The SQL `Query` AST is broader than
+the supported graph contract, so the planner rejects unsupported shapes instead
+of approximating them. Parameterized SQL is handled by prepared shapes
+(`plan_prepared_shape`, ch. 5); ordinary query planning (`plan_query`) rejects
+parameters, and the only binding predicate accepted is `column = $param`
+(`INV-QUERY-15`, `INV-QUERY-16`).
+
+Unsupported shapes are rejected explicitly (`INV-QUERY-17`): `SELECT DISTINCT`,
+`GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, derived tables, implicit
+multi-`FROM` joins, non-inner joins, non-`UNION ALL` set ops, non-column
+projections, and non-field-literal predicates. "Field-literal" means a
+comparison between a column and a constant: `status = 'active'`, `age >= 18`,
+`deleted_at IS NULL` lower; column-to-column comparisons (`a.x = b.y` outside a
+join key), arithmetic, and function calls in predicates do not. `AND`/`OR`
+compositions of lowerable predicates are lowerable.
+
+*Further invariants.* `INV-QUERY-4` — SQL predicate lowering rejects
+unsupported/ill-typed predicates rather than approximating them.
+`INV-QUERY-18` — SQL inner joins lower only equality predicates, with `AND`
+forming multi-column join keys.
+
+## Open questions
+
+- 🔶 **`ArgMaxBy` terminology.** It lives under "Aggregate" in `op_types` but is
+  source-backed and PK-constrained. Decide whether to rename it (e.g. a
+  "latest/winner" operator) so the taxonomy doesn't imply general aggregation.
