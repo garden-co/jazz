@@ -38,7 +38,9 @@ try {
   page.setDefaultTimeout(30_000);
 
   await page.goto(url, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
 
   const log = page.locator("#log");
   await expectLog(page, "starting browser WASM worker");
@@ -48,56 +50,92 @@ try {
   await expectLog(page, "delete write durability: Local");
   await page.waitForFunction(() => document.querySelectorAll("#todosBody .todo-row").length === 0);
   await page.waitForFunction(() => document.querySelector("#rowCount")?.textContent === "0 todos");
-  await page.waitForFunction(() => document.querySelector("#runtimeStatus")?.textContent === "Shutdown");
-  await page.waitForFunction(() => document.querySelector("#durabilityStatus")?.textContent === "Local");
-  await page.waitForFunction(() => document.querySelector("#readStatus")?.textContent === "0 decoded");
-  await page.waitForFunction(() => document.querySelector("#watchStatus")?.textContent === "delete: none");
+  await page.waitForFunction(
+    () => document.querySelector("#runtimeStatus")?.textContent === "Shutdown",
+  );
+  await page.waitForFunction(
+    () => document.querySelector("#durabilityStatus")?.textContent === "Local",
+  );
+  await page.waitForFunction(
+    () => document.querySelector("#readStatus")?.textContent === "0 decoded",
+  );
+  await page.waitForFunction(
+    () => document.querySelector("#watchStatus")?.textContent === "delete: none",
+  );
   await page.waitForFunction(() => {
     const rendered = [...document.querySelectorAll("#transitionsBody .transition-row")]
       .map((row) => row.textContent ?? "")
       .join("\n");
-    return rendered.includes("initial: none")
-      && rendered.includes("insert: Ship direct WasmDb:open")
-      && rendered.includes("update: Ship direct WasmDb:done")
-      && rendered.includes("delete: none");
+    return (
+      rendered.includes("initial: none") &&
+      rendered.includes("insert: Ship direct WasmDb:open") &&
+      rendered.includes("update: Ship direct WasmDb:done") &&
+      rendered.includes("delete: none")
+    );
   });
   const schemaHex = await page.evaluate(() => window.__jazzBrowserTodoSchemaHex);
   if (typeof schemaHex !== "string" || schemaHex.length === 0) {
     throw new Error("browser bundle did not expose todo schema hex");
   }
   const reloadNamespace = `reload-${crypto.randomUUID()}`;
-  await page.goto(`${url}?smoke=reload-write&ns=${encodeURIComponent(reloadNamespace)}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.goto(`${url}?smoke=reload-write&ns=${encodeURIComponent(reloadNamespace)}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "reload insert write durability: Local");
 
-  await page.goto(`${url}?smoke=reload-verify&ns=${encodeURIComponent(reloadNamespace)}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.goto(`${url}?smoke=reload-verify&ns=${encodeURIComponent(reloadNamespace)}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "reload update write durability: Local");
 
   const concurrencyNamespace = `concurrency-${crypto.randomUUID()}`;
-  await page.goto(`${url}?smoke=browser-concurrency&ns=${encodeURIComponent(concurrencyNamespace)}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.goto(
+    `${url}?smoke=browser-concurrency&ns=${encodeURIComponent(concurrencyNamespace)}`,
+    { waitUntil: "domcontentloaded" },
+  );
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "concurrency first worker: browser db opened");
   await expectLog(page, "concurrency second worker: browser db opened");
 
   const batchNamespace = `batch-${crypto.randomUUID()}`;
-  await page.goto(`${url}?smoke=browser-batch-durability&ns=${encodeURIComponent(batchNamespace)}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.goto(
+    `${url}?smoke=browser-batch-durability&ns=${encodeURIComponent(batchNamespace)}`,
+    { waitUntil: "domcontentloaded" },
+  );
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "batch insert Batch durable alpha write durability: Local");
   await expectLog(page, "batch insert Batch durable beta write durability: Local");
   await expectLog(page, "batch insert Batch durable gamma write durability: Local");
 
   await page.goto(`${url}?smoke=db-all-bytea-order`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "file insert charlie.bin write durability: Local");
 
   await page.goto(`${url}?smoke=websocket-boundary`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "websocket insert write durability: Local");
 
   rustServer = await startLoopbackWebSocketServer(schemaHex);
-  await page.goto(`${url}?smoke=websocket-rust&ws=${encodeURIComponent(rustServer.url)}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelector("#summary")?.textContent?.includes("Ready"));
+  await page.goto(`${url}?smoke=websocket-rust&ws=${encodeURIComponent(rustServer.url)}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForFunction(() =>
+    document.querySelector("#summary")?.textContent?.includes("Ready"),
+  );
   await expectLog(page, "websocket rust insert write durability: Local");
 
   const summaryText = await page.locator("#summary").innerText();

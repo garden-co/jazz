@@ -1,5 +1,5 @@
 import {
-  BrowserWasmWorkerClient,
+  BrowserWasmAbiSmokeClient,
   openConfig,
   PostcardWriter,
   queryFromTable,
@@ -8,7 +8,7 @@ import {
   type QueryHandle,
   type SubscriptionHandle,
   type WriteHandle,
-} from "./browser-wasm-worker-client.js";
+} from "./abi-smoke-worker-client.js";
 import {
   encodedFileCells,
   encodedTodoCells,
@@ -30,7 +30,11 @@ export type ScenarioProgress =
   | { type: "db-opened"; db: Handle }
   | { type: "query-prepared"; query: Handle }
   | { type: "insert-permission"; allowed: boolean }
-  | { type: "todo-transition"; label: "initial" | "insert" | "update" | "delete"; todos: TodoView[] }
+  | {
+      type: "todo-transition";
+      label: "initial" | "insert" | "update" | "delete";
+      todos: TodoView[];
+    }
   | { type: "write-state"; fate: string; durability: string }
   | { type: "write-durable"; durability: string }
   | { type: "watch-opened"; watch: SubscriptionHandle; current: TodoView[] }
@@ -40,14 +44,17 @@ export type ScenarioProgressHandler = (event: ScenarioProgress) => void;
 export type ReloadPersistenceSmokeMode = "reload-write" | "reload-verify";
 
 type StartedWorkerClient = {
-  client: BrowserWasmWorkerClient;
+  client: BrowserWasmAbiSmokeClient;
 };
 
 export function todoSchemaHex(): string {
   return hex(todosSchema());
 }
 
-export async function runWorkerBackedTour(log: ScenarioLogger, progress: ScenarioProgressHandler = () => {}): Promise<ScenarioSummary> {
+export async function runWorkerBackedTour(
+  log: ScenarioLogger,
+  progress: ScenarioProgressHandler = () => {},
+): Promise<ScenarioSummary> {
   const started = await startWorkerClient(log, "tour", progress);
   try {
     const schema = todosSchema();
@@ -66,17 +73,33 @@ export async function runWorkerBackedTour(log: ScenarioLogger, progress: Scenari
     assertTodoSummaries("initial", openedCurrent, []);
 
     const todoRowId = new Uint8Array(16).fill(0x7a);
-    const initialCells = encodedTodoCells({ title: "Ship direct WasmDb", done: false, owner: accountAuthor });
+    const initialCells = encodedTodoCells({
+      title: "Ship direct WasmDb",
+      done: false,
+      owner: accountAuthor,
+    });
     const allowed = await started.client.canInsertEncoded(db, "todos", initialCells);
     progress({ type: "insert-permission", allowed });
     if (!allowed) throw new Error("expected insert to be allowed");
 
-    await waitForLocalWrite(started.client, await started.client.insertWithIdEncoded(db, "todos", todoRowId, initialCells), "insert", progress, log);
+    await waitForLocalWrite(
+      started.client,
+      await started.client.insertWithIdEncoded(db, "todos", todoRowId, initialCells),
+      "insert",
+      progress,
+      log,
+    );
     const afterInsert = await subscriptionTodos(started.client, opened.subscription);
     progress({ type: "todo-transition", label: "insert", todos: afterInsert });
     assertTodoSummaries("insert", afterInsert, ["Ship direct WasmDb:open"]);
 
-    await waitForLocalWrite(started.client, await started.client.updateEncoded(db, "todos", todoRowId, encodedTodoPatch({ done: true })), "update", progress, log);
+    await waitForLocalWrite(
+      started.client,
+      await started.client.updateEncoded(db, "todos", todoRowId, encodedTodoPatch({ done: true })),
+      "update",
+      progress,
+      log,
+    );
     const afterUpdate = await subscriptionTodos(started.client, opened.subscription);
     progress({ type: "todo-transition", label: "update", todos: afterUpdate });
     assertTodoSummaries("update", afterUpdate, ["Ship direct WasmDb:done"]);
@@ -88,12 +111,30 @@ export async function runWorkerBackedTour(log: ScenarioLogger, progress: Scenari
     const otherRead = await readTodosAs(started.client, db, query, otherAuthor);
     assertTodoSummaries("identity other read", otherRead, []);
 
-    const ownerCanUpdate = await started.client.canUpdateEncodedForIdentity(db, "todos", todoRowId, encodedTodoPatch({ title: "Owner dry-run" }), accountAuthor);
+    const ownerCanUpdate = await started.client.canUpdateEncodedForIdentity(
+      db,
+      "todos",
+      todoRowId,
+      encodedTodoPatch({ title: "Owner dry-run" }),
+      accountAuthor,
+    );
     if (!ownerCanUpdate) throw new Error("expected owner update dry-run to be allowed");
-    const otherCanUpdate = await started.client.canUpdateEncodedForIdentity(db, "todos", todoRowId, encodedTodoPatch({ title: "Other dry-run" }), otherAuthor);
+    const otherCanUpdate = await started.client.canUpdateEncodedForIdentity(
+      db,
+      "todos",
+      todoRowId,
+      encodedTodoPatch({ title: "Other dry-run" }),
+      otherAuthor,
+    );
     if (otherCanUpdate) throw new Error("expected other update dry-run to be denied");
 
-    await waitForLocalWrite(started.client, await started.client.deleteRow(db, "todos", todoRowId), "delete", progress, log);
+    await waitForLocalWrite(
+      started.client,
+      await started.client.deleteRow(db, "todos", todoRowId),
+      "delete",
+      progress,
+      log,
+    );
     const afterDelete = await subscriptionTodos(started.client, opened.subscription);
     progress({ type: "todo-transition", label: "delete", todos: afterDelete });
     assertTodoSummaries("delete", afterDelete, []);
@@ -124,11 +165,32 @@ export async function runReloadPersistenceSmoke(
   if (mode === "reload-write") {
     const first = await startWorkerClient(log, "reload write");
     try {
-      const db = await openBrowserTodoDb(first.client, namespace, schema, config, log, "reload write");
+      const db = await openBrowserTodoDb(
+        first.client,
+        namespace,
+        schema,
+        config,
+        log,
+        "reload write",
+      );
       const query = await prepareTodosQuery(first.client, db, log, "reload write");
-      const cells = encodedTodoCells({ title: "Survive reload", done: false, owner: accountAuthor });
-      await waitForLocalWrite(first.client, await first.client.insertWithIdEncoded(db, "todos", todoRowId, cells), "reload insert", () => {}, log);
-      assertTodoSummaries("reload first read", await readTodosAs(first.client, db, query, accountAuthor), ["Survive reload:open"]);
+      const cells = encodedTodoCells({
+        title: "Survive reload",
+        done: false,
+        owner: accountAuthor,
+      });
+      await waitForLocalWrite(
+        first.client,
+        await first.client.insertWithIdEncoded(db, "todos", todoRowId, cells),
+        "reload insert",
+        () => {},
+        log,
+      );
+      assertTodoSummaries(
+        "reload first read",
+        await readTodosAs(first.client, db, query, accountAuthor),
+        ["Survive reload:open"],
+      );
       await first.client.release(query);
       await first.client.closeDb(db);
       await shutdownWorkerClient(first, log, "reload write");
@@ -141,18 +203,39 @@ export async function runReloadPersistenceSmoke(
 
   const second = await startWorkerClient(log, "reload verify");
   try {
-    const db = await openBrowserTodoDb(second.client, namespace, schema, config, log, "reload verify");
+    const db = await openBrowserTodoDb(
+      second.client,
+      namespace,
+      schema,
+      config,
+      log,
+      "reload verify",
+    );
     const query = await prepareTodosQuery(second.client, db, log, "reload verify");
     const opened = await second.client.subscribe(db, query);
-    assertTodoSummaries("reload restored watch", todoViews(opened.current), ["Survive reload:open"]);
-    await waitForLocalWrite(second.client, await second.client.updateEncoded(db, "todos", todoRowId, encodedTodoPatch({ done: true })), "reload update", () => {}, log);
-    assertTodoSummaries("reload updated watch", await subscriptionTodos(second.client, opened.subscription), ["Survive reload:done"]);
+    assertTodoSummaries("reload restored watch", todoViews(opened.current), [
+      "Survive reload:open",
+    ]);
+    await waitForLocalWrite(
+      second.client,
+      await second.client.updateEncoded(db, "todos", todoRowId, encodedTodoPatch({ done: true })),
+      "reload update",
+      () => {},
+      log,
+    );
+    assertTodoSummaries(
+      "reload updated watch",
+      await subscriptionTodos(second.client, opened.subscription),
+      ["Survive reload:done"],
+    );
     await second.client.unsubscribe(opened.subscription);
     await second.client.release(query);
     await second.client.closeDb(db);
     await second.client.destroyBrowserStorage(namespace);
     await shutdownWorkerClient(second, log, "reload verify");
-    return { message: "Ready: openBrowserDb reload persistence smoke restored and watched the todo." };
+    return {
+      message: "Ready: openBrowserDb reload persistence smoke restored and watched the todo.",
+    };
   } catch (error) {
     await second.client.destroyBrowserStorage(namespace).catch(() => undefined);
     await shutdownWorkerClient(second, log, "reload verify").catch(() => undefined);
@@ -160,16 +243,34 @@ export async function runReloadPersistenceSmoke(
   }
 }
 
-export async function runBrowserStorageConcurrencySmoke(namespace: string, log: ScenarioLogger): Promise<ScenarioSummary> {
-  if (namespace.length === 0) throw new Error("browser storage concurrency namespace must not be empty");
+export async function runBrowserStorageConcurrencySmoke(
+  namespace: string,
+  log: ScenarioLogger,
+): Promise<ScenarioSummary> {
+  if (namespace.length === 0)
+    throw new Error("browser storage concurrency namespace must not be empty");
   const schema = todosSchema();
   const config = openConfig(new Uint8Array(16).fill(0x42), new Uint8Array(16).fill(0x77), 0x2026);
   const first = await startWorkerClient(log, "concurrency first");
   let second: StartedWorkerClient | undefined;
   try {
-    const firstDb = await openBrowserTodoDb(first.client, namespace, schema, config, log, "concurrency first");
+    const firstDb = await openBrowserTodoDb(
+      first.client,
+      namespace,
+      schema,
+      config,
+      log,
+      "concurrency first",
+    );
     second = await startWorkerClient(log, "concurrency second");
-    const secondOpen = openBrowserTodoDb(second.client, namespace, schema, config, log, "concurrency second");
+    const secondOpen = openBrowserTodoDb(
+      second.client,
+      namespace,
+      schema,
+      config,
+      log,
+      "concurrency second",
+    );
     await delay(75);
     await first.client.closeDb(firstDb);
     await shutdownWorkerClient(first, log, "concurrency first");
@@ -181,13 +282,18 @@ export async function runBrowserStorageConcurrencySmoke(namespace: string, log: 
   } catch (error) {
     await first.client.destroyBrowserStorage(namespace).catch(() => undefined);
     await shutdownWorkerClient(first, log, "concurrency first").catch(() => undefined);
-    if (second) await shutdownWorkerClient(second, log, "concurrency second").catch(() => undefined);
+    if (second)
+      await shutdownWorkerClient(second, log, "concurrency second").catch(() => undefined);
     throw error;
   }
 }
 
-export async function runBrowserBatchDurabilitySmoke(namespace: string, log: ScenarioLogger): Promise<ScenarioSummary> {
-  if (namespace.length === 0) throw new Error("browser batch durability namespace must not be empty");
+export async function runBrowserBatchDurabilitySmoke(
+  namespace: string,
+  log: ScenarioLogger,
+): Promise<ScenarioSummary> {
+  if (namespace.length === 0)
+    throw new Error("browser batch durability namespace must not be empty");
   const schema = todosSchema();
   const accountAuthor = new Uint8Array(16).fill(0x77);
   const config = openConfig(new Uint8Array(16).fill(0x42), accountAuthor, 0x2026);
@@ -202,13 +308,24 @@ export async function runBrowserBatchDurabilitySmoke(namespace: string, log: Sce
     const db = await openBrowserTodoDb(first.client, namespace, schema, config, log, "batch");
     const query = await prepareTodosQuery(first.client, db, log, "batch");
     for (const fixture of fixtures) {
-      await waitForLocalWrite(first.client, await first.client.insertWithIdEncoded(db, "todos", fixture.id, encodedTodoCells({ title: fixture.title, done: fixture.done, owner: accountAuthor })), `batch insert ${fixture.title}`, () => {}, log);
+      await waitForLocalWrite(
+        first.client,
+        await first.client.insertWithIdEncoded(
+          db,
+          "todos",
+          fixture.id,
+          encodedTodoCells({ title: fixture.title, done: fixture.done, owner: accountAuthor }),
+        ),
+        `batch insert ${fixture.title}`,
+        () => {},
+        log,
+      );
     }
-    assertTodoSummariesIgnoringOrder("batch read", await readTodosAs(first.client, db, query, accountAuthor), [
-      "Batch durable alpha:open",
-      "Batch durable beta:open",
-      "Batch durable gamma:done",
-    ]);
+    assertTodoSummariesIgnoringOrder(
+      "batch read",
+      await readTodosAs(first.client, db, query, accountAuthor),
+      ["Batch durable alpha:open", "Batch durable beta:open", "Batch durable gamma:done"],
+    );
     await first.client.release(query);
     await first.client.closeDb(db);
     await first.client.destroyBrowserStorage(namespace);
@@ -235,25 +352,50 @@ export async function runDbAllByteaOrderSmoke(log: ScenarioLogger): Promise<Scen
       { id: new Uint8Array(16).fill(0xa4), name: "delta.bin", data: new Uint8Array([10]) },
     ];
     for (const fixture of fixtures) {
-      await waitForLocalWrite(started.client, await started.client.insertWithIdEncoded(db, "files", fixture.id, encodedFileCells({
-        name: fixture.name,
-        mimeType: "application/octet-stream",
-        data: fixture.data,
-        size: fixture.data.length,
-        owner: accountAuthor,
-      })), `file insert ${fixture.name}`, () => {}, log);
+      await waitForLocalWrite(
+        started.client,
+        await started.client.insertWithIdEncoded(
+          db,
+          "files",
+          fixture.id,
+          encodedFileCells({
+            name: fixture.name,
+            mimeType: "application/octet-stream",
+            data: fixture.data,
+            size: fixture.data.length,
+            owner: accountAuthor,
+          }),
+        ),
+        `file insert ${fixture.name}`,
+        () => {},
+        log,
+      );
     }
-    const query = await prepareQueryBytes(started.client, db, queryFilesOrderBySizeDescLimitOffset(), log, "db.all bytea/order");
+    const query = await prepareQueryBytes(
+      started.client,
+      db,
+      queryFilesOrderBySizeDescLimitOffset(),
+      log,
+      "db.all bytea/order",
+    );
     const files = fileViews(await started.client.readAllForIdentity(db, query, accountAuthor));
     const actualNames = files.map((file) => file.name);
     const actualBytea = files.map((file) => [...file.data].join(","));
-    if (actualNames.join("|") !== "charlie.bin|alpha.bin" || actualBytea.join("|") !== "7,8,9|1,2") {
-      throw new Error(`unexpected bytea/order limited files: ${actualNames.join(", ")} / ${actualBytea.join(" | ")}`);
+    if (
+      actualNames.join("|") !== "charlie.bin|alpha.bin" ||
+      actualBytea.join("|") !== "7,8,9|1,2"
+    ) {
+      throw new Error(
+        `unexpected bytea/order limited files: ${actualNames.join(", ")} / ${actualBytea.join(" | ")}`,
+      );
     }
     await started.client.release(query);
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "db.all bytea/order");
-    return { message: "Ready: browser direct db.all read returned Bytea rows with order, limit, and offset." };
+    return {
+      message:
+        "Ready: browser direct db.all read returned Bytea rows with order, limit, and offset.",
+    };
   } catch (error) {
     await shutdownWorkerClient(started, log, "db.all bytea/order").catch(() => undefined);
     throw error;
@@ -274,17 +416,30 @@ export async function runWebSocketBoundarySmoke(log: ScenarioLogger): Promise<Sc
       db,
       identity: accountAuthor,
       WebSocket: class extends RecordingWebSocket {
-        constructor(url: string) { super(url, socket); }
+        constructor(url: string) {
+          super(url, socket);
+        }
       },
       tickMs: 60_000,
     });
-    const cells = encodedTodoCells({ title: "Browser websocket boundary", done: false, owner: accountAuthor });
-    await waitForLocalWrite(started.client, await started.client.insertWithIdEncoded(db, "todos", new Uint8Array(16).fill(0x91), cells), "websocket insert", () => {}, log);
+    const cells = encodedTodoCells({
+      title: "Browser websocket boundary",
+      done: false,
+      owner: accountAuthor,
+    });
+    await waitForLocalWrite(
+      started.client,
+      await started.client.insertWithIdEncoded(db, "todos", new Uint8Array(16).fill(0x91), cells),
+      "websocket insert",
+      () => {},
+      log,
+    );
     for (let attempt = 0; attempt < 20 && socket.sent.length === 0; attempt += 1) {
       await sync.flush();
       await delay(10);
     }
-    if (socket.sent.length === 0 || sync.stats.sentFrames === 0) throw new Error("browser websocket boundary did not emit any binary wire frames");
+    if (socket.sent.length === 0 || sync.stats.sentFrames === 0)
+      throw new Error("browser websocket boundary did not emit any binary wire frames");
     await sync.close();
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "websocket boundary");
@@ -295,23 +450,49 @@ export async function runWebSocketBoundarySmoke(log: ScenarioLogger): Promise<Sc
   }
 }
 
-export async function runWebSocketRustSmoke(wsUrl: string, log: ScenarioLogger): Promise<ScenarioSummary> {
-  if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) throw new Error("websocket rust smoke requires a ws:// or wss:// URL");
+export async function runWebSocketRustSmoke(
+  wsUrl: string,
+  log: ScenarioLogger,
+): Promise<ScenarioSummary> {
+  if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://"))
+    throw new Error("websocket rust smoke requires a ws:// or wss:// URL");
   const started = await startWorkerClient(log, "websocket rust");
   try {
     const schema = todosSchema();
     const accountAuthor = new Uint8Array(16).fill(0x77);
     const config = openConfig(new Uint8Array(16).fill(0x42), accountAuthor, 0x2026);
     const db = await openMemoryTodoDb(started.client, schema, config, log, "websocket rust");
-    const sync = await openBrowserWebSocketTransport({ url: wsUrl, client: started.client, db, identity: accountAuthor, tickMs: 20 });
-    const cells = encodedTodoCells({ title: "Browser to Rust websocket", done: false, owner: accountAuthor });
-    await waitForLocalWrite(started.client, await started.client.insertWithIdEncoded(db, "todos", new Uint8Array(16).fill(0x92), cells), "websocket rust insert", () => {}, log);
-    for (let attempt = 0; attempt < 50 && (sync.stats.sentFrames === 0 || sync.stats.receivedFrames === 0); attempt += 1) {
+    const sync = await openBrowserWebSocketTransport({
+      url: wsUrl,
+      client: started.client,
+      db,
+      identity: accountAuthor,
+      tickMs: 20,
+    });
+    const cells = encodedTodoCells({
+      title: "Browser to Rust websocket",
+      done: false,
+      owner: accountAuthor,
+    });
+    await waitForLocalWrite(
+      started.client,
+      await started.client.insertWithIdEncoded(db, "todos", new Uint8Array(16).fill(0x92), cells),
+      "websocket rust insert",
+      () => {},
+      log,
+    );
+    for (
+      let attempt = 0;
+      attempt < 50 && (sync.stats.sentFrames === 0 || sync.stats.receivedFrames === 0);
+      attempt += 1
+    ) {
       await sync.flush();
       await delay(20);
     }
-    if (sync.stats.sentFrames === 0) throw new Error("browser websocket rust smoke did not send any binary wire frames");
-    if (sync.stats.receivedFrames === 0) throw new Error("browser websocket rust smoke did not receive any binary wire frames");
+    if (sync.stats.sentFrames === 0)
+      throw new Error("browser websocket rust smoke did not send any binary wire frames");
+    if (sync.stats.receivedFrames === 0)
+      throw new Error("browser websocket rust smoke did not receive any binary wire frames");
     await sync.close();
     await started.client.closeDb(db);
     await shutdownWorkerClient(started, log, "websocket rust");
@@ -322,57 +503,95 @@ export async function runWebSocketRustSmoke(wsUrl: string, log: ScenarioLogger):
   }
 }
 
-async function startWorkerClient(log: ScenarioLogger, label: string, progress?: ScenarioProgressHandler): Promise<StartedWorkerClient> {
+async function startWorkerClient(
+  log: ScenarioLogger,
+  label: string,
+  progress?: ScenarioProgressHandler,
+): Promise<StartedWorkerClient> {
   progress?.({ type: "worker-starting" });
   log(`${label} worker: starting browser WASM worker`);
-  const worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module" });
-  const client = new BrowserWasmWorkerClient(worker);
+  const worker = new Worker(new URL("./abi-smoke-worker.ts", import.meta.url), { type: "module" });
+  const client = new BrowserWasmAbiSmokeClient(worker);
   worker.addEventListener("error", (event) => client.rejectPending(new Error(event.message)));
-  worker.addEventListener("messageerror", () => client.rejectPending(new Error("worker message deserialization failed")));
+  worker.addEventListener("messageerror", () =>
+    client.rejectPending(new Error("worker message deserialization failed")),
+  );
   await client.init();
   progress?.({ type: "worker-ready" });
   log(`${label} worker: ready`);
   return { client };
 }
 
-async function shutdownWorkerClient(started: StartedWorkerClient, log: ScenarioLogger, label: string): Promise<void> {
+async function shutdownWorkerClient(
+  started: StartedWorkerClient,
+  log: ScenarioLogger,
+  label: string,
+): Promise<void> {
   await started.client.shutdown();
   log(`${label} worker: shutdown`);
 }
 
-async function openMemoryTodoDb(client: BrowserWasmWorkerClient, schema: Uint8Array, config: Uint8Array, log: ScenarioLogger, label: string): Promise<DbHandle> {
+async function openMemoryTodoDb(
+  client: BrowserWasmAbiSmokeClient,
+  schema: Uint8Array,
+  config: Uint8Array,
+  log: ScenarioLogger,
+  label: string,
+): Promise<DbHandle> {
   const db = await client.openMemoryDb(schema, config);
   log(`${label} worker: memory db opened ${db.kind}#${db.id}`);
   return db;
 }
 
-async function openBrowserTodoDb(client: BrowserWasmWorkerClient, namespace: string, schema: Uint8Array, config: Uint8Array, log: ScenarioLogger, label: string): Promise<DbHandle> {
+async function openBrowserTodoDb(
+  client: BrowserWasmAbiSmokeClient,
+  namespace: string,
+  schema: Uint8Array,
+  config: Uint8Array,
+  log: ScenarioLogger,
+  label: string,
+): Promise<DbHandle> {
   const db = await client.openBrowserDb(namespace, schema, config);
   log(`${label} worker: browser db opened ${db.kind}#${db.id}`);
   return db;
 }
 
-async function prepareTodosQuery(client: BrowserWasmWorkerClient, db: DbHandle, log: ScenarioLogger, label: string): Promise<QueryHandle> {
+async function prepareTodosQuery(
+  client: BrowserWasmAbiSmokeClient,
+  db: DbHandle,
+  log: ScenarioLogger,
+  label: string,
+): Promise<QueryHandle> {
   const query = await client.prepareQuery(db, queryFromTable("todos"));
   log(`${label} worker: todos query prepared ${query.kind}#${query.id}`);
   return query;
 }
 
-async function prepareQueryBytes(client: BrowserWasmWorkerClient, db: DbHandle, queryBytes: Uint8Array, log: ScenarioLogger, label: string): Promise<QueryHandle> {
+async function prepareQueryBytes(
+  client: BrowserWasmAbiSmokeClient,
+  db: DbHandle,
+  queryBytes: Uint8Array,
+  log: ScenarioLogger,
+  label: string,
+): Promise<QueryHandle> {
   const query = await client.prepareQuery(db, queryBytes);
   log(`${label} worker: query prepared ${query.kind}#${query.id}`);
   return query;
 }
 
 async function waitForLocalWrite(
-  client: BrowserWasmWorkerClient,
+  client: BrowserWasmAbiSmokeClient,
   write: WriteHandle,
   operation: string,
   progress: ScenarioProgressHandler,
   log: ScenarioLogger,
 ): Promise<void> {
   const writeState = await client.writeState(write);
-  if (!["Pending", "Accepted"].includes(writeState.fate) || writeState.durability !== "Local" || writeState.rejection !== undefined) {
+  if (
+    !["Pending", "Accepted"].includes(writeState.fate) ||
+    writeState.durability !== "Local" ||
+    writeState.rejection !== undefined
+  ) {
     throw new Error(`unexpected ${operation} write state: ${JSON.stringify(writeState)}`);
   }
   progress({ type: "write-state", fate: writeState.fate, durability: writeState.durability });
@@ -381,11 +600,19 @@ async function waitForLocalWrite(
   log(`${operation} write durability: Local`);
 }
 
-async function subscriptionTodos(client: BrowserWasmWorkerClient, subscription: SubscriptionHandle): Promise<TodoView[]> {
+async function subscriptionTodos(
+  client: BrowserWasmAbiSmokeClient,
+  subscription: SubscriptionHandle,
+): Promise<TodoView[]> {
   return todoViews(await client.subscriptionCurrent(subscription));
 }
 
-async function readTodosAs(client: BrowserWasmWorkerClient, db: DbHandle, query: QueryHandle, identity: Uint8Array): Promise<TodoView[]> {
+async function readTodosAs(
+  client: BrowserWasmAbiSmokeClient,
+  db: DbHandle,
+  query: QueryHandle,
+  identity: Uint8Array,
+): Promise<TodoView[]> {
   return todoViews(await client.readAllForIdentity(db, query, identity));
 }
 
@@ -409,24 +636,34 @@ function queryFilesOrderBySizeDescLimitOffset(): Uint8Array {
 
 function assertTodoSummaries(label: string, todos: TodoView[], expected: string[]): void {
   const actual = todos.map((todo) => `${todo.title}:${todo.done ? "done" : "open"}`);
-  if (actual.join("\n") !== expected.join("\n")) throw new Error(`unexpected ${label} todos: ${formatTodos(todos)}`);
+  if (actual.join("\n") !== expected.join("\n"))
+    throw new Error(`unexpected ${label} todos: ${formatTodos(todos)}`);
 }
 
-function assertTodoSummariesIgnoringOrder(label: string, todos: TodoView[], expected: string[]): void {
+function assertTodoSummariesIgnoringOrder(
+  label: string,
+  todos: TodoView[],
+  expected: string[],
+): void {
   assertTodoSummaries(label, [...todos].sort(compareTodoSummary), [...expected].sort());
 }
 
 function compareTodoSummary(left: TodoView, right: TodoView): number {
-  return `${left.title}:${left.done ? "done" : "open"}`.localeCompare(`${right.title}:${right.done ? "done" : "open"}`);
+  return `${left.title}:${left.done ? "done" : "open"}`.localeCompare(
+    `${right.title}:${right.done ? "done" : "open"}`,
+  );
 }
 
 class RecordingWebSocket {
-  binaryType: "arraybuffer" = "arraybuffer";
+  binaryType = "arraybuffer" as const;
   readyState = 0;
   readonly sent: Uint8Array[];
   private readonly listeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
-  constructor(readonly url: string, shared?: RecordingWebSocket) {
+  constructor(
+    readonly url: string,
+    shared?: RecordingWebSocket,
+  ) {
     this.sent = shared?.sent ?? [];
     queueMicrotask(() => {
       this.readyState = 1;

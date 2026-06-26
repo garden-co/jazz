@@ -1,8 +1,8 @@
 import {
-  BrowserWasmWorkerClient,
+  BrowserWasmAbiSmokeClient,
   type DbHandle,
   type TransportHandle,
-} from "./browser-wasm-worker-client.js";
+} from "./abi-smoke-worker-client.js";
 import {
   bytesFromWebSocketMessage,
   connectWebSocket,
@@ -31,7 +31,7 @@ export type BrowserWebSocketTransportSync = {
 
 export type OpenBrowserWebSocketTransportOptions = {
   url: string;
-  client: BrowserWasmWorkerClient;
+  client: BrowserWasmAbiSmokeClient;
   db: DbHandle;
   identity: Uint8Array;
   tickMs?: number;
@@ -41,9 +41,9 @@ export type OpenBrowserWebSocketTransportOptions = {
 export async function openBrowserWebSocketTransport(
   options: OpenBrowserWebSocketTransportOptions,
 ): Promise<BrowserWebSocketTransportSync> {
-  const WebSocketCtor = options.WebSocket ?? webSocketConstructor(
-    "global WebSocket is unavailable; run in a browser or pass a constructor",
-  );
+  const WebSocketCtor =
+    options.WebSocket ??
+    webSocketConstructor("global WebSocket is unavailable; run in a browser or pass a constructor");
   const url = websocketTransportUrl(options.url, options.identity);
   const socket = await connectWebSocket(WebSocketCtor, url);
   const transport = await options.client.connectTransport(options.db, "upstream", new Uint8Array());
@@ -75,10 +75,9 @@ export async function openBrowserWebSocketTransport(
     },
     async flush() {
       if (closed || socket.readyState !== 1) return;
-      flushing ??= flushOnce(options.client, options.db, transport, socket, stats)
-        .finally(() => {
-          flushing = undefined;
-        });
+      flushing ??= flushOnce(options.client, options.db, transport, socket, stats).finally(() => {
+        flushing = undefined;
+      });
       await flushing;
     },
   };
@@ -105,14 +104,17 @@ export async function openBrowserWebSocketTransport(
 }
 
 async function flushOnce(
-  client: BrowserWasmWorkerClient,
+  client: BrowserWasmAbiSmokeClient,
   db: DbHandle,
   transport: TransportHandle,
   socket: MinimalWebSocket,
   stats: WebSocketTransportStats,
 ): Promise<void> {
   await client.transportTick(transport);
-  const frames = await client.transportRecvWireFrames(transport, { max_frames: 16, max_bytes: 1024 * 1024 });
+  const frames = await client.transportRecvWireFrames(transport, {
+    max_frames: 16,
+    max_bytes: 1024 * 1024,
+  });
   if (frames.length > 0) {
     socket.send(encodeFrameBatch(frames));
     stats.sentFrames += frames.length;

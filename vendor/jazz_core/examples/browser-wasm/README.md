@@ -1,21 +1,23 @@
-# TS WASM Browser Example
+# TS WASM Browser ABI Smoke Fixture
 
-This package is a Vite scaffold for importing the `jazz-wasm/pkg-web`
-web-target build in a browser worker and driving direct `WasmDb` objects from
-the main thread.
+This package is a low-level ABI smoke fixture for importing the
+`jazz-wasm/pkg-web` web-target build in a browser worker and driving direct
+`WasmDb` objects from the main thread. It intentionally exercises the direct
+WASM binding surface; it is not the recommended application worker
+architecture.
 
-The page starts `src/db-worker.ts`, wraps it with the local
-`BrowserWasmWorkerClient`, and sends direct `WasmDb` operations to the
+The page starts `src/abi-smoke-worker.ts`, wraps it with the local
+`BrowserWasmAbiSmokeClient`, and sends direct `WasmDb` operations to the
 worker. The worker initializes the generated WASM module, owns the live
-`WasmDb`/transport objects, revives transferred bytes, and executes the small
-allow-listed browser surface.
+`WasmDb`/transport objects in a `WasmAbiObjectRegistry`, revives transferred
+bytes, and executes the small allow-listed browser surface.
 
-The main thread owns the demo flow, handle bookkeeping, status UI, and decoded
-row rendering, while the worker owns the WASM module instance and `WasmDb` objects. The
-browser-owned boundary is deliberately thin so the example stays close to the
-direct object model while the browser integration is still settling.
+The main thread owns the smoke flow, handle bookkeeping, status UI, and decoded
+row rendering, while the worker owns the WASM module instance and `WasmDb`
+objects. The browser-owned boundary is deliberately thin so the fixture stays
+close to the direct object model and can catch low-level ABI regressions.
 
-The demo runs a browser worker-backed memory database scenario:
+The fixture runs a browser worker-backed memory database scenario:
 
 - open a memory DB
 - define a `todos` schema with `title` and `done`
@@ -91,13 +93,13 @@ cursor and subscription correctness after reload, ABI error mapping, format
 versioning, quota/cleanup handling, and worker-safe concurrency.
 
 Rows and cells stay Record-encoded across both the worker boundary and the WASM
-boundary because this demo is exercising direct `WasmDb` bindings, not a
-higher-level object mapper. The example only decodes rows after `WasmDb` returns
+boundary because this fixture is exercising direct `WasmDb` bindings, not a
+higher-level object mapper or app worker architecture. The example only decodes rows after `WasmDb` returns
 bytes; typed progress events then let the page render compact runtime,
 durability, read, and watch facts plus the decoded todo states while preserving
 the `#summary` and `#log` smoke anchors.
 
-The browser demo owns its direct `WasmDb` browser glue locally. Domain-level helpers
+The browser ABI smoke fixture owns its direct `WasmDb` browser glue locally. Domain-level helpers
 for schemas, encoded cells, and row views come from the `jazz-tools` package
 root; browser-specific query/config/event decoding stays inside this package.
 
@@ -129,7 +131,7 @@ npm run dev
 If Playwright reports that Chromium is missing on a fresh machine, run
 `npx playwright install chromium` once and rerun `npm test` or `npm run smoke`.
 
-The example imports `../../../jazz-wasm/pkg-web/jazz_wasm.js` directly so it
+The example imports `../../../jazz-wasm/pkg-web/jazz_core_wasm.js` directly so it
 stays close to the generated web package. The Node examples use
 `../../../jazz-wasm/pkg`, so browser and Node builds do not overwrite each
 other. Rebuild WASM after changing `jazz-wasm`.
