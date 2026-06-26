@@ -8,8 +8,6 @@ export {
   onActiveQuerySubscriptionsChange,
   onDevToolsPortConnect,
   onDevToolsPortDisconnect,
-} from "./extension-panel.js";
-export {
   setDevtoolsBridgeConnector,
   resetDevtoolsBridgeConnector,
   type DevtoolsBridgePort,

@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { createOverlayHandler } from "./inspector-overlay/serve.js";
+import { attachOverlayMiddleware, overlayHtmlTransform } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
@@ -184,31 +184,14 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
           resolvedRuntime.telemetryCollectorUrl;
       }
 
-      const overlay = createOverlayHandler({ appRoot: viteServer.config.root });
-      viteServer.middlewares?.use((req, res, next) => {
-        void overlay(req, res).then((handled) => {
-          if (!handled) next();
-        });
-      });
+      attachOverlayMiddleware(viteServer);
 
       console.log(
         `${LOG_PREFIX} Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).`,
       );
     },
 
-    transformIndexHtml(html: string, ctx: { server?: unknown }) {
-      if (!ctx.server) return html;
-      return {
-        html,
-        tags: [
-          {
-            tag: "script",
-            attrs: { type: "module", src: "/__jazz/loader.js" },
-            injectTo: "body" as const,
-          },
-        ],
-      };
-    },
+    transformIndexHtml: overlayHtmlTransform,
   };
 }
 
