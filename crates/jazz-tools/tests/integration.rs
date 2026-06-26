@@ -15,7 +15,7 @@ use jazz::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello, WirePeerRole,
     decode_frame, encode_frame,
 };
-use jazz_tools::transport_manager::AuthConfig;
+use jazz_tools::transport_auth::AuthConfig;
 use jazz_tools::{ColumnType, SchemaBuilder, TableSchema};
 use reqwest::Client;
 use serde_json::json;

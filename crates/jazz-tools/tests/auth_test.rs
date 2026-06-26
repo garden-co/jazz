@@ -18,7 +18,7 @@ use jazz::wire::{
     WirePeerRole, decode_frame, encode_frame,
 };
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::transport_manager::AuthConfig;
+use jazz_tools::transport_auth::AuthConfig;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};

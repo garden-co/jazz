@@ -22,7 +22,7 @@ mod builder;
 mod catalogue;
 mod core_server;
 pub mod direct_client;
-mod direct_schema;
+pub(crate) mod direct_schema;
 pub mod routes;
 mod shutdown;
 #[cfg(feature = "test-utils")]
