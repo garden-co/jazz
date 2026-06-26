@@ -171,6 +171,10 @@ name = "direct_core_benchmark"
 harness = false
 
 [[bench]]
+name = "direct_authorization_scope_benchmark"
+harness = false
+
+[[bench]]
 name = "insert_benchmark"
 harness = false
 
