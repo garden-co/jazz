@@ -300,7 +300,6 @@ type WorkerInbound =
   | { type: "settle"; id: number }
   | { type: "query"; id: number; query: Uint8Array }
   | { type: "server-in"; frame: Uint8Array }
-  | { type: "update-auth"; jwtToken?: string | null }
   | { type: "lifecycle"; event: string }
   | { type: "attach-follower-port"; peerId: string; leadershipId: number; port: MessagePort }
   | { type: "detach-follower-port"; peerId: string; leadershipId: number }

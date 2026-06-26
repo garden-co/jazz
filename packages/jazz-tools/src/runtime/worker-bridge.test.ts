@@ -151,6 +151,96 @@ describe("WorkerBridge", () => {
       JSON.stringify({ jwt_token: null }),
     );
   });
+
+  it("reopens the page-owned direct websocket carrier with refreshed auth", async () => {
+    directWebSocketCarrierMock.instances.splice(0);
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "auth-refresh-app",
+      env: "dev",
+      userBranch: "main",
+      dbName: "auth-refresh-db",
+      serverUrl: "http://localhost:4200",
+      jwtToken: "jwt-initial",
+      adminSecret: "admin-secret",
+    });
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+    worker.sent.splice(0);
+
+    bridge.updateAuth({ jwtToken: "jwt-refresh" });
+
+    expect(directWebSocketCarrierMock.instances).toHaveLength(2);
+    expect(directWebSocketCarrierMock.instances[0]!.close).toHaveBeenCalledTimes(1);
+    expect(directWebSocketCarrierMock.instances[1]!.options.authJson).toBe(
+      JSON.stringify({
+        jwt_token: "jwt-refresh",
+        admin_secret: "admin-secret",
+      }),
+    );
+    expect(worker.sent).not.toContainEqual({ type: "update-auth", jwtToken: "jwt-refresh" });
+  });
+
+  it("reports direct websocket auth errors from the page-owned carrier", async () => {
+    directWebSocketCarrierMock.instances.splice(0);
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+    const onAuthFailure = vi.fn();
+    bridge.onAuthFailure(onAuthFailure);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "auth-error-app",
+      env: "dev",
+      userBranch: "main",
+      dbName: "auth-error-db",
+      serverUrl: "http://localhost:4200",
+      jwtToken: "jwt-invalid",
+    });
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+
+    directWebSocketCarrierMock.instances[0]!.options.onError({
+      code: "auth_failed",
+      retry: "after_auth",
+      message: "token expired",
+    });
+
+    expect(onAuthFailure).toHaveBeenCalledWith("expired");
+  });
+
+  it("does not report non-auth direct websocket errors as auth failures", async () => {
+    directWebSocketCarrierMock.instances.splice(0);
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+    const onAuthFailure = vi.fn();
+    bridge.onAuthFailure(onAuthFailure);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "protocol-error-app",
+      env: "dev",
+      userBranch: "main",
+      dbName: "protocol-error-db",
+      serverUrl: "http://localhost:4200",
+    });
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+    await initPromise;
+
+    directWebSocketCarrierMock.instances[0]!.options.onError({
+      code: "internal",
+      retry: "later",
+      message: "conflicting commit unit",
+    });
+
+    expect(onAuthFailure).not.toHaveBeenCalled();
+  });
 });
 
 describe("MessagePortRuntimeBridge", () => {

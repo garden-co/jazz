@@ -1,6 +1,7 @@
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
-import { DirectWebSocketCarrier } from "./direct-wasm/direct-websocket.js";
+import { mapAuthReason } from "./auth-state.js";
+import { DirectWebSocketCarrier, type DirectWireError } from "./direct-wasm/direct-websocket.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
 /** Page lifecycle hint forwarded to the worker runtime. */
@@ -75,7 +76,6 @@ type WorkerInbound =
   | { type: "settle"; id: number }
   | { type: "query"; id: number; query: Uint8Array }
   | { type: "server-in"; frame: Uint8Array }
-  | { type: "update-auth"; jwtToken?: string | null }
   | { type: "lifecycle"; event: WorkerLifecycleEvent }
   | { type: "attach-follower-port"; peerId: string; leadershipId: number; port: MessagePort }
   | { type: "detach-follower-port"; peerId: string; leadershipId: number }
@@ -206,7 +206,12 @@ export class WorkerBridge {
   }
 
   updateAuth(auth: { jwtToken?: string }): void {
-    this.postToWorker({ type: "update-auth", jwtToken: auth.jwtToken ?? null });
+    if (!this.serverCarrierOptions) return;
+    this.serverCarrierOptions = {
+      ...this.serverCarrierOptions,
+      jwtToken: auth.jwtToken ?? undefined,
+    };
+    void this.reopenServerCarrier();
   }
 
   sendLifecycleHint(event: WorkerLifecycleEvent): void {
@@ -467,6 +472,10 @@ export class WorkerBridge {
         this.applyIncomingServerPayload(frame);
         this.schedulePump();
       },
+      onError: (error) => {
+        if (error.code !== "auth_failed") return;
+        this.listeners.onAuthFailure?.(directWireAuthFailureReason(error));
+      },
     });
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then(() => {
@@ -535,6 +544,10 @@ export class WorkerBridge {
 
 function stringifyUnknown(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function directWireAuthFailureReason(error: DirectWireError): AuthFailureReason {
+  return mapAuthReason(error.message);
 }
 
 function buildWorkerBridgeAuthJson(options: WorkerBridgeOptions): string {

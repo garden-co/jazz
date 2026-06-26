@@ -28,6 +28,7 @@ use crate::transport_manager::TransportRetryConfig;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(feature = "rocksdb")]
 const DIRECT_CORE_ROCKSDB_DIR: &str = "direct-core.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);

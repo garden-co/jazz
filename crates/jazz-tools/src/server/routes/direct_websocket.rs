@@ -4,8 +4,10 @@
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
 //! matching the direct core binding/server carrier shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     extract::State,
@@ -19,12 +21,18 @@ use jazz::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError,
     WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, encode_frame, negotiate_wire,
 };
+use tokio::sync::mpsc;
 
 use crate::server::ServerState;
 
 const DIRECT_WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 const DIRECT_WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const DIRECT_WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+
+static DIRECT_WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static DIRECT_WS_ADMISSIONS: OnceLock<std::sync::Mutex<DirectWsAdmissionRegistry>> =
+    OnceLock::new();
 
 /// Direct jazz_core websocket endpoint.
 ///
@@ -54,6 +62,79 @@ pub(super) async fn direct_ws_handler(
 struct DirectWsAdmission {
     identity: AuthorId,
     claims: BTreeMap<String, CoreValue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DirectWsAdmissionKey {
+    app_id: crate::schema_manager::AppId,
+    identity: AuthorId,
+}
+
+#[derive(Debug)]
+struct DirectWsAdmissionEntry {
+    id: u64,
+    evict_tx: mpsc::UnboundedSender<DirectWsEviction>,
+}
+
+#[derive(Debug)]
+struct DirectWsEviction;
+
+#[derive(Debug, Default)]
+struct DirectWsAdmissionRegistry {
+    by_key: HashMap<DirectWsAdmissionKey, VecDeque<DirectWsAdmissionEntry>>,
+}
+
+struct DirectWsAdmissionRegistration {
+    key: DirectWsAdmissionKey,
+    id: u64,
+    evict_rx: mpsc::UnboundedReceiver<DirectWsEviction>,
+}
+
+impl Drop for DirectWsAdmissionRegistration {
+    fn drop(&mut self) {
+        direct_ws_unregister_admission(self.key, self.id);
+    }
+}
+
+fn direct_ws_admission_registry() -> &'static std::sync::Mutex<DirectWsAdmissionRegistry> {
+    DIRECT_WS_ADMISSIONS.get_or_init(Default::default)
+}
+
+fn direct_ws_register_admission(key: DirectWsAdmissionKey) -> DirectWsAdmissionRegistration {
+    let id = DIRECT_WS_NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let (evict_tx, evict_rx) = mpsc::unbounded_channel();
+    let mut registry = direct_ws_admission_registry().lock().unwrap();
+    let entries = registry.by_key.entry(key).or_default();
+    entries.push_back(DirectWsAdmissionEntry { id, evict_tx });
+
+    while entries.len() > DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+        if let Some(oldest) = entries.pop_front() {
+            let _ = oldest.evict_tx.send(DirectWsEviction);
+        }
+    }
+
+    DirectWsAdmissionRegistration { key, id, evict_rx }
+}
+
+fn direct_ws_unregister_admission(key: DirectWsAdmissionKey, id: u64) {
+    let mut registry = direct_ws_admission_registry().lock().unwrap();
+    let Some(entries) = registry.by_key.get_mut(&key) else {
+        return;
+    };
+    entries.retain(|entry| entry.id != id);
+    if entries.is_empty() {
+        registry.by_key.remove(&key);
+    }
+}
+
+#[cfg(test)]
+fn direct_ws_live_admissions_for(key: DirectWsAdmissionKey) -> usize {
+    direct_ws_admission_registry()
+        .lock()
+        .unwrap()
+        .by_key
+        .get(&key)
+        .map_or(0, VecDeque::len)
 }
 
 #[derive(serde::Deserialize)]
@@ -390,6 +471,10 @@ async fn handle_direct_ws_connection(
             return;
         }
     };
+    let mut admission_registration = direct_ws_register_admission(DirectWsAdmissionKey {
+        app_id: state.app_id,
+        identity: admission.identity,
+    });
 
     let Some(first) = read_direct_wire_frame_batch(&mut socket, &mut shutdown_rx, &state).await
     else {
@@ -497,6 +582,21 @@ async fn handle_direct_ws_connection(
     let mut outbound_tick = tokio::time::interval(std::time::Duration::from_millis(5));
     loop {
         tokio::select! {
+            eviction = admission_registration.evict_rx.recv() => {
+                if eviction.is_some() {
+                    send_direct_wire_error(
+                        &mut socket,
+                        WireError::new(
+                            WireErrorCode::Backpressure,
+                            WireRetry::Later,
+                            "direct websocket peer_identity connection cap exceeded",
+                        ),
+                    )
+                    .await;
+                    close_direct_ws_for_policy(&mut socket, "direct websocket connection cap exceeded").await;
+                }
+                break;
+            }
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
                     close_direct_ws_for_shutdown(&mut socket).await;
@@ -614,9 +714,28 @@ async fn close_direct_ws_for_shutdown(socket: &mut WebSocket) {
         .await;
 }
 
+async fn close_direct_ws_for_policy(socket: &mut WebSocket, reason: &'static str) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::POLICY,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use futures::{SinkExt as _, StreamExt as _};
+    use jazz::wire::decode_frame;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
+    use crate::middleware::AuthConfig;
+    use crate::query_manager::types::Schema;
+    use crate::schema_manager::AppId;
+    use crate::server::{ServerBuilder, StorageBackend};
 
     #[test]
     fn direct_frame_batch_round_trips_wire_frames() {
@@ -696,5 +815,206 @@ mod tests {
             "https://evil.example".parse().unwrap(),
         );
         assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+    }
+
+    async fn make_direct_ws_test_state() -> Arc<ServerState> {
+        ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build direct ws test state")
+            .state
+    }
+
+    async fn start_direct_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
+        let app = super::super::create_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind direct ws listener");
+        let addr = listener.local_addr().expect("direct ws listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve direct ws test app");
+        });
+        addr
+    }
+
+    fn direct_ws_url(addr: std::net::SocketAddr, app_id: AppId) -> String {
+        format!("ws://{addr}/apps/{app_id}/ws")
+    }
+
+    fn direct_ws_prelude(identity: AuthorId) -> Vec<u8> {
+        format!(
+            r#"{{"peer_identity":"{}","auth":{{"admin_secret":"admin-secret"}}}}"#,
+            hex::encode(identity.as_bytes())
+        )
+        .into_bytes()
+    }
+
+    fn direct_ws_client_hello_batch() -> Vec<u8> {
+        let hello = WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+        ));
+        let encoded = vec![encode_frame(&hello).expect("encode direct client hello")];
+        postcard::to_allocvec(&encoded).expect("encode direct hello batch")
+    }
+
+    async fn open_negotiated_direct_ws(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        identity: AuthorId,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+            .await
+            .expect("connect direct ws");
+        ws.send(WsMessage::Binary(direct_ws_prelude(identity).into()))
+            .await
+            .expect("send direct ws prelude");
+        ws.send(WsMessage::Binary(direct_ws_client_hello_batch().into()))
+            .await
+            .expect("send direct ws hello");
+
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for direct server hello")
+            .expect("direct ws frame")
+            .expect("direct ws result");
+        let WsMessage::Binary(response) = response else {
+            panic!("expected direct server hello, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> =
+            postcard::from_bytes(&response).expect("decode direct ws response batch");
+        assert_eq!(frames.len(), 1);
+        let WireFrame::Hello(server_hello) =
+            decode_frame(&frames[0]).expect("decode direct server hello")
+        else {
+            panic!("expected direct server hello");
+        };
+        assert_eq!(server_hello.role, WirePeerRole::Core);
+        ws
+    }
+
+    fn decode_direct_ws_message(msg: &WsMessage) -> Vec<WireFrame> {
+        let WsMessage::Binary(bytes) = msg else {
+            return Vec::new();
+        };
+        let encoded: Vec<Vec<u8>> =
+            postcard::from_bytes(bytes).expect("decode direct ws frame batch");
+        encoded
+            .iter()
+            .map(|frame| decode_frame(frame).expect("decode direct wire frame"))
+            .collect()
+    }
+
+    // Internal route-boundary test: direct websocket liveness is not exposed
+    // through the public JazzClient API yet, so this observes the direct
+    // admission registry as the user-visible socket closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_direct_peer_identity_connections_are_bounded_by_eviction() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let identity = AuthorId::from_bytes([0x42; 16]);
+        let key = DirectWsAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+
+        let mut sockets = Vec::new();
+        for _ in 0..DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+            sockets.push(open_negotiated_direct_ws(addr, &state, identity).await);
+        }
+
+        let mut oldest = sockets.remove(0);
+        let _newest = open_negotiated_direct_ws(addr, &state, identity).await;
+
+        let mut saw_backpressure = false;
+        let mut saw_policy_close = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(msg) = oldest.next().await {
+                let msg = msg.expect("oldest ws message");
+                for frame in decode_direct_ws_message(&msg) {
+                    if let WireFrame::Error(error) = frame {
+                        saw_backpressure = error.code == WireErrorCode::Backpressure
+                            && error.retry == WireRetry::Later;
+                    }
+                }
+                if let WsMessage::Close(Some(close)) = msg {
+                    saw_policy_close = close.code
+                        == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy;
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("oldest direct ws should be evicted");
+
+        assert!(
+            saw_backpressure,
+            "evicted direct ws must receive a WireError"
+        );
+        assert!(
+            saw_policy_close,
+            "evicted direct ws must receive a policy close"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while direct_ws_live_admissions_for(key) > DIRECT_WS_PER_IDENTITY_CONNECTION_CAP {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("direct admission cleanup");
+        assert_eq!(
+            direct_ws_live_admissions_for(key),
+            DIRECT_WS_PER_IDENTITY_CONNECTION_CAP
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_direct_ws_upgrade_is_not_held_open_indefinitely() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+            .await
+            .expect("connect idle direct ws");
+
+        tokio::time::sleep(DIRECT_WS_HANDSHAKE_READ_TIMEOUT + Duration::from_millis(500)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
+            ),
+            "idle direct ws upgrade must close after handshake timeout; observed {outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_direct_ws_upgrade_during_shutdown_closes_cleanly() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(direct_ws_url(addr, state.app_id))
+            .await
+            .expect("connect idle direct ws");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(state.shutdown.request_shutdown());
+
+        let outcome = tokio::time::timeout(Duration::from_secs(3), ws.next()).await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
+            ),
+            "idle direct ws upgrade must close cleanly under shutdown; observed {outcome:?}"
+        );
     }
 }
