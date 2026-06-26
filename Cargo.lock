@@ -1844,7 +1844,6 @@ dependencies = [
  "opentelemetry_sdk",
  "postcard",
  "serde",
- "serde_bytes",
  "serde_json",
  "tokio",
  "tracing",

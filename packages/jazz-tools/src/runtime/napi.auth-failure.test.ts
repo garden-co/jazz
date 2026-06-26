@@ -1,12 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { startLocalJazzServer } from "../testing/index.js";
-import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { createNapiCoreRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { httpUrlToWs } from "./url.js";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const MINIMAL_SCHEMA: WasmSchema = {
@@ -31,17 +27,11 @@ describe("NAPI on_auth_failure", () => {
       adminSecret,
     });
 
-    const dataDir = await mkdtemp(join(tmpdir(), "jazz-napi-auth-failure-"));
-    const dataPath = join(dataDir, "runtime.db");
-
-    const { NapiRuntime } = await loadNapiModule();
-    const runtime = new NapiRuntime(
-      serializeRuntimeSchema(MINIMAL_SCHEMA),
+    const runtime = await createNapiCoreRuntime(MINIMAL_SCHEMA, {
       appId,
-      "test",
-      "main",
-      dataPath,
-    );
+      env: "test",
+      userBranch: "main",
+    });
 
     try {
       const reasons: string[] = [];
@@ -67,9 +57,10 @@ describe("NAPI on_auth_failure", () => {
       }
 
       expect(reasons.length).toBeGreaterThan(0);
-      expect(reasons[0]).toMatch(/unauth/i);
+      expect(reasons[0]).toBe("disabled");
     } finally {
       runtime.disconnect();
+      runtime.close?.();
       await server.stop();
     }
   }, 30_000);
