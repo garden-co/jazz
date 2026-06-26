@@ -13,6 +13,9 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, Schema, TableName, Value,
 };
 
+const ALPHA_USER_ID_SESSION_PATH: &str = "user_id";
+const DIRECT_USER_ID_CLAIM: &str = "user_id";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DirectSchemaConversionError {
     path: String,
@@ -262,9 +265,9 @@ fn convert_policy_operand(
 ) -> Result<Operand, DirectSchemaConversionError> {
     match value {
         PolicyValue::SessionRef(path_segments)
-            if path_segments.as_slice() == [String::from("user_id")] =>
+            if path_segments.as_slice() == [String::from(ALPHA_USER_ID_SESSION_PATH)] =>
         {
-            Ok(Operand::Claim("user_id".to_owned()))
+            Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()))
         }
         PolicyValue::SessionRef(path_segments) => Err(err(
             format!("$.{}.{}", table.as_str(), path),
@@ -442,7 +445,7 @@ mod tests {
             vec![Predicate::All(vec![
                 Predicate::Eq(
                     Operand::Column("owner_id".to_owned()),
-                    Operand::Claim("user_id".to_owned()),
+                    Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
                 ),
                 Predicate::Not(Box::new(Predicate::Eq(
                     Operand::Column("archived".to_owned()),
