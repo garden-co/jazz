@@ -315,7 +315,7 @@ impl NapiDirectWrite {
     }
 }
 
-#[napi(js_name = "WasmDb")]
+#[napi(js_name = "NapiDirectDb")]
 pub struct NapiDirectDb {
     inner: DirectNapiDbInner,
 }

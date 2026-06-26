@@ -11,6 +11,19 @@ export declare class JazzServer {
   stop(): Promise<void>
 }
 
+export declare class NapiDirectDb {
+  static openMemory(schema: Uint8Array, config: Uint8Array): NapiDirectDb
+  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDirectDb
+  prepareQuery(query: Uint8Array): WasmPreparedQuery
+  all(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
+  delete(table: string, rowId: Uint8Array): WasmWrite
+  tick(): void
+  close(): void
+}
+
 export declare class NapiRuntime {
   /** Create a new NapiRuntime with SQLite-backed persistent storage. */
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
@@ -64,20 +77,6 @@ export declare class TestJwtIssuer {
   jwtForUser(userId: string, claims?: Record<string, unknown> | undefined, options?: { expiresInSeconds?: number; issuer?: string } | undefined): string
   stop(): Promise<void>
 }
-
-export declare class WasmDb {
-  static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb
-  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): WasmDb
-  prepareQuery(query: Uint8Array): WasmPreparedQuery
-  all(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
-  delete(table: string, rowId: Uint8Array): WasmWrite
-  tick(): void
-  close(): void
-}
-export type NapiDirectDb = WasmDb
 
 export declare class WasmPreparedQuery {
 

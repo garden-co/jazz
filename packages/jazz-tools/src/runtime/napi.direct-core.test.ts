@@ -17,9 +17,9 @@ const TEST_SCHEMA: WasmSchema = {
 
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
   it("opens, mutates one row, and queries it through the direct WASM adapter shape", async () => {
-    const { WasmDb } = await loadNapiModule();
+    const { NapiDirectDb } = await loadNapiModule();
     const runtime = new DirectWasmRuntime(
-      { openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never },
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-direct-core:node"),
       deterministicBytes("jazz-napi-direct-core:author"),
@@ -64,7 +64,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
   });
 
   it("reopens a persistent direct DB and reads previously written rows", async () => {
-    const { WasmDb } = await loadNapiModule();
+    const { NapiDirectDb } = await loadNapiModule();
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-"));
     const dataPath = join(tempDir, "db");
     const node = deterministicBytes("jazz-napi-direct-persistent:node");
@@ -75,9 +75,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     try {
       firstRuntime = new DirectWasmRuntime(
         {
-          openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never,
+          openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
-            WasmDb.openPersistent(path, schema, config) as never,
+            NapiDirectDb.openPersistent(path, schema, config) as never,
         },
         TEST_SCHEMA,
         node,
@@ -97,9 +97,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
       secondRuntime = new DirectWasmRuntime(
         {
-          openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never,
+          openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
-            WasmDb.openPersistent(path, schema, config) as never,
+            NapiDirectDb.openPersistent(path, schema, config) as never,
         },
         TEST_SCHEMA,
         node,
