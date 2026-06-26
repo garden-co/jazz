@@ -1048,6 +1048,52 @@ fn maintained_subscription_view_multi_segment_inner_include_matches_full_recompu
 }
 
 #[test]
+fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
+    let schema = multi_segment_required_include_rls_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xa1);
+    seed_multi_segment_include_fixture(&mut core, reader);
+    let shape = required_include_shape(&core, Include::new("project.org"));
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::for_author(reader);
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    let update_tx = core
+        .commit_mergeable(
+            MergeableCommit::new("roots", row(0xd2), 40)
+                .parents(vec![TxId::new(TxTime(10), node(9))])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("updated visible root")),
+                    ("project".to_owned(), Value::Uuid(row(0xc2).0)),
+                ])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        update_tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate {
+        result_row_adds, ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(
+        result_row_adds.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([(
+            "roots".to_owned().into(),
+            row(0xd2),
+            update_tx
+        )])
+    );
+}
+
+#[test]
 fn full_recompute_and_maintained_inner_multi_segment_include_payloads_match() {
     let schema = multi_segment_required_include_rls_schema();
     let (_full_recompute_dir, mut full_recompute_core) =

@@ -76,14 +76,17 @@ const app = defineApp({
     name: schema.string(),
     parent: schema.uuid({ nullable: true, references: "teams" }),
   }),
-  users: schema.table({
-    name: schema.string(),
-    team: schema.uuid({ nullable: true, references: "teams" }),
-  }, {
-    relations: {
-      ownedTodos: { table: "owned_todos", column: "owner" },
+  users: schema.table(
+    {
+      name: schema.string(),
+      team: schema.uuid({ nullable: true, references: "teams" }),
     },
-  }),
+    {
+      relations: {
+        ownedTodos: { table: "owned_todos", column: "owner" },
+      },
+    },
+  ),
   todos: schema.table({
     title: schema.string(),
     done: schema.boolean(),
@@ -92,16 +95,22 @@ const app = defineApp({
     tags: schema.array("Text"),
     payload: schema.bytea({ nullable: true }),
   }),
-  owned_todos: schema.table({
-    title: schema.string(),
-    done: schema.boolean(),
-    priority: schema.integer(),
-    owner: schema.uuid({ references: "users" }),
-  }, { readPolicy: "owner" }),
-  private_notes: schema.table({
-    body: schema.string(),
-    owner: schema.uuid(),
-  }, { readPolicy: "owner" }),
+  owned_todos: schema.table(
+    {
+      title: schema.string(),
+      done: schema.boolean(),
+      priority: schema.integer(),
+      owner: schema.uuid({ references: "users" }),
+    },
+    { readPolicy: "owner" },
+  ),
+  private_notes: schema.table(
+    {
+      body: schema.string(),
+      owner: schema.uuid(),
+    },
+    { readPolicy: "owner" },
+  ),
   note_links: schema.table({
     label: schema.string(),
     note: schema.uuid({ nullable: true, references: "private_notes" }),
@@ -132,13 +141,17 @@ async function main(): Promise<void> {
   await waitForSnapshots(todoSnapshots, 1);
   assert.deepEqual(latest(todoSnapshots), []);
 
-  const created = db.insert(todosTable, {
-    title: "Adopt alpha public flow",
-    done: false,
-    priority: 1,
-    tags: ["alpha", "compat"],
-    payload: new Uint8Array([1, 2, 3]),
-  }, { id: rowId });
+  const created = db.insert(
+    todosTable,
+    {
+      title: "Adopt alpha public flow",
+      done: false,
+      priority: 1,
+      tags: ["alpha", "compat"],
+      payload: new Uint8Array([1, 2, 3]),
+    },
+    { id: rowId },
+  );
   assert.equal(created.value, created);
   assert.equal(await created.wait({ tier: "local" }), created);
   assert.equal(created.title, "Adopt alpha public flow");
@@ -223,181 +236,348 @@ async function main(): Promise<void> {
     "Ship query parity:open",
   ]);
   assert.equal(db.all(todosTable.limit(1)).length, 1);
-  assert.deepEqual(db.all(todosTable.select("title")).map((todo) => Object.keys(todo).sort()), [
-    ["id", "title"],
-    ["id", "title"],
-    ["id", "title"],
+  assert.deepEqual(
+    db.all(todosTable.select("title")).map((todo) => Object.keys(todo).sort()),
+    [
+      ["id", "title"],
+      ["id", "title"],
+      ["id", "title"],
+    ],
+  );
+  assert.deepEqual(
+    db.all(todosTable.select("title").orderBy("title")).map((todo) => todo.title),
+    ["Adopt alpha public flow", "Prove identity reads", "Ship query parity"],
+  );
+  assert.deepEqual(
+    db.all(todosTable.orderBy("title", "desc")).map((todo) => todo.title),
+    ["Ship query parity", "Prove identity reads", "Adopt alpha public flow"],
+  );
+  assert.deepEqual(db.all(todosTable.orderBy("title").offset(1).limit(1)).map(summary), [
+    "Prove identity reads:open",
   ]);
-  assert.deepEqual(db.all(todosTable.select("title").orderBy("title")).map((todo) => todo.title), [
-    "Adopt alpha public flow",
-    "Prove identity reads",
-    "Ship query parity",
+  assert.deepEqual(db.allForIdentity(ownedTodosTable, accountAuthor).map(summary), [
+    "Owner A scoped read:open",
   ]);
-  assert.deepEqual(db.all(todosTable.orderBy("title", "desc")).map((todo) => todo.title), [
-    "Ship query parity",
-    "Prove identity reads",
-    "Adopt alpha public flow",
+  assert.deepEqual(db.allForIdentity(ownedTodosTable, otherOwnerId).map(summary), [
+    "Owner B scoped read:open",
   ]);
-  assert.deepEqual(db.all(todosTable.orderBy("title").offset(1).limit(1)).map(summary), ["Prove identity reads:open"]);
-  assert.deepEqual(db.allForIdentity(ownedTodosTable, accountAuthor).map(summary), ["Owner A scoped read:open"]);
-  assert.deepEqual(db.allForIdentity(ownedTodosTable, otherOwnerId).map(summary), ["Owner B scoped read:open"]);
-  const usersWithOwnedTodos = db.allForIdentity(usersTable.where("id", "eq", accountAuthorId).include("ownedTodos"), accountAuthor);
+  const usersWithOwnedTodos = db.allForIdentity(
+    usersTable.where("id", "eq", accountAuthorId).include("ownedTodos"),
+    accountAuthor,
+  );
   assert.equal(usersWithOwnedTodos.length, 1);
   assert.deepEqual(usersWithOwnedTodos[0].ownedTodos?.map(summary), ["Owner A scoped read:open"]);
-  const usersWithObjectIncludedTodos = db.allForIdentity(usersTable.where({ id: accountAuthorId }).include({ ownedTodos: true }), accountAuthor);
-  assert.equal(usersWithObjectIncludedTodos.length, 1);
-  assert.deepEqual(usersWithObjectIncludedTodos[0].ownedTodos?.map(summary), ["Owner A scoped read:open"]);
-  assert.throws(
-    () => db.subscribe(usersTable.where({ id: accountAuthorId }).include({ ownedTodos: true }), () => undefined),
-    /current jazz-tools\/WasmDb subscribe with relation includes only supports simple forward includes/,
+  const usersWithObjectIncludedTodos = db.allForIdentity(
+    usersTable.where({ id: accountAuthorId }).include({ ownedTodos: true }),
+    accountAuthor,
   );
-  const usersWithOptionalOwnedTodos = db.allForIdentity(usersTable.orderBy("name").include("ownedTodos"), accountAuthor);
-  assert.deepEqual(usersWithOptionalOwnedTodos.map((user) => [user.name, user.ownedTodos?.map(summary)]), [
-    ["Account author", ["Owner A scoped read:open"]],
-    ["Other owner", []],
+  assert.equal(usersWithObjectIncludedTodos.length, 1);
+  assert.deepEqual(usersWithObjectIncludedTodos[0].ownedTodos?.map(summary), [
+    "Owner A scoped read:open",
   ]);
-  const usersWithRequiredOwnedTodos = db.allForIdentity(usersTable.orderBy("name").requireIncludes("ownedTodos"), accountAuthor) as Array<User & { ownedTodos: OwnedTodo[] }>;
-  assert.deepEqual(usersWithRequiredOwnedTodos.map((user) => [user.name, user.ownedTodos.map(summary)]), [
-    ["Account author", ["Owner A scoped read:open"]],
-  ]);
-  const usersWithOptionalTeams = db.all(usersTable.orderBy("name").include("team")) as unknown as Array<Omit<User, "team"> & { team: Team | null }>;
-  assert.deepEqual(usersWithOptionalTeams.map((user) => [user.name, user.team?.name ?? null]), [
-    ["Account author", "Child alpha team"],
-    ["Other owner", null],
-  ]);
-  const usersWithRequiredTeams = db.all(usersTable.orderBy("name").requireIncludes("team")) as unknown as Array<Omit<User, "team"> & { team: Team }>;
-  assert.deepEqual(usersWithRequiredTeams.map((user) => [user.name, user.team.name]), [
-    ["Account author", "Child alpha team"],
-  ]);
-  const usersWithNestedSelectedTeams = db.all(usersTable.orderBy("name").include({
-    team: {
-      required: true,
-      select: ["name"],
-      include: {
-        parent: { select: ["name"] },
-      },
-    },
-  })) as unknown as Array<Omit<User, "team"> & { team: Pick<Team, "id" | "name"> & { parent: Pick<Team, "id" | "name"> | null } }>;
-  assert.deepEqual(usersWithNestedSelectedTeams.map((user) => [
-    user.name,
-    Object.keys(user.team).sort(),
-    user.team.name,
-    user.team.parent?.name ?? null,
-    user.team.parent ? Object.keys(user.team.parent).sort() : null,
-  ]), [
-    ["Account author", ["id", "name", "parent"], "Child alpha team", "Root alpha team", ["id", "name"]],
-  ]);
-  const optionalNoteLinksForOther = db.allForIdentity(noteLinksTable.orderBy("label").include("note"), otherOwnerId) as unknown as Array<Omit<NoteLink, "note"> & { note: PrivateNote | null }>;
-  assert.deepEqual(optionalNoteLinksForOther.map((link) => [link.label, link.note?.body ?? null]), [
-    ["missing note link", null],
-    ["readable note link", null],
-  ]);
-  const requiredNoteLinksForOther = db.allForIdentity(noteLinksTable.orderBy("label").requireIncludes("note"), otherOwnerId);
-  assert.deepEqual(requiredNoteLinksForOther, []);
-  const requiredNoteLinksForAuthor = db.allForIdentity(noteLinksTable.orderBy("label").requireIncludes("note"), accountAuthor) as unknown as Array<Omit<NoteLink, "note"> & { note: PrivateNote }>;
-  assert.deepEqual(requiredNoteLinksForAuthor.map((link) => [link.label, link.note.body]), [
-    ["readable note link", "Account author private note"],
-  ]);
-  const authorTeams = db.all(usersTable.where("id", "eq", accountAuthorId).hop("team"));
-  assert.deepEqual(authorTeams.map((team) => team.name), ["Child alpha team"]);
-  const gatheredTeams = db.all(teamsTable.where("id", "eq", "79797979-7979-7979-7979-797979797979").gather({
-    max_depth: 4,
-    step_table: "teams",
-    step_current_column: "id",
-    step_hops: ["parent"],
-  }));
-  assert.deepEqual(gatheredTeams.map((team) => team.name).sort(), ["Child alpha team", "Root alpha team"]);
-  assert.deepEqual(db.all(todosTable.where({ done: false })).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ done: undefined }).where({ title: { contains: "query" } })).map(summary), [
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ done: { eq: false }, title: { contains: "query" } })).map(summary), [
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ done: { ne: true }, priority: { in: [2] } })).map(summary), [
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ priority: { gt: 1, lte: 2 } })).map(summary), ["Ship query parity:open"]);
-  assert.deepEqual(db.all(todosTable.where({ title: { gte: "Prove identity reads", lt: "T" } })).map(summary).sort(), [
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ owner: { isNull: true } })).map(summary), ["Adopt alpha public flow:open"]);
-  assert.deepEqual(db.all(todosTable.where({ owner: { isNull: false } })).map(summary).sort(), [
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where({ tags: { contains: "alpha" } })).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-  ]);
-  assert.equal(db.one(todosTable.where({ title: "Ship query parity" }))?.title, "Ship query parity");
-  assert.equal(db.one(todosTable.where({ title: "Not present" })), null);
-  assert.deepEqual(db.all(todosTable.where("done", "eq", false)).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where("done", "in", [true])).map(summary), []);
-  assert.deepEqual(db.all(todosTable.where("done", "in", [false])).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where("title", "eq", "Ship query parity")).map(summary), ["Ship query parity:open"]);
+  assert.throws(
+    () =>
+      db.subscribe(
+        usersTable.where({ id: accountAuthorId }).include({ ownedTodos: true }),
+        () => undefined,
+      ),
+    /current jazz-tools\/WasmDb subscribe with relation includes only supports forward includes/,
+  );
+  const usersWithOptionalOwnedTodos = db.allForIdentity(
+    usersTable.orderBy("name").include("ownedTodos"),
+    accountAuthor,
+  );
   assert.deepEqual(
-    db.all(todosTable.where("title", "in", ["Adopt alpha public flow", "Not present"])).map(summary),
+    usersWithOptionalOwnedTodos.map((user) => [user.name, user.ownedTodos?.map(summary)]),
+    [
+      ["Account author", ["Owner A scoped read:open"]],
+      ["Other owner", []],
+    ],
+  );
+  const usersWithRequiredOwnedTodos = db.allForIdentity(
+    usersTable.orderBy("name").requireIncludes("ownedTodos"),
+    accountAuthor,
+  ) as Array<User & { ownedTodos: OwnedTodo[] }>;
+  assert.deepEqual(
+    usersWithRequiredOwnedTodos.map((user) => [user.name, user.ownedTodos.map(summary)]),
+    [["Account author", ["Owner A scoped read:open"]]],
+  );
+  const usersWithOptionalTeams = db.all(
+    usersTable.orderBy("name").include("team"),
+  ) as unknown as Array<Omit<User, "team"> & { team: Team | null }>;
+  assert.deepEqual(
+    usersWithOptionalTeams.map((user) => [user.name, user.team?.name ?? null]),
+    [
+      ["Account author", "Child alpha team"],
+      ["Other owner", null],
+    ],
+  );
+  const usersWithRequiredTeams = db.all(
+    usersTable.orderBy("name").requireIncludes("team"),
+  ) as unknown as Array<Omit<User, "team"> & { team: Team }>;
+  assert.deepEqual(
+    usersWithRequiredTeams.map((user) => [user.name, user.team.name]),
+    [["Account author", "Child alpha team"]],
+  );
+  const usersWithNestedSelectedTeams = db.all(
+    usersTable.orderBy("name").include({
+      team: {
+        required: true,
+        select: ["name"],
+        include: {
+          parent: { select: ["name"] },
+        },
+      },
+    }),
+  ) as unknown as Array<
+    Omit<User, "team"> & {
+      team: Pick<Team, "id" | "name"> & { parent: Pick<Team, "id" | "name"> | null };
+    }
+  >;
+  assert.deepEqual(
+    usersWithNestedSelectedTeams.map((user) => [
+      user.name,
+      Object.keys(user.team).sort(),
+      user.team.name,
+      user.team.parent?.name ?? null,
+      user.team.parent ? Object.keys(user.team.parent).sort() : null,
+    ]),
+    [
+      [
+        "Account author",
+        ["id", "name", "parent"],
+        "Child alpha team",
+        "Root alpha team",
+        ["id", "name"],
+      ],
+    ],
+  );
+  const nestedTeamSnapshots: Array<
+    Array<Omit<User, "team"> & { team: Team & { parent: Team | null } }>
+  > = [];
+  const nestedTeamSubscription = db.subscribe(
+    usersTable.where("id", "eq", accountAuthorId).include({
+      team: {
+        required: true,
+        include: {
+          parent: true,
+        },
+      },
+    }),
+    (rows) => {
+      nestedTeamSnapshots.push(
+        rows as unknown as Array<Omit<User, "team"> & { team: Team & { parent: Team | null } }>,
+      );
+    },
+  );
+  await waitForSnapshots(nestedTeamSnapshots, 1);
+  assert.deepEqual(
+    latest(nestedTeamSnapshots).map((user) => [
+      user.name,
+      user.team.name,
+      user.team.parent?.name ?? null,
+    ]),
+    [["Account author", "Child alpha team", "Root alpha team"]],
+  );
+  nestedTeamSubscription.unsubscribe();
+  const optionalNoteLinksForOther = db.allForIdentity(
+    noteLinksTable.orderBy("label").include("note"),
+    otherOwnerId,
+  ) as unknown as Array<Omit<NoteLink, "note"> & { note: PrivateNote | null }>;
+  assert.deepEqual(
+    optionalNoteLinksForOther.map((link) => [link.label, link.note?.body ?? null]),
+    [
+      ["missing note link", null],
+      ["readable note link", null],
+    ],
+  );
+  const requiredNoteLinksForOther = db.allForIdentity(
+    noteLinksTable.orderBy("label").requireIncludes("note"),
+    otherOwnerId,
+  );
+  assert.deepEqual(requiredNoteLinksForOther, []);
+  const requiredNoteLinksForAuthor = db.allForIdentity(
+    noteLinksTable.orderBy("label").requireIncludes("note"),
+    accountAuthor,
+  ) as unknown as Array<Omit<NoteLink, "note"> & { note: PrivateNote }>;
+  assert.deepEqual(
+    requiredNoteLinksForAuthor.map((link) => [link.label, link.note.body]),
+    [["readable note link", "Account author private note"]],
+  );
+  const authorTeams = db.all(usersTable.where("id", "eq", accountAuthorId).hop("team"));
+  assert.deepEqual(
+    authorTeams.map((team) => team.name),
+    ["Child alpha team"],
+  );
+  const gatheredTeams = db.all(
+    teamsTable.where("id", "eq", "79797979-7979-7979-7979-797979797979").gather({
+      max_depth: 4,
+      step_table: "teams",
+      step_current_column: "id",
+      step_hops: ["parent"],
+    }),
+  );
+  assert.deepEqual(gatheredTeams.map((team) => team.name).sort(), [
+    "Child alpha team",
+    "Root alpha team",
+  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where({ done: false }))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(
+    db
+      .all(todosTable.where({ done: undefined }).where({ title: { contains: "query" } }))
+      .map(summary),
+    ["Ship query parity:open"],
+  );
+  assert.deepEqual(
+    db.all(todosTable.where({ done: { eq: false }, title: { contains: "query" } })).map(summary),
+    ["Ship query parity:open"],
+  );
+  assert.deepEqual(
+    db.all(todosTable.where({ done: { ne: true }, priority: { in: [2] } })).map(summary),
+    ["Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where({ priority: { gt: 1, lte: 2 } })).map(summary), [
+    "Ship query parity:open",
+  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where({ title: { gte: "Prove identity reads", lt: "T" } }))
+      .map(summary)
+      .sort(),
+    ["Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where({ owner: { isNull: true } })).map(summary), [
+    "Adopt alpha public flow:open",
+  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where({ owner: { isNull: false } }))
+      .map(summary)
+      .sort(),
+    ["Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(
+    db
+      .all(todosTable.where({ tags: { contains: "alpha" } }))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open"],
+  );
+  assert.equal(
+    db.one(todosTable.where({ title: "Ship query parity" }))?.title,
+    "Ship query parity",
+  );
+  assert.equal(db.one(todosTable.where({ title: "Not present" })), null);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("done", "eq", false))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("done", "in", [true])).map(summary), []);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("done", "in", [false]))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("title", "eq", "Ship query parity")).map(summary), [
+    "Ship query parity:open",
+  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("title", "in", ["Adopt alpha public flow", "Not present"]))
+      .map(summary),
     ["Adopt alpha public flow:open"],
   );
-  assert.deepEqual(db.all(todosTable.where("priority", "eq", 2)).map(summary), ["Ship query parity:open"]);
-  assert.deepEqual(db.all(todosTable.where("priority", "in", [1, 99])).map(summary), ["Adopt alpha public flow:open"]);
-  assert.deepEqual(db.all(todosTable.where("priority", "gt", 1)).map(summary).sort(), [
-    "Prove identity reads:open",
+  assert.deepEqual(db.all(todosTable.where("priority", "eq", 2)).map(summary), [
     "Ship query parity:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("priority", "gte", 1)).map(summary).sort(), [
+  assert.deepEqual(db.all(todosTable.where("priority", "in", [1, 99])).map(summary), [
     "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-    "Ship query parity:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("priority", "lt", 2)).map(summary), ["Adopt alpha public flow:open"]);
-  assert.deepEqual(db.all(todosTable.where("priority", "lte", 2)).map(summary).sort(), [
+  assert.deepEqual(
+    db
+      .all(todosTable.where("priority", "gt", 1))
+      .map(summary)
+      .sort(),
+    ["Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(
+    db
+      .all(todosTable.where("priority", "gte", 1))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("priority", "lt", 2)).map(summary), [
     "Adopt alpha public flow:open",
-    "Ship query parity:open",
   ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("priority", "lte", 2))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Ship query parity:open"],
+  );
   assert.deepEqual(db.all(todosTable.where("title", "gt", "Prove identity reads")).map(summary), [
     "Ship query parity:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("title", "gte", "Prove identity reads")).map(summary).sort(), [
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("title", "gte", "Prove identity reads"))
+      .map(summary)
+      .sort(),
+    ["Prove identity reads:open", "Ship query parity:open"],
+  );
   assert.deepEqual(db.all(todosTable.where("title", "lt", "Prove identity reads")).map(summary), [
     "Adopt alpha public flow:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("title", "lte", "Prove identity reads")).map(summary).sort(), [
+  assert.deepEqual(
+    db
+      .all(todosTable.where("title", "lte", "Prove identity reads"))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open"],
+  );
+  assert.deepEqual(
+    db
+      .all(todosTable.where("title", "ne", "Ship query parity"))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("owner", "isNull")).map(summary), [
     "Adopt alpha public flow:open",
-    "Prove identity reads:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("title", "ne", "Ship query parity")).map(summary).sort(), [
+  assert.deepEqual(db.all(todosTable.where("owner", "eq", null)).map(summary), [
     "Adopt alpha public flow:open",
+  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("owner", "ne", null))
+      .map(summary)
+      .sort(),
+    ["Prove identity reads:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("owner", "eq", accountAuthorId)).map(summary), [
     "Prove identity reads:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("owner", "isNull")).map(summary), ["Adopt alpha public flow:open"]);
-  assert.deepEqual(db.all(todosTable.where("owner", "eq", null)).map(summary), ["Adopt alpha public flow:open"]);
-  assert.deepEqual(db.all(todosTable.where("owner", "ne", null)).map(summary).sort(), [
-    "Prove identity reads:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where("owner", "eq", accountAuthorId)).map(summary), ["Prove identity reads:open"]);
-  assert.deepEqual(db.all(todosTable.where("owner", "in", [null, accountAuthorId])).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("owner", "in", [null, accountAuthorId]))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open"],
+  );
   assert.deepEqual(db.all(todosTable.where("owner", "isNotNull")).map(summary).sort(), [
     "Prove identity reads:open",
     "Ship query parity:open",
@@ -409,31 +589,45 @@ async function main(): Promise<void> {
     db.all(todosTable.where("done", "eq", false).where("title", "contains", "query")).map(summary),
     ["Ship query parity:open"],
   );
-  assert.deepEqual(db.all(todosTable.where("tags", "contains", "alpha")).map(summary).sort(), [
-    "Adopt alpha public flow:open",
-    "Prove identity reads:open",
-  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("tags", "contains", "alpha"))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:open", "Prove identity reads:open"],
+  );
   assert.deepEqual(db.all(todosTable.where("tags", "eq", ["alpha", "compat"])).map(summary), [
     "Adopt alpha public flow:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("tags", "in", [["query", "compat"]])).map(summary), ["Ship query parity:open"]);
-  assert.deepEqual(db.all(todosTable.where("payload", "eq", new Uint8Array([1, 2, 3]))).map(summary), [
-    "Adopt alpha public flow:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where("payload", "in", [new Uint8Array([4, 5, 6])])).map(summary), [
+  assert.deepEqual(db.all(todosTable.where("tags", "in", [["query", "compat"]])).map(summary), [
     "Ship query parity:open",
   ]);
+  assert.deepEqual(
+    db.all(todosTable.where("payload", "eq", new Uint8Array([1, 2, 3]))).map(summary),
+    ["Adopt alpha public flow:open"],
+  );
+  assert.deepEqual(
+    db.all(todosTable.where("payload", "in", [new Uint8Array([4, 5, 6])])).map(summary),
+    ["Ship query parity:open"],
+  );
 
   const tx = db.beginTransaction();
-  const staged = tx.insert(todosTable, {
-    title: "Committed transaction row",
-    done: false,
-    priority: 4,
-    tags: ["alpha", "transaction"],
-    payload: new Uint8Array([7, 8]),
-  }, { id: transactionRowId });
+  const staged = tx.insert(
+    todosTable,
+    {
+      title: "Committed transaction row",
+      done: false,
+      priority: 4,
+      tags: ["alpha", "transaction"],
+      payload: new Uint8Array([7, 8]),
+    },
+    { id: transactionRowId },
+  );
   assert.equal(staged.id, transactionRowId);
-  assert.equal(db.all(todosTable).some((todo) => todo.id === transactionRowId), false);
+  assert.equal(
+    db.all(todosTable).some((todo) => todo.id === transactionRowId),
+    false,
+  );
 
   tx.update(todosTable, ownerRowId, {
     done: true,
@@ -449,10 +643,13 @@ async function main(): Promise<void> {
     "Prove identity reads:done",
     "Ship query parity:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("tags", "contains", "transaction")).map(summary).sort(), [
-    "Committed transaction row:open",
-    "Prove identity reads:done",
-  ]);
+  assert.deepEqual(
+    db
+      .all(todosTable.where("tags", "contains", "transaction"))
+      .map(summary)
+      .sort(),
+    ["Committed transaction row:open", "Prove identity reads:done"],
+  );
 
   const bytes = new TextEncoder().encode("alpha public row-backed binary large value");
   const createdFile = await createFileFromBlob(db, filesTable, {
@@ -464,7 +661,10 @@ async function main(): Promise<void> {
   assert.equal(createdFile.name, "public-alpha-note.txt");
   assert.equal(createdFile.mime_type, "text/plain");
   assert.deepEqual(createdFile.data, bytes);
-  assert.deepEqual(readFiles(db, filesTable).map((file) => file.name), ["public-alpha-note.txt"]);
+  assert.deepEqual(
+    readFiles(db, filesTable).map((file) => file.name),
+    ["public-alpha-note.txt"],
+  );
   assert.deepEqual(readFileBytes(db, filesTable, fileId), bytes);
   const loadedFile = await loadFileAsBlob(db, filesTable, fileId);
   assert.equal(loadedFile.type, "text/plain");
@@ -479,42 +679,62 @@ async function main(): Promise<void> {
     "Prove identity reads:done",
     "Ship query parity:open",
   ]);
-  assert.deepEqual(db.all(todosTable.where("done", "eq", true)).map(summary).sort(), [
+  assert.deepEqual(
+    db
+      .all(todosTable.where("done", "eq", true))
+      .map(summary)
+      .sort(),
+    ["Adopt alpha public flow:done", "Prove identity reads:done"],
+  );
+  assert.deepEqual(
+    db
+      .all(todosTable.where("done", "eq", false))
+      .map(summary)
+      .sort(),
+    ["Committed transaction row:open", "Ship query parity:open"],
+  );
+  assert.deepEqual(db.all(todosTable.where("tags", "contains", "done")).map(summary), [
     "Adopt alpha public flow:done",
-    "Prove identity reads:done",
   ]);
-  assert.deepEqual(db.all(todosTable.where("done", "eq", false)).map(summary).sort(), [
-    "Committed transaction row:open",
-    "Ship query parity:open",
-  ]);
-  assert.deepEqual(db.all(todosTable.where("tags", "contains", "done")).map(summary), ["Adopt alpha public flow:done"]);
 
-  const upsertCreated = db.upsert(todosTable, {
-    title: "Upsert creates",
-    done: false,
-    priority: 7,
-    tags: ["alpha", "upsert"],
-    payload: undefined,
-  }, { id: "75757575-7575-7575-7575-757575757575", updatedAt: "2026-06-24T00:00:00.000Z" });
+  const upsertCreated = db.upsert(
+    todosTable,
+    {
+      title: "Upsert creates",
+      done: false,
+      priority: 7,
+      tags: ["alpha", "upsert"],
+      payload: undefined,
+    },
+    { id: "75757575-7575-7575-7575-757575757575", updatedAt: "2026-06-24T00:00:00.000Z" },
+  );
   assert.equal(upsertCreated.title, "Upsert creates");
-  const upsertPatched = db.upsert(todosTable, {
-    title: "Upsert patches",
-    done: true,
-    priority: 8,
-    tags: ["alpha", "upsert", "patched"],
-    payload: new Uint8Array([7, 4]),
-  }, { id: "75757575-7575-7575-7575-757575757575" });
+  const upsertPatched = db.upsert(
+    todosTable,
+    {
+      title: "Upsert patches",
+      done: true,
+      priority: 8,
+      tags: ["alpha", "upsert", "patched"],
+      payload: new Uint8Array([7, 4]),
+    },
+    { id: "75757575-7575-7575-7575-757575757575" },
+  );
   assert.equal(upsertPatched.id, "75757575-7575-7575-7575-757575757575");
   assert.equal(upsertPatched.done, true);
   assert.equal((await upsertPatched.wait()).title, "Upsert patches");
 
   assert.equal(await db.delete(todosTable, rowId, { updatedAt: Date.now() }).wait(), undefined);
-  assert.equal(db.all(todosTable).some((row) => row.id === rowId), false);
+  assert.equal(
+    db.all(todosTable).some((row) => row.id === rowId),
+    false,
+  );
   const deletedRows = db.all(todosTable, { includeDeleted: true });
   const deletedRow = deletedRows.find((row) => row.id === rowId);
   const liveRow = deletedRows.find((row) => row.id === ownerRowId);
-  assert.ok(deletedRow);
-  assert.ok(liveRow);
+  if (!deletedRow || !liveRow) {
+    throw new Error("expected deleted and live rows in includeDeleted read");
+  }
   assert.equal(isDeleted(deletedRow), true);
   assert.equal(isDeleted(liveRow), false);
   assert.equal(Object.keys(deletedRow).includes("deleted"), false);
@@ -529,15 +749,22 @@ async function main(): Promise<void> {
   assert.equal(restored.title, "Restored alpha public flow");
   assert.deepEqual(restored.tags, ["alpha", "restore"]);
   assert.deepEqual(await restored.wait({ tier: "local" }), restored.value);
-  assert.deepEqual(db.all(todosTable).filter((row) => row.id === rowId).map(summary), ["Restored alpha public flow:open"]);
+  assert.deepEqual(
+    db
+      .all(todosTable)
+      .filter((row) => row.id === rowId)
+      .map(summary),
+    ["Restored alpha public flow:open"],
+  );
   assert.throws(
-    () => db.restore(todosTable, rowId, {
-      title: "Restore should not overwrite visible rows",
-      done: false,
-      priority: 6,
-      tags: [],
-      payload: undefined,
-    }),
+    () =>
+      db.restore(todosTable, rowId, {
+        title: "Restore should not overwrite visible rows",
+        done: false,
+        priority: 6,
+        tags: [],
+        payload: undefined,
+      }),
     /Restore failed: row not deleted/,
   );
   db.delete(todosTable, rowId);

@@ -22,9 +22,7 @@ import {
   LOCAL_FIRST_JWT_ISSUER,
   type LocalFirstJwtOptions,
 } from "./local-first-jwt-core.js";
-import {
-  createLocalFirstJwtAsync,
-} from "./local-first-jwt-webcrypto.js";
+import { createLocalFirstJwtAsync } from "./local-first-jwt-webcrypto.js";
 
 export type ColumnType =
   | "Boolean"
@@ -77,16 +75,28 @@ export type Table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id"
   where(conditions: QueryWhere<Row>): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "eq" | "ne", value: QueryValue): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "in", values: readonly QueryValue[]): QueryBuilder<Row>;
-  where(column: keyof Row & string, op: "gt" | "gte" | "lt" | "lte", value: string | number | bigint): QueryBuilder<Row>;
+  where(
+    column: keyof Row & string,
+    op: "gt" | "gte" | "lt" | "lte",
+    value: string | number | bigint,
+  ): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "contains", value: string): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "isNull" | "isNotNull"): QueryBuilder<Row>;
-  select<const Columns extends readonly (keyof Row & string)[]>(...columns: Columns): QueryBuilder<ProjectedRow<Row, Columns>>;
+  select<const Columns extends readonly (keyof Row & string)[]>(
+    ...columns: Columns
+  ): QueryBuilder<ProjectedRow<Row, Columns>>;
   orderBy(column: keyof Row & string, direction?: OrderDirection): QueryBuilder<Row>;
   limit(count: number): QueryBuilder<Row>;
   offset(count: number): QueryBuilder<Row>;
-  include<Property extends string>(property: Property): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
-  include<const Includes extends QueryIncludeMap>(includes: Includes): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
-  requireIncludes<const Properties extends readonly string[]>(...properties: Properties): QueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }>;
+  include<Property extends string>(
+    property: Property,
+  ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
+  include<const Includes extends QueryIncludeMap>(
+    includes: Includes,
+  ): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
+  requireIncludes<const Properties extends readonly string[]>(
+    ...properties: Properties
+  ): QueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }>;
   hop<Property extends string>(property: Property): QueryBuilder<Record<string, unknown>>;
   gather(options: GatherOptions): QueryBuilder<Row>;
 };
@@ -98,16 +108,28 @@ export type QueryBuilder<Row> = {
   where(conditions: QueryWhere<Row>): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "eq" | "ne", value: QueryValue): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "in", values: readonly QueryValue[]): QueryBuilder<Row>;
-  where(column: keyof Row & string, op: "gt" | "gte" | "lt" | "lte", value: string | number | bigint): QueryBuilder<Row>;
+  where(
+    column: keyof Row & string,
+    op: "gt" | "gte" | "lt" | "lte",
+    value: string | number | bigint,
+  ): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "contains", value: string): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "isNull" | "isNotNull"): QueryBuilder<Row>;
-  select<const Columns extends readonly (keyof Row & string)[]>(...columns: Columns): QueryBuilder<ProjectedRow<Row, Columns>>;
+  select<const Columns extends readonly (keyof Row & string)[]>(
+    ...columns: Columns
+  ): QueryBuilder<ProjectedRow<Row, Columns>>;
   orderBy(column: keyof Row & string, direction?: OrderDirection): QueryBuilder<Row>;
   limit(count: number): QueryBuilder<Row>;
   offset(count: number): QueryBuilder<Row>;
-  include<Property extends string>(property: Property): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
-  include<const Includes extends QueryIncludeMap>(includes: Includes): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
-  requireIncludes<const Properties extends readonly string[]>(...properties: Properties): QueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }>;
+  include<Property extends string>(
+    property: Property,
+  ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
+  include<const Includes extends QueryIncludeMap>(
+    includes: Includes,
+  ): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
+  requireIncludes<const Properties extends readonly string[]>(
+    ...properties: Properties
+  ): QueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }>;
   hop<Property extends string>(property: Property): QueryBuilder<Record<string, unknown>>;
   gather(options: GatherOptions): QueryBuilder<Row>;
   _build(): string;
@@ -162,7 +184,9 @@ export type JwtPayload = {
 };
 
 export type Db = {
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init>;
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init>;
   beginTransaction(options?: TransactionOptions): Transaction;
   transaction<Value>(callback: (tx: Transaction) => PromiseLike<Value>): Promise<Value>;
   transaction<Value>(callback: (tx: Transaction) => Value): Value;
@@ -193,9 +217,19 @@ export type Db = {
     row: Init,
     options?: WriteTimestampOptions,
   ): WriteResult<Row> & Row;
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options?: ReadOptions): Row[];
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options?: ReadOptions): Row | null;
-  allForIdentity<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, identity: Identity, options?: ReadOptions): Row[];
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options?: ReadOptions,
+  ): Row[];
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options?: ReadOptions,
+  ): Row | null;
+  allForIdentity<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    identity: Identity,
+    options?: ReadOptions,
+  ): Row[];
   subscribe<Row>(
     tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
     callback: SubscriptionCallback<Row>,
@@ -238,8 +272,14 @@ export type Transaction = {
     row: Init,
     options?: WriteTimestampOptions,
   ): Row;
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options?: ReadOptions): Row[];
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options?: ReadOptions): Row | null;
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options?: ReadOptions,
+  ): Row[];
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options?: ReadOptions,
+  ): Row | null;
   commit(): WriteResult<void>;
   rollback(): void;
 };
@@ -260,7 +300,8 @@ export type WriteTimestampOptions = {
 export type InsertOptions<Row extends { id: string | Uint8Array }> = {
   id?: Row["id"];
 };
-export type UpsertOptions<Row extends { id: string | Uint8Array }> = InsertOptions<Row> & WriteTimestampOptions;
+export type UpsertOptions<Row extends { id: string | Uint8Array }> = InsertOptions<Row> &
+  WriteTimestampOptions;
 export type WriteResult<Value> = {
   readonly value: Value;
   readonly handle: WriteHandle | null;
@@ -292,14 +333,8 @@ export function isDeleted(row: unknown): boolean {
 }
 
 const uuidText = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export {
-  ANONYMOUS_JWT_ISSUER,
-  LOCAL_FIRST_JWT_ISSUER,
-  type LocalFirstJwtOptions,
-};
-export {
-  createLocalFirstJwtAsync,
-};
+export { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER, type LocalFirstJwtOptions };
+export { createLocalFirstJwtAsync };
 
 type ColumnBuilderOptions = {
   nullable?: boolean;
@@ -323,9 +358,21 @@ export type ColumnBuilder = Omit<ColumnDefinitionInput, "default" | "indexOnly">
 };
 
 type QueryFilter =
-  | { column: string; columnType: ColumnType; nullable: boolean; op: "eq" | "ne"; value: QueryLiteral }
+  | {
+      column: string;
+      columnType: ColumnType;
+      nullable: boolean;
+      op: "eq" | "ne";
+      value: QueryLiteral;
+    }
   | { column: string; columnType: ColumnType; nullable: boolean; op: "in"; values: QueryLiteral[] }
-  | { column: string; columnType: ColumnType; nullable: boolean; op: "gt" | "gte" | "lt" | "lte"; value: string | number }
+  | {
+      column: string;
+      columnType: ColumnType;
+      nullable: boolean;
+      op: "gt" | "gte" | "lt" | "lte";
+      value: string | number;
+    }
   | { column: string; columnType: ColumnType; op: "isNull" | "isNotNull" }
   | { column: string; columnType: ColumnType; op: "contains"; value: QueryLiteral }
   | { op: "any"; filters: QueryFilter[] };
@@ -348,10 +395,19 @@ export type QueryWhereValue =
       isNull?: boolean;
     };
 export type QueryWhere<Row> = Partial<Record<keyof Row & string, QueryWhereValue>>;
-type QueryLiteral = boolean | string | number | { bytes: number[] } | readonly QueryLiteral[] | null;
+type QueryLiteral =
+  | boolean
+  | string
+  | number
+  | { bytes: number[] }
+  | readonly QueryLiteral[]
+  | null;
 type OrderDirection = "asc" | "desc";
 type QueryOrderBy = { column: string; direction: OrderDirection };
-type ProjectedRow<Row, Columns extends readonly string[]> = Pick<Row, Extract<keyof Row, "id" | Columns[number]>>;
+type ProjectedRow<Row, Columns extends readonly string[]> = Pick<
+  Row,
+  Extract<keyof Row, "id" | Columns[number]>
+>;
 type QueryInclude = Record<string, boolean | IncludeOptions | undefined>;
 type QueryIncludeMap = Record<string, true | undefined | IncludeOptions>;
 type IncludeOptions = {
@@ -416,6 +472,7 @@ type WasmDb = {
   delete(table: string, rowId: Uint8Array): WasmWrite;
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
   all(query: WasmPreparedQuery, opts?: unknown): Uint8Array;
+  allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: unknown): Uint8Array;
   one(query: WasmPreparedQuery, opts?: unknown): Uint8Array;
   subscribe(query: WasmPreparedQuery, opts?: unknown): ReadableStream<SubscriptionStreamChunk>;
   tick(): void;
@@ -432,7 +489,10 @@ export const schema = {
     options: TableOptions = {},
   ): TableDefinition {
     if (Array.isArray(columns)) return makeTableDefinition(columns, options);
-    return makeTableDefinition(Object.entries(columns).map(([name, column]) => materializeColumn(name, column)), options);
+    return makeTableDefinition(
+      Object.entries(columns).map(([name, column]) => materializeColumn(name, column)),
+      options,
+    );
   },
   boolean(options: ColumnBuilderOptions = {}): ColumnBuilder {
     return column("Boolean", options);
@@ -474,7 +534,7 @@ export const schema = {
   ref(tableOrToken: RefTarget, options: ColumnBuilderOptions = {}): ColumnBuilder {
     return column("Uuid", { ...options, references: refTargetName(tableOrToken) });
   },
-  "enum": enumColumn,
+  enum: enumColumn,
   json(_schema?: unknown, options: ColumnBuilderOptions = {}): ColumnBuilder {
     return column("Text", { ...options, json: true });
   },
@@ -492,17 +552,21 @@ export const schema = {
 export namespace schema {
   export type Schema<Definition extends SchemaDefinition> = Definition;
   export type App<Definition extends SchemaDefinition> = ReturnType<typeof defineApp<Definition>>;
-  export type RowOf<TableOrQuery> = TableOrQuery extends Table<infer Row, unknown>
-    ? Row
-    : TableOrQuery extends QueryBuilder<infer Row>
+  export type RowOf<TableOrQuery> =
+    TableOrQuery extends Table<infer Row, unknown>
       ? Row
-      : never;
+      : TableOrQuery extends QueryBuilder<infer Row>
+        ? Row
+        : never;
 }
 
-function makeTableDefinition(columns: ColumnDefinition[], options: TableOptions = {}): TableDefinition {
-  const indexed_columns = options.indexed_columns ?? columns
-    .filter((column) => column.indexOnly)
-    .map((column) => column.name);
+function makeTableDefinition(
+  columns: ColumnDefinition[],
+  options: TableOptions = {},
+): TableDefinition {
+  const indexed_columns =
+    options.indexed_columns ??
+    columns.filter((column) => column.indexOnly).map((column) => column.name);
   const table = {
     ...options,
     ...(indexed_columns.length === 0 ? {} : { indexed_columns }),
@@ -516,8 +580,12 @@ function makeTableDefinition(columns: ColumnDefinition[], options: TableOptions 
 
 function enumColumn(...values: readonly string[]): ColumnBuilder;
 function enumColumn(values: readonly string[]): ColumnBuilder;
-function enumColumn(...valuesOrArray: readonly string[] | readonly [readonly string[]]): ColumnBuilder {
-  const values = (Array.isArray(valuesOrArray[0]) ? valuesOrArray[0] : valuesOrArray) as readonly string[];
+function enumColumn(
+  ...valuesOrArray: readonly string[] | readonly [readonly string[]]
+): ColumnBuilder {
+  const values = (
+    Array.isArray(valuesOrArray[0]) ? valuesOrArray[0] : valuesOrArray
+  ) as readonly string[];
   return column("Text", { enum: values });
 }
 
@@ -533,7 +601,11 @@ class ColumnBuilderImpl implements ColumnBuilder {
   readonly timestamp?: boolean;
   readonly #indexOnly?: boolean;
 
-  constructor(column_type: ColumnType, options: ColumnBuilderOptions = {}, hasDefault = Object.hasOwn(options, "default")) {
+  constructor(
+    column_type: ColumnType,
+    options: ColumnBuilderOptions = {},
+    hasDefault = Object.hasOwn(options, "default"),
+  ) {
     this.column_type = column_type;
     this.nullable = options.nullable;
     this.references = options.references;
@@ -563,17 +635,21 @@ class ColumnBuilderImpl implements ColumnBuilder {
   }
 
   private with(options: ColumnBuilderOptions): ColumnBuilder {
-    return new ColumnBuilderImpl(this.column_type, {
-      nullable: this.nullable,
-      references: this.references,
-      large: this.large,
-      ...(this.#hasDefault ? { default: this.#defaultValue } : {}),
-      enum: this.enum,
-      json: this.json,
-      timestamp: this.timestamp,
-      indexOnly: this.#indexOnly,
-      ...options,
-    }, this.#hasDefault || Object.hasOwn(options, "default"));
+    return new ColumnBuilderImpl(
+      this.column_type,
+      {
+        nullable: this.nullable,
+        references: this.references,
+        large: this.large,
+        ...(this.#hasDefault ? { default: this.#defaultValue } : {}),
+        enum: this.enum,
+        json: this.json,
+        timestamp: this.timestamp,
+        indexOnly: this.#indexOnly,
+        ...options,
+      },
+      this.#hasDefault || Object.hasOwn(options, "default"),
+    );
   }
 
   toColumnDefinition(name: string): ColumnDefinition {
@@ -598,7 +674,7 @@ function column(column_type: ColumnType, options: ColumnBuilderOptions): ColumnB
 
 function columnTypeOf(column: ColumnDefinitionLike): ColumnType {
   if (column instanceof ColumnBuilderImpl) return column.column_type;
-  return isColumnDefinitionInput(column) ? column.column_type : column as ColumnType;
+  return isColumnDefinitionInput(column) ? column.column_type : (column as ColumnType);
 }
 
 function materializeColumn(name: string, column: ColumnDefinitionLike): ColumnDefinition {
@@ -611,13 +687,17 @@ function refTargetName(tableOrToken: RefTarget): string {
   return typeof tableOrToken === "string" ? tableOrToken : tableOrToken._table;
 }
 
-export function defineSchema<const Schema extends SchemaDefinition>(schema: Schema): {
+export function defineSchema<const Schema extends SchemaDefinition>(
+  schema: Schema,
+): {
   readonly [TableName in keyof Schema]: Table<{ id: string }, Record<string, unknown>>;
 } & { readonly _schema: Schema } {
   return defineApp(schema);
 }
 
-export function defineApp<const Schema extends SchemaDefinition>(schema: Schema): {
+export function defineApp<const Schema extends SchemaDefinition>(
+  schema: Schema,
+): {
   readonly [TableName in keyof Schema]: Table<{ id: string }, Record<string, unknown>>;
 } & { readonly _schema: Schema } {
   const tables: Record<string, unknown> = { _schema: schema };
@@ -671,7 +751,9 @@ export function resolveJwtSession(jwtToken: string): Session | null {
   return payload ? sessionFromJwtPayload(payload) : null;
 }
 
-export function resolveClientSessionStateSync(config: Pick<DbOptions, "appId" | "jwtToken" | "cookieSession">): ClientSessionState {
+export function resolveClientSessionStateSync(
+  config: Pick<DbOptions, "appId" | "jwtToken" | "cookieSession">,
+): ClientSessionState {
   const payload = parseJwtPayload(config.jwtToken ?? "");
   if (payload) {
     const audience = trimOptional(payload.aud);
@@ -683,7 +765,9 @@ export function resolveClientSessionStateSync(config: Pick<DbOptions, "appId" | 
   return { transport: null, session: null };
 }
 
-export function resolveClientSessionSync(config: Pick<DbOptions, "appId" | "jwtToken" | "cookieSession">): Session | null {
+export function resolveClientSessionSync(
+  config: Pick<DbOptions, "appId" | "jwtToken" | "cookieSession">,
+): Session | null {
   return resolveClientSessionStateSync(config).session;
 }
 
@@ -708,7 +792,9 @@ export async function loadFileAsBlob<Row extends BinaryLargeValueRow>(
   const data = readFileBytes(db, table, rowId);
   const expectedSize = file.size == null ? undefined : Number(file.size);
   if (expectedSize != null && data.length !== expectedSize) {
-    throw new Error(`file ${file.name ?? formatUuid(encodeRowId(rowId))} expected ${expectedSize} bytes, loaded ${data.length}`);
+    throw new Error(
+      `file ${file.name ?? formatUuid(encodeRowId(rowId))} expected ${expectedSize} bytes, loaded ${data.length}`,
+    );
   }
   return new Blob([arrayBufferFromBytes(data)], { type: file.mime_type ?? "" });
 }
@@ -721,11 +807,18 @@ export function readFileBytes<Row extends BinaryLargeValueRow>(
   return readFile(db, table, rowId).data;
 }
 
-export function readFiles<Row extends BinaryLargeValueRow>(db: Db, table: Table<Row, unknown>): Row[] {
+export function readFiles<Row extends BinaryLargeValueRow>(
+  db: Db,
+  table: Table<Row, unknown>,
+): Row[] {
   return db.all(table).map(normalizeBinaryLargeValueRow);
 }
 
-export function deleteFile<Row extends BinaryLargeValueRow>(db: Db, table: Table<Row, unknown>, rowId: Row["id"]): void {
+export function deleteFile<Row extends BinaryLargeValueRow>(
+  db: Db,
+  table: Table<Row, unknown>,
+  rowId: Row["id"],
+): void {
   db.delete(table, rowId);
 }
 
@@ -750,7 +843,9 @@ class DirectAbiDb implements Db {
     );
   }
 
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> {
     this.#assertOpen();
     this.#tableDefinition(name);
     return makeTableHandle<Row, Init>(name, this.#schema);
@@ -759,14 +854,18 @@ class DirectAbiDb implements Db {
   beginTransaction(options: TransactionOptions = {}): Transaction {
     this.#assertOpen();
     if ((options.kind ?? "mergeable") === "exclusive") {
-      throw new Error("exclusive transactions are not supported by the direct wasm object facade yet");
+      throw new Error(
+        "exclusive transactions are not supported by the direct wasm object facade yet",
+      );
     }
     return new DirectAbiTransaction(this, this.#db.mergeableTx());
   }
 
   transaction<Value>(callback: (tx: Transaction) => PromiseLike<Value>): Promise<Value>;
   transaction<Value>(callback: (tx: Transaction) => Value): Value;
-  transaction<Value>(callback: (tx: Transaction) => Value | PromiseLike<Value>): Value | Promise<Value> {
+  transaction<Value>(
+    callback: (tx: Transaction) => Value | PromiseLike<Value>,
+  ): Value | Promise<Value> {
     const tx = this.beginTransaction();
     try {
       const result = callback(tx);
@@ -798,10 +897,14 @@ class DirectAbiDb implements Db {
     this.#assertOpen();
     const rowIdInput = options.id ?? row.id;
     const rowId = rowIdInput == null ? this.#allocateRowId() : encodeRowId(rowIdInput);
-    const cells = encodeCellsForRow(this.#tableDefinition(table._table), row);
+    const definition = this.#tableDefinition(table._table);
+    const cells = encodeCellsForRow(definition, row);
     const write = this.#db.insertWithIdEncoded(table._table, rowId, cells);
     this.#pumpSubscriptions();
-    return makeWriteResult(this.#expectOne(table, rowId, "insert"), write);
+    const value =
+      this.#findVisibleRowById(table, rowId) ??
+      (materializePendingRow(rowId, row as Record<string, unknown>, definition) as Row);
+    return makeWriteResult(value, write);
   }
 
   update<Row extends { id: string | Uint8Array }>(
@@ -827,8 +930,9 @@ class DirectAbiDb implements Db {
     options: UpsertOptions<Row>,
   ): WriteResult<Row> & Row {
     this.#assertOpen();
-    if (options.id == null && row.id == null) throw new Error("db.upsert requires options.id or row.id");
-    const rowId = encodeRowId(options.id ?? row.id as Row["id"]);
+    if (options.id == null && row.id == null)
+      throw new Error("db.upsert requires options.id or row.id");
+    const rowId = encodeRowId(options.id ?? (row.id as Row["id"]));
     const cells = encodeCellsForRow(this.#tableDefinition(table._table), row);
     const write = this.#db.upsertEncoded(table._table, rowId, cells);
     this.#pumpSubscriptions();
@@ -866,15 +970,34 @@ class DirectAbiDb implements Db {
     return makeWriteResult(this.#expectOne(table, rowId, "restore"), write);
   }
 
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options: ReadOptions = {}): Row[] {
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options: ReadOptions = {},
+  ): Row[] {
     this.#assertOpen();
     const relationQuery = builtQueryWithRelations(tableOrQuery);
     if (relationQuery) return this.#readBuiltQuery(relationQuery, undefined, options) as Row[];
+    if ("_build" in tableOrQuery) {
+      const built = JSON.parse(tableOrQuery._build()) as BuiltQuery;
+      if (queryNeedsJsPredicateFallback(built)) {
+        return applyBuiltQueryFallback(
+          this.#readRows(queryFromTable(queryTableName(built)), undefined, options),
+          built,
+          this.#schema,
+        ) as Row[];
+      }
+    }
     const query = this.#prepareQuery(tableOrQuery);
-    return decodeRows(readRowBatches(this.#db.all(query, readOptions(options))), this.#schema) as Row[];
+    return decodeRows(
+      readRowBatches(this.#db.all(query, readOptions(options))),
+      this.#schema,
+    ) as Row[];
   }
 
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, options: ReadOptions = {}): Row | null {
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    options: ReadOptions = {},
+  ): Row | null {
     const query =
       "limit" in tableOrQuery && typeof tableOrQuery.limit === "function"
         ? tableOrQuery.limit(1)
@@ -891,8 +1014,12 @@ class DirectAbiDb implements Db {
     const relationQuery = builtQueryWithRelations(tableOrQuery);
     if (relationQuery) return this.#readBuiltQuery(relationQuery, identity, options) as Row[];
     const query = this.#prepareQuery(tableOrQuery);
-    void identity;
-    return decodeRows(readRowBatches(this.#db.all(query, readOptions(options))), this.#schema) as Row[];
+    return decodeRows(
+      readRowBatches(
+        this.#db.allForIdentity(query, encodeIdentity(identity), readOptions(options)),
+      ),
+      this.#schema,
+    ) as Row[];
   }
 
   subscribe<Row>(
@@ -901,7 +1028,24 @@ class DirectAbiDb implements Db {
   ): Subscription<Row> {
     this.#assertOpen();
     const relationQuery = subscribeRelationQuery(tableOrQuery, this.#schema);
-    const query = this.#prepareQuery(tableOrQuery);
+    const callbackForSubscription: SubscriptionCallback<Row> = relationQuery
+      ? () => callback(this.#readBuiltQuery(relationQuery) as Row[])
+      : callback;
+    const query = relationQuery
+      ? this.#prepareQueryBytes(
+          encodeBuiltQuery(
+            JSON.stringify(
+              stripIdFilters({
+                ...relationQuery,
+                includes: undefined,
+                hops: undefined,
+                gather: undefined,
+              }),
+            ),
+            this.#schema,
+          ),
+        )
+      : this.#prepareQuery(tableOrQuery);
     const reader = this.#db.subscribe(query, subscriptionReadOptions()).getReader();
     const subscription = new DirectAbiSubscription(
       reader,
@@ -909,8 +1053,8 @@ class DirectAbiDb implements Db {
       () => {
         this.#subscriptions.delete(subscription as DirectAbiSubscription<unknown>);
       },
-      callback,
-      relationQuery,
+      callbackForSubscription,
+      undefined,
     );
     this.#subscriptions.add(subscription as DirectAbiSubscription<unknown>);
     void subscription.start().catch((error: unknown) => {
@@ -950,9 +1094,18 @@ class DirectAbiDb implements Db {
     this.#closed = true;
   }
 
-  #prepareQuery<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): WasmPreparedQuery {
+  #prepareQuery<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+  ): WasmPreparedQuery {
     this.#assertOpen();
-    const queryBytes = "_build" in tableOrQuery ? encodeBuiltQuery(tableOrQuery._build(), this.#schema) : queryFromTable(tableOrQuery._table);
+    const queryBytes =
+      "_build" in tableOrQuery
+        ? encodeBuiltQuery(tableOrQuery._build(), this.#schema)
+        : queryFromTable(tableOrQuery._table);
+    return this.#prepareQueryBytes(queryBytes);
+  }
+
+  #prepareQueryBytes(queryBytes: Uint8Array): WasmPreparedQuery {
     const key = bytesKey(queryBytes);
     let prepared = this.#preparedQueries.get(key);
     if (!prepared) {
@@ -980,7 +1133,10 @@ class DirectAbiDb implements Db {
     return this.#allocateRowId();
   }
 
-  _transactionFindVisibleRowById<Row extends { id: string | Uint8Array }>(table: Table<Row, unknown>, rowId: Uint8Array): Row | undefined {
+  _transactionFindVisibleRowById<Row extends { id: string | Uint8Array }>(
+    table: Table<Row, unknown>,
+    rowId: Uint8Array,
+  ): Row | undefined {
     return this.#findVisibleRowById(table, rowId);
   }
 
@@ -992,7 +1148,11 @@ class DirectAbiDb implements Db {
     this.#assertOpen();
   }
 
-  #readBuiltQuery(query: BuiltQuery, identity?: Identity, options: ReadOptions = {}): Array<Record<string, unknown>> {
+  #readBuiltQuery(
+    query: BuiltQuery,
+    identity?: Identity,
+    options: ReadOptions = {},
+  ): Array<Record<string, unknown>> {
     const table = queryTableName(query);
     const baseQuery = stripIdFilters({
       ...query,
@@ -1000,25 +1160,42 @@ class DirectAbiDb implements Db {
       hops: undefined,
       gather: undefined,
     });
-    const baseRows = filterRowsById(this.#readRows(encodeBuiltQuery(JSON.stringify(baseQuery), this.#schema), identity, options), query);
+    const baseRows = filterRowsById(
+      this.#readRows(encodeBuiltQuery(JSON.stringify(baseQuery), this.#schema), identity, options),
+      query,
+    );
     if (query.hops?.length) return this.#applyHops(table, baseRows, query.hops, identity, options);
     if (query.gather) return this.#applyGather(table, baseRows, query.gather, identity, options);
-    if (query.includes && Object.keys(query.includes).length > 0) return this.#applyIncludes(table, baseRows, query.includes, identity, options);
+    if (query.includes && Object.keys(query.includes).length > 0)
+      return this.#applyIncludes(table, baseRows, query.includes, identity, options);
     return baseRows;
   }
 
-  #readRows(queryBytes: Uint8Array, identity?: Identity, options: ReadOptions = {}): Array<Record<string, unknown>> {
-    void identity;
+  #readRows(
+    queryBytes: Uint8Array,
+    identity?: Identity,
+    options: ReadOptions = {},
+  ): Array<Record<string, unknown>> {
     const key = bytesKey(queryBytes);
     let query = this.#preparedQueries.get(key);
     if (!query) {
       query = this.#db.prepareQuery(queryBytes);
       this.#preparedQueries.set(key, query);
     }
-    return decodeRows(readRowBatches(this.#db.all(query, readOptions(options))), this.#schema);
+    const rows =
+      identity == null
+        ? this.#db.all(query, readOptions(options))
+        : this.#db.allForIdentity(query, encodeIdentity(identity), readOptions(options));
+    return decodeRows(readRowBatches(rows), this.#schema);
   }
 
-  #applyIncludes(table: string, rows: Array<Record<string, unknown>>, includes: QueryInclude, identity?: Identity, options: ReadOptions = {}): Array<Record<string, unknown>> {
+  #applyIncludes(
+    table: string,
+    rows: Array<Record<string, unknown>>,
+    includes: QueryInclude,
+    identity?: Identity,
+    options: ReadOptions = {},
+  ): Array<Record<string, unknown>> {
     return rows.flatMap((row) => {
       const expanded = { ...row };
       for (const includeName of Object.keys(includes)) {
@@ -1027,23 +1204,35 @@ class DirectAbiDb implements Db {
         const include = normalizeIncludeOptions(includes[includeName]);
         if (relation.direction === "forward") {
           const targetId = row[relation.column];
-          const targetRows = targetId == null
-            ? []
-            : this.#readBuiltQuery(relationQuery(relation.table, "id", targetId), identity, options);
+          const targetRows =
+            targetId == null
+              ? []
+              : this.#readBuiltQuery(
+                  relationQuery(relation.table, "id", targetId),
+                  identity,
+                  options,
+                );
           const expandedTargetRows = include.include
             ? this.#applyIncludes(relation.table, targetRows, include.include, identity, options)
             : targetRows;
-          const target = expandedTargetRows[0] == null
-            ? null
-            : projectIncludedRow(expandedTargetRows[0], include.select, include.include);
+          const target =
+            expandedTargetRows[0] == null
+              ? null
+              : projectIncludedRow(expandedTargetRows[0], include.select, include.include);
           if (include.required && target == null) return [];
           expanded[includeName] = target;
         } else {
-          const childRows = this.#readBuiltQuery(relationQuery(relation.table, relation.column, row.id), identity, options);
+          const childRows = this.#readBuiltQuery(
+            relationQuery(relation.table, relation.column, row.id),
+            identity,
+            options,
+          );
           const expandedChildRows = include.include
             ? this.#applyIncludes(relation.table, childRows, include.include, identity, options)
             : childRows;
-          const children = expandedChildRows.map((child) => projectIncludedRow(child, include.select, include.include));
+          const children = expandedChildRows.map((child) =>
+            projectIncludedRow(child, include.select, include.include),
+          );
           if (include.required && children.length === 0) return [];
           expanded[includeName] = children;
         }
@@ -1052,22 +1241,38 @@ class DirectAbiDb implements Db {
     });
   }
 
-  #applyHops(table: string, rows: Array<Record<string, unknown>>, hops: string[], identity?: Identity, options: ReadOptions = {}): Array<Record<string, unknown>> {
+  #applyHops(
+    table: string,
+    rows: Array<Record<string, unknown>>,
+    hops: string[],
+    identity?: Identity,
+    options: ReadOptions = {},
+  ): Array<Record<string, unknown>> {
     let currentTable = table;
     let currentRows = rows;
     for (const hop of hops) {
       const relation = forwardRelation(this.#schema, currentTable, hop);
-      currentRows = currentRows.flatMap((row) => relationValues(row[relation.column]).flatMap((id) => (
-        this.#readBuiltQuery(relationQuery(relation.table, "id", id), identity, options)
-      )));
+      currentRows = currentRows.flatMap((row) =>
+        relationValues(row[relation.column]).flatMap((id) =>
+          this.#readBuiltQuery(relationQuery(relation.table, "id", id), identity, options),
+        ),
+      );
       currentTable = relation.table;
     }
     return uniqueRows(currentRows);
   }
 
-  #applyGather(table: string, rows: Array<Record<string, unknown>>, gather: GatherOptions, identity?: Identity, options: ReadOptions = {}): Array<Record<string, unknown>> {
-    if (gather.step_table !== table) throw new Error("alpha gather currently requires step_table to match the starting table");
-    if (gather.step_current_column !== "id") throw new Error("alpha gather currently requires step_current_column: 'id'");
+  #applyGather(
+    table: string,
+    rows: Array<Record<string, unknown>>,
+    gather: GatherOptions,
+    identity?: Identity,
+    options: ReadOptions = {},
+  ): Array<Record<string, unknown>> {
+    if (gather.step_table !== table)
+      throw new Error("alpha gather currently requires step_table to match the starting table");
+    if (gather.step_current_column !== "id")
+      throw new Error("alpha gather currently requires step_current_column: 'id'");
     const seen = new Set<string>();
     let frontier = rows;
     const gathered: Array<Record<string, unknown>> = [];
@@ -1082,20 +1287,33 @@ class DirectAbiDb implements Db {
       if (depth === gather.max_depth) break;
       frontier = this.#applyHops(table, fresh, gather.step_hops, identity, options);
       if (gather.step_conditions?.length) {
-        const allowed = new Set(this.#readBuiltQuery({ table, conditions: gather.step_conditions }, identity, options).map((row) => String(row.id)));
+        const allowed = new Set(
+          this.#readBuiltQuery(
+            { table, conditions: gather.step_conditions },
+            identity,
+            options,
+          ).map((row) => String(row.id)),
+        );
         frontier = frontier.filter((row) => allowed.has(String(row.id)));
       }
     }
     return gathered;
   }
 
-  #expectOne<Row extends { id: string | Uint8Array }>(table: Table<Row, unknown>, rowId: Uint8Array, operation: string): Row {
+  #expectOne<Row extends { id: string | Uint8Array }>(
+    table: Table<Row, unknown>,
+    rowId: Uint8Array,
+    operation: string,
+  ): Row {
     const found = this.#findVisibleRowById(table, rowId);
     if (!found) throw new Error(`${operation} did not produce row ${formatUuid(rowId)}`);
     return found;
   }
 
-  #findVisibleRowById<Row extends { id: string | Uint8Array }>(table: Table<Row, unknown>, rowId: Uint8Array): Row | undefined {
+  #findVisibleRowById<Row extends { id: string | Uint8Array }>(
+    table: Table<Row, unknown>,
+    rowId: Uint8Array,
+  ): Row | undefined {
     return this.all(table).find((row) => sameBytes(encodeRowId(row.id), rowId));
   }
 
@@ -1127,7 +1345,8 @@ class DirectAbiTransaction implements Transaction {
     this.#assertOpen();
     const definition = this.db._transactionTableDefinition(table._table);
     const rowIdInput = options.id ?? row.id;
-    const rowId = rowIdInput == null ? this.db._transactionAllocateRowId() : encodeRowId(rowIdInput);
+    const rowId =
+      rowIdInput == null ? this.db._transactionAllocateRowId() : encodeRowId(rowIdInput);
     this.tx.insertWithIdEncoded(table._table, rowId, encodeCellsForRow(definition, row));
     return materializePendingRow(rowId, row as Record<string, unknown>, definition) as Row;
   }
@@ -1152,9 +1371,10 @@ class DirectAbiTransaction implements Transaction {
     options: UpsertOptions<Row>,
   ): Row {
     this.#assertOpen();
-    if (options.id == null && row.id == null) throw new Error("tx.upsert requires options.id or row.id");
+    if (options.id == null && row.id == null)
+      throw new Error("tx.upsert requires options.id or row.id");
     const definition = this.db._transactionTableDefinition(table._table);
-    const rowId = encodeRowId(options.id ?? row.id as Row["id"]);
+    const rowId = encodeRowId(options.id ?? (row.id as Row["id"]));
     this.tx.upsertEncoded(table._table, rowId, encodeCellsForRow(definition, row));
     return materializePendingRow(rowId, row as Record<string, unknown>, definition) as Row;
   }
@@ -1177,18 +1397,32 @@ class DirectAbiTransaction implements Transaction {
     this.#assertOpen();
     const definition = this.db._transactionTableDefinition(table._table);
     const rowId = encodeRowId(id);
-    this.tx.restoreEncoded(table._table, rowId, encodeCellsForRow(definition, row as Record<string, unknown>));
+    this.tx.restoreEncoded(
+      table._table,
+      rowId,
+      encodeCellsForRow(definition, row as Record<string, unknown>),
+    );
     return materializePendingRow(rowId, row as Record<string, unknown>, definition) as Row;
   }
 
-  all<Row>(_tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, _options: ReadOptions = {}): Row[] {
+  all<Row>(
+    _tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    _options: ReadOptions = {},
+  ): Row[] {
     this.#assertOpen();
-    throw new Error("mergeable transaction reads are not supported by the direct wasm object facade yet");
+    throw new Error(
+      "mergeable transaction reads are not supported by the direct wasm object facade yet",
+    );
   }
 
-  one<Row>(_tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>, _options: ReadOptions = {}): Row | null {
+  one<Row>(
+    _tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+    _options: ReadOptions = {},
+  ): Row | null {
     this.#assertOpen();
-    throw new Error("mergeable transaction reads are not supported by the direct wasm object facade yet");
+    throw new Error(
+      "mergeable transaction reads are not supported by the direct wasm object facade yet",
+    );
   }
 
   commit(): WriteResult<void> {
@@ -1263,10 +1497,19 @@ class DirectAbiSubscription<Row> implements Subscription<Row> {
   private materializeRows(rows: Array<Record<string, unknown>>): Row[] {
     if (!this.relationQuery?.includes) return rows as Row[];
     const table = queryTableName(this.relationQuery);
-    const relationSnapshot = relationSubscriptionSnapshotFromRowPayload(table, rows, this.relationQuery.includes, this.schema);
+    const relationSnapshot = relationSubscriptionSnapshotFromRowPayload(
+      table,
+      rows,
+      this.relationQuery.includes,
+      this.schema,
+    );
+    const rootRows = filterRowsById(
+      rows.filter((row) => row["__jazz_table"] === table),
+      this.relationQuery,
+    );
     return applyRelationSubscriptionIncludes(
       table,
-      rows.filter((row) => row["__jazz_table"] === table),
+      rootRows,
       this.relationQuery.includes,
       relationSnapshot,
       this.schema,
@@ -1279,12 +1522,18 @@ function normalizeSubscriptionChunk(chunk: unknown): SubscriptionStreamChunk {
   if (!isRecord(chunk)) throw new Error("expected subscription stream chunk object");
   if (chunk.type === "snapshot" || chunk.type === "Snapshot") {
     const rows = (chunk as { rows?: unknown }).rows;
-    return { type: "snapshot", rows: readRowBatches(assertBytes(rows, "subscription snapshot rows")) };
+    return {
+      type: "snapshot",
+      rows: readRowBatches(assertBytes(rows, "subscription snapshot rows")),
+    };
   }
   if (chunk.type === "delta" || chunk.type === "Delta") {
     const delta = (chunk as { delta?: unknown }).delta;
     if (delta instanceof Uint8Array || Array.isArray(delta)) {
-      return { type: "delta", delta: readSubscriptionDelta(assertBytes(delta, "subscription delta")) };
+      return {
+        type: "delta",
+        delta: readSubscriptionDelta(assertBytes(delta, "subscription delta")),
+      };
     }
     if (!isRecord(delta)) throw new Error("expected subscription delta");
     return { type: "delta", delta: normalizeAbiSubscriptionDelta(delta) };
@@ -1356,16 +1605,16 @@ function normalizeValueType(valueType: unknown): ValueType {
     if (entries.length === 1) {
       const [variant, payload] = entries[0];
       const tag = valueTypeTag(variant);
-      if (tag === 10 && Array.isArray(payload)) return { tag, inner: normalizeValueType(payload[0]) };
-      if ((tag === 11 || tag === 12) && payload != null) return { tag, inner: normalizeValueType(payload) };
+      if (tag === 10 && Array.isArray(payload))
+        return { tag, inner: normalizeValueType(payload[0]) };
+      if ((tag === 11 || tag === 12) && payload != null)
+        return { tag, inner: normalizeValueType(payload) };
       return { tag };
     }
   }
   if (!isRecord(valueType)) throw new Error("expected ABI descriptor value type");
   const inner = valueType.inner == null ? undefined : normalizeValueType(valueType.inner);
-  return inner == null
-    ? valueType as ValueType
-    : { ...(valueType as ValueType), inner };
+  return inner == null ? (valueType as ValueType) : { ...(valueType as ValueType), inner };
 }
 
 function valueTypeTag(variant: string): number {
@@ -1389,11 +1638,16 @@ function valueTypeTag(variant: string): number {
   return tag;
 }
 
-
-function makeWriteResult<Value extends object>(value: Value, handle: WriteHandle | null): WriteResult<Value> & Value;
+function makeWriteResult<Value extends object>(
+  value: Value,
+  handle: WriteHandle | null,
+): WriteResult<Value> & Value;
 function makeWriteResult(value: void, handle: WriteHandle | null): WriteResult<void>;
-function makeWriteResult<Value>(value: Value, handle: WriteHandle | null): WriteResult<Value> | (WriteResult<Value> & object) {
-  const target = isRecord(value) || value instanceof Uint8Array ? value as object : {};
+function makeWriteResult<Value>(
+  value: Value,
+  handle: WriteHandle | null,
+): WriteResult<Value> | (WriteResult<Value> & object) {
+  const target = isRecord(value) || value instanceof Uint8Array ? (value as object) : {};
   Object.defineProperties(target, {
     value: {
       value,
@@ -1409,7 +1663,9 @@ function makeWriteResult<Value>(value: Value, handle: WriteHandle | null): Write
       value: async (options: WriteWaitOptions = {}) => {
         const tier = normalizeWriteTier(options.tier ?? "local");
         if (tier !== "Local") {
-          throw new Error(`write wait tier "${tier}" is not supported by this current jazz-tools/WasmDb slice yet`);
+          throw new Error(
+            `write wait tier "${tier}" is not supported by this current jazz-tools/WasmDb slice yet`,
+          );
         }
         return value;
       },
@@ -1420,7 +1676,11 @@ function makeWriteResult<Value>(value: Value, handle: WriteHandle | null): Write
   return target as WriteResult<Value> & object;
 }
 
-function materializePendingRow(rowId: Uint8Array, row: Record<string, unknown>, definition: TableDefinition): Record<string, unknown> {
+function materializePendingRow(
+  rowId: Uint8Array,
+  row: Record<string, unknown>,
+  definition: TableDefinition,
+): Record<string, unknown> {
   const next: Record<string, unknown> = { id: formatUuid(rowId) };
   for (const column of definition.columns) {
     if (Object.hasOwn(row, column.name)) {
@@ -1470,10 +1730,15 @@ async function resolveDbOptions(options: DbOptions): Promise<ResolvedDbOptions> 
     throw new Error("DbOptions error: jwtToken and cookieSession are mutually exclusive");
   }
   const appId = options.appId ?? "jazz-tools-alpha";
-  const localFirst = options.secret ? await localFirstAuthForSecret(appId, options.secret) : undefined;
+  const localFirst = options.secret
+    ? await localFirstAuthForSecret(appId, options.secret)
+    : undefined;
   const jwtToken = localFirst?.jwtToken ?? options.jwtToken;
-  const session = localFirst?.session ?? resolveClientSessionSync({ appId, jwtToken, cookieSession: options.cookieSession });
-  const accountAuthor = options.accountAuthor ?? localFirst?.accountAuthor ?? authorForSession(appId, session);
+  const session =
+    localFirst?.session ??
+    resolveClientSessionSync({ appId, jwtToken, cookieSession: options.cookieSession });
+  const accountAuthor =
+    options.accountAuthor ?? localFirst?.accountAuthor ?? authorForSession(appId, session);
   return {
     ...options,
     appId,
@@ -1484,7 +1749,10 @@ async function resolveDbOptions(options: DbOptions): Promise<ResolvedDbOptions> 
   };
 }
 
-async function localFirstAuthForSecret(appId: string, secret: string): Promise<{ accountAuthor: Uint8Array; jwtToken: string; session: Session }> {
+async function localFirstAuthForSecret(
+  appId: string,
+  secret: string,
+): Promise<{ accountAuthor: Uint8Array; jwtToken: string; session: Session }> {
   const accountAuthor = deterministicBytes(`local-first:${appId}:${secret}`, 16);
   const subject = formatUuid(accountAuthor);
   const jwtToken = await createLocalFirstJwtAsync({ appId, secret, subject });
@@ -1494,7 +1762,8 @@ async function localFirstAuthForSecret(appId: string, secret: string): Promise<{
 }
 
 function authorForSession(appId: string, session: Session | null): Uint8Array {
-  if (session) return deterministicBytes(`session:${appId}:${session.authMode}:${session.user_id}`, 16);
+  if (session)
+    return deterministicBytes(`session:${appId}:${session.authMode}:${session.user_id}`, 16);
   return deterministicBytes(`anonymous:${appId}`, 16);
 }
 
@@ -1503,7 +1772,9 @@ function accountIdForAuthor(author: Uint8Array): number {
   return view.getUint32(0, true);
 }
 
-function createAuthStateStore(input: Pick<ResolvedDbOptions, "appId" | "jwtToken" | "cookieSession">): AuthStateStore {
+function createAuthStateStore(
+  input: Pick<ResolvedDbOptions, "appId" | "jwtToken" | "cookieSession">,
+): AuthStateStore {
   let state = deriveAuthState(input);
   const initialAuthMode = state.authMode;
   const listeners = new Set<(state: AuthState) => void>();
@@ -1522,11 +1793,17 @@ function createAuthStateStore(input: Pick<ResolvedDbOptions, "appId" | "jwtToken
       };
     },
     applyJwtToken(jwtToken) {
-      const resolved = resolveClientSessionStateSync({ appId: input.appId, jwtToken, cookieSession: input.cookieSession });
+      const resolved = resolveClientSessionStateSync({
+        appId: input.appId,
+        jwtToken,
+        cookieSession: input.cookieSession,
+      });
       const currentUserId = state.session?.user_id ?? null;
       const nextUserId = resolved.session?.user_id ?? null;
       if (currentUserId !== nextUserId) {
-        throw new Error("Changing auth principal on a live client is not supported. Recreate the Db.");
+        throw new Error(
+          "Changing auth principal on a live client is not supported. Recreate the Db.",
+        );
       }
       const nextState: AuthState = { authMode: initialAuthMode, session: resolved.session };
       if (authStateEquals(state, nextState)) return false;
@@ -1537,7 +1814,9 @@ function createAuthStateStore(input: Pick<ResolvedDbOptions, "appId" | "jwtToken
   };
 }
 
-function deriveAuthState(input: Pick<ResolvedDbOptions, "appId" | "jwtToken" | "cookieSession">): AuthState {
+function deriveAuthState(
+  input: Pick<ResolvedDbOptions, "appId" | "jwtToken" | "cookieSession">,
+): AuthState {
   const resolved = resolveClientSessionStateSync(input);
   return {
     authMode: resolved.session?.authMode ?? "external",
@@ -1546,17 +1825,21 @@ function deriveAuthState(input: Pick<ResolvedDbOptions, "appId" | "jwtToken" | "
 }
 
 function authStateEquals(left: AuthState, right: AuthState): boolean {
-  return left.authMode === right.authMode
-    && left.error === right.error
-    && sessionsEqual(left.session, right.session);
+  return (
+    left.authMode === right.authMode &&
+    left.error === right.error &&
+    sessionsEqual(left.session, right.session)
+  );
 }
 
 function sessionsEqual(left: Session | null, right: Session | null): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
-  return left.user_id === right.user_id
-    && left.authMode === right.authMode
-    && JSON.stringify(left.claims) === JSON.stringify(right.claims);
+  return (
+    left.user_id === right.user_id &&
+    left.authMode === right.authMode &&
+    JSON.stringify(left.claims) === JSON.stringify(right.claims)
+  );
 }
 
 function encodeSchema(schema: SchemaDefinition): Uint8Array {
@@ -1600,91 +1883,27 @@ function encodeSchema(schema: SchemaDefinition): Uint8Array {
 }
 
 function encodeCellsForRow(definition: TableDefinition, row: Record<string, unknown>): Uint8Array {
-  return encodeDirectCells(definition.columns, (column) => valueForColumn(column, row), true);
+  return encodeCellsForColumns(definition.columns, (column) => valueForColumn(column, row));
 }
 
-function encodeCellsForPatch(definition: TableDefinition, patch: Record<string, unknown>): Uint8Array {
+function encodeCellsForPatch(
+  definition: TableDefinition,
+  patch: Record<string, unknown>,
+): Uint8Array {
   const columns = definition.columns.filter((column) => Object.hasOwn(patch, column.name));
-  return encodeDirectCells(columns, (column) => patch[column.name], false);
+  return encodeCellsForColumns(columns, (column) => patch[column.name]);
 }
 
-function encodeDirectCells(
+function encodeCellsForColumns(
   columns: ColumnDefinition[],
   valueFor: (column: ColumnDefinition) => unknown,
-  requireMissingDefaults: boolean,
 ): Uint8Array {
-  const writer = new PostcardWriter();
   const entries = [...columns].sort((left, right) => left.name.localeCompare(right.name));
-  writer.map(entries.length);
-  for (const column of entries) {
-    writer.string(column.name);
-    writeGrooveValue(writer, column, valueFor(column), requireMissingDefaults);
-  }
-  return writer.finish();
-}
-
-function writeGrooveValue(
-  writer: PostcardWriter,
-  column: ColumnDefinition,
-  value: unknown,
-  requireMissingDefaults: boolean,
-): void {
-  if (value == null) {
-    if (column.nullable) {
-      writer.u64(12);
-      writer.none();
-      return;
-    }
-    if (requireMissingDefaults) throw new Error(`missing required column ${column.name}`);
-  }
-  const normalized = typeof column.column_type === "string" ? { type: column.column_type } : column.column_type;
-  if (column.nullable) {
-    writer.u64(12);
-    writer.some((some) => writeGrooveNonNullValue(some, normalized, value));
-    return;
-  }
-  writeGrooveNonNullValue(writer, normalized, value);
-}
-
-function writeGrooveNonNullValue(writer: PostcardWriter, columnType: Exclude<ColumnType, string> | { type: string }, value: unknown): void {
-  switch (columnType.type) {
-    case "Boolean":
-      if (typeof value !== "boolean") throw new Error("expected boolean");
-      writer.u64(5);
-      writer.bool(value);
-      return;
-    case "Integer":
-      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("expected non-negative safe integer");
-      writer.u64(3);
-      writer.u64(value);
-      return;
-    case "Text":
-      if (typeof value !== "string") throw new Error("expected string");
-      writer.u64(6);
-      writer.string(value);
-      return;
-    case "Uuid":
-      writer.u64(8);
-      writer.bytes(encodeRowId(value));
-      return;
-    case "Bytea":
-      if (!(value instanceof Uint8Array)) throw new Error("expected Uint8Array");
-      writer.u64(7);
-      writer.bytes(value);
-      return;
-    case "Array":
-      if (!Array.isArray(value)) throw new Error("expected array");
-      if (!("element" in columnType)) throw new Error("array column is missing element type");
-      writer.u64(11);
-      writer.vec((element, index) => writeGrooveNonNullValue(element, normalizeColumnType(columnType.element), value[index]), value.length);
-      return;
-    default:
-      throw new Error(`unsupported column type ${(columnType as { type: string }).type}`);
-  }
-}
-
-function normalizeColumnType(columnType: ColumnType): Exclude<ColumnType, string> | { type: string } {
-  return typeof columnType === "string" ? { type: columnType } : columnType;
+  const descriptor = entries.map(columnDescriptor);
+  return encodeCells(
+    descriptor,
+    entries.map((column) => encodeCell(column, valueFor(column))),
+  );
 }
 
 function valueForColumn(column: ColumnDefinition, row: Record<string, unknown>): unknown {
@@ -1693,33 +1912,38 @@ function valueForColumn(column: ColumnDefinition, row: Record<string, unknown>):
   return undefined;
 }
 
-function decodeRows(batches: AbiRowBatch[], schema?: SchemaDefinition): Array<Record<string, unknown>> {
-  return batches.flatMap((batch) => batch.rows.map((row) => {
-    const decoded: Record<string, unknown> = { id: formatUuid(row.rowId) };
-    for (let index = 0; index < batch.descriptor.length; index += 1) {
-      const field = batch.descriptor[index];
-      if (!field.name) continue;
-      if (isInternalProjectionField(field.name)) continue;
-      const valueType = descriptorValueType(batch.table, field, schema);
-      decoded[publicFieldName(field.name)] = decodeCell(
-        valueType,
-        batch.descriptor,
-        row.raw,
-        index,
-      );
-    }
-    Object.defineProperty(decoded, deletedRowMarker, {
-      value: row.deleted,
-      enumerable: false,
-      configurable: false,
-    });
-    Object.defineProperty(decoded, "__jazz_table", {
-      value: batch.table,
-      enumerable: false,
-      configurable: false,
-    });
-    return decoded;
-  }));
+function decodeRows(
+  batches: AbiRowBatch[],
+  schema?: SchemaDefinition,
+): Array<Record<string, unknown>> {
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => {
+      const decoded: Record<string, unknown> = { id: formatUuid(row.rowId) };
+      for (let index = 0; index < batch.descriptor.length; index += 1) {
+        const field = batch.descriptor[index];
+        if (!field.name) continue;
+        if (isInternalProjectionField(field.name)) continue;
+        const valueType = descriptorValueType(batch.table, field, schema);
+        decoded[publicFieldName(field.name)] = decodeCell(
+          valueType,
+          batch.descriptor,
+          row.raw,
+          index,
+        );
+      }
+      Object.defineProperty(decoded, deletedRowMarker, {
+        value: row.deleted,
+        enumerable: false,
+        configurable: false,
+      });
+      Object.defineProperty(decoded, "__jazz_table", {
+        value: batch.table,
+        enumerable: false,
+        configurable: false,
+      });
+      return decoded;
+    }),
+  );
 }
 
 function applySubscriptionDeltaRows(
@@ -1745,9 +1969,16 @@ function rowIdentityKey(row: Record<string, unknown>): string {
   return `${table}:${String(row.id)}`;
 }
 
-function descriptorValueType(table: string, field: DescriptorField, schema?: SchemaDefinition): ValueType {
+function descriptorValueType(
+  table: string,
+  field: DescriptorField,
+  schema?: SchemaDefinition,
+): ValueType {
   const fieldName = field.name ? publicFieldName(field.name) : undefined;
-  const column = fieldName == null ? undefined : schema?.[table]?.columns.find((candidate) => candidate.name === fieldName);
+  const column =
+    fieldName == null
+      ? undefined
+      : schema?.[table]?.columns.find((candidate) => candidate.name === fieldName);
   return column ? columnValueType(column) : field.valueType;
 }
 
@@ -1760,15 +1991,22 @@ function rowsFromEvents(events: unknown[]): AbiRowBatch[] {
   return readRowBatches(assertBytes(isRecord(rows) ? rows.rows : rows, "rows payload"));
 }
 
-function relationSubscriptionSnapshotFromEvents(events: unknown[]): AbiRelationSubscriptionSnapshot | undefined {
+function relationSubscriptionSnapshotFromEvents(
+  events: unknown[],
+): AbiRelationSubscriptionSnapshot | undefined {
   const graph = events
     .filter(isRecord)
     .map((event) => event.kind)
     .filter(isRecord)
-    .find((event) => event.type === "relation_subscription_opened" || event.type === "RelationSubscriptionOpened")
-    ?.payload;
+    .find(
+      (event) =>
+        event.type === "relation_subscription_opened" ||
+        event.type === "RelationSubscriptionOpened",
+    )?.payload;
   if (graph == null) return undefined;
-  const reader = new PostcardReader(assertBytes(isRecord(graph) ? graph.graph : graph, "relation subscription graph"));
+  const reader = new PostcardReader(
+    assertBytes(isRecord(graph) ? graph.graph : graph, "relation subscription graph"),
+  );
   return {
     cursor: reader.u64(),
     rows: reader.readVec(readAbiRowBatchWithArrays),
@@ -1948,7 +2186,8 @@ function encodeNonNullCell(columnType: ColumnType, value: unknown): Uint8Array {
       if (typeof value !== "boolean") throw new Error("expected boolean");
       return new Uint8Array([value ? 1 : 0]);
     case "Integer":
-      if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error("expected safe integer");
+      if (typeof value !== "number" || !Number.isSafeInteger(value))
+        throw new Error("expected safe integer");
       return u64Le(value);
     case "Text":
       if (typeof value !== "string") throw new Error("expected string");
@@ -2049,7 +2288,11 @@ function decodeCell(
   let bytes = decodeReturnedRecordCell(descriptor, raw, index).bytes;
   if (descriptor[index].valueType.tag === 12) {
     if (valueType.tag === 11 && bytes.length === 0) return undefined;
-    if (bytes[0] === 1 && descriptor[index].valueType.inner && fixedSize(descriptor[index].valueType.inner) == null) {
+    if (
+      bytes[0] === 1 &&
+      descriptor[index].valueType.inner &&
+      fixedSize(descriptor[index].valueType.inner) == null
+    ) {
       bytes = bytes.subarray(1);
     }
   }
@@ -2156,10 +2399,20 @@ function decodeReturnedRecordCell(
   }
   const target = variables.find((variable) => variable.index === logicalIndex);
   if (!target) throw new Error("field is not present");
-  const value = variableRecordBytes(raw, variables.length, target.offsetIndex, fixedOffset) ?? new Uint8Array();
+  const value =
+    variableRecordBytes(raw, variables.length, target.offsetIndex, fixedOffset) ?? new Uint8Array();
   const descriptorType = descriptor[logicalIndex].valueType;
-  if (descriptorType.tag === 12 && descriptorType.inner && fixedSize(descriptorType.inner) == null && value.length === 0) {
-    const fallback = decodeReturnedRecordCellWithFixedNullableVariablePresence(descriptor, raw, logicalIndex);
+  if (
+    descriptorType.tag === 12 &&
+    descriptorType.inner &&
+    fixedSize(descriptorType.inner) == null &&
+    value.length === 0
+  ) {
+    const fallback = decodeReturnedRecordCellWithFixedNullableVariablePresence(
+      descriptor,
+      raw,
+      logicalIndex,
+    );
     if (fallback.bytes.length > 0 || !fallback.present) return fallback;
   }
   const present = descriptorType.tag !== 12 || value.length > 0;
@@ -2226,7 +2479,8 @@ function decodeReturnedRecordCellWithFixedNullableVariablePresence(
   }
   const target = variables.find((variable) => variable.index === logicalIndex);
   if (!target) throw new Error("field is not present");
-  const value = variableRecordBytes(raw, variables.length, target.offsetIndex, fixedOffset) ?? new Uint8Array();
+  const value =
+    variableRecordBytes(raw, variables.length, target.offsetIndex, fixedOffset) ?? new Uint8Array();
   const presenceOffset = presenceOffsets.get(logicalIndex);
   const present = presenceOffset == null || raw[presenceOffset] !== 0;
   return { present, bytes: value };
@@ -2241,8 +2495,12 @@ function variableRecordBytes(
   if (variableCount === 0) return undefined;
   const variableStart = offsetTableStart + Math.max(0, variableCount - 1) * 4;
   if (variableStart > raw.length) return undefined;
-  const start = offsetIndex === 0 ? variableStart : readU32Le(raw, offsetTableStart + (offsetIndex - 1) * 4);
-  const end = offsetIndex === variableCount - 1 ? raw.length : readU32Le(raw, offsetTableStart + offsetIndex * 4);
+  const start =
+    offsetIndex === 0 ? variableStart : readU32Le(raw, offsetTableStart + (offsetIndex - 1) * 4);
+  const end =
+    offsetIndex === variableCount - 1
+      ? raw.length
+      : readU32Le(raw, offsetTableStart + offsetIndex * 4);
   if (start < variableStart || end < start || end > raw.length) return undefined;
   return raw.subarray(start, end);
 }
@@ -2255,12 +2513,29 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
 function encodeBuiltQuery(built: string, schema?: SchemaDefinition): Uint8Array {
   const query = JSON.parse(built) as BuiltQuery;
   const table = queryTableName(query);
-  const filters = query.filters ?? (query.filter ? [query.filter] : filtersFromConditions(schema, table, query.conditions ?? []));
+  const filters =
+    query.filters ??
+    (query.filter ? [query.filter] : filtersFromConditions(schema, table, query.conditions ?? []));
   const includes = encodeableForwardIncludes(query, schema, table);
-  if (filters.length === 0 && includes.length === 0 && query.select == null && query.orderBy == null && query.limit == null && query.offset == null) {
+  if (
+    filters.length === 0 &&
+    includes.length === 0 &&
+    query.select == null &&
+    query.orderBy == null &&
+    query.limit == null &&
+    query.offset == null
+  ) {
     return queryFromTable(table);
   }
-  return encodeQuery(table, filters, includes, query.select, query.orderBy, query.limit, query.offset);
+  return encodeQuery(
+    table,
+    filters,
+    includes,
+    query.select,
+    query.orderBy,
+    query.limit,
+    query.offset,
+  );
 }
 
 function encodeQuery(
@@ -2279,7 +2554,8 @@ function encodeQuery(
   }
   let orderByItems: QueryOrderBy[] = [];
   if (orderBy != null) {
-    if (!Array.isArray(orderBy) || !orderBy.every(isQueryOrderBy)) throw new Error("query orderBy must be an array of order items");
+    if (!Array.isArray(orderBy) || !orderBy.every(isQueryOrderBy))
+      throw new Error("query orderBy must be an array of order items");
     orderByItems = orderBy;
   }
   let limitCount: number | undefined;
@@ -2299,7 +2575,12 @@ function encodeQuery(
   if (selectedColumns == null) {
     writer.none();
   } else {
-    writer.some((selected) => selected.vec((column, index) => column.string(selectedColumns[index]), selectedColumns.length));
+    writer.some((selected) =>
+      selected.vec(
+        (column, index) => column.string(selectedColumns[index]),
+        selectedColumns.length,
+      ),
+    );
   }
   writer.vec((order, index) => writeOrderBy(order, orderByItems[index]), orderByItems.length);
   writer.none();
@@ -2327,20 +2608,41 @@ export function assertSubscribeQuerySupportedForTest<Row>(
   assertSubscribeQuerySupported(tableOrQuery);
 }
 
-function encodeableForwardIncludes(query: BuiltQuery, schema: SchemaDefinition | undefined, table: string): EncodedInclude[] {
+function encodeableForwardIncludes(
+  query: BuiltQuery,
+  schema: SchemaDefinition | undefined,
+  table: string,
+): EncodedInclude[] {
   if (query.includes == null || Object.keys(query.includes).length === 0) return [];
   if (!schema) throw new Error("query includes require a schema");
-  return Object.entries(query.includes).flatMap(([property, include]) => {
+  return encodeableForwardIncludeEntries(query.includes, schema, table, "");
+}
+
+function encodeableForwardIncludeEntries(
+  includes: QueryInclude,
+  schema: SchemaDefinition,
+  table: string,
+  prefix: string,
+): EncodedInclude[] {
+  return Object.entries(includes).flatMap(([property, include]) => {
     if (include === undefined) return [];
     const relation = includeRelation(schema, table, property);
     if (relation.direction !== "forward") {
-      throw new Error("current jazz-tools/WasmDb query byte encoding only supports forward relation includes");
+      throw new Error(
+        "current jazz-tools/WasmDb query byte encoding only supports forward relation includes",
+      );
     }
     const normalized = normalizeIncludeOptions(include);
-    if (normalized.include != null || normalized.select != null) {
-      throw new Error("current jazz-tools/WasmDb query byte encoding only supports simple forward relation includes");
+    if (normalized.select != null) {
+      throw new Error(
+        "current jazz-tools/WasmDb query byte encoding does not support selected include projections yet",
+      );
     }
-    return [{ path: relation.column, required: normalized.required === true }];
+    const path = prefix ? `${prefix}.${relation.column}` : relation.column;
+    return [
+      { path, required: normalized.required === true },
+      ...encodeableForwardIncludeEntries(normalized.include ?? {}, schema, relation.table, path),
+    ];
   });
 }
 
@@ -2360,7 +2662,11 @@ function writeFilter(writer: PostcardWriter, filter: QueryFilter): void {
     case "eq":
     case "ne":
       if (filter.value === null) {
-        writeFilter(writer, { column: filter.column, columnType: filter.columnType, op: filter.op === "eq" ? "isNull" : "isNotNull" });
+        writeFilter(writer, {
+          column: filter.column,
+          columnType: filter.columnType,
+          op: filter.op === "eq" ? "isNull" : "isNotNull",
+        });
         return;
       }
       writer.u64(filter.op === "eq" ? 3 : 4);
@@ -2373,7 +2679,11 @@ function writeFilter(writer: PostcardWriter, filter: QueryFilter): void {
       if (filter.values.includes(null)) {
         const nonNullValues = filter.values.filter((value) => value !== null);
         if (nonNullValues.length === 0) {
-          writeFilter(writer, { column: filter.column, columnType: filter.columnType, op: "isNull" });
+          writeFilter(writer, {
+            column: filter.column,
+            columnType: filter.columnType,
+            op: "isNull",
+          });
           return;
         }
         writeFilter(writer, {
@@ -2385,13 +2695,16 @@ function writeFilter(writer: PostcardWriter, filter: QueryFilter): void {
         });
         return;
       }
-      writer.u64(5);
-      writer.u64(0);
-      writer.string(filter.column);
-      writer.vec((value, index) => {
-        value.u64(3);
-        writeLiteral(value, filter.columnType, filter.values[index], filter.nullable);
-      }, filter.values.length);
+      writeFilter(writer, {
+        op: "any",
+        filters: filter.values.map((value) => ({
+          column: filter.column,
+          columnType: filter.columnType,
+          nullable: filter.nullable,
+          op: "eq",
+          value,
+        })),
+      });
       return;
     case "gt":
     case "gte":
@@ -2423,12 +2736,20 @@ function writeFilter(writer: PostcardWriter, filter: QueryFilter): void {
       return;
     case "any":
       writer.u64(1);
-      writer.vec((child, index) => writeFilter(child, filter.filters[index]), filter.filters.length);
+      writer.vec(
+        (child, index) => writeFilter(child, filter.filters[index]),
+        filter.filters.length,
+      );
       return;
   }
 }
 
-function writeLiteral(writer: PostcardWriter, columnType: ColumnType, value: QueryLiteral, nullable = false): void {
+function writeLiteral(
+  writer: PostcardWriter,
+  columnType: ColumnType,
+  value: QueryLiteral,
+  nullable = false,
+): void {
   if (nullable) {
     writer.u64(12);
     writer.some((inner) => writeLiteral(inner, columnType, value, false));
@@ -2439,11 +2760,15 @@ function writeLiteral(writer: PostcardWriter, columnType: ColumnType, value: Que
   if (normalized.type === "Array") {
     if (!Array.isArray(value)) throw new Error("array query value must target an Array column");
     writer.u64(11);
-    writer.vec((element, index) => writeLiteral(element, normalized.element, value[index], false), value.length);
+    writer.vec(
+      (element, index) => writeLiteral(element, normalized.element, value[index], false),
+      value.length,
+    );
     return;
   }
   if (typeof value === "boolean") {
-    if (normalized.type !== "Boolean") throw new Error("boolean query value must target a Boolean column");
+    if (normalized.type !== "Boolean")
+      throw new Error("boolean query value must target a Boolean column");
     writer.u64(5);
     writer.bool(value);
     return;
@@ -2454,14 +2779,17 @@ function writeLiteral(writer: PostcardWriter, columnType: ColumnType, value: Que
       writer.bytes(parseUuid(value));
       return;
     }
-    if (normalized.type !== "Text") throw new Error("string query value must target a Text or Uuid column");
+    if (normalized.type !== "Text")
+      throw new Error("string query value must target a Text or Uuid column");
     writer.u64(6);
     writer.string(value);
     return;
   }
   if (typeof value === "number") {
-    if (normalized.type !== "Integer") throw new Error("number query value must target an Integer column");
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error("expected non-negative safe integer query value");
+    if (normalized.type !== "Integer")
+      throw new Error("number query value must target an Integer column");
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error("expected non-negative safe integer query value");
     writer.u64(3);
     writer.u64(value);
     return;
@@ -2474,7 +2802,8 @@ function writeLiteral(writer: PostcardWriter, columnType: ColumnType, value: Que
       writer.bytes(bytes);
       return;
     }
-    if (normalized.type !== "Bytea") throw new Error("bytes query value must target a Bytea or Uuid column");
+    if (normalized.type !== "Bytea")
+      throw new Error("bytes query value must target a Bytea or Uuid column");
     writer.u64(7);
     writer.bytes(bytes);
     return;
@@ -2503,7 +2832,9 @@ function inFilter(
     return {
       op: "any",
       filters: [
-        ...(values.some((value) => value === null) ? [{ column, columnType, op: "isNull" } satisfies QueryFilter] : []),
+        ...(values.some((value) => value === null)
+          ? [{ column, columnType, op: "isNull" } satisfies QueryFilter]
+          : []),
         ...nonNullValues.map((value) => ({
           column,
           columnType,
@@ -2520,7 +2851,9 @@ function inFilter(
   return { column, columnType, nullable, op: "in", values: values.map(encodeQueryLiteral) };
 }
 
-function builtQueryWithRelations<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): BuiltQuery | undefined {
+function builtQueryWithRelations<Row>(
+  tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+): BuiltQuery | undefined {
   if (!("_build" in tableOrQuery)) return undefined;
   const query = JSON.parse(tableOrQuery._build()) as BuiltQuery;
   const hasIncludes = query.includes && Object.keys(query.includes).length > 0;
@@ -2552,16 +2885,27 @@ function assertSubscribeQuerySupported<Row>(
   subscribeRelationQuery(tableOrQuery, "_schema" in tableOrQuery ? tableOrQuery._schema : {});
 }
 
-function validateSimpleForwardSubscribeIncludes(schema: SchemaDefinition, table: string, includes: QueryInclude): void {
+function validateSimpleForwardSubscribeIncludes(
+  schema: SchemaDefinition,
+  table: string,
+  includes: QueryInclude,
+): void {
   for (const [property, includeValue] of Object.entries(includes)) {
     if (includeValue === undefined) continue;
     const relation = includeRelation(schema, table, property);
     if (relation.direction !== "forward") {
-      throw new Error("current jazz-tools/WasmDb subscribe with relation includes only supports simple forward includes");
+      throw new Error(
+        "current jazz-tools/WasmDb subscribe with relation includes only supports forward includes",
+      );
     }
     const include = normalizeIncludeOptions(includeValue);
-    if (include.include != null || include.select != null) {
-      throw new Error("current jazz-tools/WasmDb subscribe with relation includes only supports simple forward includes");
+    if (include.select != null) {
+      throw new Error(
+        "current jazz-tools/WasmDb subscribe with relation includes does not support selected projections yet",
+      );
+    }
+    if (include.include != null) {
+      validateSimpleForwardSubscribeIncludes(schema, relation.table, include.include);
     }
   }
 }
@@ -2577,31 +2921,48 @@ function filtersFromConditions(
   conditions: Array<{ column: string; op: string; value?: unknown }>,
 ): QueryFilter[] {
   return conditions.map((condition) => {
-    const column = condition.column === "id"
-      ? implicitIdColumn()
-      : schema?.[table]?.columns.find((candidate) => candidate.name === condition.column);
+    const column =
+      condition.column === "id"
+        ? implicitIdColumn()
+        : schema?.[table]?.columns.find((candidate) => candidate.name === condition.column);
     if (!column) throw new Error(`unknown column ${table}.${condition.column}`);
     const nullable = column.nullable === true;
     const columnType = column.column_type;
     switch (condition.op) {
       case "eq":
       case "ne":
-        if (condition.value === null && !nullable) throw new Error("null query value must target a nullable column");
-        return { column: condition.column, columnType, nullable, op: condition.op, value: encodeQueryLiteral(condition.value as QueryValue) };
+        if (condition.value === null && !nullable)
+          throw new Error("null query value must target a nullable column");
+        return {
+          column: condition.column,
+          columnType,
+          nullable,
+          op: condition.op,
+          value: encodeQueryLiteral(condition.value as QueryValue),
+        };
       case "in":
-        if (!isQueryValueArray(condition.value as QueryValue | readonly QueryValue[] | undefined)) throw new Error("in requires an array of query values");
+        if (!isQueryValueArray(condition.value as QueryValue | readonly QueryValue[] | undefined))
+          throw new Error("in requires an array of query values");
         {
           const values = condition.value as readonly QueryValue[];
-          if (values.some((item) => item === null) && !nullable) throw new Error("null query value must target a nullable column");
+          if (values.some((item) => item === null) && !nullable)
+            throw new Error("null query value must target a nullable column");
           return inFilter(condition.column, columnType, nullable, values);
         }
       case "gt":
       case "gte":
       case "lt":
       case "lte":
-        return { column: condition.column, columnType, nullable, op: condition.op, value: encodeRangeQueryLiteral(condition.value as string | number | bigint) };
+        return {
+          column: condition.column,
+          columnType,
+          nullable,
+          op: condition.op,
+          value: encodeRangeQueryLiteral(condition.value as string | number | bigint),
+        };
       case "contains":
-        if (typeof condition.value !== "string") throw new Error("contains is currently wired for string values only");
+        if (typeof condition.value !== "string")
+          throw new Error("contains is currently wired for string values only");
         return { column: condition.column, columnType, op: "contains", value: condition.value };
       case "isNull":
       case "isNotNull":
@@ -2620,21 +2981,144 @@ function stripIdFilters(query: BuiltQuery): BuiltQuery {
   return {
     ...query,
     filters: query.filters?.filter((filter) => filter.op === "any" || filter.column !== "id"),
-    filter: query.filter && query.filter.op !== "any" && query.filter.column === "id" ? undefined : query.filter,
+    filter:
+      query.filter && query.filter.op !== "any" && query.filter.column === "id"
+        ? undefined
+        : query.filter,
     conditions: query.conditions?.filter((condition) => condition.column !== "id"),
   };
 }
 
-function filterRowsById(rows: Array<Record<string, unknown>>, query: BuiltQuery): Array<Record<string, unknown>> {
+function filterRowsById(
+  rows: Array<Record<string, unknown>>,
+  query: BuiltQuery,
+): Array<Record<string, unknown>> {
   const idFilters = [
-    ...(query.filter && query.filter.op !== "any" && query.filter.column === "id" ? [query.filter] : []),
+    ...(query.filter && query.filter.op !== "any" && query.filter.column === "id"
+      ? [query.filter]
+      : []),
     ...(query.filters?.filter((filter) => filter.op !== "any" && filter.column === "id") ?? []),
     ...(query.conditions?.filter((condition) => condition.column === "id") ?? []),
   ];
-  return idFilters.reduce((currentRows, filter) => currentRows.filter((row) => matchesIdFilter(String(row.id), filter)), rows);
+  return idFilters.reduce(
+    (currentRows, filter) => currentRows.filter((row) => matchesIdFilter(String(row.id), filter)),
+    rows,
+  );
 }
 
-function matchesIdFilter(rowId: string, filter: QueryFilter | { column: string; op: string; value?: unknown }): boolean {
+function queryNeedsJsPredicateFallback(query: BuiltQuery): boolean {
+  return (
+    (query.filters ?? []).some(
+      (filter) =>
+        filter.op === "in" ||
+        filter.op === "any" ||
+        filter.op === "contains" ||
+        filter.op === "isNull" ||
+        filter.op === "isNotNull" ||
+        ((filter.op === "eq" || filter.op === "ne") &&
+          (filter.value == null || queryLiteralNeedsJsPredicateFallback(filter.value))),
+    ) ||
+    (query.conditions ?? []).some(
+      (condition) =>
+        condition.op === "in" ||
+        condition.op === "contains" ||
+        condition.op === "isNull" ||
+        condition.op === "isNotNull" ||
+        ((condition.op === "eq" || condition.op === "ne") &&
+          (condition.value === null || queryValueNeedsJsPredicateFallback(condition.value))),
+    )
+  );
+}
+
+function queryLiteralNeedsJsPredicateFallback(value: QueryLiteral): boolean {
+  return Array.isArray(value) || (typeof value === "object" && value !== null && "bytes" in value);
+}
+
+function queryValueNeedsJsPredicateFallback(value: unknown): boolean {
+  return Array.isArray(value) || value instanceof Uint8Array;
+}
+
+function applyBuiltQueryFallback(
+  rows: Array<Record<string, unknown>>,
+  query: BuiltQuery,
+  schema?: SchemaDefinition,
+): Array<Record<string, unknown>> {
+  const filters =
+    query.filters ?? filtersFromConditions(schema, queryTableName(query), query.conditions ?? []);
+  return filters.reduce(
+    (currentRows, filter) => currentRows.filter((row) => matchesQueryFilter(row, filter)),
+    rows,
+  );
+}
+
+function matchesQueryFilter(row: Record<string, unknown>, filter: QueryFilter): boolean {
+  switch (filter.op) {
+    case "eq":
+      return sameQueryValue(row[filter.column], filter.value);
+    case "ne":
+      return !sameQueryValue(row[filter.column], filter.value);
+    case "in":
+      return filter.values.some((value) => sameQueryValue(row[filter.column], value));
+    case "any":
+      return filter.filters.some((child) => matchesQueryFilter(row, child));
+    case "contains": {
+      const value = row[filter.column];
+      return Array.isArray(value)
+        ? value.some((item: unknown) => sameQueryValue(item, filter.value))
+        : typeof value === "string" &&
+            typeof filter.value === "string" &&
+            value.includes(filter.value);
+    }
+    case "isNull":
+      return row[filter.column] == null;
+    case "isNotNull":
+      return row[filter.column] != null;
+    default:
+      return false;
+  }
+}
+
+function sameQueryValue(left: unknown, right: unknown): boolean {
+  if (left == null && right == null) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameQueryValue(item, right[index]))
+    );
+  }
+  if (left instanceof Uint8Array && right instanceof Uint8Array)
+    return sameNullableBytes(left, right);
+  if (left instanceof Uint8Array && right && typeof right === "object" && "bytes" in right) {
+    return sameNullableBytes(left, Uint8Array.from(right.bytes as number[]));
+  }
+  if (
+    left instanceof Uint8Array ||
+    right instanceof Uint8Array ||
+    (right && typeof right === "object" && "bytes" in right)
+  ) {
+    return sameQueryId(String(left), right);
+  }
+  if (
+    (typeof left === "number" || typeof left === "bigint") &&
+    (typeof right === "number" || typeof right === "bigint")
+  ) {
+    const leftBigInt = BigInt(left);
+    const rightBigInt = BigInt(right);
+    return leftBigInt === rightBigInt || leftBigInt === rightBigInt * 256n + 1n;
+  }
+  return left === right;
+}
+
+function sameNullableBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return sameBytes(left, right) || (left[0] === 1 && sameBytes(left.subarray(1), right));
+}
+
+function matchesIdFilter(
+  rowId: string,
+  filter: QueryFilter | { column: string; op: string; value?: unknown },
+): boolean {
   if (filter.op === "eq") return sameQueryId(rowId, "value" in filter ? filter.value : undefined);
   if (filter.op === "ne") return !sameQueryId(rowId, "value" in filter ? filter.value : undefined);
   if (filter.op === "in") {
@@ -2645,7 +3129,8 @@ function matchesIdFilter(rowId: string, filter: QueryFilter | { column: string; 
 }
 
 function sameQueryId(rowId: string, value: unknown): boolean {
-  if (value instanceof Uint8Array) return rowId === formatUuid(value.length === 17 && value[0] === 1 ? value.subarray(1) : value);
+  if (value instanceof Uint8Array)
+    return rowId === formatUuid(value.length === 17 && value[0] === 1 ? value.subarray(1) : value);
   if (value && typeof value === "object" && "bytes" in value && Array.isArray(value.bytes)) {
     return rowId === formatUuid(new Uint8Array(value.bytes));
   }
@@ -2675,27 +3160,52 @@ function applyRelationSubscriptionIncludes(
   schema: SchemaDefinition,
   decodedSnapshotRows?: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
-  const includedRowsByKey = rowMapByTableAndId(decodedSnapshotRows ?? decodeRows(snapshot.rows, schema));
+  const includedRowsByKey = rowMapByTableAndId(
+    decodedSnapshotRows ?? decodeRows(snapshot.rows, schema),
+  );
   return rows.flatMap((row) => {
     const expanded = { ...row };
     for (const [includeName, includeValue] of Object.entries(includes)) {
       if (includeValue === undefined) continue;
       const relation = includeRelation(schema, table, includeName);
       const include = normalizeIncludeOptions(includeValue);
-      if (relation.direction !== "forward" || include.include != null || include.select != null) {
-        throw new Error("current jazz-tools/WasmDb subscribe with relation includes only supports simple forward includes");
+      if (relation.direction !== "forward") {
+        throw new Error(
+          "current jazz-tools/WasmDb subscribe with relation includes only supports forward includes",
+        );
       }
-      const edge = snapshot.edges.find((candidate) => (
-        candidate.sourceTable === table
-        && candidate.relation === relation.column
-        && sameBytes(candidate.sourceRowId, encodeRowId(row.id))
-      ));
-      const rowPayloadTargets = decodedSnapshotRows?.filter((candidate) => candidate["__jazz_table"] === relation.table) ?? [];
-      const target = edge == null
-        ? rowPayloadTargets.length === 1 ? rowPayloadTargets[0] : null
-        : includedRowsByKey.get(rowKey(edge.targetTable, edge.targetRowId)) ?? null;
+      if (include.select != null) {
+        throw new Error(
+          "current jazz-tools/WasmDb subscribe with relation includes does not support selected projections yet",
+        );
+      }
+      const edge = snapshot.edges.find(
+        (candidate) =>
+          candidate.sourceTable === table &&
+          candidate.relation === relation.column &&
+          sameBytes(candidate.sourceRowId, encodeRowId(row.id)),
+      );
+      const rowPayloadTargets =
+        decodedSnapshotRows?.filter((candidate) => candidate["__jazz_table"] === relation.table) ??
+        [];
+      const target =
+        edge == null
+          ? rowPayloadTargets.length === 1
+            ? rowPayloadTargets[0]
+            : null
+          : (includedRowsByKey.get(rowKey(edge.targetTable, edge.targetRowId)) ?? null);
       if (include.required && target == null) return [];
-      expanded[includeName] = target;
+      expanded[includeName] =
+        target == null
+          ? null
+          : applyRelationSubscriptionIncludes(
+              relation.table,
+              [target],
+              include.include ?? {},
+              snapshot,
+              schema,
+              decodedSnapshotRows,
+            )[0];
     }
     return [expanded];
   });
@@ -2711,32 +3221,68 @@ function relationSubscriptionSnapshotFromRowPayload(
   const includedRows = rows.filter((row) => row["__jazz_table"] !== table);
   const includedByKey = rowMapByTableAndId(includedRows);
   for (const row of rows.filter((candidate) => candidate["__jazz_table"] === table)) {
-    for (const [includeName, includeValue] of Object.entries(includes)) {
-      if (includeValue === undefined) continue;
-      const relation = includeRelation(schema, table, includeName);
-      if (relation.direction !== "forward") continue;
-      const targetId = row[relation.column];
-      const targetRows = includedRows.filter((candidate) => candidate["__jazz_table"] === relation.table);
-      const targetRowId = targetId == null && targetRows.length === 1
-        ? encodeRowId(targetRows[0].id)
-        : targetId == null
-          ? undefined
-          : encodeRowId(targetId);
-      if (targetRowId == null) continue;
-      if (!includedByKey.has(rowKey(relation.table, targetRowId))) continue;
-      edges.push({
-        sourceTable: table,
-        sourceRowId: encodeRowId(row.id),
-        relation: relation.column,
-        targetTable: relation.table,
-        targetRowId,
-      });
-    }
+    collectRelationSubscriptionEdges(
+      row,
+      table,
+      includes,
+      schema,
+      includedRows,
+      includedByKey,
+      edges,
+    );
   }
   return { cursor: 0, rows: [], edges };
 }
 
-function rowMapByTableAndId(rows: Array<Record<string, unknown>>): Map<string, Record<string, unknown>> {
+function collectRelationSubscriptionEdges(
+  row: Record<string, unknown>,
+  table: string,
+  includes: QueryInclude,
+  schema: SchemaDefinition,
+  includedRows: Array<Record<string, unknown>>,
+  includedByKey: Map<string, Record<string, unknown>>,
+  edges: AbiRelationSubscriptionSnapshot["edges"],
+): void {
+  for (const [includeName, includeValue] of Object.entries(includes)) {
+    if (includeValue === undefined) continue;
+    const relation = includeRelation(schema, table, includeName);
+    if (relation.direction !== "forward") continue;
+    const include = normalizeIncludeOptions(includeValue);
+    const targetId = row[relation.column];
+    const targetRows = includedRows.filter(
+      (candidate) => candidate["__jazz_table"] === relation.table,
+    );
+    const targetRowId =
+      targetId == null && targetRows.length === 1
+        ? encodeRowId(targetRows[0].id)
+        : targetId == null
+          ? undefined
+          : encodeRowId(targetId);
+    if (targetRowId == null) continue;
+    const target = includedByKey.get(rowKey(relation.table, targetRowId));
+    if (!target) continue;
+    edges.push({
+      sourceTable: table,
+      sourceRowId: encodeRowId(row.id),
+      relation: relation.column,
+      targetTable: relation.table,
+      targetRowId,
+    });
+    collectRelationSubscriptionEdges(
+      target,
+      relation.table,
+      include.include ?? {},
+      schema,
+      includedRows,
+      includedByKey,
+      edges,
+    );
+  }
+}
+
+function rowMapByTableAndId(
+  rows: Array<Record<string, unknown>>,
+): Map<string, Record<string, unknown>> {
   const byKey = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
     const table = typeof row.__jazz_table === "string" ? row.__jazz_table : undefined;
@@ -2749,11 +3295,19 @@ function rowKey(table: string, rowId: Uint8Array): string {
   return `${table}:${formatUuid(rowId)}`;
 }
 
-function forwardRelation(schema: SchemaDefinition, table: string, name: string): RelationDefinition {
+function forwardRelation(
+  schema: SchemaDefinition,
+  table: string,
+  name: string,
+): RelationDefinition {
   const columns = schema[table]?.columns ?? [];
-  const candidates = columns.filter((column) => column.references && relationName(column.name) === name);
+  const candidates = columns.filter(
+    (column) => column.references && relationName(column.name) === name,
+  );
   if (candidates.length !== 1 || !candidates[0].references) {
-    throw new Error(`unknown or ambiguous alpha hop ${table}.${name}; add a referenced column such as ${name}_id`);
+    throw new Error(
+      `unknown or ambiguous alpha hop ${table}.${name}; add a referenced column such as ${name}_id`,
+    );
   }
   return { table: candidates[0].references, column: candidates[0].name };
 }
@@ -2764,49 +3318,74 @@ function includeRelation(schema: SchemaDefinition, table: string, name: string):
   const forward = maybeForwardRelation(schema, table, name);
   const reverse = maybeReverseRelation(schema, table, name);
   if (forward && reverse) {
-    throw new Error(`ambiguous alpha include ${table}.${name}; both forward and reverse relations match`);
+    throw new Error(
+      `ambiguous alpha include ${table}.${name}; both forward and reverse relations match`,
+    );
   }
   if (forward) return { ...forward, direction: "forward" };
   if (reverse) return { ...reverse, direction: "reverse" };
-  throw new Error(`unknown alpha include ${table}.${name}; add a referenced column such as ${name}_id or schema.table(..., { relations: { ${name}: { table, column } } })`);
+  throw new Error(
+    `unknown alpha include ${table}.${name}; add a referenced column such as ${name}_id or schema.table(..., { relations: { ${name}: { table, column } } })`,
+  );
 }
 
-function maybeForwardRelation(schema: SchemaDefinition, table: string, name: string): RelationDefinition | undefined {
+function maybeForwardRelation(
+  schema: SchemaDefinition,
+  table: string,
+  name: string,
+): RelationDefinition | undefined {
   const columns = schema[table]?.columns ?? [];
-  const candidates = columns.filter((column) => column.references && relationName(column.name) === name);
+  const candidates = columns.filter(
+    (column) => column.references && relationName(column.name) === name,
+  );
   if (candidates.length === 0) return undefined;
   if (candidates.length > 1 || !candidates[0].references) {
-    throw new Error(`unknown or ambiguous alpha include ${table}.${name}; add a referenced column such as ${name}_id`);
+    throw new Error(
+      `unknown or ambiguous alpha include ${table}.${name}; add a referenced column such as ${name}_id`,
+    );
   }
   return { table: candidates[0].references, column: candidates[0].name };
 }
 
-function maybeReverseRelation(schema: SchemaDefinition, table: string, name: string): RelationDefinition | undefined {
+function maybeReverseRelation(
+  schema: SchemaDefinition,
+  table: string,
+  name: string,
+): RelationDefinition | undefined {
   const explicit = schema[table]?.relations?.[name];
   if (explicit) return explicit;
-  const matches = Object.entries(schema).flatMap(([candidateTable, definition]) => (
+  const matches = Object.entries(schema).flatMap(([candidateTable, definition]) =>
     definition.columns
       .filter((column) => column.references === table && relationName(candidateTable) === name)
-      .map((column) => ({ table: candidateTable, column: column.name }))
-  ));
+      .map((column) => ({ table: candidateTable, column: column.name })),
+  );
   if (matches.length === 0) return undefined;
   if (matches.length !== 1) {
-    throw new Error(`unknown or ambiguous alpha include ${table}.${name}; add schema.table(..., { relations: { ${name}: { table, column } } })`);
+    throw new Error(
+      `unknown or ambiguous alpha include ${table}.${name}; add schema.table(..., { relations: { ${name}: { table, column } } })`,
+    );
   }
   return matches[0];
 }
 
-function reverseRelation(schema: SchemaDefinition, table: string, name: string): RelationDefinition {
+function reverseRelation(
+  schema: SchemaDefinition,
+  table: string,
+  name: string,
+): RelationDefinition {
   const relation = maybeReverseRelation(schema, table, name);
   if (!relation) {
-    throw new Error(`unknown or ambiguous alpha include ${table}.${name}; add schema.table(..., { relations: { ${name}: { table, column } } })`);
+    throw new Error(
+      `unknown or ambiguous alpha include ${table}.${name}; add schema.table(..., { relations: { ${name}: { table, column } } })`,
+    );
   }
   return relation;
 }
 
 function normalizeIncludeOptions(include: boolean | IncludeOptions | undefined): IncludeOptions {
   if (include === true || include === undefined) return {};
-  if (include === false) throw new Error("object include values must be true, an include options object, or undefined");
+  if (include === false)
+    throw new Error("object include values must be true, an include options object, or undefined");
   return {
     required: include.required === true,
     include: include.include,
@@ -2814,9 +3393,14 @@ function normalizeIncludeOptions(include: boolean | IncludeOptions | undefined):
   };
 }
 
-function validateIncludeSpec(schema: SchemaDefinition, table: string, include: IncludeOptions): void {
+function validateIncludeSpec(
+  schema: SchemaDefinition,
+  table: string,
+  include: IncludeOptions,
+): void {
   if (include.select !== undefined) {
-    if (!isStringArray(include.select)) throw new Error("include select must be an array of column names");
+    if (!isStringArray(include.select))
+      throw new Error("include select must be an array of column names");
     for (const column of include.select) {
       if (column === "id") continue;
       if (!schema[table]?.columns.some((candidate) => candidate.name === column)) {
@@ -2878,10 +3462,18 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   where(conditions: QueryWhere<Row>): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "eq" | "ne", value: QueryValue): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "in", values: readonly QueryValue[]): QueryBuilder<Row>;
-  where(column: keyof Row & string, op: "gt" | "gte" | "lt" | "lte", value: string | number | bigint): QueryBuilder<Row>;
+  where(
+    column: keyof Row & string,
+    op: "gt" | "gte" | "lt" | "lte",
+    value: string | number | bigint,
+  ): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "contains", value: string): QueryBuilder<Row>;
   where(column: keyof Row & string, op: "isNull" | "isNotNull"): QueryBuilder<Row>;
-  where(columnOrConditions: (keyof Row & string) | QueryWhere<Row>, op?: QueryFilter["op"], value?: QueryValue | readonly QueryValue[]): QueryBuilder<Row> {
+  where(
+    columnOrConditions: (keyof Row & string) | QueryWhere<Row>,
+    op?: QueryFilter["op"],
+    value?: QueryValue | readonly QueryValue[],
+  ): QueryBuilder<Row> {
     if (typeof columnOrConditions !== "string") return this.#whereObject(columnOrConditions);
     if (op == null) throw new Error("where operator is required");
     const column = columnOrConditions;
@@ -2889,12 +3481,17 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     const columnType = columnDefinition.column_type;
     const nullable = columnDefinition.nullable === true;
     if (op === "eq" || op === "ne") {
-      if (value === undefined || (Array.isArray(value) && !isArrayColumn(columnType))) throw new Error(`${op} requires a scalar query value`);
-      if (value === null && !nullable) throw new Error("null query value must target a nullable column");
+      if (value === undefined || (Array.isArray(value) && !isArrayColumn(columnType)))
+        throw new Error(`${op} requires a scalar query value`);
+      if (value === null && !nullable)
+        throw new Error("null query value must target a nullable column");
       return new DirectAbiQueryBuilder<Row>(
         this._table,
         this._schema,
-        [...this.filters, { column, columnType, nullable, op, value: encodeQueryLiteral(value as QueryValue) }],
+        [
+          ...this.filters,
+          { column, columnType, nullable, op, value: encodeQueryLiteral(value as QueryValue) },
+        ],
         this.selectedColumns,
         this.orderByItems,
         this.limitCount,
@@ -2906,7 +3503,8 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     }
     if (op === "in") {
       if (!isQueryValueArray(value)) throw new Error("in requires an array of query values");
-      if (value.some((item) => item === null) && !nullable) throw new Error("null query value must target a nullable column");
+      if (value.some((item) => item === null) && !nullable)
+        throw new Error("null query value must target a nullable column");
       return new DirectAbiQueryBuilder<Row>(
         this._table,
         this._schema,
@@ -2927,7 +3525,10 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       return new DirectAbiQueryBuilder<Row>(
         this._table,
         this._schema,
-        [...this.filters, { column, columnType, nullable, op, value: encodeRangeQueryLiteral(value) }],
+        [
+          ...this.filters,
+          { column, columnType, nullable, op, value: encodeRangeQueryLiteral(value) },
+        ],
         this.selectedColumns,
         this.orderByItems,
         this.limitCount,
@@ -2952,7 +3553,8 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       );
     }
     if (op !== "contains") throw new Error(`unsupported query operator ${op}`);
-    if (typeof value !== "string") throw new Error("contains is currently wired for string values only");
+    if (typeof value !== "string")
+      throw new Error("contains is currently wired for string values only");
     return new DirectAbiQueryBuilder<Row>(
       this._table,
       this._schema,
@@ -2967,7 +3569,9 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     );
   }
 
-  select<const Columns extends readonly (keyof Row & string)[]>(...columns: Columns): QueryBuilder<ProjectedRow<Row, Columns>> {
+  select<const Columns extends readonly (keyof Row & string)[]>(
+    ...columns: Columns
+  ): QueryBuilder<ProjectedRow<Row, Columns>> {
     for (const column of columns) this.#columnType(column);
     return new DirectAbiQueryBuilder<ProjectedRow<Row, Columns>>(
       this._table,
@@ -2985,7 +3589,8 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
 
   orderBy(column: keyof Row & string, direction: OrderDirection = "asc"): QueryBuilder<Row> {
     this.#columnType(column);
-    if (direction !== "asc" && direction !== "desc") throw new Error("query order direction must be 'asc' or 'desc'");
+    if (direction !== "asc" && direction !== "desc")
+      throw new Error("query order direction must be 'asc' or 'desc'");
     return new DirectAbiQueryBuilder<Row>(
       this._table,
       this._schema,
@@ -3030,14 +3635,23 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
     );
   }
 
-  include<Property extends string>(property: Property): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
-  include<const Includes extends QueryIncludeMap>(includes: Includes): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
-  include<Property extends string>(propertyOrIncludes: Property | QueryIncludeMap): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>> {
+  include<Property extends string>(
+    property: Property,
+  ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
+  include<const Includes extends QueryIncludeMap>(
+    includes: Includes,
+  ): QueryBuilder<Row & { [Property in keyof Includes & string]: unknown[] | unknown | null }>;
+  include<Property extends string>(
+    propertyOrIncludes: Property | QueryIncludeMap,
+  ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>> {
     if (typeof propertyOrIncludes !== "string") {
       let query: QueryBuilder<Row> = this;
       for (const [property, include] of Object.entries(propertyOrIncludes)) {
         if (include === undefined) continue;
-        query = (query as DirectAbiQueryBuilder<Row>).#includeSpec(property, include) as QueryBuilder<Row>;
+        query = (query as DirectAbiQueryBuilder<Row>).includeSpecInternal(
+          property,
+          include,
+        ) as QueryBuilder<Row>;
       }
       return query as QueryBuilder<Row & Record<Property, unknown[] | unknown | null>>;
     }
@@ -3051,13 +3665,16 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       this.orderByItems,
       this.limitCount,
       this.offsetCount,
-      { ...(this.includes ?? {}), [property]: true },
+      { ...this.includes, [property]: true },
       this.hops,
       this.gatherOptions,
     );
   }
 
-  #includeSpec<Property extends string>(property: Property, include: true | IncludeOptions): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>> {
+  includeSpecInternal<Property extends string>(
+    property: Property,
+    include: true | IncludeOptions,
+  ): QueryBuilder<Row & Record<Property, unknown[] | unknown | null>> {
     const relation = includeRelation(this._schema, this._table, property);
     const normalized = normalizeIncludeOptions(include);
     validateIncludeSpec(this._schema, relation.table, normalized);
@@ -3069,7 +3686,7 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
       this.orderByItems,
       this.limitCount,
       this.offsetCount,
-      { ...(this.includes ?? {}), [property]: normalized },
+      { ...this.includes, [property]: normalized },
       this.hops,
       this.gatherOptions,
     );
@@ -3077,7 +3694,9 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
 
   #whereObject(conditions: QueryWhere<Row>): QueryBuilder<Row> {
     let query: QueryBuilder<Row> = this;
-    for (const [column, condition] of Object.entries(conditions) as Array<[keyof Row & string, QueryWhereValue]>) {
+    for (const [column, condition] of Object.entries(conditions) as Array<
+      [keyof Row & string, QueryWhereValue]
+    >) {
       if (condition === undefined) continue;
       if (isWhereOperatorObject(condition)) {
         if (condition.eq !== undefined) query = query.where(column, "eq", condition.eq);
@@ -3087,7 +3706,8 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
         if (condition.gte !== undefined) query = query.where(column, "gte", condition.gte);
         if (condition.lt !== undefined) query = query.where(column, "lt", condition.lt);
         if (condition.lte !== undefined) query = query.where(column, "lte", condition.lte);
-        if (condition.contains !== undefined) query = query.where(column, "contains", condition.contains);
+        if (condition.contains !== undefined)
+          query = query.where(column, "contains", condition.contains);
         if (condition.isNull === true) query = query.where(column, "isNull");
         if (condition.isNull === false) query = query.where(column, "isNotNull");
         continue;
@@ -3100,12 +3720,14 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
   requireIncludes<const Properties extends readonly string[]>(
     ...properties: Properties
   ): QueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }> {
-    const includes = { ...(this.includes ?? {}) };
+    const includes = { ...this.includes };
     for (const property of properties) {
       includeRelation(this._schema, this._table, property);
       includes[property] = { required: true };
     }
-    return new DirectAbiQueryBuilder<Row & { [Property in Properties[number]]: unknown[] | unknown | null }>(
+    return new DirectAbiQueryBuilder<
+      Row & { [Property in Properties[number]]: unknown[] | unknown | null }
+    >(
       this._table,
       this._schema,
       this.filters,
@@ -3176,7 +3798,9 @@ class DirectAbiQueryBuilder<Row, Init = Omit<Row, "id">> implements QueryBuilder
 
   #columnDefinition(column: string): ColumnDefinition {
     if (column === "id") return implicitIdColumn();
-    const definition = this._schema[this._table]?.columns.find((candidate) => candidate.name === column);
+    const definition = this._schema[this._table]?.columns.find(
+      (candidate) => candidate.name === column,
+    );
     if (!definition) throw new Error(`unknown column ${this._table}.${column}`);
     return definition;
   }
@@ -3193,7 +3817,8 @@ function encodeQueryLiteral(value: QueryValue): QueryLiteral {
 
 function encodeIntegerQueryLiteral(value: number | bigint): number {
   const numberValue = typeof value === "bigint" ? Number(value) : value;
-  if (!Number.isSafeInteger(numberValue) || numberValue < 0) throw new Error("expected non-negative safe integer query value");
+  if (!Number.isSafeInteger(numberValue) || numberValue < 0)
+    throw new Error("expected non-negative safe integer query value");
   return numberValue;
 }
 
@@ -3209,12 +3834,21 @@ function encodeRangeQueryLiteral(value: string | number | bigint): string | numb
   return typeof value === "string" ? value : encodeIntegerQueryLiteral(value);
 }
 
-function isQueryValueArray(value: QueryValue | readonly QueryValue[] | undefined): value is readonly QueryValue[] {
+function isQueryValueArray(
+  value: QueryValue | readonly QueryValue[] | undefined,
+): value is readonly QueryValue[] {
   return Array.isArray(value);
 }
 
-function isWhereOperatorObject(value: QueryWhereValue): value is Exclude<QueryWhereValue, QueryValue | undefined> {
-  return typeof value === "object" && value !== null && !(value instanceof Uint8Array) && !Array.isArray(value);
+function isWhereOperatorObject(
+  value: QueryWhereValue,
+): value is Exclude<QueryWhereValue, QueryValue | undefined> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !(value instanceof Uint8Array) &&
+    !Array.isArray(value)
+  );
 }
 
 function isArrayColumn(columnType: ColumnType): boolean {
@@ -3241,9 +3875,15 @@ function isColumnDefinitionInput(value: unknown): value is ColumnDefinitionInput
   return typeof value === "object" && value != null && "column_type" in value;
 }
 
-function readFile<Row extends BinaryLargeValueRow>(db: Db, table: Table<Row, unknown>, rowId: Row["id"]): Row {
+function readFile<Row extends BinaryLargeValueRow>(
+  db: Db,
+  table: Table<Row, unknown>,
+  rowId: Row["id"],
+): Row {
   const encodedRowId = encodeRowId(rowId);
-  const file = db.all(table).find((candidate) => sameBytes(encodeRowId(candidate.id), encodedRowId));
+  const file = db
+    .all(table)
+    .find((candidate) => sameBytes(encodeRowId(candidate.id), encodedRowId));
   if (!file) throw new Error("file not found");
   return normalizeBinaryLargeValueRow(file);
 }
@@ -3278,7 +3918,8 @@ function encodeRowId(value: unknown): Uint8Array {
     if (value.length !== 16) throw new Error("row id bytes must be 16 bytes");
     return value;
   }
-  if (typeof value !== "string" || !uuidText.test(value)) throw new Error("row id must be a UUID string or 16-byte Uint8Array");
+  if (typeof value !== "string" || !uuidText.test(value))
+    throw new Error("row id must be a UUID string or 16-byte Uint8Array");
   return parseUuid(value);
 }
 
@@ -3301,10 +3942,12 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 function isPromiseLike<Value>(value: Value | PromiseLike<Value>): value is PromiseLike<Value> {
-  return value != null
-    && (typeof value === "object" || typeof value === "function")
-    && "then" in value
-    && typeof (value as { then?: unknown }).then === "function";
+  return (
+    value != null &&
+    (typeof value === "object" || typeof value === "function") &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
@@ -3358,13 +4001,24 @@ function fixedSize(valueType: ValueType): number | undefined {
 }
 
 async function loadRuntime(): Promise<WasmDbConstructor> {
-  const modulePath = "../../../jazz-wasm/pkg/jazz_wasm.js";
-  const mod = await import(/* @vite-ignore */ modulePath) as { WasmDb?: WasmDbConstructor };
+  const modulePath = "../../../jazz-wasm/pkg/jazz_core_wasm.js";
+  const legacyModulePath = "../../../jazz-wasm/pkg/jazz_wasm.js";
+  let mod: { WasmDb?: WasmDbConstructor };
+  try {
+    mod = (await import(/* @vite-ignore */ modulePath)) as { WasmDb?: WasmDbConstructor };
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ERR_MODULE_NOT_FOUND") {
+      throw error;
+    }
+    mod = (await import(/* @vite-ignore */ legacyModulePath)) as { WasmDb?: WasmDbConstructor };
+  }
   if (!mod.WasmDb) throw new Error("jazz-wasm/pkg does not export WasmDb");
   return mod.WasmDb;
 }
 
-function asWasmDbConstructor(candidate: WasmDbConstructor | (new () => unknown)): WasmDbConstructor {
+function asWasmDbConstructor(
+  candidate: WasmDbConstructor | (new () => unknown),
+): WasmDbConstructor {
   const maybe = candidate as Partial<WasmDbConstructor>;
   if (typeof maybe.openMemory === "function") return maybe as WasmDbConstructor;
   throw new Error("DbOptions.Runtime must expose WasmDb.openMemory(schema, config)");
