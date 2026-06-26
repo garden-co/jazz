@@ -28,7 +28,6 @@ export interface JazzRnRuntimeBinding {
   disconnect(): void;
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
-  delete_(objectId: string, writeContextJson: string | undefined): string;
   getSchemaHash(): string;
   insert(
     table: string,
