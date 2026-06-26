@@ -434,6 +434,7 @@ impl MaintainedSubscriptionViewSubscription {
             crate::node::MaintainedViewBundleInputs {
                 subscription: subscription_key,
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
+                complete_exclusive_payloads: false,
                 previous_result_set,
                 result_row_adds,
                 result_row_removes,

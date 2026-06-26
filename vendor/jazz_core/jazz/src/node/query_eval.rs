@@ -308,12 +308,7 @@ where
             }
         }
 
-        self.query_rows_with_prepared_plan(
-            shape,
-            binding,
-            DurabilityTier::Local,
-            prepared_plan,
-        )
+        self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 
     pub(crate) fn query_rows_including_deleted_for_identity(
@@ -1690,7 +1685,7 @@ where
                 table,
                 &query.includes,
                 identity,
-                current_row_fields(table),
+                current_row_fields_with_params(table, &param_types),
             )?;
         }
         let param_names = param_types.keys().cloned().collect::<Vec<_>>();
@@ -2160,6 +2155,7 @@ where
             MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads: peer_complete_tx_payloads.into_iter().collect(),
+                complete_exclusive_payloads: false,
                 previous_result_set,
                 result_row_adds,
                 result_row_removes,
@@ -4437,7 +4433,7 @@ pub(super) fn binding_for_shape(
 
 fn join_params_if_needed(
     graph: GraphBuilder,
-    shape: &ValidatedQuery,
+    _shape: &ValidatedQuery,
     param_types: &BTreeMap<String, groove::schema::ColumnType>,
     predicates: &[Predicate],
     output_fields: Vec<String>,
@@ -4497,8 +4493,7 @@ fn join_params_if_needed(
             .cloned()
             .map(|field| ProjectField::renamed(format!("right.{field}"), field))
             .chain(
-                shape
-                    .params()
+                param_types
                     .keys()
                     .cloned()
                     .map(|param| ProjectField::renamed(format!("left.{param}"), param)),
@@ -4528,8 +4523,7 @@ fn join_params_if_needed(
     Ok(
         joined.project_fields(output_fields.into_iter().map(ProjectField::named).chain(
             if keep_params {
-                shape
-                    .params()
+                param_types
                     .keys()
                     .cloned()
                     .map(ProjectField::named)
@@ -5342,6 +5336,16 @@ fn current_row_fields(table: &TableSchema) -> Vec<String> {
     fields
 }
 
+fn current_row_fields_with_params(
+    table: &TableSchema,
+    param_types: &BTreeMap<String, groove::schema::ColumnType>,
+) -> Vec<String> {
+    current_row_fields(table)
+        .into_iter()
+        .chain(param_types.keys().cloned())
+        .collect()
+}
+
 fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
@@ -5684,13 +5688,14 @@ fn maintained_view_tagged_content_fields<'a>(
     fields.extend(
         maintained_view_terminal_user_columns(terminal_tables)
             .into_iter()
-            .map(|(column_name, column_type)| {
-                let field = format!("user_{column_name}");
-                if table_columns.contains_key(column_name.as_str()) {
-                    ProjectField::renamed(source(&field), field)
+            .map(|((table_name, column_name), column_type)| {
+                let user_field = format!("user_{column_name}");
+                let tagged_field = maintained_view_tagged_user_field(&table_name, &column_name);
+                if table_name == table.name && table_columns.contains_key(column_name.as_str()) {
+                    ProjectField::renamed(source(&user_field), tagged_field)
                 } else {
                     ProjectField::null_typed(
-                        field,
+                        tagged_field,
                         ValueType::Nullable(Box::new(column_type.value_type())),
                     )
                 }
@@ -5720,7 +5725,7 @@ fn maintained_view_tagged_field_names<'a>(
     fields.extend(
         maintained_view_terminal_user_columns(terminal_tables)
             .into_keys()
-            .map(|column| format!("user_{column}")),
+            .map(|(table, column)| maintained_view_tagged_user_field(&table, &column)),
     );
     fields
 }
@@ -5747,9 +5752,9 @@ fn maintained_view_tagged_deletion_fields<'a>(
     fields.extend(
         maintained_view_terminal_user_columns(terminal_tables)
             .into_iter()
-            .map(|(column_name, column_type)| {
+            .map(|((table_name, column_name), column_type)| {
                 ProjectField::null_typed(
-                    format!("user_{column_name}"),
+                    maintained_view_tagged_user_field(&table_name, &column_name),
                     ValueType::Nullable(Box::new(column_type.value_type())),
                 )
             }),
@@ -5759,16 +5764,20 @@ fn maintained_view_tagged_deletion_fields<'a>(
 
 fn maintained_view_terminal_user_columns<'a>(
     terminal_tables: impl IntoIterator<Item = &'a TableSchema>,
-) -> BTreeMap<String, groove::schema::ColumnType> {
+) -> BTreeMap<(String, String), groove::schema::ColumnType> {
     let mut columns = BTreeMap::new();
     for table in terminal_tables {
         for column in &table.columns {
             columns
-                .entry(column.name.clone())
+                .entry((table.name.clone(), column.name.clone()))
                 .or_insert_with(|| column.column_type.clone());
         }
     }
     columns
+}
+
+pub(crate) fn maintained_view_tagged_user_field(table: &str, column: &str) -> String {
+    format!("user__{table}__{column}")
 }
 
 fn query_field(column: &str) -> String {

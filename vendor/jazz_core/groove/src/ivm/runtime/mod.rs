@@ -4651,10 +4651,7 @@ fn record_field_key_parts(
                         .into_iter()
                         .map(|value| {
                             let mut key = Vec::new();
-                            encode_key_part(
-                                &mut key,
-                                &Value::Nullable(Some(Box::new(value))),
-                            )?;
+                            encode_key_part(&mut key, &Value::Nullable(Some(Box::new(value))))?;
                             Ok(key)
                         })
                         .collect(),

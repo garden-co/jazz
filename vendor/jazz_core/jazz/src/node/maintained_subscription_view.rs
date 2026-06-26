@@ -7,6 +7,7 @@ use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
     tx_ids_from_value, version_tx_id_from_aliases,
 };
+use super::query_eval::maintained_view_tagged_user_field;
 use crate::ids::{NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::ResultRowEntry;
 use crate::schema::TableSchema;
@@ -296,7 +297,7 @@ fn decode_tagged_terminal_version(
     let deletion = tagged_deletion(record.get_idx(field_idx(record, "_deletion")?)?)?;
     let mut cells = BTreeMap::new();
     for column in &table.columns {
-        let field = format!("user_{}", column.name);
+        let field = maintained_view_tagged_user_field(&table.name, &column.name);
         if let Some(value) = nullable_value(record.get_idx(field_idx(record, &field)?)?)? {
             cells.insert(column.name.clone(), value);
         }

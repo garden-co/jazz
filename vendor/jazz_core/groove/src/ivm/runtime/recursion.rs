@@ -626,11 +626,9 @@ where
                 }
                 let mut deltas = Vec::new();
                 for left_delta in &left.deltas {
-                    for key in super::join::join_keys(
-                        &join.left_descriptor,
-                        left_delta.raw(),
-                        &left_on,
-                    )? {
+                    for key in
+                        super::join::join_keys(&join.left_descriptor, left_delta.raw(), &left_on)?
+                    {
                         let Some(matches) = right_by_key.get(&key) else {
                             continue;
                         };
