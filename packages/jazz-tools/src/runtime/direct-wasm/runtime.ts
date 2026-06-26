@@ -32,12 +32,10 @@ import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 type WasmDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): DirectWasmDb;
-  openBrowser(namespace: string, schema: Uint8Array, config: Uint8Array): Promise<DirectWasmDb>;
 };
 
 type DirectWasmDb = {
   all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
-  one(query: DirectPreparedQuery, opts: unknown): Uint8Array;
   prepareQuery(query: Uint8Array): DirectPreparedQuery;
   subscribe(query: DirectPreparedQuery, opts: unknown): ReadableStream<unknown>;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
@@ -47,7 +45,6 @@ type DirectWasmDb = {
   delete(table: string, rowId: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
   connectUpstream(): DirectTransport;
-  acceptSubscriber(identity: Uint8Array): DirectTransport;
   tick(): void;
 };
 
@@ -118,7 +115,6 @@ export class DirectWasmRuntime implements Runtime {
   private readonly pendingTxs = new Map<string, PendingTx>();
   private readonly writes = new Map<string, DirectWrite>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
-  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: DirectTransport | null = null;
   private serverCarrier: DirectWebSocketCarrier | null = null;
@@ -254,8 +250,9 @@ export class DirectWasmRuntime implements Runtime {
     return this.finishMutation(this.db.delete(table, rowId));
   }
 
-  onMutationError(callback: (event: MutationErrorEvent) => void): void {
-    this.mutationErrorCallback = callback;
+  onMutationError(_callback: (event: MutationErrorEvent) => void): void {
+    // Direct WasmDb wait() surfaces rejected writes synchronously today. Worker
+    // replay of async rejection events is handled above this runtime layer.
   }
 
   beginTransaction(kind: TransactionKind): string {
