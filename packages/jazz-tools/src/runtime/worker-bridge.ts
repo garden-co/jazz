@@ -1,5 +1,6 @@
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
+import { DirectWebSocketCarrier } from "./direct-wasm/direct-websocket.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
 /** Page lifecycle hint forwarded to the worker runtime. */
@@ -119,6 +120,9 @@ export class WorkerBridge {
   private transport: DirectTransport | null = null;
   private readonly listeners: ListenerSlots = {};
   private pendingForwarder: ServerPayloadForwarder | null = null;
+  private serverCarrier: DirectWebSocketCarrier | null = null;
+  private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
+  private serverCarrierOptions: WorkerBridgeOptions | null = null;
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
   private disposed = false;
@@ -169,9 +173,10 @@ export class WorkerBridge {
     this.transport = connectUpstreamPeer.call(this.runtime);
     this.unsubscribeSyncNeeded = this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
     this.runtime.setDurableQueryExecutor?.((query) => this.queryDurable(query));
+    const directOpen = getDirectOpenPayload.call(this.runtime);
     const initOptions: WorkerBridgeOptions = {
       ...options,
-      directOpen: getDirectOpenPayload.call(this.runtime),
+      directOpen,
     };
 
     this.clientIdPromise = new Promise<string>((resolve, reject) => {
@@ -192,6 +197,7 @@ export class WorkerBridge {
       };
       this.worker.addEventListener("message", onMessage);
       this.postToWorker({ type: "init", options: initOptions });
+      this.openServerCarrier(initOptions);
       this.schedulePump();
     });
     return this.clientIdPromise;
@@ -212,6 +218,7 @@ export class WorkerBridge {
     this.unsubscribeSyncNeeded?.();
     this.unsubscribeSyncNeeded = null;
     this.runtime.setDurableQueryExecutor?.(null);
+    this.closeServerCarrier();
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 1_000);
       this.shutdownResolve = () => {
@@ -233,6 +240,7 @@ export class WorkerBridge {
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {
+    await this.serverCarrierPromise;
     return;
   }
 
@@ -281,14 +289,16 @@ export class WorkerBridge {
   }
 
   replayServerConnection(): void {
+    void this.reopenServerCarrier();
     this.schedulePump();
   }
 
   disconnectUpstream(): void {
-    this.transport?.close();
+    this.closeServerCarrier();
   }
 
   reconnectUpstream(): void {
+    void this.reopenServerCarrier();
     this.schedulePump();
   }
 
@@ -349,9 +359,7 @@ export class WorkerBridge {
         this.schedulePump();
         return;
       case "server-out":
-        for (const frame of normalizeFrames(message.frames)) {
-          this.pendingForwarder?.(frame);
-        }
+        this.forwardServerFrames(normalizeFrames(message.frames));
         return;
       case "settled": {
         const pending = this.pendingSettles.get(message.id);
@@ -443,6 +451,71 @@ export class WorkerBridge {
   private postToWorker(message: WorkerInbound, transfer: Transferable[] = []): void {
     this.worker.postMessage(message, transfer);
   }
+
+  private openServerCarrier(options: WorkerBridgeOptions): void {
+    if (!options.serverUrl || !options.directOpen) return;
+    this.closeServerCarrier();
+    this.serverCarrierOptions = options;
+    const carrier = new DirectWebSocketCarrier({
+      serverUrl: options.serverUrl,
+      appId: options.appId,
+      peerIdentity: options.directOpen.peerIdentity,
+      onFrame: (frame) => {
+        this.applyIncomingServerPayload(frame);
+        this.schedulePump();
+      },
+    });
+    this.serverCarrier = carrier;
+    this.serverCarrierPromise = carrier.ready().then(() => carrier);
+    this.serverCarrierPromise.catch((error) => {
+      this.rejectPendingServerWork(`Direct websocket connection failed: ${stringifyUnknown(error)}`);
+    });
+  }
+
+  private async reopenServerCarrier(): Promise<void> {
+    const options = this.serverCarrierOptions;
+    if (!options) return;
+    this.closeServerCarrier();
+    this.openServerCarrier(options);
+    this.schedulePump();
+  }
+
+  private closeServerCarrier(): void {
+    this.serverCarrier?.close();
+    this.serverCarrier = null;
+    this.serverCarrierPromise = null;
+  }
+
+  private forwardServerFrames(frames: Uint8Array[]): void {
+    if (frames.length === 0) return;
+    for (const frame of frames) {
+      this.pendingForwarder?.(frame);
+    }
+    const carrier = this.serverCarrier;
+    if (!carrier) return;
+    void carrier.sendBatch(frames).catch((error) => {
+      this.rejectPendingServerWork(`Direct websocket send failed: ${stringifyUnknown(error)}`);
+    });
+  }
+
+  private rejectPendingServerWork(message: string): void {
+    const error = new Error(message);
+    for (const pending of this.pendingSettles.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pendingSettles.clear();
+    for (const pending of this.pendingQueries.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pendingQueries.clear();
+    console.error("Jazz worker bridge server error", message);
+  }
+}
+
+function stringifyUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export class MessagePortRuntimeBridge {
