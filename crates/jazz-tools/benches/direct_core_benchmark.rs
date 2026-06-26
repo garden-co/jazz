@@ -58,12 +58,9 @@ fn owner_write_schema() -> JazzSchema {
 
 fn reachable_policy_schema() -> JazzSchema {
     JazzSchema::new([
-        TableSchema::new(
-            "teams",
-            [ColumnSchema::new("name", ColumnType::String)],
-        )
-        .with_read_policy(Policy::public())
-        .with_write_policy(Policy::public()),
+        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
         TableSchema::new(
             "team_edges",
             [
@@ -117,7 +114,10 @@ fn open_db(seed: u64) -> DirectDb {
 
 fn open_db_with_schema(seed: u64, schema: JazzSchema) -> DirectDb {
     let column_families = schema.column_families();
-    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
@@ -139,7 +139,10 @@ fn row_uuid(index: usize) -> RowUuid {
 fn cells(index: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("folder".to_owned(), Value::Uuid(row_uuid(index % 32).0)),
-        ("title".to_owned(), Value::String(format!("Document {index}"))),
+        (
+            "title".to_owned(),
+            Value::String(format!("Document {index}")),
+        ),
         (
             "content".to_owned(),
             Value::String(format!("Content body for document {index}")),
@@ -311,7 +314,11 @@ fn direct_filtered_prepared_read(c: &mut Criterion) {
                 seed_filtered_documents(&db, row_count);
                 let query = filtered_documents_query(&db);
 
-                b.iter(|| db.read(&query).expect("direct filtered read should succeed").len());
+                b.iter(|| {
+                    db.read(&query)
+                        .expect("direct filtered read should succeed")
+                        .len()
+                });
             },
         );
     }

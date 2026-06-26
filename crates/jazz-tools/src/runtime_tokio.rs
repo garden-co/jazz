@@ -720,20 +720,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.remove_client(client_id))
     }
 
-    /// Promote a client to Admin role (full access, no ReBAC).
-    pub fn set_client_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.set_client_admin(client_id);
-        Ok(())
-    }
-
-    /// Promote a client to Backend role (row access, no catalogue writes).
-    pub fn set_client_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.set_client_backend(client_id);
-        Ok(())
-    }
-
     // =========================================================================
     // Schema Access
     // =========================================================================

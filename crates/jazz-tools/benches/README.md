@@ -29,8 +29,9 @@ than old helper behavior:
   direct-core benchmark measures one transaction-shaped subscription delta.
 - `realistic_phase1_direct` is a smallest useful active slice of the old
   realistic suite. It hard-codes the S profile and covers single-DB memory
-  project-board CRUD, reads, and subscribed writes through `jazz::db::Db`
-  directly.
+  project-board CRUD, mixed reads, a hot-task comment/activity history workload
+  with multiple direct subscriptions, and subscribed writes through
+  `jazz::db::Db` directly.
 
 ## Intended next ports
 

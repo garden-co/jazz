@@ -32,9 +32,10 @@ fn authorization_schema(extra_columns: usize) -> JazzSchema {
         ColumnSchema::new("score", ColumnType::U64),
     ];
 
-    columns.extend((0..extra_columns).map(|index| {
-        ColumnSchema::new(format!("metadata_{index}"), ColumnType::String)
-    }));
+    columns.extend(
+        (0..extra_columns)
+            .map(|index| ColumnSchema::new(format!("metadata_{index}"), ColumnType::String)),
+    );
 
     JazzSchema::new([TableSchema::new("items", columns)
         .with_read_policy(Policy::owner_only("items", "owner_id"))
@@ -44,7 +45,10 @@ fn authorization_schema(extra_columns: usize) -> JazzSchema {
 fn open_db(seed: u64, extra_columns: usize) -> DirectDb {
     let schema = authorization_schema(extra_columns);
     let column_families = schema.column_families();
-    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     block_on(Db::open(
         DbConfig::new(

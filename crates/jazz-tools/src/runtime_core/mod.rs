@@ -158,8 +158,6 @@ impl SyncSender for VecSyncSender {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionHandle(pub u64);
 
-// Re-export QueryHandle from query_manager for convenience.
-pub use crate::query_manager::manager::QueryHandle as QMQueryHandle;
 pub use subscriptions::ReadDurabilityOptions;
 
 /// Errors from runtime operations.

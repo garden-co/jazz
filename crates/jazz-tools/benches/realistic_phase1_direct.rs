@@ -428,6 +428,20 @@ fn activity_feed_query(db: &BenchDb, project: RowUuid) -> jazz::db::PreparedQuer
         .expect("prepare activity feed query")
 }
 
+fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
+    match event {
+        Some(SubscriptionEvent::Opened { current, .. }) => current.len(),
+        other => panic!("expected opened {name} subscription event, got {other:?}"),
+    }
+}
+
+fn drain_delta(event: Option<SubscriptionEvent>, name: &str) -> usize {
+    match event {
+        Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
+        other => panic!("expected {name} subscription delta event, got {other:?}"),
+    }
+}
+
 fn r1_crud(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1_direct/r1_crud");
 
@@ -509,6 +523,102 @@ fn r2_reads(c: &mut Criterion) {
     group.finish();
 }
 
+fn r4_hot_task_history(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r4_hot_task_history");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(3));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let db = open_db(4);
+                let fixture = seed_fixture(&db, profile);
+                let hot_task = fixture.tasks[0];
+                let hot_project = fixture.projects[0];
+                let mut project_board = block_on(
+                    db.subscribe(&project_board_query(&db, hot_project), ReadOpts::default()),
+                )
+                .expect("subscribe project board");
+                let mut task_comments = block_on(
+                    db.subscribe(&task_comments_query(&db, hot_task), ReadOpts::default()),
+                )
+                .expect("subscribe task comments");
+                let mut activity_feed = block_on(
+                    db.subscribe(&activity_feed_query(&db, hot_project), ReadOpts::default()),
+                )
+                .expect("subscribe activity feed");
+
+                black_box(drain_opened(
+                    block_on(project_board.next_event()),
+                    "project board",
+                ));
+                black_box(drain_opened(
+                    block_on(task_comments.next_event()),
+                    "task comments",
+                ));
+                black_box(drain_opened(
+                    block_on(activity_feed.next_event()),
+                    "activity feed",
+                ));
+
+                let mut event_index = profile.activity_events;
+                b.iter(|| {
+                    wait_local(
+                        db.update(
+                            "tasks",
+                            hot_task,
+                            BTreeMap::from([
+                                (
+                                    "status".to_owned(),
+                                    Value::String(
+                                        if event_index % 2 == 0 {
+                                            "doing"
+                                        } else {
+                                            "review"
+                                        }
+                                        .to_owned(),
+                                    ),
+                                ),
+                                ("updated_at".to_owned(), Value::U64(event_index as u64)),
+                            ]),
+                        )
+                        .expect("hot task update"),
+                    );
+                    wait_local(
+                        db.insert(
+                            "comments",
+                            comment_cells(event_index, &[hot_task], &fixture.users),
+                        )
+                        .expect("hot task comment"),
+                    );
+                    wait_local(
+                        db.insert(
+                            "activity",
+                            activity_cells(
+                                event_index,
+                                &[hot_project],
+                                &[hot_task],
+                                &fixture.users,
+                            ),
+                        )
+                        .expect("hot task activity"),
+                    );
+                    event_index += 1;
+
+                    let delivered =
+                        drain_delta(block_on(project_board.next_event()), "project board")
+                            + drain_delta(block_on(task_comments.next_event()), "task comments")
+                            + drain_delta(block_on(activity_feed.next_event()), "activity feed");
+                    black_box(delivered)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn r9_subscribed_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1_direct/r9_subscribed_write");
 
@@ -560,6 +670,6 @@ fn r9_subscribed_write(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r9_subscribed_write
+    targets = r1_crud, r2_reads, r4_hot_task_history, r9_subscribed_write
 }
 criterion_main!(benches);
