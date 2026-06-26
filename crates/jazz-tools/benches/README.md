@@ -11,6 +11,7 @@ The active bench harness is the explicit `[[bench]]` list in
 - `observer_write_path`
 - `direct_core_benchmark`
 - `direct_authorization_scope_benchmark`
+- `realistic_phase1_direct`
 - `insert_benchmark`
 - `update_benchmark`
 - `subscription_benchmark`
@@ -26,6 +27,10 @@ than old helper behavior:
   policy instead of old `INHERITS SELECT VIA folder_id` session recursion.
 - `subscription_benchmark` uses `Db::mergeable_tx()` for the batch case so the
   direct-core benchmark measures one transaction-shaped subscription delta.
+- `realistic_phase1_direct` is a smallest useful active slice of the old
+  realistic suite. It hard-codes the S profile and covers single-DB memory
+  project-board CRUD, reads, and subscribed writes through `jazz::db::Db`
+  directly.
 
 ## Intended next ports
 
