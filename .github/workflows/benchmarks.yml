@@ -106,6 +106,7 @@ jobs:
           cargo build --release -p jazz-tools --features client,sqlite --example realistic_bench
           cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run
           cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run
+          cargo bench --manifest-path vendor/jazz_core/Cargo.toml -p jazz-sim --bench s2_canvas --no-run
 
       - name: Run native benchmark suite
         run: |
@@ -127,6 +128,18 @@ jobs:
               --out "${out_dir}/criterion_realistic_phase1.json" \
               --summary-md "${out_dir}/criterion_realistic_phase1.md"
           done
+
+      - name: Run jazz-sim benchmark suite
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/native/jazz-sim
+          taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
+            --suite jazz-sim \
+            --out-dir bench-out/native/jazz-sim \
+            --profile "${BENCH_PROFILE}" \
+            --skip-set dev/benchmarks/realistic/ci_skip_set.json \
+            --repeat-count "${BENCH_REPEAT_COUNT}" \
+            --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
       - name: Publish native execution summary
         run: |

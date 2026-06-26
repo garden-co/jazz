@@ -2,8 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { ACTIVE_SKIP_MIN_OBSERVATIONS, NATIVE_BENCHMARKS, skipIds } from "./ci_benchmarks.mjs";
 import {
+  ACTIVE_SKIP_MIN_OBSERVATIONS,
+  JAZZ_SIM_BENCHMARKS,
+  NATIVE_BENCHMARKS,
+  skipIds,
+} from "./ci_benchmarks.mjs";
+import {
+  buildJazzSimCommand,
   buildNativeCriterionCommand,
   buildNativeExampleBaseCommand,
   NATIVE_CRITERION_FEATURES_BY_ENGINE,
@@ -65,6 +71,38 @@ test("native benchmark catalog targets storage-backed engine-specific Criterion 
 
   assert.ok(sqliteColdLoad, "expected SQLite cold-load benchmark entry");
   assert.equal(sqliteColdLoad.criterion_filter, "realistic_phase1/cold_load_sqlite");
+});
+
+test("jazz-sim catalog defines fast scenarios and encoded wire canaries", () => {
+  const ids = new Set(JAZZ_SIM_BENCHMARKS.map((entry) => entry.id));
+
+  assert.ok(ids.has("jazz-sim:s1_saas"));
+  assert.ok(ids.has("jazz-sim:s2_canvas"));
+  assert.ok(ids.has("jazz-sim:s3_permissions"));
+  assert.ok(ids.has("jazz-sim:s4_order_processing"));
+  assert.ok(ids.has("jazz-sim:s5_durable_stream"));
+  assert.ok(ids.has("jazz-sim:s6_text_traces"));
+  assert.ok(ids.has("jazz-sim:s7_migrations"));
+  assert.ok(ids.has("jazz-sim:s9_durable_execution"));
+  assert.ok(ids.has("jazz-sim:s2_canvas:wire_frames"));
+  assert.ok(ids.has("jazz-sim:s1_saas:wire_frames"));
+});
+
+test("jazz-sim command runs the requested benchmark quietly", () => {
+  const benchmark = JAZZ_SIM_BENCHMARKS.find((entry) => entry.id === "jazz-sim:s2_canvas");
+  assert.ok(benchmark, "expected the S2 jazz-sim benchmark");
+
+  assert.deepEqual(buildJazzSimCommand(benchmark), [
+    "cargo",
+    "bench",
+    "--manifest-path",
+    "vendor/jazz_core/Cargo.toml",
+    "-p",
+    "jazz-sim",
+    "--bench",
+    "s2_canvas",
+    "--quiet",
+  ]);
 });
 
 test("native example command opts into the RocksDB storage backend", () => {
@@ -169,6 +207,19 @@ test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native b
     workflow,
     /cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run/,
   );
+});
+
+test("benchmark workflow runs the jazz-sim benchmark suite", () => {
+  const workflow = readFileSync(
+    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /cargo bench --manifest-path vendor\/jazz_core\/Cargo.toml -p jazz-sim --bench s2_canvas --no-run/,
+  );
+  assert.match(workflow, /--suite jazz-sim/);
 });
 
 test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
