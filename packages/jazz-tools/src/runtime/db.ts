@@ -2635,12 +2635,11 @@ export class Db {
     const context = this.getRuntimeOperationContext();
     const shouldQueryDurableWorker =
       this.workerBridge !== null &&
-      !context &&
       !usesRelationTraversal &&
       this.tabRole !== "follower" &&
       resolvedQueryOptions.tier === "local";
     const rows = shouldQueryDurableWorker
-      ? await this.workerBridge!.queryLocalRows(wasmQuery)
+      ? await this.workerBridge!.queryLocalRows(wasmQuery, context?.session)
       : context || usesRelationTraversal
         ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
         : await client.query(wasmQuery, queryOptions);

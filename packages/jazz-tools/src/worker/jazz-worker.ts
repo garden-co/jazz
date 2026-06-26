@@ -297,7 +297,7 @@ async function runWorkerHostWithOptionalLock(
 
 type WorkerInbound =
   | { type: "sync"; frames: Uint8Array[] }
-  | { type: "query"; id: number; query: Uint8Array }
+  | { type: "query"; id: number; query: Uint8Array; identity?: Uint8Array }
   | { type: "settle"; id: number }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: string }
@@ -329,6 +329,7 @@ type DirectDb = {
   acceptSubscriber(identity: Uint8Array): DirectTransport;
   prepareQuery(query: Uint8Array): object;
   all(query: object, opts: unknown): Uint8Array;
+  allForIdentity?(query: object, identity: Uint8Array, opts: unknown): Uint8Array;
   tick(): void;
 };
 
@@ -406,7 +407,17 @@ class DirectWorkerHost {
         if (message.query instanceof Uint8Array) {
           this.pump();
           const query = this.db.prepareQuery(message.query);
-          const rows = this.db.all(query, { tier: "local" });
+          const identity = message.identity instanceof Uint8Array ? message.identity : null;
+          if (identity && typeof this.db.allForIdentity !== "function") {
+            post({
+              type: "error",
+              message: "Worker local query requires session-scoped direct WasmDb reads",
+            });
+            return;
+          }
+          const rows = identity
+            ? this.db.allForIdentity!(query, identity, { tier: "local" })
+            : this.db.all(query, { tier: "local" });
           const transfer = rows.buffer instanceof ArrayBuffer ? [rows.buffer] : [];
           post({ type: "query-result", id: message.id, rows }, transfer);
           this.schedulePump();

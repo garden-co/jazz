@@ -80,7 +80,7 @@ type WorkerInbound =
   | { type: "init"; options: WorkerBridgeOptions }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "update-auth"; jwtToken?: string | null }
-  | { type: "query"; id: number; query: Uint8Array }
+  | { type: "query"; id: number; query: Uint8Array; identity?: Uint8Array }
   | { type: "settle"; id: number }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: WorkerLifecycleEvent }
@@ -284,7 +284,7 @@ export class WorkerBridge {
     });
   }
 
-  async queryLocalRows(queryJson: string): Promise<WasmRow[]> {
+  async queryLocalRows(queryJson: string, session?: Session): Promise<WasmRow[]> {
     if (this.disposed) return [];
     const encodeDirectQuery = this.runtime.encodeDirectQuery;
     const decodeDirectRows = this.runtime.decodeDirectRows;
@@ -300,13 +300,17 @@ export class WorkerBridge {
     this.pumpTransport();
     const id = this.nextQueryId++;
     const query = encodeDirectQuery.call(this.runtime, queryJson);
+    const identity = session ? parseUuid(session.user_id) : undefined;
     return await new Promise<WasmRow[]>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingQueries.delete(id);
         reject(new Error("WorkerBridge local query timed out"));
       }, 30_000);
       this.pendingQueries.set(id, { queryJson, resolve, reject, timeout });
-      this.postToWorker({ type: "query", id, query }, [query.buffer]);
+      this.postToWorker(
+        { type: "query", id, query, identity },
+        identity ? [query.buffer, identity.buffer] : [query.buffer],
+      );
       this.schedulePump();
     });
   }
@@ -431,6 +435,11 @@ export class WorkerBridge {
           pending.reject(new Error(message.message));
         }
         this.pendingSettles.clear();
+        for (const pending of this.pendingQueries.values()) {
+          clearTimeout(pending.timeout);
+          pending.reject(new Error(message.message));
+        }
+        this.pendingQueries.clear();
         console.error("Jazz worker bridge error", message.message);
         return;
       default:
@@ -550,6 +559,16 @@ export class WorkerBridge {
     this.pendingSettles.clear();
     console.error("Jazz worker bridge server error", message);
   }
+}
+
+function parseUuid(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
 }
 
 function stringifyUnknown(error: unknown): string {
