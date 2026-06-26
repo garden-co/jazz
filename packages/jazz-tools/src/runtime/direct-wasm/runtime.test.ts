@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { createRecord, PostcardWriter, writeDescriptor } from "./direct-codec.js";
+import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./direct-codec.js";
 import {
   decodeDirectWebSocketFrameBatch,
   encodeDirectWebSocketPrelude,
@@ -271,6 +271,58 @@ describe("DirectWasmRuntime server transport", () => {
     );
   });
 
+  it("routes session-scoped queries through allForIdentity", async () => {
+    const authors: string[] = [];
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () => {
+            throw new Error("session query should use allForIdentity");
+          },
+          allForIdentity: (_query: unknown, author: Uint8Array) => {
+            authors.push(formatUuidForTest(author));
+            return encodeRows([
+              {
+                table: "todos",
+                rowId: new Uint8Array(16),
+                title: "session scoped",
+              },
+            ]);
+          },
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({
+          user_id: "00000000-0000-0000-0000-0000000000a1",
+          claims: {},
+          authMode: "anonymous",
+        }),
+        "local",
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "session scoped" }],
+      },
+    ]);
+    expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
+  });
+
   it("decodes fixed-width array columns from direct row batches", async () => {
     const runtime = new DirectWasmRuntime(
       {
@@ -313,6 +365,125 @@ describe("DirectWasmRuntime server transport", () => {
       },
     ]);
   });
+
+  it("lowers scalar comparison relation IR into the prepared direct query", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () => new Uint8Array([0]),
+          prepareQuery: (query: Uint8Array) => {
+            preparedBytes = query;
+            return {};
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Filter: {
+            input: { TableScan: { table: "todos" } },
+            predicate: {
+              Cmp: {
+                left: { column: "title" },
+                op: "Gt",
+                right: { Literal: { type: "Text", value: "m" } },
+              },
+            },
+          },
+        },
+        limit: 5,
+      }),
+    );
+
+    expect(readPreparedComparison(preparedBytes!)).toEqual({
+      table: "todos",
+      predicateTag: 6,
+      column: "title",
+      literalTag: 6,
+      value: "m",
+      limit: 5,
+    });
+  });
+
+  it("fails fast for unsupported non-local query read options", async () => {
+    const runtime = directRuntimeWithEmptyDb();
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).rejects.toThrow(
+      "only supports local reads",
+    );
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        null,
+        "local",
+        JSON.stringify({ propagation: "local" }),
+      ),
+    ).rejects.toThrow("does not support read propagation");
+  });
+
+  it("fails fast for unsupported non-local subscription read options", () => {
+    const runtime = directRuntimeWithEmptyDb();
+
+    expect(() =>
+      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge"),
+    ).toThrow("only supports local reads");
+  });
+
+  it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
+    const runtime = directRuntimeWithEmptyDb();
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: null }),
+      ),
+    ).toThrow("session is missing user_id");
+  });
+
+  it("fails fast instead of dropping unsupported id comparisons", async () => {
+    const runtime = directRuntimeWithEmptyDb();
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "id" },
+                  op: "Gt",
+                  right: {
+                    Literal: { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ),
+    ).rejects.toThrow("does not support 'Gt' comparisons on id yet");
+  });
 });
 
 const testSchema = {
@@ -320,6 +491,57 @@ const testSchema = {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
   },
 } satisfies WasmSchema;
+
+function directRuntimeWithEmptyDb(): DirectWasmRuntime {
+  return new DirectWasmRuntime(
+    {
+      openMemory: () => ({
+        all: () => new Uint8Array([0]),
+        prepareQuery: () => ({}),
+        subscribe: () => new ReadableStream(),
+        tick: () => undefined,
+      }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+  );
+}
+
+function readPreparedComparison(query: Uint8Array): {
+  table: string;
+  predicateTag: number;
+  column: string;
+  literalTag: number;
+  value: string;
+  limit: number | undefined;
+} {
+  const reader = new PostcardReader(query);
+  const table = reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  const predicateTag = reader.u64();
+  const leftOperandTag = reader.u64();
+  expect(leftOperandTag).toBe(0);
+  const column = reader.string();
+  const rightOperandTag = reader.u64();
+  expect(rightOperandTag).toBe(3);
+  const literalTag = reader.u64();
+  const value = reader.string();
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  const limit = reader.option((optionReader) => optionReader.u64());
+  return { table, predicateTag, column, literalTag, value, limit };
+}
 
 const fileSchema = {
   files: {
@@ -446,6 +668,11 @@ function uuidBytes(value: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function formatUuidForTest(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function doubleBytes(value: number): Uint8Array {

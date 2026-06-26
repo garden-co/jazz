@@ -20,10 +20,12 @@ import {
   openConfig,
   queryFromTable,
   queryWithEqFilters,
+  queryWithPredicates,
   readAbiRowBatch,
   readAbiSubscriptionDelta,
   type AbiRowBatch,
   type DirectQueryLiteral,
+  type DirectQueryPredicate,
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
@@ -36,6 +38,7 @@ type WasmDbConstructor = {
 
 type DirectWasmDb = {
   all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
+  allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   prepareQuery(query: Uint8Array): DirectPreparedQuery;
   subscribe(query: DirectPreparedQuery, opts: unknown): ReadableStream<unknown>;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
@@ -302,20 +305,27 @@ export class DirectWasmRuntime implements Runtime {
 
   async query(
     queryJson: string,
-    _sessionJson?: string | null,
-    _tier?: string | null,
-    _optionsJson?: string | null,
+    sessionJson?: string | null,
+    tier?: string | null,
+    optionsJson?: string | null,
   ): Promise<unknown> {
+    assertSupportedReadOptions(tier, optionsJson);
     const query = this.prepareQuery(queryJson);
-    return this.decodeDirectRows(this.db.all(query, readOptions()), queryJson);
+    const session = readSession(sessionJson);
+    const rows = session
+      ? this.db.allForIdentity(query, parseUuid(session.user_id), readOptions())
+      : this.db.all(query, readOptions());
+    return this.decodeDirectRows(rows, queryJson);
   }
 
   createSubscription(
     queryJson: string,
-    _sessionJson?: string | null,
-    _tier?: string | null,
-    _optionsJson?: string | null,
+    sessionJson?: string | null,
+    tier?: string | null,
+    optionsJson?: string | null,
   ): number {
+    assertSupportedReadOptions(tier, optionsJson);
+    void readSession(sessionJson);
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
     const reader = this.db.subscribe(query, readOptions()).getReader();
@@ -587,6 +597,32 @@ function readOptions(): unknown {
   return { tier: "local" };
 }
 
+function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+  if (tier != null && tier !== "local") {
+    throw new Error(`Direct WasmDb runtime only supports local reads; received tier '${tier}'`);
+  }
+  if (optionsJson != null) readSupportedReadOptions(optionsJson);
+}
+
+function readSession(sessionJson?: string | null): { user_id: string } | null {
+  if (sessionJson == null) return null;
+  const parsed = JSON.parse(sessionJson) as { user_id?: unknown };
+  if (typeof parsed.user_id !== "string") {
+    throw new Error("Direct WasmDb runtime session is missing user_id");
+  }
+  return { user_id: parsed.user_id };
+}
+
+function readSupportedReadOptions(optionsJson: string): void {
+  const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
+  const propagation = parsed.propagation;
+  if (propagation != null && propagation !== "full") {
+    throw new Error(
+      `Direct WasmDb runtime does not support read propagation '${String(propagation)}' yet`,
+    );
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -639,9 +675,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
   if (encoded) {
-    return parsed.limit == null
-      ? encoded.query
-      : queryWithEqFilters(parsed.table, encoded.filters, readLimit(parsed.limit));
+    return queryWithPredicates(parsed.table, encoded.predicates, readLimitIfPresent(parsed.limit));
   }
   if (parsed.limit != null) {
     return queryWithEqFilters(parsed.table, [], readLimit(parsed.limit));
@@ -653,20 +687,24 @@ function encodeSimpleRelationQuery(
   table: string,
   relationIr: unknown,
   schema: WasmSchema,
-): { query: Uint8Array; filters: Array<{ column: string; value: DirectQueryLiteral }> } | null {
+): { predicates: DirectQueryPredicate[] } | null {
   const unwrapped = unwrapSimpleRelation(table, relationIr);
   if (!unwrapped) return null;
-  const filters = unwrapped.filters.map((filter) => ({
-    ...filter,
-    value: coerceQueryLiteral(table, filter.column, filter.value, schema),
-  }));
-  const rustFilters = filters.filter((filter) => filter.column !== "id");
-  if (rustFilters.length === 0) {
-    return { query: queryFromTable(table), filters: [] };
+  const unsupportedIdComparator = unwrapped.predicates.find(
+    (filter) => filter.column === "id" && filter.op !== "Eq",
+  );
+  if (unsupportedIdComparator) {
+    throw new Error(
+      `Direct WasmDb runtime does not support '${unsupportedIdComparator.op}' comparisons on id yet`,
+    );
   }
   return {
-    query: queryWithEqFilters(table, rustFilters),
-    filters: rustFilters,
+    predicates: unwrapped.predicates
+      .filter((filter) => filter.column !== "id")
+      .map((filter) => ({
+        ...filter,
+        value: coerceQueryLiteral(table, filter.column, filter.value, schema),
+      })),
   };
 }
 
@@ -695,8 +733,8 @@ function coerceQueryLiteral(
 function unwrapSimpleRelation(
   table: string,
   relationIr: unknown,
-): { filters: Array<{ column: string; value: DirectQueryLiteral }> } | null {
-  if (!relationIr || typeof relationIr !== "object") return { filters: [] };
+): { predicates: DirectQueryPredicate[] } | null {
+  if (!relationIr || typeof relationIr !== "object") return { predicates: [] };
   const relation = relationIr as Record<string, unknown>;
   const tableScan = relation.TableScan;
   if (
@@ -704,27 +742,25 @@ function unwrapSimpleRelation(
     typeof tableScan === "object" &&
     (tableScan as { table?: unknown }).table === table
   ) {
-    return { filters: [] };
+    return { predicates: [] };
   }
   const filter = relation.Filter;
   if (!filter || typeof filter !== "object") return null;
   const filterRecord = filter as { input?: unknown; predicate?: unknown };
   const input = unwrapSimpleRelation(table, filterRecord.input);
   if (!input) return null;
-  const predicateFilters = predicateToEqFilters(filterRecord.predicate);
-  return predicateFilters ? { filters: input.filters.concat(predicateFilters) } : null;
+  const predicates = predicateToFilters(filterRecord.predicate);
+  return predicates ? { predicates: input.predicates.concat(predicates) } : null;
 }
 
-function predicateToEqFilters(
-  predicate: unknown,
-): Array<{ column: string; value: DirectQueryLiteral }> | null {
+function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
   if (predicate === "True") return [];
   if (!predicate || typeof predicate !== "object") return null;
   const record = predicate as Record<string, unknown>;
   if (Array.isArray(record.And)) {
-    const filters: Array<{ column: string; value: DirectQueryLiteral }> = [];
+    const filters: DirectQueryPredicate[] = [];
     for (const child of record.And) {
-      const childFilters = predicateToEqFilters(child);
+      const childFilters = predicateToFilters(child);
       if (!childFilters) return null;
       filters.push(...childFilters);
     }
@@ -733,10 +769,29 @@ function predicateToEqFilters(
   const cmp = record.Cmp;
   if (!cmp || typeof cmp !== "object") return null;
   const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
-  if (cmpRecord.op !== "Eq") return null;
+  const op = readPredicateOp(cmpRecord.op);
+  if (!op) return null;
   const column = readColumnRef(cmpRecord.left);
   const value = readLiteral(cmpRecord.right);
-  return column && value ? [{ column, value }] : null;
+  return column && value ? [{ column, op, value }] : null;
+}
+
+function readPredicateOp(value: unknown): DirectQueryPredicate["op"] | null {
+  switch (value) {
+    case "Eq":
+    case "Ne":
+    case "Gt":
+    case "Gte":
+    case "Lt":
+    case "Lte":
+      return value;
+    case "Ge":
+      return "Gte";
+    case "Le":
+      return "Lte";
+    default:
+      return null;
+  }
 }
 
 function readColumnRef(value: unknown): string | null {
@@ -770,14 +825,20 @@ function readLimit(value: unknown): number {
   return value;
 }
 
+function readLimitIfPresent(value: unknown): number | undefined {
+  return value == null ? undefined : readLimit(value);
+}
+
 function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
   const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
   if (typeof parsed.table !== "string") return [];
   return (
-    unwrapSimpleRelation(parsed.table, parsed.relation_ir)?.filters.map((filter) => ({
-      ...filter,
-      value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
-    })) ?? []
+    unwrapSimpleRelation(parsed.table, parsed.relation_ir)
+      ?.predicates.filter((filter) => filter.op === "Eq")
+      .map((filter) => ({
+        ...filter,
+        value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
+      })) ?? []
   );
 }
 
