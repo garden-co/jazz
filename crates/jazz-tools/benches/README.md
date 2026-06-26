@@ -62,6 +62,9 @@ scenarios, scale factors, fixtures, and expected measurement coverage. Port them
 by rebuilding the scenarios against the public direct-core API rather than by
 reviving the old RuntimeCore internals.
 
+The old `server_authorization_scope_benchmark` file was removed after its
+measurement intent was ported to `direct_authorization_scope_benchmark`.
+
 The old `memory_benchmark` file was removed rather than left as a broken
 RuntimeCore path. Reintroduce it after the direct `Db` facade exposes retained
 memory metrics comparable to the old SyncManager/QueryManager breakdown.

@@ -26,7 +26,7 @@ type BenchDb = Db<MemoryStorage>;
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
-fn schema() -> JazzSchema {
+fn direct_core_schema() -> JazzSchema {
     let folder_owner_policy =
         Policy::shape(Query::from("folders").filter(eq(col("owner"), claim("sub"))));
     let folder_access_policy = Policy::shape(Query::from("documents").join_via_column(
@@ -75,13 +75,15 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    let schema = schema();
+    let schema = direct_core_schema();
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
 
+    // Open the public direct-core database path directly. This benchmark should
+    // not route inserts through legacy runtime/schema/sync manager layers.
     block_on(Db::open(
         DbConfig::new(
             schema,
