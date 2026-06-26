@@ -418,12 +418,15 @@ describe("DirectWasmRuntime server transport", () => {
     });
   });
 
-  it("fails fast for unsupported non-local query read options", async () => {
+  it("passes supported read tiers through and fails fast for unsupported read options", async () => {
     const runtime = directRuntimeWithEmptyDb();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).rejects.toThrow(
-      "only supports local reads",
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
+      [],
     );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "planetary"),
+    ).rejects.toThrow("unsupported read tier");
     await expect(
       runtime.query(
         JSON.stringify({ table: "todos" }),
@@ -434,12 +437,15 @@ describe("DirectWasmRuntime server transport", () => {
     ).rejects.toThrow("does not support read propagation");
   });
 
-  it("fails fast for unsupported non-local subscription read options", () => {
+  it("passes supported subscription read tiers through", () => {
     const runtime = directRuntimeWithEmptyDb();
 
     expect(() =>
       runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge"),
-    ).toThrow("only supports local reads");
+    ).not.toThrow();
+    expect(() =>
+      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "planetary"),
+    ).toThrow("unsupported read tier");
   });
 
   it("accepts well-formed subscription sessions and rejects malformed sessions", () => {
@@ -483,6 +489,57 @@ describe("DirectWasmRuntime server transport", () => {
         }),
       ),
     ).rejects.toThrow("does not support 'Gt' comparisons on id yet");
+  });
+
+  it("does not push limits below post-filtered id predicates", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () => new Uint8Array([0]),
+          prepareQuery: (query: Uint8Array) => {
+            preparedBytes = query;
+            return {};
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: {
+          Limit: {
+            input: {
+              Filter: {
+                input: { TableScan: { table: "todos" } },
+                predicate: {
+                  Cmp: {
+                    left: { column: "id" },
+                    op: "Eq",
+                    right: {
+                      Literal: { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" },
+                    },
+                  },
+                },
+              },
+            },
+            limit: 1,
+          },
+        },
+      }),
+    );
+
+    expect(readPreparedLimit(preparedBytes!)).toBeUndefined();
   });
 });
 
@@ -541,6 +598,26 @@ function readPreparedComparison(query: Uint8Array): {
   reader.option(() => undefined);
   const limit = reader.option((optionReader) => optionReader.u64());
   return { table, predicateTag, column, literalTag, value, limit };
+}
+
+function readPreparedLimit(query: Uint8Array): number | undefined {
+  const reader = new PostcardReader(query);
+  reader.string();
+  reader.readVec(() => {
+    reader.u64();
+    reader.u64();
+    reader.string();
+    reader.u64();
+    reader.u64();
+    reader.string();
+  });
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  return reader.option((optionReader) => optionReader.u64());
 }
 
 const fileSchema = {

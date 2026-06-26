@@ -2627,13 +2627,21 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions);
     const wasmQuery = translateQuery(builderJson, planningSchema);
+    const resolvedQueryOptions = resolveEffectiveQueryExecutionOptions(this.config, queryOptions);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal
       ? { ...queryOptions, runtimeSettledTier: null }
       : queryOptions;
     const context = this.getRuntimeOperationContext();
-    const rows =
-      context || usesRelationTraversal
+    const shouldQueryDurableWorker =
+      this.workerBridge !== null &&
+      !context &&
+      !usesRelationTraversal &&
+      this.tabRole !== "follower" &&
+      resolvedQueryOptions.tier === "local";
+    const rows = shouldQueryDurableWorker
+      ? await this.workerBridge!.queryLocalRows(wasmQuery)
+      : context || usesRelationTraversal
         ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;

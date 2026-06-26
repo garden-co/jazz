@@ -297,6 +297,7 @@ async function runWorkerHostWithOptionalLock(
 
 type WorkerInbound =
   | { type: "sync"; frames: Uint8Array[] }
+  | { type: "query"; id: number; query: Uint8Array }
   | { type: "settle"; id: number }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: string }
@@ -309,6 +310,7 @@ type WorkerOutbound =
   | { type: "init-ok"; clientId: string }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "server-out"; frames: Uint8Array[] }
+  | { type: "query-result"; id: number; rows: Uint8Array }
   | { type: "settled"; id: number }
   | { type: "follower-port-attached"; peerId: string; leadershipId: number }
   | { type: "follower-port-closed"; peerId: string; leadershipId: number }
@@ -399,6 +401,16 @@ class DirectWorkerHost {
           this.pendingDurabilityTick = true;
         }
         this.schedulePump();
+        return;
+      case "query":
+        if (message.query instanceof Uint8Array) {
+          this.pump();
+          const query = this.db.prepareQuery(message.query);
+          const rows = this.db.all(query, { tier: "local" });
+          const transfer = rows.buffer instanceof ArrayBuffer ? [rows.buffer] : [];
+          post({ type: "query-result", id: message.id, rows }, transfer);
+          this.schedulePump();
+        }
         return;
       case "settle":
         this.pendingDurabilityTick = true;

@@ -1,5 +1,6 @@
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
+import type { WasmRow } from "../drivers/types.js";
 import {
   DirectWebSocketCarrier,
   directWireAuthFailureReason,
@@ -69,6 +70,8 @@ interface DirectTransport {
 
 interface RuntimeWithDirectTransport extends Runtime {
   connectUpstreamPeer?(): DirectTransport;
+  decodeDirectRows?(payload: Uint8Array, queryJson: string): WasmRow[];
+  encodeDirectQuery?(queryJson: string): Uint8Array;
   getDirectOpenPayload?(): DirectOpenPayload;
   onDirectSyncNeeded?(callback: () => void): () => void;
 }
@@ -77,6 +80,7 @@ type WorkerInbound =
   | { type: "init"; options: WorkerBridgeOptions }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "update-auth"; jwtToken?: string | null }
+  | { type: "query"; id: number; query: Uint8Array }
   | { type: "settle"; id: number }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: WorkerLifecycleEvent }
@@ -90,6 +94,7 @@ type WorkerOutbound =
   | { type: "init-ok"; clientId: string }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "server-out"; frames: Uint8Array[] }
+  | { type: "query-result"; id: number; rows: Uint8Array }
   | { type: "settled"; id: number }
   | { type: "auth-failure"; reason: AuthFailureReason }
   | { type: "follower-port-attached"; peerId: string; leadershipId: number }
@@ -134,9 +139,19 @@ export class WorkerBridge {
   private pumpAgain = false;
   private shutdownResolve: (() => void) | null = null;
   private nextSettleId = 1;
+  private nextQueryId = 1;
   private readonly pendingSettles = new Map<
     number,
     { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }
+  >();
+  private readonly pendingQueries = new Map<
+    number,
+    {
+      queryJson: string;
+      resolve: (rows: WasmRow[]) => void;
+      reject: (error: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
   >();
 
   constructor(worker: Worker, runtime: Runtime) {
@@ -269,6 +284,33 @@ export class WorkerBridge {
     });
   }
 
+  async queryLocalRows(queryJson: string): Promise<WasmRow[]> {
+    if (this.disposed) return [];
+    const encodeDirectQuery = this.runtime.encodeDirectQuery;
+    const decodeDirectRows = this.runtime.decodeDirectRows;
+    if (typeof encodeDirectQuery !== "function" || typeof decodeDirectRows !== "function") {
+      throw new Error("WorkerBridge local query requires a direct WasmDb runtime");
+    }
+    await this.clientIdPromise;
+    if (this.disposed) return [];
+
+    await this.waitForDurableSettle();
+    if (this.disposed) return [];
+
+    this.pumpTransport();
+    const id = this.nextQueryId++;
+    const query = encodeDirectQuery.call(this.runtime, queryJson);
+    return await new Promise<WasmRow[]>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingQueries.delete(id);
+        reject(new Error("WorkerBridge local query timed out"));
+      }, 30_000);
+      this.pendingQueries.set(id, { queryJson, resolve, reject, timeout });
+      this.postToWorker({ type: "query", id, query }, [query.buffer]);
+      this.schedulePump();
+    });
+  }
+
   applyIncomingServerPayload(payload: Uint8Array): void {
     this.postToWorker({ type: "server-in", frame: payload });
   }
@@ -346,6 +388,22 @@ export class WorkerBridge {
       case "server-out":
         this.forwardServerFrames(normalizeFrames(message.frames));
         return;
+      case "query-result": {
+        const pending = this.pendingQueries.get(message.id);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        this.pendingQueries.delete(message.id);
+        try {
+          const decodeDirectRows = this.runtime.decodeDirectRows;
+          if (typeof decodeDirectRows !== "function") {
+            throw new Error("WorkerBridge local query requires a direct WasmDb runtime");
+          }
+          pending.resolve(decodeDirectRows.call(this.runtime, message.rows, pending.queryJson));
+        } catch (error) {
+          pending.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+        return;
+      }
       case "settled": {
         const pending = this.pendingSettles.get(message.id);
         if (!pending) return;
