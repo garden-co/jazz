@@ -2287,6 +2287,7 @@ impl QueryManager {
     ) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_dirty_for_table(table);
                 subscription.graph.mark_rows_updated(ids);
                 if local_overlay {
                     subscription
@@ -2297,6 +2298,7 @@ impl QueryManager {
         }
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
                 server_sub.graph.mark_rows_updated(ids);
             }
         }
@@ -2305,12 +2307,14 @@ impl QueryManager {
     pub(crate) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_dirty_for_table(table);
                 subscription.graph.mark_row_updated(id);
                 subscription.pending_local_row_ids.insert(id);
             }
         }
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
                 server_sub.graph.mark_row_updated(id);
             }
         }
@@ -2324,6 +2328,7 @@ impl QueryManager {
     ) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_dirty_for_table(table);
                 subscription.graph.mark_rows_deleted(ids);
                 if local_overlay {
                     subscription
@@ -2334,6 +2339,7 @@ impl QueryManager {
         }
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
                 server_sub.graph.mark_rows_deleted(ids);
             }
         }
@@ -2342,12 +2348,14 @@ impl QueryManager {
     pub(super) fn mark_local_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_dirty_for_table(table);
                 subscription.graph.mark_row_deleted(id);
                 subscription.pending_local_row_ids.insert(id);
             }
         }
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
                 server_sub.graph.mark_row_deleted(id);
             }
         }
