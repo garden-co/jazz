@@ -1,4 +1,4 @@
-export type ValueType = { tag: number; inner?: ValueType };
+export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type AbiRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type AbiRowBatch = { table: string; descriptor: DescriptorField[]; rows: AbiRow[] };
@@ -69,8 +69,9 @@ export function readAbiSubscriptionDelta(reader: PostcardReaderLike): AbiSubscri
   };
 }
 
-
-export function readAbiRelationSubscriptionSnapshot(reader: PostcardReaderLike): AbiRelationSubscriptionSnapshot {
+export function readAbiRelationSubscriptionSnapshot(
+  reader: PostcardReaderLike,
+): AbiRelationSubscriptionSnapshot {
   return {
     cursor: reader.u64(),
     rows: reader.readVec(readAbiRowBatch),
@@ -78,7 +79,9 @@ export function readAbiRelationSubscriptionSnapshot(reader: PostcardReaderLike):
   };
 }
 
-export function readAbiRelationSubscriptionDelta(reader: PostcardReaderLike): AbiRelationSubscriptionDelta {
+export function readAbiRelationSubscriptionDelta(
+  reader: PostcardReaderLike,
+): AbiRelationSubscriptionDelta {
   return {
     baseCursor: reader.option((value) => value.u64()),
     cursor: reader.u64(),
@@ -97,7 +100,9 @@ export function readAbiRemovedRow(reader: PostcardReaderLike): AbiRemovedRow {
   };
 }
 
-export function readAbiRelationSubscriptionEdge(reader: PostcardReaderLike): AbiRelationSubscriptionEdge {
+export function readAbiRelationSubscriptionEdge(
+  reader: PostcardReaderLike,
+): AbiRelationSubscriptionEdge {
   return {
     sourceTable: reader.string(),
     sourceRowId: reader.bytes(),
@@ -123,31 +128,36 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
+  if (valueType.tag === 10) {
+    const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
+    writer.vec(
+      (memberWriter, index) => writeValueType(memberWriter, members[index]),
+      members.length,
+    );
+    return;
+  }
+  if (valueType.tag === 11 || valueType.tag === 12) {
+    if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
+    writeValueType(writer, valueType.inner);
+  }
 }
 
 export function readValueType(reader: PostcardReaderLike): ValueType {
   const tag = reader.u64();
-  if (tag === 12 || tag === 13) {
+  if (tag === 11 || tag === 12) {
     return { tag, inner: readValueType(reader) };
   }
   if (tag === 10) {
     const members = reader.readVec(readValueType);
-    return { tag, inner: members[0] };
+    return { tag, members, inner: members[0] };
   }
   return { tag };
 }
 
 export function createRecord(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
-  const staticChunks: Uint8Array[] = [];
-  const variableChunks: Uint8Array[] = [];
-  for (let index = 0; index < descriptor.length; index += 1) {
-    const valueType = descriptor[index].valueType;
-    if (fixedSize(valueType) == null) {
-      variableChunks.push(values[index]);
-    } else {
-      staticChunks.push(values[index]);
-    }
-  }
+  const layout = recordLayout(descriptor);
+  const staticChunks = layout.fixed.map((field) => values[field.logicalIndex]);
+  const variableChunks = layout.variable.map((field) => values[field.logicalIndex]);
   const fixed = concatBytes(staticChunks);
   const offsets = new OffsetWriter();
   let nextOffset = fixed.length + Math.max(0, variableChunks.length - 1) * 4;
@@ -159,52 +169,77 @@ export function createRecord(descriptor: DescriptorField[], values: Uint8Array[]
 }
 
 export function fieldIndex(descriptor: DescriptorField[], name: string): number {
-  const index = descriptor.findIndex((field) => field.name === name || field.name === `user_${name}`);
+  const index = descriptor.findIndex(
+    (field) => field.name === name || field.name === `user_${name}`,
+  );
   if (index < 0) {
-    throw new Error(`missing ${name} field in [${descriptor.map((field) => field.name ?? "<anonymous>").join(", ")}]`);
+    throw new Error(
+      `missing ${name} field in [${descriptor.map((field) => field.name ?? "<anonymous>").join(", ")}]`,
+    );
   }
   return index;
 }
 
-export function decodeRecordBool(descriptor: DescriptorField[], raw: Uint8Array, logicalIndex: number): boolean {
+export function decodeRecordBool(
+  descriptor: DescriptorField[],
+  raw: Uint8Array,
+  logicalIndex: number,
+): boolean {
   const bytes = decodeRecordBytes(descriptor, raw, logicalIndex);
   if (bytes.length !== 1) throw new Error(`invalid bool size ${bytes.length}`);
   return bytes[0] !== 0;
 }
 
-export function decodeRecordString(descriptor: DescriptorField[], raw: Uint8Array, logicalIndex: number): string {
+export function decodeRecordString(
+  descriptor: DescriptorField[],
+  raw: Uint8Array,
+  logicalIndex: number,
+): string {
   return new TextDecoder().decode(decodeRecordBytes(descriptor, raw, logicalIndex));
 }
 
-export function decodeRecordBytes(descriptor: DescriptorField[], raw: Uint8Array, logicalIndex: number): Uint8Array {
-  const valueType = descriptor[logicalIndex].valueType;
-  let fixedOffset = 0;
-  const variables: { index: number; offsetIndex: number }[] = [];
-  for (let index = 0; index < descriptor.length; index += 1) {
-    const size = fixedSize(descriptor[index].valueType);
-    if (size == null) {
-      variables.push({ index, offsetIndex: variables.length });
-    } else if (index === logicalIndex) {
-      let value = raw.subarray(fixedOffset, fixedOffset + size);
-      if (valueType.tag === 12) value = unwrapNullable(value);
-      return value;
-    } else {
-      fixedOffset += size;
-    }
-  }
-  const target = variables.find((variable) => variable.index === logicalIndex);
-  if (!target) throw new Error("field is not present");
-  const offsetTableStart = fixedOffset;
-  const variableStart = fixedOffset + Math.max(0, variables.length - 1) * 4;
-  const start = target.offsetIndex === 0 ? variableStart : readU32Le(raw, offsetTableStart + (target.offsetIndex - 1) * 4);
-  const end = target.offsetIndex === variables.length - 1 ? raw.length : readU32Le(raw, offsetTableStart + target.offsetIndex * 4);
-  let value = raw.subarray(start, end);
-  if (valueType.tag === 12) value = unwrapNullable(value);
+export function decodeRecordBytes(
+  descriptor: DescriptorField[],
+  raw: Uint8Array,
+  logicalIndex: number,
+): Uint8Array {
+  const value = decodeRecordValue(descriptor, raw, logicalIndex);
+  if (value == null) return new Uint8Array();
   return value;
 }
 
-function unwrapNullable(value: Uint8Array): Uint8Array {
-  if (value[0] === 0) return new Uint8Array();
+export function decodeRecordValue(
+  descriptor: DescriptorField[],
+  raw: Uint8Array,
+  logicalIndex: number,
+): Uint8Array | null {
+  const layout = recordLayout(descriptor);
+  const target = layout.fields[logicalIndex];
+  if (!target) throw new Error("field is not present");
+  const valueType = descriptor[logicalIndex].valueType;
+  if (target.kind === "fixed") {
+    const end = target.offset + target.size;
+    if (end > raw.length) throw new Error("unexpected end of record");
+    const value = raw.subarray(target.offset, target.offset + target.size);
+    return valueType.tag === 12 ? unwrapNullable(value) : value;
+  }
+  const offsetTableStart = layout.fixedSize;
+  const variableStart = layout.fixedSize + Math.max(0, layout.variable.length - 1) * 4;
+  const start =
+    target.variableIndex === 0
+      ? variableStart
+      : readU32Le(raw, offsetTableStart + (target.variableIndex - 1) * 4);
+  const end =
+    target.variableIndex === layout.variable.length - 1
+      ? raw.length
+      : readU32Le(raw, offsetTableStart + target.variableIndex * 4);
+  if (start > end || end > raw.length) throw new Error("invalid offset");
+  const value = raw.subarray(start, end);
+  return valueType.tag === 12 ? unwrapNullable(value) : value;
+}
+
+function unwrapNullable(value: Uint8Array): Uint8Array | null {
+  if (value[0] === 0) return null;
   if (value[0] !== 1) return value;
   return value.subarray(1);
 }
@@ -224,19 +259,77 @@ function fixedSize(valueType: ValueType): number | undefined {
       return 8;
     case 8:
       return 16;
+    case 10: {
+      const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
+      return members.reduce<number | undefined>((total, member) => {
+        if (total == null) return undefined;
+        const memberSize = fixedSize(member);
+        return memberSize == null ? undefined : total + memberSize;
+      }, 0);
+    }
+    case 11:
+      return undefined;
     case 12: {
       const innerSize = valueType.inner ? fixedSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
-    case 13:
-      return valueType.inner ? fixedSize(valueType.inner) : undefined;
     default:
       return undefined;
   }
 }
 
+type FieldLayout =
+  | {
+      kind: "fixed";
+      logicalIndex: number;
+      offset: number;
+      size: number;
+    }
+  | {
+      kind: "variable";
+      logicalIndex: number;
+      variableIndex: number;
+    };
+
+function recordLayout(descriptor: DescriptorField[]): {
+  fields: FieldLayout[];
+  fixed: Extract<FieldLayout, { kind: "fixed" }>[];
+  variable: Extract<FieldLayout, { kind: "variable" }>[];
+  fixedSize: number;
+} {
+  const fields: FieldLayout[] = [];
+  fields.length = descriptor.length;
+  const fixed: Extract<FieldLayout, { kind: "fixed" }>[] = [];
+  const variable: Extract<FieldLayout, { kind: "variable" }>[] = [];
+  let fixedOffset = 0;
+
+  for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
+    const size = fixedSize(descriptor[logicalIndex].valueType);
+    if (size == null) continue;
+    const layout = { kind: "fixed" as const, logicalIndex, offset: fixedOffset, size };
+    fields[logicalIndex] = layout;
+    fixed.push(layout);
+    fixedOffset += size;
+  }
+
+  for (let logicalIndex = 0; logicalIndex < descriptor.length; logicalIndex += 1) {
+    if (fixedSize(descriptor[logicalIndex].valueType) != null) continue;
+    const layout = {
+      kind: "variable" as const,
+      logicalIndex,
+      variableIndex: variable.length,
+    };
+    fields[logicalIndex] = layout;
+    variable.push(layout);
+  }
+
+  return { fields, fixed, variable, fixedSize: fixedOffset };
+}
+
 function readU32Le(bytes: Uint8Array, offset: number): number {
-  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
+  return (
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+  );
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
@@ -254,7 +347,12 @@ class OffsetWriter {
   readonly #bytes: number[] = [];
 
   u32Le(value: number): void {
-    this.#bytes.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+    this.#bytes.push(
+      value & 0xff,
+      (value >>> 8) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 24) & 0xff,
+    );
   }
 
   finish(): Uint8Array {

@@ -25,7 +25,7 @@ import {
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
-import { createRecord, decodeRecordBytes } from "./direct-row-codec.js";
+import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 type WasmDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): DirectWasmDb;
@@ -153,7 +153,12 @@ export class DirectWasmRuntime implements Runtime {
     return this.finishInsert(table, rowId, write);
   }
 
-  restore(table: string, objectId: string, values: InsertValues, writeContext?: string | null): DirectInsertResult {
+  restore(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    writeContext?: string | null,
+  ): DirectInsertResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const tx = this.currentTx(writeContext);
@@ -165,7 +170,11 @@ export class DirectWasmRuntime implements Runtime {
     return this.finishInsert(table, rowId, this.db.restoreEncoded(table, rowId, cells));
   }
 
-  update(objectId: string, values: Record<string, Value>, writeContext?: string | null): DirectMutationResult {
+  update(
+    objectId: string,
+    values: Record<string, Value>,
+    writeContext?: string | null,
+  ): DirectMutationResult {
     const { table, rowId } = this.resolveRow(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const tx = this.currentTx(writeContext);
@@ -177,7 +186,12 @@ export class DirectWasmRuntime implements Runtime {
     return this.finishMutation(this.db.updateEncoded(table, rowId, patch));
   }
 
-  upsert(table: string, objectId: string, values: InsertValues, writeContext?: string | null): DirectMutationResult {
+  upsert(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    writeContext?: string | null,
+  ): DirectMutationResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
     const tx = this.currentTx(writeContext);
@@ -235,12 +249,22 @@ export class DirectWasmRuntime implements Runtime {
     return true;
   }
 
-  async query(queryJson: string, _sessionJson?: string | null, _tier?: string | null, _optionsJson?: string | null): Promise<unknown> {
+  async query(
+    queryJson: string,
+    _sessionJson?: string | null,
+    _tier?: string | null,
+    _optionsJson?: string | null,
+  ): Promise<unknown> {
     const query = this.prepareQuery(queryJson);
     return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema);
   }
 
-  createSubscription(queryJson: string, _sessionJson?: string | null, _tier?: string | null, _optionsJson?: string | null): number {
+  createSubscription(
+    queryJson: string,
+    _sessionJson?: string | null,
+    _tier?: string | null,
+    _optionsJson?: string | null,
+  ): number {
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
     const reader = this.db.subscribe(query, readOptions()).getReader();
@@ -295,15 +319,20 @@ export class DirectWasmRuntime implements Runtime {
     return { transactionId };
   }
 
-  private resultForRow(table: string, rowId: Uint8Array, transactionId: string): DirectInsertResult {
+  private resultForRow(
+    table: string,
+    rowId: Uint8Array,
+    transactionId: string,
+  ): DirectInsertResult {
     const row = this.readRow(table, rowId);
     return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
   }
 
   private readRow(table: string, rowId: Uint8Array): RowState | undefined {
     const query = this.prepareQuery(JSON.stringify({ table }));
-    return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema)
-      .find((row) => row.table === table && row.id === formatUuid(rowId));
+    return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema).find(
+      (row) => row.table === table && row.id === formatUuid(rowId),
+    );
   }
 
   private resolveRow(objectId: string): { table: string; rowId: Uint8Array } {
@@ -354,8 +383,9 @@ export class DirectWasmRuntime implements Runtime {
       subscription.rows = rowsFromBatches(chunk.rows, this.schema);
       subscription.callback?.(nativeDeltaFromRows(subscription.rows));
     } else {
-      subscription.rows = rowsFromBatches(chunk.delta.added, this.schema)
-        .concat(rowsFromBatches(chunk.delta.updated, this.schema));
+      subscription.rows = rowsFromBatches(chunk.delta.added, this.schema).concat(
+        rowsFromBatches(chunk.delta.updated, this.schema),
+      );
       subscription.callback?.(nativeDeltaFromRows(subscription.rows));
     }
   }
@@ -421,11 +451,17 @@ function encodeSchema(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
-function encodeCellsForRow(definition: { columns: ColumnDescriptor[] }, row: InsertValues): Uint8Array {
+function encodeCellsForRow(
+  definition: { columns: ColumnDescriptor[] },
+  row: InsertValues,
+): Uint8Array {
   return encodeCells(definition.columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForPatch(definition: { columns: ColumnDescriptor[] }, patch: Record<string, Value>): Uint8Array {
+function encodeCellsForPatch(
+  definition: { columns: ColumnDescriptor[] },
+  patch: Record<string, Value>,
+): Uint8Array {
   const columns = definition.columns.filter((column) => Object.hasOwn(patch, column.name));
   return encodeCells(columns, (column) => patch[column.name], false);
 }
@@ -438,7 +474,9 @@ function encodeCells(
   const descriptor = [...columns]
     .sort((left, right) => left.name.localeCompare(right.name))
     .map((column) => ({ name: column.name, valueType: columnValueType(column), column }));
-  const values = descriptor.map(({ column }) => encodeValue(column, valueFor(column), requireMissingDefaults));
+  const values = descriptor.map(({ column }) =>
+    encodeValue(column, valueFor(column), requireMissingDefaults),
+  );
   const writer = new PostcardWriter();
   writer.vec((field, index) => {
     field.some((name) => name.string(descriptor[index]!.name));
@@ -448,10 +486,17 @@ function encodeCells(
   return writer.finish();
 }
 
-function encodeValue(column: ColumnDescriptor, value: Value | undefined, requireMissingDefaults: boolean): Uint8Array {
+function encodeValue(
+  column: ColumnDescriptor,
+  value: Value | undefined,
+  requireMissingDefaults: boolean,
+): Uint8Array {
   const resolved = value ?? column.default;
   if (!resolved || resolved.type === "Null") {
-    if (column.nullable) return Uint8Array.of(0);
+    if (column.nullable) return encodeNullValue(column.column_type);
+    if (column.column_type.type === "Array") {
+      return encodeNonNullValue(column.column_type, { type: "Array", value: [] });
+    }
     if (requireMissingDefaults) throw new Error(`missing required column ${column.name}`);
     return new Uint8Array();
   }
@@ -466,7 +511,7 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
       view.setUint32(0, expectNumber(value, "Integer"), true);
-      return new Uint8Array(view.buffer, 0, 8);
+      return new Uint8Array(view.buffer, 0, 4);
     case "BigInt":
     case "Timestamp":
       view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
@@ -484,14 +529,77 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
       return value.value;
     case "Array":
+      return encodeArrayValue(type.element, value);
     case "Row":
       throw new Error(`Direct WasmDb runtime does not encode ${type.type} values yet`);
   }
 }
 
+function encodeArrayValue(elementType: ColumnType, value: Value): Uint8Array {
+  if (value.type !== "Array") throw new Error("expected Array value");
+  const encoded = value.value.map((item) => encodeNonNullValue(elementType, item));
+  const elementWidth = fixedValueSize(columnTypeToValueType(elementType));
+  if (elementWidth != null) return concatBytes(encoded);
+
+  const offsets = new PostcardWriter();
+  let nextOffset = 4 + Math.max(0, encoded.length - 1) * 4;
+  for (const chunk of encoded.slice(0, -1)) {
+    nextOffset += chunk.length;
+    offsets.u32Le(nextOffset);
+  }
+  return concatBytes([u32Le(encoded.length), offsets.finish(), ...encoded]);
+}
+
+function u32Le(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, true);
+  return bytes;
+}
+
+function encodeNullValue(type: ColumnType): Uint8Array {
+  const valueType = columnTypeToValueType(type);
+  const width = fixedValueSize(valueType);
+  return width == null ? Uint8Array.of(0) : new Uint8Array(width + 1);
+}
+
+function fixedValueSize(valueType: ValueType): number | undefined {
+  switch (valueType.tag) {
+    case 0:
+    case 5:
+    case 9:
+      return 1;
+    case 1:
+      return 2;
+    case 2:
+      return 4;
+    case 3:
+    case 4:
+      return 8;
+    case 8:
+      return 16;
+    case 10: {
+      const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
+      return members.reduce<number | undefined>((total, member) => {
+        if (total == null) return undefined;
+        const memberSize = fixedValueSize(member);
+        return memberSize == null ? undefined : total + memberSize;
+      }, 0);
+    }
+    case 12: {
+      const innerSize = valueType.inner ? fixedValueSize(valueType.inner) : undefined;
+      return innerSize == null ? undefined : innerSize + 1;
+    }
+    default:
+      return undefined;
+  }
+}
+
 function expectNumber(value: Value, type: string): number {
   if (
-    (value.type === "Integer" || value.type === "BigInt" || value.type === "Double" || value.type === "Timestamp") &&
+    (value.type === "Integer" ||
+      value.type === "BigInt" ||
+      value.type === "Double" ||
+      value.type === "Timestamp") &&
     typeof value.value === "number"
   ) {
     return value.value;
@@ -511,13 +619,18 @@ function readRowBatches(payload: Uint8Array): AbiRowBatch[] {
 }
 
 function rowsFromBatches(batches: AbiRowBatch[], schema: WasmSchema): RowState[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    table: batch.table,
-    id: formatUuid(row.rowId),
-    values: batch.descriptor
-      .filter((field) => field.name && !isInternalField(field.name))
-      .map((field, index) => decodeField(batch.table, field, batch.descriptor, row.raw, index, schema)),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      table: batch.table,
+      id: formatUuid(row.rowId),
+      values: batch.descriptor
+        .map((field, index) => ({ field, index }))
+        .filter(({ field }) => field.name && !isInternalField(field.name))
+        .map(({ field, index }) =>
+          decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
+        ),
+    })),
+  );
 }
 
 function decodeField(
@@ -528,9 +641,12 @@ function decodeField(
   index: number,
   schema: WasmSchema,
 ): Value {
-  const column = schema[table]?.columns.find((candidate) => candidate.name === publicFieldName(field.name ?? ""));
+  const column = schema[table]?.columns.find(
+    (candidate) => candidate.name === publicFieldName(field.name ?? ""),
+  );
   const type = column?.column_type;
-  const bytes = decodeRecordBytes(descriptor, raw, index);
+  const bytes = decodeRecordValue(descriptor, raw, index);
+  if (bytes == null) return { type: "Null" };
   if (!type) return { type: "Bytea", value: bytes };
   return decodeBytes(type, bytes);
 }
@@ -562,16 +678,26 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
   }
 }
 
-function normalizeSubscriptionChunk(chunk: unknown):
+function normalizeSubscriptionChunk(
+  chunk: unknown,
+):
   | { type: "snapshot"; rows: AbiRowBatch[] }
   | { type: "delta"; delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: unknown[] } } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
   const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown };
   if (record.type === "snapshot" || record.type === "Snapshot") {
-    return { type: "snapshot", rows: readRowBatches(assertBytes(record.rows, "subscription rows")) };
+    return {
+      type: "snapshot",
+      rows: readRowBatches(assertBytes(record.rows, "subscription rows")),
+    };
   }
   if (record.type === "delta" || record.type === "Delta") {
-    return { type: "delta", delta: readAbiSubscriptionDelta(new PostcardReader(assertBytes(record.delta, "subscription delta"))) };
+    return {
+      type: "delta",
+      delta: readAbiSubscriptionDelta(
+        new PostcardReader(assertBytes(record.delta, "subscription delta")),
+      ),
+    };
   }
   throw new Error("unknown subscription chunk");
 }
@@ -599,6 +725,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Boolean":
       return { tag: 5 };
     case "Integer":
+      return { tag: 2 };
     case "BigInt":
     case "Timestamp":
       return { tag: 3 };
@@ -637,7 +764,9 @@ function parseUuid(value: string): Uint8Array {
 }
 
 function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
