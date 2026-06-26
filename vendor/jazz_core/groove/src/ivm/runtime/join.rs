@@ -452,10 +452,7 @@ pub(super) fn join_keys(
 
     for field in fields {
         let values = descriptor.get(record, field)?;
-        let parts = match values {
-            crate::records::Value::Array(values) => values,
-            value => vec![value],
-        };
+        let parts = join_key_parts(values);
 
         if parts.is_empty() {
             return Ok(Vec::new());
@@ -476,6 +473,20 @@ pub(super) fn join_keys(
     }
 
     Ok(keys)
+}
+
+fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
+    match value {
+        crate::records::Value::Array(values) => values,
+        crate::records::Value::Nullable(Some(value)) => match *value {
+            crate::records::Value::Array(values) => values
+                .into_iter()
+                .map(|value| crate::records::Value::Nullable(Some(Box::new(value))))
+                .collect(),
+            value => vec![crate::records::Value::Nullable(Some(Box::new(value)))],
+        },
+        value => vec![value],
+    }
 }
 
 pub(super) fn create_join_record(

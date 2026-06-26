@@ -158,8 +158,13 @@ describe("alpha public package flow", () => {
 
     await withTimeout(
       waitForFileParts(db, file.partIds),
-      10_000,
+      20_000,
       "created file parts were not readable locally",
+    );
+    await withTimeout(
+      waitForFileRecord(db, file.id),
+      20_000,
+      "created file metadata was not readable locally",
     );
 
     await db.shutdown();
@@ -172,6 +177,16 @@ describe("alpha public package flow", () => {
       persistentDbName,
       sharedSecret,
       { uniqueLabel: false },
+    );
+    await withTimeout(
+      waitForFileRecord(reopenedDb, file.id),
+      20_000,
+      "file metadata did not reload from persistent OPFS after reopen",
+    );
+    await withTimeout(
+      waitForFileParts(reopenedDb, file.partIds),
+      20_000,
+      "file parts did not reload from persistent OPFS after reopen",
     );
     const reopenedBlob = await withTimeout(
       reopenedDb.loadFileAsBlob(fileApp, file.id, { tier: "local" }),
@@ -339,6 +354,17 @@ async function waitForFileParts(
       tier,
     );
   }
+}
+
+async function waitForFileRecord(db: Db, fileId: string): Promise<void> {
+  await waitForQuery(
+    db,
+    fileApp.files.where({ id: fileId }),
+    (files) => files.length === 1,
+    `file ${fileId}`,
+    15_000,
+    "local",
+  );
 }
 
 async function expectBlobBytes(blob: Blob, expected: Uint8Array): Promise<void> {

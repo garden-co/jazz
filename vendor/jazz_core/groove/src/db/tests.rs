@@ -363,6 +363,40 @@ fn files_parts_schema() -> DatabaseSchema {
     ])
 }
 
+fn indexed_files_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "files",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("part_ids", ColumnType::Uuid.array_of()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("files_by_part_ids", ["part_ids"]))])
+}
+
+fn nullable_files_parts_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "files",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("part_ids", ColumnType::Uuid.array_of().nullable()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "file_parts",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("part_uuid", ColumnType::Uuid.nullable()),
+                ColumnSchema::new("data", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
 fn albums_blockers_schema() -> DatabaseSchema {
     DatabaseSchema::new([
         TableSchema::new(
@@ -4356,6 +4390,102 @@ fn join_subscriptions_match_persisted_array_key_elements() {
 }
 
 #[test]
+fn join_subscriptions_match_nullable_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(nullable_files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::Array(vec![
+                Value::Uuid(part_a),
+                Value::Uuid(part_b),
+            ])))),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Nullable(Some(Box::new(Value::Uuid(part_b)))),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                Value::U64(1),
+                Value::Nullable(Some(Box::new(Value::Array(vec![
+                    Value::Uuid(part_a),
+                    Value::Uuid(part_b),
+                ])))),
+                Value::U64(10),
+                Value::Nullable(Some(Box::new(Value::Uuid(part_b)))),
+                Value::Bytes(b"b".to_vec()),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn index_subscriptions_expand_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "indices"]);
+    let mut database = Database::new(indexed_files_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe(GraphBuilder::index("files", "files_by_part_ids"))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_a)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (
+                vec![
+                    encoded_uuid_index_key(part_a, 1).into(),
+                    Vec::<u8>::new().into(),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    encoded_uuid_index_key(part_b, 1).into(),
+                    Vec::<u8>::new().into(),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
 fn query_graph_joins_related_tables_through_database_facade() {
     let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
@@ -7416,6 +7546,14 @@ fn transitive_closure(
 
 fn encoded_title_index_key(title: &str, primary_key: u64) -> Vec<u8> {
     let mut bytes = encoded_title_key_part(title);
+    bytes.push(0xff);
+    bytes.extend(encoded_u64_index_part(primary_key));
+    bytes
+}
+
+fn encoded_uuid_index_key(value: uuid::Uuid, primary_key: u64) -> Vec<u8> {
+    let mut bytes = vec![10];
+    bytes.extend(value.as_bytes());
     bytes.push(0xff);
     bytes.extend(encoded_u64_index_part(primary_key));
     bytes
