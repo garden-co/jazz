@@ -5,9 +5,9 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { directWebSocketUrl } from "./direct-wasm/direct-websocket.js";
-import { DirectCoreRuntime } from "./direct-wasm/runtime.js";
-import { encodeDirectSchema } from "./direct-wasm/runtime.js";
+import { directWebSocketUrl } from "./direct-core/direct-websocket.js";
+import { DirectCoreRuntime } from "./direct-core/runtime.js";
+import { encodeDirectSchema } from "./direct-core/runtime.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 const TEST_SCHEMA: WasmSchema = {

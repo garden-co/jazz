@@ -124,7 +124,7 @@ vi.mock("jazz-napi", () => ({
   NapiDirectDb: mocks.MockNapiDirectDb,
 }));
 
-vi.mock("../runtime/direct-wasm/runtime.js", () => ({
+vi.mock("../runtime/direct-core/runtime.js", () => ({
   DirectCoreRuntime: mocks.MockDirectCoreRuntime,
 }));
 
