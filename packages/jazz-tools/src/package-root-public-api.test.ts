@@ -7,10 +7,10 @@ import * as runtime from "./runtime/index.js";
 import type { WorkerBridgeOptions as RuntimeWorkerBridgeOptions } from "./runtime/index.js";
 // @ts-expect-error WorkerBridgeOptions is intentionally not part of the package-root surface.
 import type { WorkerBridgeOptions as PackageRootWorkerBridgeOptions } from "./index.js";
-// @ts-expect-error DirectCoreRuntime is intentionally not part of the public runtime surface.
-import type { DirectCoreRuntime as RuntimeDirectCoreRuntime } from "./runtime/index.js";
-// @ts-expect-error DirectCoreRuntime is intentionally not part of the package-root surface.
-import type { DirectCoreRuntime as PackageRootDirectCoreRuntime } from "./index.js";
+// @ts-expect-error CoreRuntime is intentionally not part of the public runtime surface.
+import type { CoreRuntime as RuntimeCoreRuntime } from "./runtime/index.js";
+// @ts-expect-error CoreRuntime is intentionally not part of the package-root surface.
+import type { CoreRuntime as PackageRootCoreRuntime } from "./index.js";
 // @ts-expect-error DirectWebSocketCarrier is intentionally not part of the public runtime surface.
 import type { DirectWebSocketCarrier as RuntimeDirectWebSocketCarrier } from "./runtime/index.js";
 // @ts-expect-error DirectWebSocketCarrier is intentionally not part of the package-root surface.
@@ -34,8 +34,8 @@ import type { DirectOpenPayload as PackageRootDirectOpenPayload } from "./index.
 
 void (null as unknown as RuntimeWorkerBridgeOptions);
 void (null as unknown as PackageRootWorkerBridgeOptions);
-void (null as unknown as RuntimeDirectCoreRuntime);
-void (null as unknown as PackageRootDirectCoreRuntime);
+void (null as unknown as RuntimeCoreRuntime);
+void (null as unknown as PackageRootCoreRuntime);
 void (null as unknown as RuntimeDirectWebSocketCarrier);
 void (null as unknown as PackageRootDirectWebSocketCarrier);
 void (null as unknown as RuntimeEncodeDirectSchema);
@@ -48,7 +48,7 @@ void (null as unknown as RuntimeDirectOpenPayload);
 void (null as unknown as PackageRootDirectOpenPayload);
 
 const internalRuntimeExports = [
-  "DirectCoreRuntime",
+  "CoreRuntime",
   "DirectWebSocketCarrier",
   "encodeDirectSchema",
   "encodeDirectWebSocketFrameBatch",

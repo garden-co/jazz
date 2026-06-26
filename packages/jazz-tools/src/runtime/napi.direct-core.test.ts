@@ -5,9 +5,9 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { directWebSocketUrl } from "./direct-core/direct-websocket.js";
-import { DirectCoreRuntime } from "./direct-core/runtime.js";
-import { encodeDirectSchema } from "./direct-core/runtime.js";
+import { directWebSocketUrl } from "./core-runtime/direct-websocket.js";
+import { CoreRuntime } from "./core-runtime/runtime.js";
+import { encodeDirectSchema } from "./core-runtime/runtime.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 const TEST_SCHEMA: WasmSchema = {
@@ -66,9 +66,9 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
   },
 };
 
-describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
+describe.skipIf(!hasJazzNapiBuild())("jazz-napi core runtime memory DB", () => {
   let server: LocalJazzServerHandle | null = null;
-  const runtimes: DirectCoreRuntime[] = [];
+  const runtimes: CoreRuntime[] = [];
   const previousWebSocket = globalThis.WebSocket;
 
   afterEach(async () => {
@@ -82,11 +82,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("opens, mutates one row, and queries it through the direct WASM adapter shape", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core:node"),
-      deterministicBytes("jazz-napi-direct-core:author"),
+      deterministicBytes("jazz-napi-core-runtime:node"),
+      deterministicBytes("jazz-napi-core-runtime:author"),
       1,
       true,
     );
@@ -129,11 +129,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("delivers direct NAPI subscription updates through the native handle", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-subscription:node"),
-      deterministicBytes("jazz-napi-direct-core-subscription:author"),
+      deterministicBytes("jazz-napi-core-runtime-subscription:node"),
+      deterministicBytes("jazz-napi-core-runtime-subscription:author"),
       21,
       true,
     );
@@ -173,11 +173,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("applies session ownership policy to local direct NAPI inserts and reads", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-policy:node"),
-      deterministicBytes("jazz-napi-direct-core-policy:author"),
+      deterministicBytes("jazz-napi-core-runtime-policy:node"),
+      deterministicBytes("jazz-napi-core-runtime-policy:author"),
       11,
       true,
     );
@@ -275,11 +275,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("applies session ownership policy to direct NAPI subscriptions", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-policy-subscription:node"),
-      deterministicBytes("jazz-napi-direct-core-policy-subscription:author"),
+      deterministicBytes("jazz-napi-core-runtime-policy-subscription:node"),
+      deterministicBytes("jazz-napi-core-runtime-policy-subscription:author"),
       14,
       true,
     );
@@ -351,11 +351,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("isolates two session identities sharing one direct NAPI runtime for owned deletes", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-delete-policy:node"),
-      deterministicBytes("jazz-napi-direct-core-delete-policy:author"),
+      deterministicBytes("jazz-napi-core-runtime-delete-policy:node"),
+      deterministicBytes("jazz-napi-core-runtime-delete-policy:author"),
       12,
       true,
     );
@@ -421,11 +421,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
       schema: encodeDirectSchema(OWNED_TODOS_SCHEMA),
     });
 
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-edge-delete-policy:node"),
-      deterministicBytes("jazz-napi-direct-core-edge-delete-policy:author"),
+      deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:node"),
+      deterministicBytes("jazz-napi-core-runtime-edge-delete-policy:author"),
       13,
       true,
     );
@@ -511,15 +511,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     });
 
     try {
-      const runtime = new DirectCoreRuntime(
+      const runtime = new CoreRuntime(
         {
           openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
             NapiDirectDb.openPersistent(path, schema, config) as never,
         },
         OWNED_TODOS_SCHEMA,
-        deterministicBytes("jazz-napi-direct-core-persistent-edge-delete-policy:node"),
-        deterministicBytes("jazz-napi-direct-core-persistent-edge-delete-policy:author"),
+        deterministicBytes("jazz-napi-core-runtime-persistent-edge-delete-policy:node"),
+        deterministicBytes("jazz-napi-core-runtime-persistent-edge-delete-policy:author"),
         14,
         true,
         { persistentPath: join(tempDir, "db") },
@@ -597,11 +597,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
   it("supports direct runtime parity writes, mergeable transactions, and upstream transport", async () => {
     const { NapiDirectDb } = await loadNapiModule();
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
-      deterministicBytes("jazz-napi-direct-core-parity:node"),
-      deterministicBytes("jazz-napi-direct-core-parity:author"),
+      deterministicBytes("jazz-napi-core-runtime-parity:node"),
+      deterministicBytes("jazz-napi-core-runtime-parity:author"),
       2,
       true,
     );
@@ -686,7 +686,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     expect(transport.close()).toBe(false);
   });
 
-  it("propagates an edge-tier query over the direct core/server boundary and returns remote row adds", async () => {
+  it("propagates an edge-tier query over the core runtime/server boundary and returns remote row adds", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDirectDb } = await loadNapiModule();
@@ -699,7 +699,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     });
 
     const openRuntime = (peer: string, sourceId: number) => {
-      const runtime = new DirectCoreRuntime(
+      const runtime = new CoreRuntime(
         { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-direct-edge:${peer}:node`),
@@ -749,7 +749,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     });
   }, 15_000);
 
-  it("propagates an edge-tier query through a persistent direct core server", async () => {
+  it("propagates an edge-tier query through a persistent core server", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDirectDb } = await loadNapiModule();
@@ -763,7 +763,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     });
 
     const openRuntime = (peer: string, sourceId: number, targetServer: LocalJazzServerHandle) => {
-      const runtime = new DirectCoreRuntime(
+      const runtime = new CoreRuntime(
         { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-direct-persistent-edge:${peer}:node`),
@@ -831,11 +831,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     const dataPath = join(tempDir, "db");
     const node = deterministicBytes("jazz-napi-direct-persistent:node");
     const author = deterministicBytes("jazz-napi-direct-persistent:author");
-    let firstRuntime: DirectCoreRuntime | null = null;
-    let secondRuntime: DirectCoreRuntime | null = null;
+    let firstRuntime: CoreRuntime | null = null;
+    let secondRuntime: CoreRuntime | null = null;
 
     try {
-      firstRuntime = new DirectCoreRuntime(
+      firstRuntime = new CoreRuntime(
         {
           openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>
@@ -857,7 +857,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
       firstRuntime.close();
       firstRuntime = null;
 
-      secondRuntime = new DirectCoreRuntime(
+      secondRuntime = new CoreRuntime(
         {
           openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
           openPersistent: (path, schema, config) =>

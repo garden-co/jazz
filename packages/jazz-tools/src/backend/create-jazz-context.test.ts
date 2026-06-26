@@ -61,7 +61,7 @@ const mocks = vi.hoisted(() => {
     }),
   };
 
-  class MockDirectCoreRuntime {
+  class MockCoreRuntime {
     readonly close = vi.fn();
     constructor(
       Runtime: typeof MockNapiDirectDb,
@@ -92,7 +92,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     MockNapiDirectDb,
-    MockDirectCoreRuntime,
+    MockCoreRuntime,
     MockJazzClient,
     resolveRequestSession,
     openMemory,
@@ -124,8 +124,8 @@ vi.mock("jazz-napi", () => ({
   NapiDirectDb: mocks.MockNapiDirectDb,
 }));
 
-vi.mock("../runtime/direct-core/runtime.js", () => ({
-  DirectCoreRuntime: mocks.MockDirectCoreRuntime,
+vi.mock("../runtime/core-runtime/runtime.js", () => ({
+  CoreRuntime: mocks.MockCoreRuntime,
 }));
 
 vi.mock("../runtime/client.js", async () => {

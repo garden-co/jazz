@@ -143,11 +143,11 @@ fn convert_column_type(
         }
         ColumnType::Integer => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "INTEGER is signed, but direct core fixed schemas only support unsigned integer columns",
+            "INTEGER is signed, but core server fixed schemas only support unsigned integer columns",
         )),
         ColumnType::BigInt => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "BIGINT is signed, but direct core fixed schemas only support unsigned integer columns",
+            "BIGINT is signed, but core server fixed schemas only support unsigned integer columns",
         )),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
@@ -361,7 +361,7 @@ mod tests {
         let integer_error = convert_alpha_schema(&integer_schema).unwrap_err();
         assert_eq!(
             integer_error.to_string(),
-            "$.todos.count: INTEGER is signed, but direct core fixed schemas only support unsigned integer columns"
+            "$.todos.count: INTEGER is signed, but core server fixed schemas only support unsigned integer columns"
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -375,7 +375,7 @@ mod tests {
         let integer_array_error = convert_alpha_schema(&integer_array_schema).unwrap_err();
         assert_eq!(
             integer_array_error.to_string(),
-            "$.todos.partSizes: INTEGER is signed, but direct core fixed schemas only support unsigned integer columns"
+            "$.todos.partSizes: INTEGER is signed, but core server fixed schemas only support unsigned integer columns"
         );
 
         let default_schema = [(

@@ -28,7 +28,7 @@ const fileSchema = {
   },
 } satisfies WasmSchema;
 
-describe("DirectCoreRuntime server convergence", () => {
+describe("CoreRuntime server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
   const clients: JazzClient[] = [];
   const tempRoots: string[] = [];
@@ -52,7 +52,7 @@ describe("DirectCoreRuntime server convergence", () => {
       server = await startLocalJazzServer({
         appId,
         inMemory: true,
-        adminSecret: "direct-core-convergence-admin",
+        adminSecret: "core-runtime-convergence-admin",
         schema: encodeDirectSchema(schema),
       });
 
@@ -114,11 +114,11 @@ describe("DirectCoreRuntime server convergence", () => {
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
-      const tempRoot = await mkdtemp(join(tmpdir(), "jazz-direct-core-restart-"));
+      const tempRoot = await mkdtemp(join(tmpdir(), "jazz-core-runtime-restart-"));
       tempRoots.push(tempRoot);
       const dataDir = join(tempRoot, "server-data");
       const appId = "00000000-0000-0000-0000-00000000c002";
-      const adminSecret = "direct-core-restart-admin";
+      const adminSecret = "core-runtime-restart-admin";
 
       server = await startLocalJazzServer({
         appId,
@@ -252,7 +252,7 @@ describe("DirectCoreRuntime server convergence", () => {
     server = await startLocalJazzServer({
       appId,
       inMemory: true,
-      adminSecret: "direct-core-bytea-convergence-admin",
+      adminSecret: "core-runtime-bytea-convergence-admin",
       schema: encodeDirectSchema(fileSchema),
     });
 
