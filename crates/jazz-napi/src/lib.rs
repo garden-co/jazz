@@ -221,15 +221,6 @@ fn make_subscription_callback(
 
 type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
-#[napi(object)]
-pub struct DirectJazzServerStartOptions {
-    #[napi(js_name = "appId")]
-    pub app_id: String,
-    pub port: Option<u16>,
-    #[napi(ts_type = "Buffer | Uint8Array")]
-    pub schema: Uint8Array,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JazzServerStartOptions {
@@ -243,6 +234,7 @@ struct JazzServerStartOptions {
     upstream_url: Option<String>,
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
+    schema: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -347,73 +339,6 @@ impl Scheduler for NapiScheduler {
                 deliver_pending_mutation_errors(&core_arc);
             }
         });
-    }
-}
-
-// ============================================================================
-// DirectJazzServer
-// ============================================================================
-
-#[napi]
-pub struct DirectJazzServer {
-    server: Mutex<Option<LoopbackWebSocketServer>>,
-    url: String,
-}
-
-#[napi]
-impl DirectJazzServer {
-    #[napi(factory)]
-    pub fn start(options: DirectJazzServerStartOptions) -> napi::Result<Self> {
-        let schema =
-            postcard::from_bytes::<JazzSchema>(options.schema.as_ref()).map_err(|error| {
-                napi::Error::from_reason(format!("Invalid direct Jazz schema bytes: {error}"))
-            })?;
-        let identity = DbIdentity {
-            node: NodeUuid::from_bytes([0x5e; 16]),
-            author: AuthorId::SYSTEM,
-        };
-        let mut config = LoopbackWebSocketServerConfig::in_memory(schema, identity)
-            .with_row_id_seed(0x5e)
-            .with_auth_admission(AuthAdmissionConfig::legacy_query_identity());
-        config.listener.bind_addr = ([127, 0, 0, 1], options.port.unwrap_or(0)).into();
-        config.listener.websocket_path = format!("/apps/{}/ws", options.app_id);
-
-        let server = LoopbackWebSocketServer::start_with_config(config).map_err(|error| {
-            napi::Error::from_reason(format!("Failed to start direct Jazz server: {error}"))
-        })?;
-        let port = server.local_addr().port();
-        Ok(Self {
-            server: Mutex::new(Some(server)),
-            url: format!("http://127.0.0.1:{port}"),
-        })
-    }
-
-    #[napi(getter)]
-    pub fn url(&self) -> String {
-        self.url.clone()
-    }
-
-    #[napi]
-    pub fn stop(&self) -> napi::Result<()> {
-        if let Some(server) = self
-            .server
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .take()
-        {
-            server.shutdown();
-        }
-        Ok(())
-    }
-}
-
-impl Drop for DirectJazzServer {
-    fn drop(&mut self) {
-        if let Ok(mut server) = self.server.lock()
-            && let Some(server) = server.take()
-        {
-            server.shutdown();
-        }
     }
 }
 
@@ -1119,7 +1044,19 @@ impl TestJwtIssuer {
 
 #[napi]
 pub struct JazzServer {
-    inner: Mutex<Option<CoreJazzServer>>,
+    inner: Mutex<Option<JazzServerInner>>,
+}
+
+enum JazzServerInner {
+    Alpha(CoreJazzServer),
+    Direct {
+        server: LoopbackWebSocketServer,
+        app_id: String,
+        url: String,
+        port: u16,
+        admin_secret: String,
+        backend_secret: String,
+    },
 }
 
 #[napi]
@@ -1127,12 +1064,16 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
-        let opts = parse_jazz_server_start_options(options)?;
+        let mut opts = parse_jazz_server_start_options(options)?;
         init_jazz_server_telemetry(opts.telemetry_collector_url.as_deref());
+
+        if let Some(schema_bytes) = opts.schema.take() {
+            return start_direct_jazz_server(opts, schema_bytes);
+        }
 
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
@@ -1183,38 +1124,56 @@ impl JazzServer {
         .await;
 
         Ok(Self {
-            inner: Mutex::new(Some(server)),
+            inner: Mutex::new(Some(JazzServerInner::Alpha(server))),
         })
     }
 
     #[napi(getter, js_name = "appId")]
     pub fn app_id(&self) -> napi::Result<String> {
-        self.with_server(|server| server.app_id().to_string())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.app_id().to_string(),
+            JazzServerInner::Direct { app_id, .. } => app_id.clone(),
+        })
     }
 
     #[napi(getter)]
     pub fn url(&self) -> napi::Result<String> {
-        self.with_server(|server| server.base_url())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.base_url(),
+            JazzServerInner::Direct { url, .. } => url.clone(),
+        })
     }
 
     #[napi(getter)]
     pub fn port(&self) -> napi::Result<u16> {
-        self.with_server(|server| server.port())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.port(),
+            JazzServerInner::Direct { port, .. } => *port,
+        })
     }
 
     #[napi(getter, js_name = "dataDir")]
     pub fn data_dir(&self) -> napi::Result<String> {
-        self.with_server(|server| server.data_dir().to_string_lossy().into_owned())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.data_dir().to_string_lossy().into_owned(),
+            JazzServerInner::Direct { .. } => String::new(),
+        })
     }
 
     #[napi(getter, js_name = "backendSecret")]
     pub fn backend_secret(&self) -> napi::Result<String> {
-        self.with_server(|server| server.backend_secret().to_string())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.backend_secret().to_string(),
+            JazzServerInner::Direct { backend_secret, .. } => backend_secret.clone(),
+        })
     }
 
     #[napi(getter, js_name = "adminSecret")]
     pub fn admin_secret(&self) -> napi::Result<String> {
-        self.with_server(|server| server.admin_secret().to_string())
+        self.with_server(|server| match server {
+            JazzServerInner::Alpha(server) => server.admin_secret().to_string(),
+            JazzServerInner::Direct { admin_secret, .. } => admin_secret.clone(),
+        })
     }
 
     #[napi]
@@ -1226,13 +1185,16 @@ impl JazzServer {
             .take();
 
         if let Some(server) = server {
-            server.shutdown().await;
+            match server {
+                JazzServerInner::Alpha(server) => server.shutdown().await,
+                JazzServerInner::Direct { server, .. } => server.shutdown(),
+            }
         }
 
         Ok(())
     }
 
-    fn with_server<T>(&self, f: impl FnOnce(&CoreJazzServer) -> T) -> napi::Result<T> {
+    fn with_server<T>(&self, f: impl FnOnce(&JazzServerInner) -> T) -> napi::Result<T> {
         let server = self
             .inner
             .lock()
@@ -1242,6 +1204,39 @@ impl JazzServer {
             .ok_or_else(|| napi::Error::from_reason("JazzServer has been stopped"))?;
         Ok(f(server))
     }
+}
+
+fn start_direct_jazz_server(
+    opts: JazzServerStartOptions,
+    schema_bytes: Vec<u8>,
+) -> napi::Result<JazzServer> {
+    let schema = postcard::from_bytes::<JazzSchema>(&schema_bytes).map_err(|error| {
+        napi::Error::from_reason(format!("Invalid direct Jazz schema bytes: {error}"))
+    })?;
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        author: AuthorId::SYSTEM,
+    };
+    let mut config = LoopbackWebSocketServerConfig::in_memory(schema, identity)
+        .with_row_id_seed(0x5e)
+        .with_auth_admission(AuthAdmissionConfig::legacy_query_identity());
+    config.listener.bind_addr = ([127, 0, 0, 1], opts.port.unwrap_or(0)).into();
+    config.listener.websocket_path = format!("/apps/{}/ws", opts.app_id);
+
+    let server = LoopbackWebSocketServer::start_with_config(config).map_err(|error| {
+        napi::Error::from_reason(format!("Failed to start direct Jazz server: {error}"))
+    })?;
+    let port = server.local_addr().port();
+    Ok(JazzServer {
+        inner: Mutex::new(Some(JazzServerInner::Direct {
+            server,
+            app_id: opts.app_id,
+            url: format!("http://127.0.0.1:{port}"),
+            port,
+            admin_secret: opts.admin_secret,
+            backend_secret: opts.backend_secret,
+        })),
+    })
 }
 
 // ============================================================================
