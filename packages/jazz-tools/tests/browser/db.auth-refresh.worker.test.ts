@@ -31,6 +31,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import type { Session } from "../../src/runtime/context.js";
 import { TestCleanup, uniqueDbName, withTimeout } from "./support.js";
 
 // ---------------------------------------------------------------------------
@@ -256,5 +257,56 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
     );
     expect(rowsAfter.some((r) => r.title === preMarker)).toBe(true);
     expect(rowsAfter.some((r) => r.title === postMarker)).toBe(true);
+  });
+
+  it("passes refreshed backend cookie sessions to the worker bridge auth update", async () => {
+    const initialSession: Session = {
+      user_id: "backend-session-user",
+      claims: { role: "member" },
+      authMode: "external",
+    };
+    const refreshedSession: Session = {
+      user_id: "backend-session-user",
+      claims: { role: "member", refresh: 1 },
+      authMode: "external",
+    };
+
+    const db = ctx.track(
+      await createDb({
+        appId: "test-app-cookie-session-refresh",
+        backendSecret: "backend-secret",
+        cookieSession: initialSession,
+        driver: { type: "persistent", dbName: uniqueDbName("worker-cookie-session-auth") },
+      }),
+    );
+
+    db.insert(todos, { title: "cookie-session-bridge-init", done: false });
+    await withTimeout(
+      db.all(allTodos, { tier: "local" }),
+      15_000,
+      "bridge init: local-tier query did not resolve",
+    );
+
+    const bridge = (
+      db as unknown as {
+        workerBridge?: { updateAuth: (auth: unknown) => void };
+      }
+    ).workerBridge;
+    expect(bridge, "persistent browser Db must initialize a worker bridge").toBeTruthy();
+
+    const updates: unknown[] = [];
+    const originalUpdateAuth = bridge!.updateAuth.bind(bridge);
+    bridge!.updateAuth = ((auth: unknown) => {
+      updates.push(auth);
+      return originalUpdateAuth(auth);
+    }) as typeof bridge.updateAuth;
+
+    db.updateCookieSession(refreshedSession);
+
+    expect(updates).toContainEqual({
+      jwtToken: undefined,
+      backendSecret: "backend-secret",
+      cookieSession: refreshedSession,
+    });
   });
 });

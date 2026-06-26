@@ -96,6 +96,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
+        backendSecret: config.backendSecret,
         adminSecret: config.adminSecret,
         tier: hasDurablePeer ? undefined : "local",
         defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,

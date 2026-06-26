@@ -148,6 +148,8 @@ export interface DbConfig {
   cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
+  /** Backend secret for backend-scoped sync auth with cookieSession. */
+  backendSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
   dbName?: string;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
@@ -1122,6 +1124,8 @@ export class Db {
 
     this.workerBridge?.updateAuth({
       jwtToken,
+      backendSecret: this.config.backendSecret,
+      cookieSession: this.config.cookieSession,
     });
     this.followerPortBridge?.updateAuth({
       jwtToken,
@@ -1149,6 +1153,8 @@ export class Db {
 
     this.workerBridge?.updateAuth({
       jwtToken: this.config.jwtToken,
+      backendSecret: this.config.backendSecret,
+      cookieSession,
     });
     this.followerPortBridge?.updateAuth({
       jwtToken: this.config.jwtToken,
@@ -1291,6 +1297,8 @@ export class Db {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
+          backend_secret: this.config.backendSecret,
+          backend_session: this.config.cookieSession,
         });
       }
       this.clients.set(key, client);
@@ -1534,6 +1542,8 @@ export class Db {
       serverUrl: this.config.serverUrl,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
+      backendSecret: this.config.backendSecret,
+      cookieSession: this.config.cookieSession,
       runtimeSources,
       fallbackWasmUrl,
       workerLockName:
