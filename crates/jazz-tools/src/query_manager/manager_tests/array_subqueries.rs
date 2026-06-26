@@ -1769,3 +1769,109 @@ fn e2e_client_receives_array_subquery_server_data_via_subscription() {
         "Client should receive inner rows needed for the array"
     );
 }
+
+#[test]
+fn e2e_client_receives_nested_array_subquery_server_data_via_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("orgs"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("todos"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("org_id", ColumnType::Uuid),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("user_checks"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("todo_id", ColumnType::Uuid)]).into(),
+    );
+    schema.insert(
+        TableName::new("check_notes"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("body", ColumnType::Text),
+            ColumnDescriptor::new("user_check_id", ColumnType::Uuid),
+        ])
+        .into(),
+    );
+
+    let (mut server, mut server_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let org = server
+        .insert(&mut server_io, "orgs", &[Value::Text("Acme".into())])
+        .unwrap();
+    let todo = server
+        .insert(
+            &mut server_io,
+            "todos",
+            &[Value::Text("ship it".into()), Value::Uuid(org.row_id)],
+        )
+        .unwrap();
+    let user_check = server
+        .insert(&mut server_io, "user_checks", &[Value::Uuid(todo.row_id)])
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "check_notes",
+            &[
+                Value::Text("looks good".into()),
+                Value::Uuid(user_check.row_id),
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema);
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("orgs")
+        .with_array("todosViaOrg", |todos| {
+            todos
+                .from("todos")
+                .correlate("org_id", "orgs.id")
+                .with_array("user_checksViaTodo", |checks| {
+                    checks
+                        .from("user_checks")
+                        .correlate("todo_id", "todos.id")
+                        .with_array("check_notesViaUser_check", |notes| {
+                            notes
+                                .from("check_notes")
+                                .correlate("user_check_id", "user_checks.id")
+                        })
+                })
+        })
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1, "Client should receive the org row");
+    let todos = results[0].1[1].as_array().expect("todos array");
+    assert_eq!(todos.len(), 1, "Client should receive nested todo rows");
+    let todo_values = todos[0].as_row().expect("todo row");
+    let checks = todo_values[2].as_array().expect("checks array");
+    assert_eq!(checks.len(), 1, "Client should receive nested check rows");
+    let check_values = checks[0].as_row().expect("check row");
+    let notes = check_values[1].as_array().expect("notes array");
+    assert_eq!(notes.len(), 1, "Client should receive nested note rows");
+}
