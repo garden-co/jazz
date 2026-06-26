@@ -773,6 +773,7 @@ mod tests {
     use crate::middleware::AuthConfig;
     use crate::query_manager::types::Schema;
     use crate::schema_manager::AppId;
+    use crate::server::direct_client::DirectCoreWebSocketTransport;
     use crate::server::{ServerBuilder, StorageBackend};
 
     const DIRECT_WS_STORM_SIZE: usize = 24;
@@ -1038,6 +1039,50 @@ mod tests {
             admission.claims.get("authMode"),
             Some(&CoreValue::String("external".to_owned()))
         );
+    }
+
+    // Internal route-boundary test: this proves the reusable direct-core
+    // websocket client helper negotiates the real /apps/<APP_ID>/ws route
+    // without reintroducing the legacy alpha websocket handler.
+    #[tokio::test]
+    async fn direct_core_websocket_client_helper_negotiates_route_hello() {
+        let state = make_direct_ws_test_state().await;
+        let addr = start_direct_ws_test_server(state.clone()).await;
+
+        let transport = DirectCoreWebSocketTransport::connect(
+            format!("http://{addr}"),
+            state.app_id,
+            AuthorId::from_bytes([0x41; 16]),
+            crate::transport_manager::AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("direct core websocket helper should negotiate server hello");
+
+        let schema = direct_ws_core_schema();
+        let column_families = schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let db = Db::open(
+            DbConfig::new(
+                schema,
+                CoreMemoryStorage::new(&refs),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x41; 16]),
+                    author: AuthorId::from_bytes([0x41; 16]),
+                },
+            )
+            .with_id_source(SeededRowIdSource::new(0x4100)),
+        )
+        .await
+        .expect("open direct helper client db");
+        db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        db.tick()
+            .expect("direct helper transport should accept db upstream frames");
     }
 
     async fn start_direct_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
