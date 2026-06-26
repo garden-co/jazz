@@ -34,6 +34,7 @@ import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 type WasmDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): DirectWasmDb;
+  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): DirectWasmDb;
 };
 
 type DirectWasmDb = {
@@ -49,6 +50,7 @@ type DirectWasmDb = {
   mergeableTx(): DirectTx;
   connectUpstream(): DirectTransport;
   tick(): void;
+  close?(): void;
 };
 
 type DirectPreparedQuery = object;
@@ -108,6 +110,18 @@ type RowState = {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+function openPersistentDirectDb(
+  Runtime: WasmDbConstructor,
+  dataPath: string,
+  schema: Uint8Array,
+  config: Uint8Array,
+): DirectWasmDb {
+  if (!Runtime.openPersistent) {
+    throw new Error("Direct WasmDb runtime does not expose persistent storage");
+  }
+  return Runtime.openPersistent(dataPath, schema, config);
+}
+
 export class DirectWasmRuntime implements Runtime {
   private readonly db: DirectWasmDb;
   private readonly schemaBytes: Uint8Array;
@@ -137,12 +151,15 @@ export class DirectWasmRuntime implements Runtime {
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
+    opts?: { persistentPath?: string },
   ) {
     this.schemaBytes = encodeDirectSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
-    this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
+    this.db = opts?.persistentPath
+      ? openPersistentDirectDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes)
+      : Runtime.openMemory(this.schemaBytes, this.configBytes);
   }
 
   getDirectOpenPayload(): DirectOpenPayload {
@@ -151,6 +168,10 @@ export class DirectWasmRuntime implements Runtime {
 
   connectUpstreamPeer(): DirectTransport {
     return this.db.connectUpstream();
+  }
+
+  close(): void {
+    this.db.close?.();
   }
 
   encodeDirectQuery(queryJson: string): Uint8Array {
@@ -312,7 +333,7 @@ export class DirectWasmRuntime implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
-    const opts = readOptions(tier);
+    const opts = readOptions(tier, queryIncludesDeleted(queryJson));
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
@@ -594,8 +615,10 @@ function txIdFromContext(writeContext?: string | null): string | undefined {
   }
 }
 
-function readOptions(tier?: string | null): unknown {
-  return { tier: tier ?? "local" };
+function readOptions(tier?: string | null, includeDeleted = false): unknown {
+  return includeDeleted
+    ? { tier: tier ?? "local", include_deleted: true }
+    : { tier: tier ?? "local" };
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
@@ -621,6 +644,14 @@ function readSupportedReadOptions(optionsJson: string): void {
     throw new Error(
       `Direct WasmDb runtime does not support read propagation '${String(propagation)}' yet`,
     );
+  }
+}
+
+function queryIncludesDeleted(queryJson: string): boolean {
+  try {
+    return (JSON.parse(queryJson) as { include_deleted?: unknown }).include_deleted === true;
+  } catch {
+    return false;
   }
 }
 

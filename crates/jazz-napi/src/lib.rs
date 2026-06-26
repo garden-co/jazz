@@ -51,7 +51,7 @@ use jazz::db::{
 use jazz::groove::records::{BorrowedRecord as DirectBorrowedRecord, RecordDescriptor};
 use jazz::groove::storage::{
     MemoryStorage as DirectMemoryStorage, OrderedKvStorage as DirectOrderedKvStorage,
-    ReopenableStorage as DirectReopenableStorage,
+    ReopenableStorage as DirectReopenableStorage, RocksDbStorage as DirectRocksDbStorage,
 };
 use jazz::ids::{AuthorId as DirectAuthorId, NodeUuid as DirectNodeUuid, RowUuid as DirectRowUuid};
 use jazz::query::Query as DirectQuery;
@@ -270,7 +270,17 @@ struct DirectWriteResult {
     tx_id: DirectTxId,
 }
 
-type DirectNapiDbInner = Rc<RefCell<DirectDb<DirectMemoryStorage>>>;
+type DirectNapiDbInner = Rc<RefCell<Option<DirectNapiDb>>>;
+
+enum DirectNapiDb {
+    Memory(DirectDb<DirectMemoryStorage>),
+    Persistent(DirectDb<DirectRocksDbStorage>),
+}
+
+enum DirectNapiWrite {
+    Memory(DirectWriteHandle<DirectMemoryStorage>),
+    Persistent(DirectWriteHandle<DirectRocksDbStorage>),
+}
 
 #[napi(js_name = "WasmPreparedQuery")]
 pub struct NapiDirectPreparedQuery {
@@ -280,7 +290,7 @@ pub struct NapiDirectPreparedQuery {
 #[napi(js_name = "WasmWrite")]
 pub struct NapiDirectWrite {
     payload: Vec<u8>,
-    inner: Option<DirectWriteHandle<DirectMemoryStorage>>,
+    inner: Option<DirectNapiWrite>,
 }
 
 #[napi]
@@ -294,8 +304,12 @@ impl NapiDirectWrite {
     pub fn wait(&self, tier: String) -> napi::Result<()> {
         let tier = direct_durability_tier_from_str(&tier)?;
         if let Some(write) = &self.inner {
-            direct_block_on(write.wait(tier))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            match write {
+                DirectNapiWrite::Memory(write) => direct_block_on(write.wait(tier))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                DirectNapiWrite::Persistent(write) => direct_block_on(write.wait(tier))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            };
         }
         Ok(())
     }
@@ -316,7 +330,25 @@ impl NapiDirectDb {
         let db = open_direct_db(schema, DirectMemoryStorage::new(&refs), config)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(db)),
+            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Memory(db)))),
+        })
+    }
+
+    #[napi(factory, js_name = "openPersistent")]
+    pub fn open_persistent(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_direct_open_args(&schema, &config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = DirectRocksDbStorage::open(data_path, &refs)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_direct_db(schema, storage, config)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(DirectNapiDb::Persistent(db)))),
         })
     }
 
@@ -325,11 +357,15 @@ impl NapiDirectDb {
         let query: DirectQuery = postcard::from_bytes(&query)
             .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
         let db = self.inner.borrow();
-        Ok(NapiDirectPreparedQuery {
-            inner: db
-                .prepare_query(&query)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        })
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let inner = match db {
+            DirectNapiDb::Memory(db) => db.prepare_query(&query),
+            DirectNapiDb::Persistent(db) => db.prepare_query(&query),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(NapiDirectPreparedQuery { inner })
     }
 
     #[napi]
@@ -343,8 +379,14 @@ impl NapiDirectDb {
     ) -> napi::Result<Uint8Array> {
         let opts = direct_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
-        let rows = direct_block_on(db.all(&query.inner, opts))
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let rows = match db {
+            DirectNapiDb::Memory(db) => direct_block_on(db.all(&query.inner, opts)),
+            DirectNapiDb::Persistent(db) => direct_block_on(db.all(&query.inner, opts)),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         encode_direct_rows(&rows)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
@@ -363,8 +405,18 @@ impl NapiDirectDb {
         let author = direct_author_id_from_bytes(&author)?;
         let opts = direct_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
-        let rows = direct_block_on(db.all_for_identity(&query.inner, opts, author))
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let rows = match db {
+            DirectNapiDb::Memory(db) => {
+                direct_block_on(db.all_for_identity(&query.inner, opts, author))
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_block_on(db.all_for_identity(&query.inner, opts, author))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         encode_direct_rows(&rows)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
@@ -380,10 +432,19 @@ impl NapiDirectDb {
         let row_id = direct_row_uuid_from_bytes(&row_id)?;
         let cells = decode_direct_cells(&cells)?;
         let db = self.inner.borrow();
-        let write = db
-            .insert_with_id(&table, row_id, cells)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        direct_write_memory(write)
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => direct_write_memory(
+                db.insert_with_id(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => direct_write_persistent(
+                db.insert_with_id(&table, row_id, cells)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
     }
 
     #[napi(js_name = "updateEncoded")]
@@ -396,10 +457,19 @@ impl NapiDirectDb {
         let row_id = direct_row_uuid_from_bytes(&row_id)?;
         let patch = decode_direct_cells(&patch)?;
         let db = self.inner.borrow();
-        let write = db
-            .update(&table, row_id, patch)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        direct_write_memory(write)
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => direct_write_memory(
+                db.update(&table, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => direct_write_persistent(
+                db.update(&table, row_id, patch)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
     }
 
     #[napi(js_name = "delete")]
@@ -410,17 +480,37 @@ impl NapiDirectDb {
     ) -> napi::Result<NapiDirectWrite> {
         let row_id = direct_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
-        let write = db
-            .delete(&table, row_id)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        direct_write_memory(write)
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => direct_write_memory(
+                db.delete(&table, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => direct_write_persistent(
+                db.delete(&table, row_id)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
     }
 
     #[napi]
     pub fn tick(&self) -> napi::Result<()> {
         let db = self.inner.borrow();
-        db.tick()
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => db.tick(),
+            DirectNapiDb::Persistent(db) => db.tick(),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        self.inner.borrow_mut().take();
     }
 }
 
@@ -497,7 +587,21 @@ fn direct_write_memory(
     Ok(NapiDirectWrite {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        inner: Some(write),
+        inner: Some(DirectNapiWrite::Memory(write)),
+    })
+}
+
+fn direct_write_persistent(
+    write: DirectWriteHandle<DirectRocksDbStorage>,
+) -> napi::Result<NapiDirectWrite> {
+    let result = DirectWriteResult {
+        row_id: write.row_uuid(),
+        tx_id: write.mergeable_tx_id(),
+    };
+    Ok(NapiDirectWrite {
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        inner: Some(DirectNapiWrite::Persistent(write)),
     })
 }
 
