@@ -1,68 +1,10 @@
-//! jazz-wasm - WebAssembly bindings for the Jazz database engine.
+//! Published `jazz-wasm` package shell.
 //!
-//! This crate provides JavaScript bindings for the Jazz local-first database engine,
-//! enabling TypeScript/JavaScript applications to use Jazz with custom storage backends.
-//!
-//! # Architecture
-//!
-//! - **WasmRuntime**: Main entry point that wraps SchemaManager and provides CRUD operations
-//! - **WasmQueryBuilder**: Fluent query builder exposed to JavaScript
-//! - **JsStorageDriver**: Interface for JavaScript storage implementations (IndexedDB, node:sqlite)
-//! - **Type bridges**: Serialization between Rust and JavaScript types
-//!
-//! # Usage
-//!
-//! ```javascript
-//! import { WasmRuntime, WasmQueryBuilder } from 'jazz-wasm';
-//!
-//! // Create a storage driver (e.g., IndexedDB)
-//! const driver = {
-//!   async process(requests) {
-//!     // Handle storage requests
-//!     return responses;
-//!   }
-//! };
-//!
-//! // Create runtime
-//! const schema = { todos: { columns: [...] } };
-//! const runtime = new WasmRuntime(driver, JSON.stringify(schema), 'my-app', 'dev', 'main');
-//!
-//! // Insert a row
-//! const id = await runtime.insert('todos', {
-//!   title: { type: 'Text', value: 'Buy milk' },
-//!   done: { type: 'Boolean', value: false },
-//! });
-//!
-//! // Query with builder
-//! const query = new WasmQueryBuilder('todos').branch('main').build();
-//! const results = await runtime.query(query);
-//!
-//! // Tick must be called periodically
-//! setInterval(() => runtime.tick(), 100);
-//! ```
+//! The implementation now comes from the vendored `jazz_core` wasm bindings.
+//! Keep this crate as the publishable alpha package name, but do not keep the
+//! old alpha `WasmRuntime` engine alive in parallel.
 
-#![allow(clippy::new_without_default)]
-
-pub mod driver_bridge;
-pub mod query;
-pub mod runtime;
-pub mod types;
-#[cfg(target_arch = "wasm32")]
-pub mod worker_bridge;
-#[cfg(target_arch = "wasm32")]
-pub mod worker_host;
-pub mod worker_protocol;
-#[cfg(target_arch = "wasm32")]
-pub mod ws_stream;
-
-// Re-export main types for JavaScript
-pub use driver_bridge::JsStorageDriver;
-pub use query::WasmQueryBuilder;
-pub use runtime::WasmRuntime;
-#[cfg(target_arch = "wasm32")]
-pub use worker_bridge::WasmWorkerBridge;
-#[cfg(target_arch = "wasm32")]
-pub use worker_host::run_as_worker;
+pub use vendored_core_wasm::*;
 
 use wasm_bindgen::prelude::*;
 
@@ -73,16 +15,6 @@ use wasm_bindgen::prelude::*;
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-}
-
-/// Parse a schema from JSON string.
-///
-/// Returns the schema as a JsValue for inspection.
-#[wasm_bindgen(js_name = parseSchema)]
-pub fn parse_schema(json: &str) -> Result<JsValue, JsError> {
-    let schema: types::Schema =
-        serde_json::from_str(json).map_err(|e| JsError::new(&format!("Parse error: {}", e)))?;
-    Ok(serde_wasm_bindgen::to_value(&schema)?)
 }
 
 /// Generate a new UUID v7 (time-ordered).

@@ -9,6 +9,10 @@ repository = "https://github.com/garden-co/jazz2"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+wasm-bench = []
+
 [dependencies]
 rustc-hash = "2"
 thiserror = "2"

@@ -5,7 +5,7 @@ mod file;
 mod page;
 mod superblock;
 mod wal;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-bench"))]
 pub mod wasm_bench;
 
 pub use db::{BTreeOptions, CheckpointState, OpfsBTree};
