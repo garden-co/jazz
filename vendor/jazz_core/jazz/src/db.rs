@@ -286,15 +286,18 @@ where
         })
     }
 
-    /// Synchronously read local rows for a prepared query.
+    /// Synchronously read rows for a prepared query.
+    ///
+    /// If an upstream/server subscription has covered this exact shape and
+    /// binding, prefer that authoritative settled result set; otherwise read
+    /// the local preview.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.node
             .node
             .borrow_mut()
-            .query_rows_with_prepared_plan(
+            .query_rows_prefer_settled_result_set(
                 &prepared.shape,
                 &prepared.binding,
-                DurabilityTier::Local,
                 prepared.plan_for_tier(DurabilityTier::Local),
             )
             .map_err(Into::into)
