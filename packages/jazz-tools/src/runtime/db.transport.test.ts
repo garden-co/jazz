@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
-import { JazzClient, WriteResult, type DirectInsertResult } from "./client.js";
+import { JazzClient, WriteResult, type DirectInsertResult, type Runtime } from "./client.js";
 import { createDbWithRuntimeModule, Db, type DbConfig } from "./db.js";
 import {
   DbRuntimeModule,
@@ -35,8 +35,8 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     const hasDurablePeer = durablePeer !== null;
-    return JazzClient.connectSync(
-      TestDb.runtime as never,
+    return JazzClient.connectWithRuntime(
+      makeRuntimeStub(),
       {
         appId: config.appId,
         schema,
@@ -51,9 +51,7 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
         defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,
       },
       {
-        useBinaryEncoding: hasDurablePeer,
         onAuthFailure,
-        nonDurableClientRuntime: hasDurablePeer,
       },
     );
   }
@@ -97,6 +95,31 @@ function makeClientStub() {
   };
 }
 
+function makeRuntimeStub(): Runtime {
+  return {
+    insert: vi.fn(),
+    restore: vi.fn(),
+    update: vi.fn(),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+    onMutationError: vi.fn(),
+    beginTransaction: vi.fn(),
+    commitTransaction: vi.fn(),
+    waitForTransaction: vi.fn(),
+    rollbackTransaction: vi.fn(),
+    query: vi.fn(),
+    createSubscription: vi.fn(),
+    executeSubscription: vi.fn(),
+    unsubscribe: vi.fn(),
+    getSchema: vi.fn(),
+    getSchemaHash: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    updateAuth: vi.fn(),
+    onAuthFailure: vi.fn(),
+  } as unknown as Runtime;
+}
+
 describe("runtime/Db direct path upstream wiring", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -107,7 +130,9 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U01 calls connectTransport with serverUrl and derived app scope when configured and no worker", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
 
     const db = new TestDb({
       appId: "app",
@@ -117,7 +142,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
     db.exposeGetClient(makeSchema());
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
     expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
       jwt_token: "jwt-x",
       admin_secret: "admin-y",
@@ -126,7 +151,7 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U01b calls connectTransport without a separate prefix argument", () => {
     const client = makeClientStub();
-    vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
 
     const db = new TestDb({
       appId: "app",
@@ -144,7 +169,7 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U02 does not call connectTransport when serverUrl is absent", () => {
     const client = makeClientStub();
-    vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
 
     const db = new TestDb({ appId: "app" });
     db.exposeGetClient(makeSchema());
@@ -154,7 +179,9 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
     const schema: WasmSchema = {
       todos: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
@@ -176,8 +203,8 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
     db.exposeGetClient(schema);
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
-    const runtimeSchema = connectSyncSpy.mock.calls[0]?.[1].schema;
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
+    const runtimeSchema = connectWithRuntimeSpy.mock.calls[0]?.[1].schema;
     expect(runtimeSchema.todos.policies).toBeUndefined();
     expect(runtimeSchema).toMatchObject({
       todos: {
@@ -188,7 +215,9 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U03b preserves local policies when the runtime does not support policy bypass", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
     class PolicyEvaluatingRuntimeModule extends TestDirectRuntimeModule {
       override readonly supportsPolicyBypass = false;
     }
@@ -216,8 +245,8 @@ describe("runtime/Db direct path upstream wiring", () => {
     );
     db.exposeGetClient(schema);
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
-    const runtimeSchema = connectSyncSpy.mock.calls[0]?.[1].schema;
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
+    const runtimeSchema = connectWithRuntimeSpy.mock.calls[0]?.[1].schema;
     expect(runtimeSchema.todos).toHaveProperty("policies", {
       update: {
         using: {

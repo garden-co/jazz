@@ -1,7 +1,7 @@
 import {
   JazzClient,
   loadWasmModule,
-  type ConnectSyncRuntimeOptions,
+  type ConnectRuntimeOptions,
   type WasmModule,
 } from "./client.js";
 import { LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
@@ -64,12 +64,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
     setGlobalWasmLogLevel(config.logLevel);
 
     const hasDurablePeer = durablePeer !== null;
-    const runtimeOptions: ConnectSyncRuntimeOptions = {
-      // Main-thread peers exchange postcard payloads with their durable peer;
-      // direct browser/server routing keeps JSON payloads.
-      useBinaryEncoding: hasDurablePeer,
+    const runtimeOptions: ConnectRuntimeOptions = {
       onAuthFailure,
-      nonDurableClientRuntime: hasDurablePeer,
     };
 
     const mainThreadPeerRuntime = new DirectWasmRuntime(
