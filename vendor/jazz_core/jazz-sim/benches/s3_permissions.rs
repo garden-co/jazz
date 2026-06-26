@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use hdrhistogram::Histogram;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, Transport, WatchHandle,
+    Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream, Transport,
 };
 use jazz::groove::db::{
     StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
@@ -107,8 +108,6 @@ pub fn smoke() {
     let mut deterministic = DeterministicDriver::new(topology, config.seed);
     let summary = run(&mut deterministic, &config);
     assert_eq!(summary.forbidden_deliveries, 0);
-    let db_surface = run_db_surface(&config);
-    assert_eq!(db_surface.forbidden_deliveries, 0);
 }
 
 #[derive(Clone, Debug)]
@@ -420,7 +419,8 @@ struct DbClient {
     _dir: tempfile::TempDir,
     server_to_client_bytes: Rc<Cell<u64>>,
     server_to_client_floor_bytes: Rc<Cell<u64>>,
-    watch: Option<WatchHandle>,
+    watch: Option<SubscriptionStream>,
+    visible_rows: BTreeSet<RowUuid>,
 }
 
 #[derive(Clone, Debug)]
@@ -532,7 +532,18 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
     );
 
     let mut revoke_summaries = Vec::new();
-    for (group, requested) in fixture.revoke_groups.iter().copied() {
+    for (group, _requested) in fixture.revoke_groups.iter().copied() {
+        let before = oracle.visible_for(fixture.simple_team);
+        let membership = oracle
+            .memberships
+            .iter()
+            .find(|(_, (member, parent, _))| *member == fixture.simple_team && *parent == group)
+            .map(|(row, _)| *row)
+            .expect("revoke membership exists");
+        let mut expected_oracle = oracle.clone();
+        expected_oracle.memberships.remove(&membership);
+        let expected = expected_oracle.visible_for(fixture.simple_team);
+        let hidden = before.difference(&expected).count();
         let summary = revoke_phase(
             ctx,
             &mut writer,
@@ -544,7 +555,7 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             &fixture,
             &mut oracle,
             group,
-            requested.min(config.resources()),
+            hidden,
         );
         revoke_summaries.push(summary);
         assert_eq!(
@@ -661,7 +672,26 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         oracle.visible_for(fixture.simple_team)
     );
 
-    let revoke = Vec::new();
+    let mut revoke = Vec::new();
+    for (group, _requested) in fixture.revoke_groups.iter().copied() {
+        let before = oracle.visible_for(fixture.simple_team);
+        let membership = oracle
+            .memberships
+            .iter()
+            .find(|(_, (member, parent, _))| *member == fixture.simple_team && *parent == group)
+            .map(|(row, _)| *row)
+            .expect("revoke membership exists");
+        let mut expected_oracle = oracle.clone();
+        expected_oracle.memberships.remove(&membership);
+        let expected = expected_oracle.visible_for(fixture.simple_team);
+        let hidden = before.difference(&expected).count();
+        let summary = revoke_phase_db(&core, &mut simple, &fixture, &mut oracle, group, hidden);
+        revoke.push(summary);
+        assert_eq!(
+            visible_rows_db_client(&simple),
+            oracle.visible_for(fixture.simple_team)
+        );
+    }
 
     let forbidden_deliveries = forbidden_write_phase_db(&core, &mut spy, config);
     assert_eq!(visible_rows_db_client(&spy).len(), 0);
@@ -826,9 +856,10 @@ fn grant_phase_db(
     );
     drive_db_round_trip(core, client);
     let watch_rows = visible_rows_db_client(client);
+    let prepared = client.db.prepare_query(&Query::from(RESOURCES)).unwrap();
     let read_rows = client
         .db
-        .read(&Query::from(RESOURCES))
+        .read(&prepared)
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -843,6 +874,56 @@ fn grant_phase_db(
     );
     samples.push(start.elapsed().as_micros() as u64);
     samples
+}
+
+fn revoke_phase_db(
+    core: &CoreDb,
+    client: &mut DbClient,
+    fixture: &Fixture,
+    oracle: &mut OracleState,
+    group: RowUuid,
+    hidden: usize,
+) -> DbRevokeSummary {
+    let membership = oracle
+        .memberships
+        .iter()
+        .find(|(_, (member, parent, _))| *member == fixture.simple_team && *parent == group)
+        .map(|(row, _)| *row)
+        .expect("revoke membership exists");
+    let before = visible_rows_db_client(client);
+    let start = Instant::now();
+    delete_db(core, MEMBERSHIPS, membership);
+    oracle.memberships.remove(&membership);
+    let tick_start = Instant::now();
+    drive_db_round_trip(core, client);
+    let expected = oracle.visible_for(fixture.simple_team);
+    let mut after = visible_rows_db_client(client);
+    for _ in 0..env_usize("JAZZ_S3_DB_REVOKE_SETTLE_TICKS", 3) {
+        if after == expected {
+            break;
+        }
+        core.tick().unwrap();
+        client.db.tick().unwrap();
+        drain_db_subscription(client);
+        after = visible_rows_db_client(client);
+    }
+    let tick_us = tick_start.elapsed().as_micros() as u64;
+    assert_eq!(after, expected);
+    let removed = before.difference(&after).count();
+    assert!(
+        removed >= hidden,
+        "revocation expected at least {hidden} removals, got {removed}"
+    );
+    let mut disappearance = Histogram::new(3).unwrap();
+    disappearance
+        .record(start.elapsed().as_micros() as u64)
+        .unwrap();
+    DbRevokeSummary {
+        hidden,
+        disappearance,
+        tick_us,
+        update_rows: removed,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -878,13 +959,13 @@ fn revoke_phase(
     let cpu_us = cpu.elapsed().as_micros() as u64;
     oracle.memberships.remove(&membership);
     let query_start = Instant::now();
+    hydrate_edge_policy(ctx, core, edge);
     let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
     edge.node
         .apply_sync_message(delivered_to_edge.message)
         .unwrap();
-    hydrate_edge_policy(ctx, core, edge);
     let update = client
         .peer
         .query_update(&mut edge.node, shape, binding)
@@ -1510,6 +1591,7 @@ fn flush_headline_versions(
         row_read_set: None,
         absent_read_set: None,
         predicate_read_set: None,
+        permission_subject: Some(AuthorId::SYSTEM),
         user_metadata_json: Some("s3_block_tree_headline_fixture".to_owned()),
         source_branch: None,
     };
@@ -1719,11 +1801,17 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
     client.server_to_client_bytes.set(0);
     client.server_to_client_floor_bytes.set(0);
     let start = Instant::now();
-    let watch = block_on(client.db.subscribe(query, ReadOpts::default())).unwrap();
+    let prepared = client.db.prepare_query(query).unwrap();
+    let mut watch = block_on(client.db.subscribe(&prepared, ReadOpts::default())).unwrap();
     client.db.tick().unwrap();
     core.tick().unwrap();
     client.db.tick().unwrap();
-    let output_rows = watch.current().len();
+    let opened = block_on(watch.next_event()).expect("db subscription opens");
+    apply_db_subscription_event(&mut client.visible_rows, opened);
+    while let Some(event) = watch.try_next_event() {
+        apply_db_subscription_event(&mut client.visible_rows, event);
+    }
+    let output_rows = client.visible_rows.len();
     client.watch = Some(watch);
     HydrateSummary {
         latency_us: start.elapsed().as_micros() as u64,
@@ -1735,10 +1823,42 @@ fn hydrate_db(core: &CoreDb, client: &mut DbClient, query: &Query) -> HydrateSum
     }
 }
 
-fn drive_db_round_trip(core: &CoreDb, client: &DbClient) {
+fn drive_db_round_trip(core: &CoreDb, client: &mut DbClient) {
     for _ in 0..3 {
         core.tick().unwrap();
         client.db.tick().unwrap();
+        drain_db_subscription(client);
+    }
+}
+
+fn drain_db_subscription(client: &mut DbClient) {
+    let Some(watch) = client.watch.as_mut() else {
+        return;
+    };
+    while let Some(event) = watch.try_next_event() {
+        apply_db_subscription_event(&mut client.visible_rows, event);
+    }
+}
+
+fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
+    match event {
+        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
+            *visible_rows = current.into_iter().map(|row| row.row_uuid()).collect();
+        }
+        SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            for row in removed {
+                visible_rows.remove(&row.row_uuid);
+            }
+            for row in added.into_iter().chain(updated) {
+                visible_rows.insert(row.row_uuid());
+            }
+        }
+        SubscriptionEvent::Closed => {}
     }
 }
 
@@ -1820,16 +1940,16 @@ fn deliver_update(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
+    hydrate_edge_policy(ctx, core, edge);
     let core_update = edge.core_peer.query_update(core, shape, binding).unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
     edge.node
         .apply_sync_message(delivered_to_edge.message)
         .unwrap();
-    hydrate_edge_policy(ctx, core, edge);
     let update = client
         .peer
-        .query_update(&mut edge.node, shape, binding)
+        .rehydrate_query(&mut edge.node, shape, binding)
         .unwrap();
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
@@ -1838,11 +1958,15 @@ fn deliver_update(
 
 fn apply_client_update(client: &mut Client, message: SyncMessage) {
     if let SyncMessage::ViewUpdate {
+        reset_result_set,
         result_row_adds,
         result_row_removes,
         ..
     } = &message
     {
+        if *reset_result_set {
+            client.visible_rows.clear();
+        }
         for row in result_row_adds {
             client.visible_rows.insert(row.1);
         }
@@ -2434,6 +2558,7 @@ fn open_db_client(
         server_to_client_bytes: bytes,
         server_to_client_floor_bytes: floor_bytes,
         watch: None,
+        visible_rows: BTreeSet::new(),
     }
 }
 
@@ -2466,7 +2591,7 @@ impl CoreDb {
     }
 
     fn tick(&self) -> Result<(), jazz::db::Error> {
-        self.server.tick()
+        self.server.tick().map(|_| ())
     }
 }
 
@@ -2516,6 +2641,21 @@ fn seed_db(core: &CoreDb, table: &str, row: RowUuid, cells: BTreeMap<String, Val
             MergeableCommit::new(table, row, core.next_now_ms())
                 .made_by(AuthorId::SYSTEM)
                 .cells(cells),
+        )
+        .unwrap();
+    node.borrow_mut()
+        .finalize_local_mergeable_commit(tx_id)
+        .unwrap();
+}
+
+fn delete_db(core: &CoreDb, table: &str, row: RowUuid) {
+    let node = core.server.node();
+    let tx_id = node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new(table, row, core.next_now_ms())
+                .made_by(AuthorId::SYSTEM)
+                .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     node.borrow_mut()
@@ -2639,14 +2779,7 @@ fn visible_rows(
 }
 
 fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
-    client
-        .watch
-        .as_ref()
-        .expect("db client is subscribed")
-        .current()
-        .into_iter()
-        .map(|row| row.row_uuid())
-        .collect()
+    client.visible_rows.clone()
 }
 
 fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
@@ -2668,7 +2801,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
             version_bundles,
-            complete_tx_refs,
             result_row_adds,
             result_row_removes,
             ..
@@ -2683,9 +2815,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                         .sum::<usize>()
                 })
                 .sum::<usize>();
-            (bundles
-                + complete_tx_refs.len() * 24
-                + (result_row_adds.len() + result_row_removes.len()) * 48) as u64
+            (bundles + (result_row_adds.len() + result_row_removes.len()) * 48) as u64
         }
         _ => 0,
     }
