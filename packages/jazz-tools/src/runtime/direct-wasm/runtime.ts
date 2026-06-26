@@ -52,7 +52,6 @@ type DirectWasmDb = {
 };
 
 type DirectPreparedQuery = object;
-type DurableQueryExecutor = (query: Uint8Array) => Promise<Uint8Array>;
 
 type DirectWrite = {
   payload: Uint8Array;
@@ -121,7 +120,6 @@ export class DirectWasmRuntime implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private authFailureCallback: ((reason: string) => void) | null = null;
-  private durableQueryExecutor: DurableQueryExecutor | null = null;
   private serverTransport: DirectTransport | null = null;
   private serverCarrier: DirectWebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
@@ -166,10 +164,6 @@ export class DirectWasmRuntime implements Runtime {
       queryFiltersFromJson(queryJson, this.schema),
       this.schema,
     );
-  }
-
-  setDurableQueryExecutor(executor: DurableQueryExecutor | null): void {
-    this.durableQueryExecutor = executor;
   }
 
   onDirectSyncNeeded(callback: () => void): () => void {
@@ -315,10 +309,6 @@ export class DirectWasmRuntime implements Runtime {
     tier?: string | null,
     _optionsJson?: string | null,
   ): Promise<unknown> {
-    if ((tier == null || tier === "local") && this.durableQueryExecutor) {
-      const payload = await this.durableQueryExecutor(this.encodeDirectQuery(queryJson));
-      return this.decodeDirectRows(payload, queryJson);
-    }
     const query = this.prepareQuery(queryJson);
     return this.decodeDirectRows(this.db.all(query, readOptions()), queryJson);
   }

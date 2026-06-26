@@ -67,14 +67,12 @@ interface RuntimeWithDirectTransport extends Runtime {
   connectUpstreamPeer?(): DirectTransport;
   getDirectOpenPayload?(): DirectOpenPayload;
   onDirectSyncNeeded?(callback: () => void): () => void;
-  setDurableQueryExecutor?(executor: ((query: Uint8Array) => Promise<Uint8Array>) | null): void;
 }
 
 type WorkerInbound =
   | { type: "init"; options: WorkerBridgeOptions }
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "settle"; id: number }
-  | { type: "query"; id: number; query: Uint8Array }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: WorkerLifecycleEvent }
   | { type: "attach-follower-port"; peerId: string; leadershipId: number; port: MessagePort }
@@ -88,8 +86,6 @@ type WorkerOutbound =
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "server-out"; frames: Uint8Array[] }
   | { type: "settled"; id: number }
-  | { type: "query-result"; id: number; rows: Uint8Array }
-  | { type: "query-error"; id: number; message: string }
   | { type: "auth-failure"; reason: AuthFailureReason }
   | { type: "follower-port-attached"; peerId: string; leadershipId: number }
   | { type: "follower-port-closed"; peerId: string; leadershipId: number }
@@ -133,18 +129,9 @@ export class WorkerBridge {
   private pumpAgain = false;
   private shutdownResolve: (() => void) | null = null;
   private nextSettleId = 1;
-  private nextQueryId = 1;
   private readonly pendingSettles = new Map<
     number,
     { resolve: () => void; reject: (error: Error) => void; timeout: ReturnType<typeof setTimeout> }
-  >();
-  private readonly pendingQueries = new Map<
-    number,
-    {
-      resolve: (rows: Uint8Array) => void;
-      reject: (error: Error) => void;
-      timeout: ReturnType<typeof setTimeout>;
-    }
   >();
 
   constructor(worker: Worker, runtime: Runtime) {
@@ -174,7 +161,6 @@ export class WorkerBridge {
     this.transport = connectUpstreamPeer.call(this.runtime);
     this.unsubscribeSyncNeeded =
       this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
-    this.runtime.setDurableQueryExecutor?.((query) => this.queryDurable(query));
     const directOpen = getDirectOpenPayload.call(this.runtime);
     const initOptions: WorkerBridgeOptions = {
       ...options,
@@ -224,7 +210,6 @@ export class WorkerBridge {
     this.disposed = true;
     this.unsubscribeSyncNeeded?.();
     this.unsubscribeSyncNeeded = null;
-    this.runtime.setDurableQueryExecutor?.(null);
     this.closeServerCarrier();
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 1_000);
@@ -268,26 +253,6 @@ export class WorkerBridge {
       this.pendingSettles.set(id, { resolve, reject, timeout });
       this.postToWorker({ type: "settle", id });
       this.schedulePump();
-    });
-  }
-
-  async queryDurable(query: Uint8Array): Promise<Uint8Array> {
-    if (!this.transport) {
-      await this.clientIdPromise;
-    }
-    if (!this.transport || this.disposed) {
-      throw new Error("WorkerBridge is not ready");
-    }
-
-    await this.waitForDurableSettle();
-    const id = this.nextQueryId++;
-    return await new Promise<Uint8Array>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingQueries.delete(id);
-        reject(new Error("WorkerBridge query timed out"));
-      }, 30_000);
-      this.pendingQueries.set(id, { resolve, reject, timeout });
-      this.postToWorker({ type: "query", id, query }, [query.buffer]);
     });
   }
 
@@ -376,22 +341,6 @@ export class WorkerBridge {
         pending.resolve();
         return;
       }
-      case "query-result": {
-        const pending = this.pendingQueries.get(message.id);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingQueries.delete(message.id);
-        pending.resolve(message.rows);
-        return;
-      }
-      case "query-error": {
-        const pending = this.pendingQueries.get(message.id);
-        if (!pending) return;
-        clearTimeout(pending.timeout);
-        this.pendingQueries.delete(message.id);
-        pending.reject(new Error(message.message));
-        return;
-      }
       case "auth-failure":
         this.listeners.onAuthFailure?.(message.reason);
         return;
@@ -411,11 +360,6 @@ export class WorkerBridge {
           pending.reject(new Error(message.message));
         }
         this.pendingSettles.clear();
-        for (const pending of this.pendingQueries.values()) {
-          clearTimeout(pending.timeout);
-          pending.reject(new Error(message.message));
-        }
-        this.pendingQueries.clear();
         console.error("Jazz worker bridge error", message.message);
         return;
       default:
@@ -533,11 +477,6 @@ export class WorkerBridge {
       pending.reject(error);
     }
     this.pendingSettles.clear();
-    for (const pending of this.pendingQueries.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
-    this.pendingQueries.clear();
     console.error("Jazz worker bridge server error", message);
   }
 }
