@@ -19,6 +19,7 @@ export declare class NapiDirectDb {
   allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   propagateQuery(query: WasmPreparedQuery, opts?: any | undefined | null): void
   queryIsCovered(query: WasmPreparedQuery): boolean
+  subscribe(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): WasmSubscription
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
   insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): WasmWrite
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
@@ -93,6 +94,13 @@ export declare class WasmPreparedQuery {
 
 }
 export type NapiDirectPreparedQuery = WasmPreparedQuery
+
+export declare class WasmSubscription {
+  readAll(): Array<any>
+  drain(): Array<any>
+  close(): boolean
+}
+export type NapiDirectSubscription = WasmSubscription
 
 export declare class WasmTransport {
   sendWireFrame(frame: Uint8Array): void

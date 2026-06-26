@@ -45,8 +45,9 @@ use jazz::db::{
     Db as DirectDb, DbConfig as DirectDbConfig, DbIdentity as DirectDbIdentity,
     LocalUpdates as DirectLocalUpdates, PeerConnection as DirectPeerConnection,
     PreparedQuery as DirectPreparedQueryInner, Propagation as DirectPropagation,
-    ReadOpts as DirectReadOpts, RowCells as DirectRowCells,
-    SeededRowIdSource as DirectSeededRowIdSource,
+    ReadOpts as DirectReadOpts, RemovedRow as DirectRemovedRowInner, RowCells as DirectRowCells,
+    SeededRowIdSource as DirectSeededRowIdSource, SubscriptionEvent as DirectSubscriptionEvent,
+    SubscriptionStream as DirectSubscriptionStream,
     WireTransportAdapter as DirectWireTransportAdapter, WriteHandle as DirectWriteHandle,
     block_on as direct_block_on,
 };
@@ -275,6 +276,19 @@ struct DirectWriteResult {
     tx_id: DirectTxId,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct DirectRemovedRow<'a> {
+    table: &'a str,
+    row_id: DirectRowUuid,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DirectSubscriptionDelta<'a> {
+    added: Vec<DirectRowBatch<'a>>,
+    updated: Vec<DirectRowBatch<'a>>,
+    removed: Vec<DirectRemovedRow<'a>>,
+}
+
 type DirectNapiDbInner = Rc<RefCell<Option<DirectNapiDb>>>;
 
 enum DirectNapiDb {
@@ -360,6 +374,11 @@ pub struct NapiDirectTransport {
     queues: DirectWireQueues,
 }
 
+#[napi(js_name = "WasmSubscription")]
+pub struct NapiDirectSubscription {
+    inner: Option<DirectNapiSubscription>,
+}
+
 enum DirectNapiTransportInner {
     Memory {
         db: Rc<DirectDb<DirectMemoryStorage>>,
@@ -369,6 +388,11 @@ enum DirectNapiTransportInner {
         db: Rc<DirectDb<DirectRocksDbStorage>>,
         connection: Option<Rc<RefCell<DirectPeerConnection<DirectRocksDbStorage>>>>,
     },
+}
+
+enum DirectNapiSubscription {
+    Memory(DirectSubscriptionStream),
+    Persistent(DirectSubscriptionStream),
 }
 
 #[napi(js_name = "WasmTx")]
@@ -452,6 +476,39 @@ impl NapiDirectTransport {
                 db.detach_connection(&connection)
             }
         }
+    }
+}
+
+#[napi]
+impl NapiDirectSubscription {
+    #[napi(js_name = "readAll")]
+    pub fn read_all(&mut self) -> napi::Result<Vec<serde_json::Value>> {
+        let subscription = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
+        let mut events = Vec::new();
+        loop {
+            let event = match subscription {
+                DirectNapiSubscription::Memory(stream) => stream.try_next_event(),
+                DirectNapiSubscription::Persistent(stream) => stream.try_next_event(),
+            };
+            let Some(event) = event else {
+                break;
+            };
+            events.push(direct_subscription_event_to_json(&event)?);
+        }
+        Ok(events)
+    }
+
+    #[napi]
+    pub fn drain(&mut self) -> napi::Result<Vec<serde_json::Value>> {
+        self.read_all()
+    }
+
+    #[napi]
+    pub fn close(&mut self) -> bool {
+        self.inner.take().is_some()
     }
 }
 
@@ -699,6 +756,33 @@ impl NapiDirectDb {
             DirectNapiDb::Memory(db) => db.query_is_covered(&query.inner),
             DirectNapiDb::Persistent(db) => db.query_is_covered(&query.inner),
         })
+    }
+
+    #[napi]
+    pub fn subscribe(
+        &self,
+        query: &NapiDirectPreparedQuery,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<NapiDirectSubscription> {
+        let opts = direct_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let inner = match db {
+            DirectNapiDb::Memory(db) => DirectNapiSubscription::Memory(
+                direct_block_on(db.subscribe(&query.inner, opts))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            DirectNapiDb::Persistent(db) => DirectNapiSubscription::Persistent(
+                direct_block_on(db.subscribe(&query.inner, opts))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        };
+        Ok(NapiDirectSubscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -1386,6 +1470,51 @@ fn direct_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> DirectRow<'a> 
         row_id: row.row_uuid(),
         deleted: row.is_deleted(),
         raw,
+    }
+}
+
+fn direct_removed_rows(rows: &[DirectRemovedRowInner]) -> Vec<DirectRemovedRow<'_>> {
+    rows.iter()
+        .map(|row| DirectRemovedRow {
+            table: row.table.as_str(),
+            row_id: row.row_uuid,
+        })
+        .collect()
+}
+
+fn encode_direct_subscription_delta(
+    added: &[jazz::node::CurrentRow],
+    updated: &[jazz::node::CurrentRow],
+    removed: &[DirectRemovedRowInner],
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&DirectSubscriptionDelta {
+        added: direct_row_batches(added),
+        updated: direct_row_batches(updated),
+        removed: direct_removed_rows(removed),
+    })
+}
+
+fn direct_subscription_event_to_json(
+    event: &DirectSubscriptionEvent,
+) -> napi::Result<serde_json::Value> {
+    match event {
+        DirectSubscriptionEvent::Opened { current, .. }
+        | DirectSubscriptionEvent::Reset { current, .. } => {
+            let rows = encode_direct_rows(current)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(serde_json::json!({ "type": "snapshot", "rows": rows }))
+        }
+        DirectSubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            let delta = encode_direct_subscription_delta(added, updated, removed)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(serde_json::json!({ "type": "delta", "delta": delta }))
+        }
+        DirectSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
 }
 
