@@ -173,9 +173,29 @@ export type DirectQueryLiteral =
   | { type: "Uuid"; value: string }
   | { type: "Nullable"; value: DirectQueryLiteral | null };
 
+export type DirectQueryPredicate = {
+  column: string;
+  op: DirectQueryPredicateOp;
+  value: DirectQueryLiteral;
+};
+
+export type DirectQueryPredicateOp = "Eq" | "Ne" | "Gt" | "Gte" | "Lt" | "Lte";
+
 export function queryWithEqFilters(
   table: string,
   filters: Array<{ column: string; value: DirectQueryLiteral }>,
+  limit?: number,
+): Uint8Array {
+  return queryWithPredicates(
+    table,
+    filters.map((filter) => ({ ...filter, op: "Eq" })),
+    limit,
+  );
+}
+
+export function queryWithPredicates(
+  table: string,
+  predicates: DirectQueryPredicate[],
   limit?: number,
 ): Uint8Array {
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
@@ -184,9 +204,9 @@ export function queryWithEqFilters(
   const writer = new PostcardWriter();
   writer.string(table);
   writer.vec((filter, index) => {
-    const predicate = filters[index]!;
-    writePredicateEqLiteral(filter, predicate.column, predicate.value);
-  }, filters.length);
+    const predicate = predicates[index]!;
+    writePredicateCmpLiteral(filter, predicate.column, predicate.op, predicate.value);
+  }, predicates.length);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
@@ -207,7 +227,16 @@ function writePredicateEqLiteral(
   column: string,
   value: DirectQueryLiteral,
 ): void {
-  writer.u64(3); // Predicate::Eq
+  writePredicateCmpLiteral(writer, column, "Eq", value);
+}
+
+function writePredicateCmpLiteral(
+  writer: PostcardWriter,
+  column: string,
+  op: DirectQueryPredicateOp,
+  value: DirectQueryLiteral,
+): void {
+  writer.u64(predicateOpTag(op));
   writer.u64(0); // Operand::Column
   writer.string(column);
   writer.u64(3); // Operand::Literal
@@ -216,6 +245,23 @@ function writePredicateEqLiteral(
 
 function writePredicateEqBool(writer: PostcardWriter, column: string, value: boolean): void {
   writePredicateEqLiteral(writer, column, { type: "Boolean", value });
+}
+
+function predicateOpTag(op: DirectQueryPredicateOp): number {
+  switch (op) {
+    case "Eq":
+      return 3; // Predicate::Eq
+    case "Ne":
+      return 4; // Predicate::Ne
+    case "Gt":
+      return 6; // Predicate::Gt
+    case "Gte":
+      return 7; // Predicate::Gte
+    case "Lt":
+      return 8; // Predicate::Lt
+    case "Lte":
+      return 9; // Predicate::Lte
+  }
 }
 
 function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): void {
