@@ -47,7 +47,12 @@ export interface OverlayDevServer {
   };
 }
 
-/** Register the inspector embedded-asset middleware (/__jazz/embedded/*) on a dev server. */
+/**
+ * Register the inspector embedded-asset middleware (/__jazz/embedded/*) on a dev
+ * server, and announce that the overlay is live. Both Vite and SvelteKit call
+ * this, so the announcement lives here — there's no way to enable the overlay
+ * without telling the developer how to open it.
+ */
 export function attachOverlayMiddleware(server: OverlayDevServer): void {
   const overlay = createOverlayHandler({ appRoot: server.config.root });
   server.middlewares?.use((req, res, next) => {
@@ -55,6 +60,7 @@ export function attachOverlayMiddleware(server: OverlayDevServer): void {
       if (!handled) next();
     });
   });
+  console.log("[jazz] Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).");
 }
 
 export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {

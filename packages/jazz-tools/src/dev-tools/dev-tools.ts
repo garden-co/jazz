@@ -266,10 +266,9 @@ function hookRegistration(
         }
 
         if (envelope.command === DEVTOOLS_COMMANDS.ANNOUNCE) {
-          let schema = resolveBridgeSchema(db);
-          if (!schema && state?.wasmSchema) {
-            schema = state.wasmSchema;
-          }
+          // resolveBridgeSchema already falls back to state.wasmSchema, so the
+          // schema is complete here — no secondary fallback needed.
+          const schema = resolveBridgeSchema(db);
           const dbConfig = resolveBridgeDbConfig(db);
 
           if (schema && dbConfig) {
