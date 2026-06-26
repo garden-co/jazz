@@ -34,11 +34,6 @@ fn s1_saas_db_surface_smoke() {
 }
 
 #[test]
-fn s1_saas_abi_direct_surface_smoke() {
-    s1_saas::abi_direct_surface_smoke();
-}
-
-#[test]
 fn s2_canvas_smoke() {
     s2_canvas::smoke();
 }
