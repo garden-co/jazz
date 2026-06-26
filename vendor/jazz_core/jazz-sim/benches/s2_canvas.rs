@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::{EnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
@@ -1782,15 +1782,32 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     }
 
     let query = db_canvas_query(canvas);
-    let watches = (0..(config.active + config.passive))
-        .map(|_| block_on(db.subscribe(&query, ReadOpts::default())).expect("db subscribe"))
+    let prepared_query = db.prepare_query(&query).expect("db prepare query");
+    let mut watches = (0..(config.active + config.passive))
+        .map(|_| {
+            block_on(db.subscribe(&prepared_query, ReadOpts::default())).expect("db subscribe")
+        })
         .collect::<Vec<_>>();
-    for watch in &watches {
-        assert_eq!(watch.current().len(), config.shapes);
+    let mut watch_rows = Vec::with_capacity(watches.len());
+    for watch in &mut watches {
+        let mut rows = BTreeMap::new();
+        apply_db_subscription_event(
+            &mut rows,
+            block_on(watch.next_event()).expect("db subscription opens"),
+        );
+        assert_eq!(rows.len(), config.shapes);
+        watch_rows.push(rows);
     }
     let spy_query = db_canvas_query(row(99_999));
-    let spy_watch = block_on(db.subscribe(&spy_query, ReadOpts::default())).expect("db spy watch");
-    assert!(spy_watch.current().is_empty());
+    let prepared_spy_query = db.prepare_query(&spy_query).expect("db prepare spy query");
+    let mut spy_watch =
+        block_on(db.subscribe(&prepared_spy_query, ReadOpts::default())).expect("db spy watch");
+    let mut spy_rows = BTreeMap::new();
+    apply_db_subscription_event(
+        &mut spy_rows,
+        block_on(spy_watch.next_event()).expect("db spy subscription opens"),
+    );
+    assert!(spy_rows.is_empty());
 
     let mut rng = Lcg::new(config.seed ^ u64::from(coalesced));
     let per_active = config.commits_per_active(coalesced);
@@ -1817,19 +1834,22 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
             writes_applied += 1;
 
-            for watch in &watches {
+            for (watch, rows_by_id) in watches.iter_mut().zip(watch_rows.iter_mut()) {
                 let start = Instant::now();
-                if block_on(watch.changed()) {
+                if let Some(event) = watch.try_next_event() {
                     watch_changes += 1;
+                    apply_db_subscription_event(rows_by_id, event);
                 }
                 changed_latencies.push(start.elapsed().as_micros() as u64);
                 let start = Instant::now();
-                let rows = watch.current();
+                let rows = rows_by_id.values().cloned().collect::<Vec<_>>();
                 current_latencies.push(start.elapsed().as_micros() as u64);
                 assert_eq!(db_rows_state(&schema, rows), expected);
             }
-            assert!(!block_on(spy_watch.changed()));
-            assert!(spy_watch.current().is_empty());
+            while let Some(event) = spy_watch.try_next_event() {
+                apply_db_subscription_event(&mut spy_rows, event);
+            }
+            assert!(spy_rows.is_empty());
         }
     }
 
@@ -2329,7 +2349,35 @@ fn db_shape_state(
     schema: &JazzSchema,
     query: &Query,
 ) -> BTreeMap<RowUuid, (u64, u64)> {
-    db_rows_state(schema, db.read(query).expect("db read shapes"))
+    let prepared = db.prepare_query(query).expect("db prepare read shapes");
+    db_rows_state(schema, db.read(&prepared).expect("db read shapes"))
+}
+
+fn apply_db_subscription_event(
+    current: &mut BTreeMap<RowUuid, CurrentRow>,
+    event: SubscriptionEvent,
+) {
+    match event {
+        SubscriptionEvent::Opened { current: rows, .. }
+        | SubscriptionEvent::Reset { current: rows, .. } => {
+            current.clear();
+            current.extend(rows.into_iter().map(|row| (row.row_uuid(), row)));
+        }
+        SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            for row in added.into_iter().chain(updated) {
+                current.insert(row.row_uuid(), row);
+            }
+            for row in removed {
+                current.remove(&row.row_uuid);
+            }
+        }
+        SubscriptionEvent::Closed => {}
+    }
 }
 
 fn db_rows_state(schema: &JazzSchema, rows: Vec<CurrentRow>) -> BTreeMap<RowUuid, (u64, u64)> {
@@ -2459,7 +2507,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
             version_bundles,
-            complete_tx_refs,
+            peer_payload_inventory,
             result_row_adds,
             result_row_removes,
             ..
@@ -2468,7 +2516,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .iter()
                 .map(version_bundle_bytes)
                 .sum::<u64>()
-                + (complete_tx_refs.len() as u64 * tx_id_wire_bytes())
+                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
                 + result_rows_bytes(result_row_adds)
                 + result_rows_bytes(result_row_removes)
         }

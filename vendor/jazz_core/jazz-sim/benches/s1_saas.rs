@@ -217,9 +217,12 @@ pub fn db_surface_smoke() {
         oracle.apply_insert(commit);
     }
 
+    let subscription1_changed =
+        apply_subscription_events(&mut subscription1, &mut subscription1_rows);
+    let subscription2_changed =
+        apply_subscription_events(&mut subscription2, &mut subscription2_rows);
     assert!(
-        apply_subscription_events(&mut subscription1, &mut subscription1_rows)
-            || apply_subscription_events(&mut subscription2, &mut subscription2_rows),
+        subscription1_changed || subscription2_changed,
         "at least one subscription should observe fixture population"
     );
     assert_db_query_matches_oracle(
@@ -1564,27 +1567,35 @@ fn apply_subscription_events(
     subscription: &mut SubscriptionStream,
     rows: &mut BTreeSet<(String, RowUuid)>,
 ) -> bool {
-    match block_on(subscription.next_event()) {
-        Some(SubscriptionEvent::Opened { current, .. })
-        | Some(SubscriptionEvent::Reset { current, .. }) => {
+    let Some(first) = block_on(subscription.next_event()) else {
+        return false;
+    };
+    apply_subscription_event(rows, first);
+    while let Some(event) = subscription.try_next_event() {
+        apply_subscription_event(rows, event);
+    }
+    true
+}
+
+fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: SubscriptionEvent) {
+    match event {
+        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
             *rows = row_set(current);
-            true
         }
-        Some(SubscriptionEvent::Delta {
+        SubscriptionEvent::Delta {
             added,
             updated,
             removed,
             ..
-        }) => {
+        } => {
             for row in removed {
                 rows.remove(&(row.table, row.row_uuid));
             }
             for row in added.into_iter().chain(updated) {
                 rows.insert((row.table().to_owned(), row.row_uuid()));
             }
-            true
         }
-        Some(SubscriptionEvent::Closed) | None => false,
+        SubscriptionEvent::Closed => {}
     }
 }
 

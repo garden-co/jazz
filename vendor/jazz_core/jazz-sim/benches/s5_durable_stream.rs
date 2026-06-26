@@ -9,7 +9,10 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, Transport};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, Node, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream, Transport,
+};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
@@ -453,12 +456,19 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     }
 
     let query = Query::from(STREAM_DOCS);
-    let watches = (0..config.tailers)
-        .map(|_| block_on(db.subscribe(&query, ReadOpts::default())).expect("db subscribe"))
+    let prepared = db.prepare_query(&query).expect("prepare stream docs query");
+    let mut watches = (0..config.tailers)
+        .map(|_| block_on(db.subscribe(&prepared, ReadOpts::default())).expect("db subscribe"))
         .collect::<Vec<_>>();
-    for watch in &watches {
-        assert_eq!(watch.current().len(), config.streams);
-    }
+    let mut watch_rows = watches
+        .iter_mut()
+        .map(|watch| {
+            let event = block_on(watch.next_event()).expect("db subscription opened");
+            let rows = subscription_opened_rows(event);
+            assert_eq!(rows.len(), config.streams);
+            rows
+        })
+        .collect::<Vec<_>>();
 
     let mut append_latencies = Vec::new();
     let mut update_latencies = Vec::new();
@@ -497,19 +507,20 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             drain_latencies.push(drain_start.elapsed().as_micros() as u64);
             append_latencies.push(before.elapsed().as_micros() as u64);
 
-            for watch in &watches {
+            for (watch, rows) in watches.iter_mut().zip(&mut watch_rows) {
                 let changed_start = Instant::now();
-                assert!(block_on(watch.changed()));
+                let event = block_on(watch.next_event()).expect("db subscription changed");
                 changed_latencies.push(changed_start.elapsed().as_micros() as u64);
                 let current_start = Instant::now();
-                let seen = db_stream_docs(&schema, watch.current());
+                apply_subscription_event(rows, event);
+                let seen = db_stream_docs(&schema, rows.clone());
                 current_latencies.push(current_start.elapsed().as_micros() as u64);
                 assert_eq!(seen, contents);
             }
         }
     }
     assert_eq!(
-        db_stream_docs(&schema, db.read(&query).expect("db read stream docs")),
+        db_stream_docs(&schema, db.read(&prepared).expect("db read stream docs")),
         contents
     );
 
@@ -558,7 +569,11 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let upstream = client.connect_upstream(client_transport);
     let subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
     let query = Query::from(STREAM_DOCS);
-    let watch = block_on(client.subscribe(&query, ReadOpts::default())).expect("db subscribe");
+    let prepared = client
+        .prepare_query(&query)
+        .expect("prepare stream docs query");
+    let mut watch =
+        block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
     client.tick().expect("client fresh subscribe tick");
     subscriber
@@ -566,7 +581,9 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
         .serve_current_rows(STREAM_DOCS)
         .expect("serve fresh rows");
     client.tick().expect("client fresh apply tick");
-    assert_eq!(watch.current().len(), streams);
+    let mut rows = Vec::new();
+    drain_subscription_events(&mut watch, &mut rows);
+    assert_eq!(rows.len(), streams);
     let full_rehydrate_bytes = subscriber
         .borrow()
         .last_resume_bytes()
@@ -612,7 +629,8 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
         .borrow()
         .last_resume_bytes()
         .expect("resume catch-up bytes");
-    let seen = db_stream_docs(&schema, watch.current());
+    drain_subscription_events(&mut watch, &mut rows);
+    let seen = db_stream_docs(&schema, rows);
     let mut expected = vec![Vec::new(); streams];
     expected[0] = content;
     assert_eq!(seen, expected);
@@ -1110,7 +1128,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
             version_bundles,
-            complete_tx_refs,
+            peer_payload_inventory,
             result_row_adds,
             result_row_removes,
             ..
@@ -1120,7 +1138,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .flat_map(|bundle| bundle.versions.iter())
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
-                + (complete_tx_refs.len() as u64 * 24)
+                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
                 + ((result_row_adds.len() + result_row_removes.len()) as u64 * 64)
         }
         _ => 0,
@@ -1152,6 +1170,55 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
         .iter()
         .find(|candidate| candidate.name == table)
         .unwrap()
+}
+
+fn subscription_opened_rows(event: SubscriptionEvent) -> Vec<jazz::node::CurrentRow> {
+    match event {
+        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
+            current
+        }
+        other => panic!("expected subscription snapshot, got {other:?}"),
+    }
+}
+
+fn drain_subscription_events(
+    subscription: &mut SubscriptionStream,
+    rows: &mut Vec<jazz::node::CurrentRow>,
+) {
+    while let Some(event) = subscription.try_next_event() {
+        apply_subscription_event(rows, event);
+    }
+}
+
+fn apply_subscription_event(rows: &mut Vec<jazz::node::CurrentRow>, event: SubscriptionEvent) {
+    match event {
+        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
+            *rows = current;
+        }
+        SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            let removed = removed
+                .into_iter()
+                .map(|row| row.row_uuid)
+                .collect::<BTreeSet<_>>();
+            rows.retain(|row| !removed.contains(&row.row_uuid()));
+            for row in added.into_iter().chain(updated) {
+                if let Some(slot) = rows
+                    .iter_mut()
+                    .find(|existing| existing.row_uuid() == row.row_uuid())
+                {
+                    *slot = row;
+                } else {
+                    rows.push(row);
+                }
+            }
+        }
+        SubscriptionEvent::Closed => {}
+    }
 }
 
 fn db_stream_docs(schema: &JazzSchema, rows: Vec<jazz::node::CurrentRow>) -> Vec<Vec<u8>> {
