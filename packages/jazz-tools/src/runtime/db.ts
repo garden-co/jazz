@@ -41,11 +41,6 @@ import {
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import {
-  MessagePortRuntimeBridge,
-  WorkerBridge,
-  type WorkerBridgeOptions,
-} from "./worker-bridge.js";
-import {
   isIncompatibleBrowserBrokerConfigurationError,
   type IncompatibleBrowserBrokerConfigurationHandler,
 } from "./browser-broker-errors.js";
@@ -55,7 +50,6 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync } from "./client-session.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -64,7 +58,6 @@ import {
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
-import type { WorkerLifecycleEvent } from "./worker-bridge.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
@@ -72,53 +65,19 @@ import {
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
 import { resolveSelectedColumns } from "./select-projection.js";
-import {
-  appendWorkerRuntimeWasmUrl,
-  resolveRuntimeConfigSyncInitInput,
-  resolveWorkerBootstrapWasmUrl,
-  resolveRuntimeConfigWorkerUrl,
-} from "./runtime-config.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
-  installWasmTeardownTrapSuppressor,
-  isWasmTeardownInProgress,
-  isWasmTeardownTrap,
-  markWasmTeardownInProgress,
-} from "./wasm-teardown-trap-suppressor.js";
-import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "./browser-broker-client.js";
-import {
-  createRandomId,
-  createBrowserBrokerFingerprint,
-  createRuntimeSourceIdentity,
-  isStaleLeadershipId,
-  stringifyError,
-  type BrowserBrokerRole,
-  type BrowserBrokerVisibility,
-} from "./browser-broker-protocol.js";
-import { acquireWebLockWithRetry, type LeaderLockLease } from "./leader-lock.js";
+  BrowserBrokerConnectionBridge,
+  DirectConnectionBridge,
+  type ConnectionBridge,
+  type ConnectionBridgeClientInput,
+  type ConnectionBridgeHost,
+} from "./connection-manager/index.js";
+
+export { resolveDefaultPersistentDbName } from "./connection-manager/browser-broker-utils.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
-
-const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
-const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
-const BROKER_STORAGE_DELETE_RETRY_MAX_MS = 500;
-
-function isBrokerStorageLockedError(error: unknown): boolean {
-  const name = (error as { name?: string } | undefined)?.name;
-  return name === "NoModificationAllowedError" || name === "InvalidStateError";
-}
-
-function brokerStorageDeleteRetryDelayMs(retry: number): number {
-  return Math.min(
-    BROKER_STORAGE_DELETE_RETRY_BASE_MS * 2 ** retry,
-    BROKER_STORAGE_DELETE_RETRY_MAX_MS,
-  );
-}
-
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * Configuration for creating a Db instance.
@@ -191,41 +150,6 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
   const strippedSchema = stripSchemaPolicies(schema);
   policyStrippedSchemaCache.set(schema, strippedSchema);
   return strippedSchema;
-}
-
-function trimOptionalString(value?: string | null): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function createBrowserTabId(): string {
-  return createRandomId();
-}
-
-/** @internal Derive the default browser persistence namespace for this Db config. */
-export function resolveDefaultPersistentDbName(config: DbConfig): string {
-  const driver = resolveStorageDriver(config.driver);
-  const explicitDbName = trimOptionalString(
-    (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
-  );
-  if (explicitDbName) {
-    return explicitDbName;
-  }
-
-  const session = resolveClientSessionSync({
-    appId: config.appId,
-    jwtToken: config.jwtToken,
-  });
-
-  if (!session?.user_id || session.authMode === "anonymous") {
-    return config.appId;
-  }
-
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
 }
 
 /**
@@ -838,11 +762,6 @@ export class DbDirectBatch extends DbBatchHandleBase {
  */
 export type BatchScope = Scoped<DbDirectBatch>;
 
-interface BrokerPromotionState {
-  leadershipId: number;
-  cancelled: boolean;
-}
-
 /**
  * High-level database interface for typed queries and mutations.
  *
@@ -872,41 +791,12 @@ export class Db {
   private config: DbConfig;
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
-  private workerBridge: WorkerBridge | null = null;
-  private worker: Worker | null = null;
-  private brokerClient: BrowserBrokerClient | null = null;
-  private brokerPromotion: Promise<void> | null = null;
-  private activeBrokerPromotion: BrokerPromotionState | null = null;
-  private tabLockLease: LeaderLockLease | null = null;
-  private brokerLeaderReadyLeadershipId: number | null = null;
-  private followerDataPort: MessagePort | null = null;
-  private followerPortBridge: MessagePortRuntimeBridge | null = null;
-  private followerReady: Promise<void> | null = null;
-  private resolveFollowerReady: (() => void) | null = null;
-  private rejectFollowerReady: ((error: Error) => void) | null = null;
-  private followerReadyResolved = false;
-  private followerPortReadyLeadershipId: number | null = null;
-  private followerLeaderReadyLeadershipId: number | null = null;
-  private durablePathError: Error | null = null;
-  private brokerSchemaFingerprint: string | null = null;
-  private brokerResetSchema: WasmSchema | null = null;
-  private readonly pendingLeaderFollowerPorts = new Map<
-    string,
-    { followerTabId: string; leadershipId: number; port: MessagePort }
-  >();
+  private connection: ConnectionBridge;
   private disposeWasmTelemetry: (() => void) | null = null;
-  private bridgeReady: Promise<void> | null = null;
-  private primaryDbName: string | null = null;
-  private workerDbName: string | null = null;
-  private tabRole: BrowserBrokerRole = "follower";
-  private tabId: string | null = null;
-  private currentLeadershipId = 0;
-  private workerReconfigure: Promise<void> = Promise.resolve();
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
-  private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -925,24 +815,6 @@ export class Db {
    */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
-  private readonly onVisibilityChange = (): void => {
-    if (typeof document === "undefined") return;
-    const hidden = document.visibilityState === "hidden";
-    this.brokerClient?.reportVisibility(hidden ? "hidden" : "visible");
-    this.sendLifecycleHint(hidden ? "visibility-hidden" : "visibility-visible");
-  };
-  private readonly onPageHide = (): void => {
-    // Page navigating away: open the teardown window so the suppressor swallows
-    // the inert WASM-teardown trap.
-    markWasmTeardownInProgress();
-    this.sendLifecycleHint("pagehide");
-  };
-  private readonly onPageFreeze = (): void => {
-    this.sendLifecycleHint("freeze");
-  };
-  private readonly onPageResume = (): void => {
-    this.sendLifecycleHint("resume");
-  };
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -955,6 +827,44 @@ export class Db {
     this.config = config;
     this.runtimeModule = runtimeModule;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
+    this.connection = new DirectConnectionBridge(this.createConnectionBridgeHost());
+  }
+
+  private createConnectionBridgeHost(): ConnectionBridgeHost {
+    // oxlint-disable-next-line typescript/no-this-alias
+    const thisDb = this;
+    return {
+      get config() {
+        return thisDb.config;
+      },
+      get isShuttingDown() {
+        return thisDb.isShuttingDown;
+      },
+      markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      telemetryCollectorUrl: () => this.telemetryCollectorUrl(),
+      firstClientEntry: () => this.firstConnectionBridgeClientEntry(),
+      shutdownClientsForConnectionReset: () => this.shutdownClientsForConnectionReset(),
+      recreateClientAfterConnectionReset: (schema) => this.getClient(schema),
+    };
+  }
+
+  private firstConnectionBridgeClientEntry(): ConnectionBridgeClientInput | null {
+    const first = this.clients.entries().next();
+    if (first.done) return null;
+    const [schemaKey, client] = first.value;
+    return {
+      schemaKey,
+      schema: this.clientSchemas.get(schemaKey) ?? normalizeRuntimeSchema(client.getSchema()),
+      client,
+    };
+  }
+
+  private async shutdownClientsForConnectionReset(): Promise<void> {
+    for (const client of this.clients.values()) {
+      await client.shutdown();
+    }
+    this.clients.clear();
+    this.clientSchemas.clear();
   }
 
   /** @internal Store the seed used for local-first auth and schedule token refresh. */
@@ -1025,12 +935,7 @@ export class Db {
       client.updateAuthToken(jwtToken);
     }
 
-    this.workerBridge?.updateAuth({
-      jwtToken,
-    });
-    this.followerPortBridge?.updateAuth({
-      jwtToken,
-    });
+    this.connection.updateAuth({ jwtToken });
 
     return true;
   }
@@ -1052,12 +957,7 @@ export class Db {
       client.updateCookieSession(cookieSession);
     }
 
-    this.workerBridge?.updateAuth({
-      jwtToken: this.config.jwtToken,
-    });
-    this.followerPortBridge?.updateAuth({
-      jwtToken: this.config.jwtToken,
-    });
+    this.connection.updateAuth({ jwtToken: this.config.jwtToken });
 
     return true;
   }
@@ -1081,69 +981,10 @@ export class Db {
    */
   static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
     const db = new Db(config, runtimeModule);
-    const persistentDriver = resolveStorageDriver(config.driver);
-    if (persistentDriver.type !== "persistent") {
-      throw new Error("Worker-backed Db requires driver.type='persistent'");
-    }
-    db.primaryDbName = resolveDefaultPersistentDbName(config);
-    db.workerDbName = db.primaryDbName;
-    db.tabId = createBrowserTabId();
-    db.tabRole = "follower";
-
-    try {
-      db.attachLifecycleHooks();
-      const broker = await BrowserBrokerClient.connect({
-        appId: config.appId,
-        dbName: db.primaryDbName,
-        tabId: db.tabId,
-        fingerprint: Db.createBrokerFingerprint(config, db.primaryDbName),
-        visibility: db.currentBrokerVisibility(),
-        runtimeSources: config.runtimeSources,
-        onBecomeLeader: (client, leadershipId, resetRequestId) => {
-          db.brokerClient = client;
-          const promotion = db.promoteViaBroker(leadershipId, resetRequestId);
-          db.brokerPromotion = promotion;
-          return promotion;
-        },
-        onDemote: (leadershipId) => db.demoteViaBroker(leadershipId),
-        onAttachFollowerPort: (followerTabId, leadershipId, port) => {
-          db.handleBrokerAttachFollowerPort(followerTabId, leadershipId, port);
-        },
-        onDetachFollowerPort: (followerTabId, leadershipId) => {
-          db.handleBrokerDetachFollowerPort(followerTabId, leadershipId);
-        },
-        onUseFollowerPort: (leadershipId, port) => {
-          db.handleBrokerUseFollowerPort(leadershipId, port);
-        },
-        onFollowerReady: (leadershipId) => {
-          db.handleBrokerFollowerReady(leadershipId);
-        },
-        onCloseFollowerPort: (leadershipId) => {
-          db.handleBrokerCloseFollowerPort(leadershipId);
-        },
-        onStorageResetBegin: (_requestId, leadershipId) =>
-          db.prepareForBrokerStorageReset(leadershipId),
-        onSchemaBlocked: (reason) => {
-          db.handleBrokerSchemaBlocked(reason);
-        },
-        onReconnected: (client) => {
-          db.handleBrokerReconnected(client);
-        },
-        onClosed: (error) => {
-          db.handleBrokerClosed(error);
-        },
-      });
-      db.brokerClient = broker;
-      db.adoptBrokerSnapshot(broker.snapshot());
-      await db.waitForInitialBrokerPromotion();
-      return db;
-    } catch (error) {
-      db.detachLifecycleHooks();
-      db.releaseBrokerLeadershipResources();
-      await db.brokerClient?.shutdown();
-      db.brokerClient = null;
-      throw error;
-    }
+    const bridge = new BrowserBrokerConnectionBridge(db.createConnectionBridgeHost());
+    db.connection = bridge;
+    await bridge.start();
+    return db;
   }
 
   /**
@@ -1166,41 +1007,30 @@ export class Db {
     // Use the canonical schema JSON as the client cache key, but memoize it by
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
-    this.reportBrokerSchemaReady(key);
 
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
-      const usesDurablePeer = this.worker !== null || this.brokerClient !== null;
+      const usesDurablePeer = this.connection.hasDurablePeer;
 
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
         hasWorker: usesDurablePeer,
         useBinaryEncoding: usesDurablePeer,
-        bufferOutboxWithoutSyncSender: this.brokerClient !== null,
+        bufferOutboxWithoutSyncSender: usesDurablePeer,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
       });
 
       this.attachMutationErrorHandler(client);
-      // In worker mode, set up the bridge for this client
-      if (this.worker && !this.workerBridge) {
-        this.attachWorkerBridge(key, client);
-      }
-      if (!this.worker && this.brokerClient) {
-        this.attachFollowerPortBridgeForClient(client);
-      }
-      // Direct (non-worker) clients with a serverUrl must open their own
-      // Rust transport — the worker bridge is not doing it for them.
-      if (!usesDurablePeer && this.config.serverUrl) {
-        client.connectTransport(this.config.serverUrl, {
-          jwt_token: this.config.jwtToken,
-          admin_secret: this.config.adminSecret,
-        });
-      }
       this.clients.set(key, client);
       this.clientSchemas.set(key, runtimeSchema);
+      this.connection.onClientCreated({
+        schemaKey: key,
+        schema: runtimeSchema,
+        client,
+      });
     }
 
     return this.clients.get(key)!;
@@ -1231,38 +1061,15 @@ export class Db {
    * No-op if not using a worker.
    */
   protected async ensureBridgeReady(): Promise<void> {
-    await this.workerReconfigure;
-    if (this.bridgeReady) {
-      await this.bridgeReady;
-    }
-    if (this.isShuttingDown) {
-      return;
-    }
-    if (this.brokerClient && this.tabRole === "follower") {
-      this.attachFollowerPortBridgeForExistingClient();
-      await this.ensureDurablePathReadyPromise();
-    } else if (this.brokerClient && this.activeBrokerPromotion) {
-      await this.ensureDurablePathReadyPromise();
-    }
+    await this.connection.ensureReadyForQuery({ tier: "local" });
   }
 
   protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
-    await this.ensureBridgeReady();
-    if (!this.workerBridge || !this.config.serverUrl) {
-      return;
-    }
-    if (!options?.tier || options.tier === "local") {
-      return;
-    }
-    await this.workerBridge.waitForUpstreamServerConnection();
+    await this.connection.ensureReadyForQuery(options);
   }
 
   private async ensureWriteWaitReady(options: { tier: DurabilityTier }): Promise<void> {
-    await this.ensureBridgeReady();
-    if (!this.workerBridge || !this.config.serverUrl || options.tier === "local") {
-      return;
-    }
-    await this.workerBridge.waitForUpstreamServerConnection();
+    await this.connection.ensureReadyForWriteWait(options.tier);
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
@@ -1274,86 +1081,8 @@ export class Db {
     return handle;
   }
 
-  private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
-    if (!this.worker) {
-      throw new Error("Cannot attach worker bridge without an active worker");
-    }
-
-    const bridge = new WorkerBridge(this.worker, client.getRuntime());
-    bridge.setServerPayloadForwarder(null);
-    bridge.onAuthFailure((reason) => {
-      this.markUnauthenticated(reason);
-    });
-    bridge.onFollowerPortAttached((event) => {
-      if (this.tabRole !== "leader") return;
-      if (event.leadershipId !== this.currentLeadershipId) return;
-      const leadershipId = event.leadershipId;
-      const reportAttached = () => {
-        if (this.tabRole !== "leader") return;
-        if (leadershipId !== this.currentLeadershipId) return;
-        if (this.workerBridge !== bridge) return;
-        this.brokerClient?.reportFollowerPortAttached(event.peerId, leadershipId);
-      };
-      if (!this.config.serverUrl) {
-        reportAttached();
-        return;
-      }
-      reportAttached();
-      void bridge.waitForUpstreamServerConnection().catch((error) => {
-        if (
-          this.brokerClient &&
-          this.tabRole === "leader" &&
-          this.currentLeadershipId === leadershipId &&
-          this.workerBridge === bridge
-        ) {
-          this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
-        }
-      });
-    });
-    bridge.onFollowerPortClosed((event) => {
-      if (this.tabRole !== "leader") return;
-      if (event.leadershipId !== this.currentLeadershipId) return;
-      if (this.workerBridge !== bridge) return;
-      this.brokerClient?.reportFollowerPortClosed(event.peerId, event.leadershipId);
-    });
-    this.workerBridge = bridge;
-    const leadershipId = this.currentLeadershipId;
-    const bridgeReady = bridge
-      .init(this.buildWorkerBridgeOptions(schemaJson))
-      .then(() => {
-        if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
-        this.flushPendingLeaderFollowerPorts();
-        this.reportBrokerLeaderReady();
-        this.resolveDurablePathReady();
-      })
-      .then(() => undefined);
-    bridgeReady.catch((error) => {
-      if (this.workerBridge !== bridge || this.currentLeadershipId !== leadershipId) return;
-      void this.handleBrokerLeaderBridgeFailure(error, bridge, leadershipId);
-    });
-    this.bridgeReady = bridgeReady;
-  }
-
-  private async handleBrokerLeaderBridgeFailure(
-    error: unknown,
-    failedBridge: WorkerBridge,
-    leadershipId: number,
-  ): Promise<void> {
-    if (this.workerBridge !== failedBridge || this.currentLeadershipId !== leadershipId) return;
-    if (this.brokerClient && this.tabRole === "leader") {
-      this.brokerClient.reportLeaderFailed(leadershipId, stringifyError(error));
-    }
-    if (this.tabRole !== "leader") return;
-
-    this.closePendingLeaderFollowerPorts();
-    await this.shutdownLeaderWorker();
-    this.releaseBrokerLeadershipResources();
-    this.tabRole = "follower";
-    this.brokerLeaderReadyLeadershipId = null;
-  }
-
   private installMainThreadWasmTelemetry(): void {
-    const collectorUrl = this.resolveTelemetryCollectorUrl();
+    const collectorUrl = this.telemetryCollectorUrl();
     if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
       return;
     }
@@ -1366,765 +1095,8 @@ export class Db {
       }) ?? null;
   }
 
-  private resolveTelemetryCollectorUrl(): string | undefined {
+  private telemetryCollectorUrl(): string | undefined {
     return resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl;
-  }
-
-  private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
-    const driver = resolveStorageDriver(this.config.driver);
-    if (driver.type !== "persistent") {
-      throw new Error("Worker bridge is only available for driver.type='persistent'");
-    }
-
-    const locationHref = typeof location !== "undefined" ? location.href : undefined;
-
-    // Opt-in default: when a bundler plugin (e.g. `withJazz` for Next) copies
-    // the wasm into the host app and advertises the URL via
-    // NEXT_PUBLIC_JAZZ_WASM_URL, pick it up so the worker receives an
-    // absolute URL and skips the (Turbopack-unreliable) bundler default.
-    //
-    // Precedence follows RuntimeSourcesConfig: any of wasmModule / wasmSource /
-    // wasmUrl / baseUrl already supplied by the caller wins — we only fill in
-    // when none of those is set, preserving the documented resolution order
-    // for Vite/webpack/Svelte/etc. callers.
-    const configRuntimeSources = this.config.runtimeSources;
-    // Use the literal `process.env.NEXT_PUBLIC_JAZZ_WASM_URL` form: Next's
-    // build-time replacement only rewrites that exact property access. Optional
-    // chaining on `process.env` can bypass the replacement in Turbopack and
-    // leave this as `undefined` in client bundles, defeating the fallback.
-    const envWasmUrl =
-      typeof process !== "undefined" && process.env
-        ? process.env.NEXT_PUBLIC_JAZZ_WASM_URL
-        : undefined;
-    // Any explicit override means the caller is taking control of wasm/worker
-    // resolution — don't second-guess them by injecting a Next-plugin URL.
-    // `workerUrl` counts too: the spawn path at `Db.spawnWorker` already
-    // resolves a wasm URL colocated with the custom worker script via
-    // `appendWorkerRuntimeWasmUrl` + `readWorkerRuntimeWasmUrl`.
-    const hasConfiguredSource =
-      !!configRuntimeSources?.wasmUrl ||
-      !!configRuntimeSources?.baseUrl ||
-      !!configRuntimeSources?.workerUrl ||
-      !!resolveRuntimeConfigSyncInitInput(configRuntimeSources);
-    const runtimeSources =
-      hasConfiguredSource || !envWasmUrl || typeof location === "undefined"
-        ? configRuntimeSources
-        : {
-            ...configRuntimeSources,
-            wasmUrl: new URL(envWasmUrl, location.href).href,
-          };
-
-    // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
-    // fallback WASM URL for non-bundled contexts where wasmModule.default() may fail.
-    let fallbackWasmUrl: string | undefined;
-    if (!runtimeSources?.workerUrl && !runtimeSources?.baseUrl && !runtimeSources?.wasmUrl) {
-      if (!resolveRuntimeConfigSyncInitInput(runtimeSources)) {
-        fallbackWasmUrl =
-          resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources) ?? undefined;
-      }
-    }
-
-    return {
-      schemaJson,
-      appId: this.config.appId,
-      env: this.config.env ?? "dev",
-      userBranch: this.config.userBranch ?? "main",
-      dbName: this.workerDbName ?? driver.dbName ?? this.config.appId,
-      serverUrl: this.config.serverUrl,
-      jwtToken: this.config.jwtToken,
-      adminSecret: this.config.adminSecret,
-      runtimeSources,
-      fallbackWasmUrl,
-      workerLockName:
-        this.brokerClient && this.tabRole === "leader" ? this.brokerWorkerLockName() : undefined,
-      leadershipId:
-        this.brokerClient && this.tabRole === "leader" ? this.currentLeadershipId : undefined,
-      logLevel: this.config.logLevel,
-      telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
-    };
-  }
-
-  private static createBrokerFingerprint(config: DbConfig, primaryDbName: string): string {
-    const driver = resolveStorageDriver(config.driver);
-    return createBrowserBrokerFingerprint({
-      appId: config.appId,
-      dbName: primaryDbName,
-      persistentDriverNamespace:
-        driver.type === "persistent" ? (driver.dbName ?? primaryDbName) : primaryDbName,
-      env: config.env ?? "dev",
-      userBranch: config.userBranch ?? "main",
-      serverUrl: config.serverUrl ?? null,
-      schemaHash: null,
-      authClass: Db.resolveBrokerAuthClass(config),
-      runtimeSourceIdentity: createRuntimeSourceIdentity(config.runtimeSources),
-    });
-  }
-
-  private static resolveBrokerAuthClass(config: DbConfig): string {
-    if (config.adminSecret) {
-      return "admin";
-    }
-
-    const session = resolveClientSessionSync({
-      appId: config.appId,
-      jwtToken: config.jwtToken,
-      cookieSession: config.cookieSession,
-    });
-    if (!session?.user_id || session.authMode === "anonymous") {
-      return "anonymous";
-    }
-    return `${session.authMode}:${session.user_id}`;
-  }
-
-  private reportBrokerSchemaReady(schemaFingerprint: string): void {
-    if (!this.brokerClient) return;
-
-    if (this.brokerSchemaFingerprint && this.brokerSchemaFingerprint !== schemaFingerprint) {
-      throw new Error(
-        "Persistent browser broker mode does not support multiple schemas in one Db instance.",
-      );
-    }
-
-    if (this.brokerSchemaFingerprint === schemaFingerprint) return;
-
-    this.brokerSchemaFingerprint = schemaFingerprint;
-    this.brokerClient.reportSchemaReady(schemaFingerprint);
-  }
-
-  private adoptBrokerSnapshot(snapshot: BrowserBrokerClientSnapshot): void {
-    this.tabRole = snapshot.role;
-    this.tabId = snapshot.tabId;
-    this.currentLeadershipId = snapshot.leadershipId;
-  }
-
-  private currentBrokerVisibility(): BrowserBrokerVisibility {
-    if (typeof document === "undefined") {
-      return "visible";
-    }
-    return document.visibilityState === "visible" ? "visible" : "hidden";
-  }
-
-  private brokerTabLockName(): string {
-    return `jazz-leader-tab:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
-  }
-
-  private brokerWorkerLockName(): string {
-    return `jazz-leader-worker:${this.config.appId}:${this.primaryDbName ?? this.config.appId}`;
-  }
-
-  private async promoteViaBroker(leadershipId: number, resetRequestId?: string): Promise<void> {
-    if (this.isShuttingDown || !this.primaryDbName) return;
-
-    const promotion: BrokerPromotionState = { leadershipId, cancelled: false };
-    this.activeBrokerPromotion = promotion;
-    this.markDurablePathPending();
-
-    this.closeFollowerPortState(undefined, {
-      preserveOutbox: true,
-    });
-    this.closePendingLeaderFollowerPorts();
-    this.currentLeadershipId = leadershipId;
-    this.workerDbName = this.primaryDbName;
-    this.brokerLeaderReadyLeadershipId = null;
-
-    try {
-      const tabLockName = this.brokerTabLockName();
-      const tabLockLease = await acquireWebLockWithRetry(tabLockName, {
-        onLost: (reason) => {
-          void this.handleBrokerLeaderLockLost(leadershipId, tabLockName, reason);
-        },
-      });
-      if (!tabLockLease) {
-        throw new Error(`Unable to acquire ${tabLockName}`);
-      }
-      this.tabLockLease = tabLockLease;
-      if (await this.finishCancelledBrokerPromotion(promotion)) return;
-
-      if (resetRequestId) {
-        await this.deleteBrokerStorageFiles();
-        if (await this.finishCancelledBrokerPromotion(promotion)) return;
-      }
-
-      const worker = await Db.spawnWorker(this.config.runtimeSources);
-      if (await this.finishCancelledBrokerPromotion(promotion, worker)) return;
-      this.worker = worker;
-      this.tabRole = "leader";
-      if (await this.finishCancelledBrokerPromotion(promotion)) return;
-      this.recreateFirstClientAfterBrokerReset();
-      this.attachWorkerBridgeForExistingClient();
-      if (resetRequestId && !this.workerBridge) {
-        // Fresh namespace: no schema has ever been used, so there is no client
-        // to recreate and no bridge to initialize. The OPFS wipe already
-        // happened above, so report readiness directly and let the broker
-        // finish the reset instead of waiting for a bridge that will never exist.
-        this.reportBrokerLeaderReady({ bridgelessStorageReset: true });
-      }
-    } catch (error) {
-      if (await this.finishCancelledBrokerPromotion(promotion)) return;
-      this.brokerClient?.reportLeaderFailed(leadershipId, stringifyError(error));
-      await this.resignBrokerLeadership();
-      throw error;
-    } finally {
-      if (this.activeBrokerPromotion === promotion) {
-        this.activeBrokerPromotion = null;
-      }
-    }
-  }
-
-  private async waitForInitialBrokerPromotion(): Promise<void> {
-    if (!this.brokerClient) return;
-
-    if (this.brokerPromotion) {
-      await this.brokerPromotion;
-    }
-  }
-
-  /**
-   * The single leadership-resignation sequence shared by every demote path.
-   * The durable path goes back to pending (waiters survive for the next
-   * leadership), the tab steps down, leader-side ports and the worker are
-   * torn down, and the leadership locks are released.
-   */
-  private async resignBrokerLeadership(
-    options: {
-      closePendingFollowerPorts?: boolean;
-      shutdown?: () => Promise<void>;
-    } = {},
-  ): Promise<void> {
-    this.markDurablePathPending();
-    this.tabRole = "follower";
-    this.brokerLeaderReadyLeadershipId = null;
-    if (options.closePendingFollowerPorts ?? true) {
-      this.closePendingLeaderFollowerPorts();
-    }
-    await (options.shutdown ? options.shutdown() : this.shutdownLeaderWorker());
-    this.releaseBrokerLeadershipResources();
-  }
-
-  private async demoteViaBroker(leadershipId: number): Promise<void> {
-    const activePromotion = this.activeBrokerPromotion;
-    const demotedActivePromotion = activePromotion?.leadershipId === leadershipId;
-    if (!demotedActivePromotion && leadershipId !== this.currentLeadershipId) return;
-    if (demotedActivePromotion) {
-      activePromotion.cancelled = true;
-    } else if (this.tabRole !== "leader") {
-      return;
-    }
-    await this.resignBrokerLeadership();
-  }
-
-  private async handleBrokerLeaderLockLost(
-    leadershipId: number,
-    lockName: string,
-    reason: unknown,
-  ): Promise<void> {
-    const activePromotion = this.activeBrokerPromotion;
-    if (activePromotion?.leadershipId === leadershipId) {
-      activePromotion.cancelled = true;
-    } else if (leadershipId !== this.currentLeadershipId || this.tabRole !== "leader") {
-      return;
-    }
-
-    const message = stringifyError(reason);
-    this.brokerClient?.reportLeaderFailed(leadershipId, message || `${lockName} was lost`);
-    await this.resignBrokerLeadership();
-  }
-
-  private async finishCancelledBrokerPromotion(
-    promotion: BrokerPromotionState,
-    worker?: Worker,
-  ): Promise<boolean> {
-    if (
-      !promotion.cancelled &&
-      !this.isShuttingDown &&
-      this.currentLeadershipId === promotion.leadershipId
-    ) {
-      return false;
-    }
-
-    if (worker && this.worker !== worker) {
-      worker.terminate();
-    }
-    await this.resignBrokerLeadership();
-    return true;
-  }
-
-  private async prepareForBrokerStorageReset(leadershipId: number): Promise<void> {
-    if (this.isShuttingDown) return;
-    if (leadershipId !== this.currentLeadershipId) return;
-
-    const activePromotion = this.activeBrokerPromotion;
-    if (activePromotion?.leadershipId === leadershipId) {
-      activePromotion.cancelled = true;
-      await this.brokerPromotion?.catch(() => undefined);
-    }
-
-    // Pending leader follower ports are left untouched: the broker clears all
-    // attachments itself when the reset starts and re-issues them afterwards.
-    await this.resignBrokerLeadership({
-      closePendingFollowerPorts: false,
-      shutdown: () => this.shutdownWorkerAndClientsForStorageReset(),
-    });
-  }
-
-  private reportBrokerLeaderReady(options?: { bridgelessStorageReset?: boolean }): void {
-    if (!this.brokerClient || this.tabRole !== "leader") return;
-    if (this.brokerLeaderReadyLeadershipId === this.currentLeadershipId) return;
-    this.brokerLeaderReadyLeadershipId = this.currentLeadershipId;
-    this.brokerClient.reportLeaderReady({
-      leadershipId: this.currentLeadershipId,
-      tabLockName: this.brokerTabLockName(),
-      workerLockName: this.brokerWorkerLockName(),
-      ...(options?.bridgelessStorageReset ? { bridgelessStorageReset: true } : {}),
-    });
-  }
-
-  private handleBrokerAttachFollowerPort(
-    followerTabId: string,
-    leadershipId: number,
-    port: MessagePort,
-  ): void {
-    if (this.tabRole !== "leader" || leadershipId !== this.currentLeadershipId) {
-      port.close();
-      return;
-    }
-
-    this.pendingLeaderFollowerPorts.set(followerTabId, { followerTabId, leadershipId, port });
-    this.flushPendingLeaderFollowerPorts();
-  }
-
-  private handleBrokerDetachFollowerPort(followerTabId: string, leadershipId: number): void {
-    const pending = this.pendingLeaderFollowerPorts.get(followerTabId);
-    if (pending?.leadershipId === leadershipId) {
-      pending.port.close();
-      this.pendingLeaderFollowerPorts.delete(followerTabId);
-    }
-    this.workerBridge?.detachFollowerPort(followerTabId, leadershipId);
-  }
-
-  private flushPendingLeaderFollowerPorts(): void {
-    if (!this.workerBridge || this.tabRole !== "leader") return;
-
-    for (const [followerTabId, entry] of this.pendingLeaderFollowerPorts) {
-      this.pendingLeaderFollowerPorts.delete(followerTabId);
-      if (entry.leadershipId !== this.currentLeadershipId) {
-        entry.port.close();
-        continue;
-      }
-      this.workerBridge.attachFollowerPort(entry.followerTabId, entry.leadershipId, entry.port);
-    }
-  }
-
-  private closePendingLeaderFollowerPorts(): void {
-    for (const entry of this.pendingLeaderFollowerPorts.values()) {
-      entry.port.close();
-    }
-    this.pendingLeaderFollowerPorts.clear();
-  }
-
-  private handleBrokerUseFollowerPort(leadershipId: number, port: MessagePort): void {
-    if (this.tabRole === "leader" || isStaleLeadershipId(leadershipId, this.currentLeadershipId)) {
-      port.close();
-      return;
-    }
-
-    this.markDurablePathPending();
-    const preserveLeaderReadySignal = this.followerLeaderReadyLeadershipId === leadershipId;
-    this.closeFollowerPortState(undefined, {
-      preserveOutbox: true,
-      preserveLeaderReadySignal,
-    });
-    this.tabRole = "follower";
-    this.currentLeadershipId = leadershipId;
-    this.followerDataPort = port;
-    this.ensureDurablePathReadyPromise();
-    this.attachFollowerPortBridgeForExistingClient();
-    this.resolveFollowerDurablePathIfReady();
-  }
-
-  private handleBrokerFollowerReady(leadershipId: number): void {
-    if (this.tabRole !== "follower") return;
-    if (isStaleLeadershipId(leadershipId, this.currentLeadershipId)) return;
-    this.currentLeadershipId = leadershipId;
-    this.followerLeaderReadyLeadershipId = leadershipId;
-    this.resolveFollowerDurablePathIfReady();
-  }
-
-  private handleBrokerCloseFollowerPort(leadershipId: number): void {
-    if (leadershipId !== this.currentLeadershipId) return;
-    this.markDurablePathPending();
-    this.closeFollowerPortState(undefined, {
-      preserveOutbox: true,
-    });
-  }
-
-  private ensureDurablePathReadyPromise(): Promise<void> {
-    if (this.durablePathError) {
-      return Promise.reject(this.durablePathError);
-    }
-    if (this.followerReadyResolved) {
-      return Promise.resolve();
-    }
-    if (this.followerReady) {
-      return this.followerReady;
-    }
-
-    this.followerReady = new Promise<void>((resolve, reject) => {
-      this.resolveFollowerReady = resolve;
-      this.rejectFollowerReady = reject;
-    });
-    return this.followerReady;
-  }
-
-  private markDurablePathPending(): void {
-    this.durablePathError = null;
-    if (this.followerReadyResolved) {
-      this.followerReady = null;
-      this.followerReadyResolved = false;
-    }
-  }
-
-  private resolveDurablePathReady(): void {
-    this.durablePathError = null;
-    this.followerReadyResolved = true;
-    this.resolveFollowerReady?.();
-    this.followerReady = Promise.resolve();
-    this.resolveFollowerReady = null;
-    this.rejectFollowerReady = null;
-  }
-
-  private rejectDurablePathReady(error: Error): void {
-    this.durablePathError = error;
-    this.followerReadyResolved = false;
-    this.rejectFollowerReady?.(error);
-    this.followerReady = null;
-    this.resolveFollowerReady = null;
-    this.rejectFollowerReady = null;
-  }
-
-  private attachFollowerPortBridgeForExistingClient(): void {
-    const first = this.clients.values().next();
-    if (first.done) return;
-    this.attachFollowerPortBridgeForClient(first.value);
-  }
-
-  private attachFollowerPortBridgeForClient(client: JazzClient): void {
-    if (this.followerPortBridge || !this.followerDataPort) {
-      return;
-    }
-
-    const bridge = new MessagePortRuntimeBridge(this.followerDataPort, client.getRuntime());
-    bridge.init();
-    bridge.onAuthFailure((reason) => {
-      this.markUnauthenticated(reason);
-    });
-    this.followerPortBridge = bridge;
-    this.followerDataPort = null;
-    this.followerPortReadyLeadershipId = this.currentLeadershipId;
-    this.resolveFollowerDurablePathIfReady();
-  }
-
-  private resolveFollowerDurablePathIfReady(): void {
-    if (this.tabRole !== "follower") return;
-    if (this.currentLeadershipId <= 0) return;
-    if (this.followerPortReadyLeadershipId !== this.currentLeadershipId) return;
-    if (this.followerLeaderReadyLeadershipId !== this.currentLeadershipId) return;
-    this.resolveDurablePathReady();
-  }
-
-  // Schema-blocked is non-terminal: queries fail fast with the reason, but the
-  // broker connection stays up so a later canonical-schema re-election can
-  // adopt this tab (any acceptance path clears the error via
-  // markDurablePathPending).
-  private handleBrokerSchemaBlocked(reason: string): void {
-    this.rejectDurablePathReady(new Error(reason));
-  }
-
-  private handleBrokerReconnected(client: BrowserBrokerClient): void {
-    this.adoptBrokerSnapshot(client.snapshot());
-    this.markDurablePathPending();
-    if (this.brokerSchemaFingerprint) {
-      client.reportSchemaReady(this.brokerSchemaFingerprint);
-    }
-  }
-
-  private handleBrokerClosed(error: Error): void {
-    this.rejectDurablePathReady(error);
-  }
-
-  private attachWorkerBridgeForExistingClient(): void {
-    if (!this.worker || this.workerBridge) return;
-    const first = this.clients.entries().next();
-    if (first.done) return;
-    const [schemaJson, client] = first.value;
-    this.attachWorkerBridge(schemaJson, client);
-  }
-
-  private recreateFirstClientAfterBrokerReset(): void {
-    if (this.clients.size > 0 || !this.brokerResetSchema) return;
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for broker storage reset");
-    }
-
-    const schema = this.brokerResetSchema;
-    const schemaJson = getRuntimeSchemaCacheKey(schema);
-    this.brokerResetSchema = null;
-    this.installMainThreadWasmTelemetry();
-    const client = this.runtimeModule.createClient({
-      config: { ...this.config },
-      schema,
-      hasWorker: true,
-      useBinaryEncoding: true,
-      bufferOutboxWithoutSyncSender: true,
-      onAuthFailure: (reason) => {
-        this.markUnauthenticated(reason);
-      },
-    });
-    this.attachMutationErrorHandler(client);
-    this.clients.set(schemaJson, client);
-    this.clientSchemas.set(schemaJson, schema);
-  }
-
-  private closeFollowerPortState(
-    error?: Error,
-    options: { preserveOutbox?: boolean; preserveLeaderReadySignal?: boolean } = {},
-  ): void {
-    if (options.preserveOutbox && !error) {
-      this.markDurablePathPending();
-    }
-    if (options.preserveOutbox) {
-      this.followerPortBridge?.detachForReconnect();
-    } else {
-      this.followerPortBridge?.shutdown();
-    }
-    this.followerPortBridge = null;
-    this.followerPortReadyLeadershipId = null;
-    if (!options.preserveLeaderReadySignal) {
-      this.followerLeaderReadyLeadershipId = null;
-    }
-    this.followerDataPort?.close();
-    this.followerDataPort = null;
-
-    if (error) {
-      this.rejectDurablePathReady(error);
-    }
-  }
-
-  private async shutdownLeaderWorker(): Promise<void> {
-    if (this.workerBridge && this.worker) {
-      try {
-        await this.workerBridge.shutdown();
-      } catch {
-        // Best effort during broker demotion/shutdown.
-      }
-    }
-    this.workerBridge = null;
-    this.bridgeReady = null;
-
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
-    }
-  }
-
-  private releaseBrokerLeadershipResources(): void {
-    const tabLockLease = this.tabLockLease;
-    this.tabLockLease = null;
-    tabLockLease?.release();
-  }
-
-  private attachLifecycleHooks(): void {
-    if (this.lifecycleHooksAttached) return;
-    if (typeof window === "undefined" || typeof document === "undefined") return;
-
-    // Arm the teardown-trap suppressor before the first `pagehide` can fire.
-    installWasmTeardownTrapSuppressor();
-    document.addEventListener("visibilitychange", this.onVisibilityChange);
-    window.addEventListener("pagehide", this.onPageHide);
-    // "freeze"/"resume" are non-standard but available in Chromium lifecycle APIs.
-    document.addEventListener("freeze", this.onPageFreeze as EventListener);
-    document.addEventListener("resume", this.onPageResume as EventListener);
-    this.lifecycleHooksAttached = true;
-  }
-
-  private detachLifecycleHooks(): void {
-    if (!this.lifecycleHooksAttached) return;
-    if (typeof window === "undefined" || typeof document === "undefined") return;
-
-    document.removeEventListener("visibilitychange", this.onVisibilityChange);
-    window.removeEventListener("pagehide", this.onPageHide);
-    document.removeEventListener("freeze", this.onPageFreeze as EventListener);
-    document.removeEventListener("resume", this.onPageResume as EventListener);
-    this.lifecycleHooksAttached = false;
-  }
-
-  private sendLifecycleHint(event: WorkerLifecycleEvent): void {
-    if (this.isShuttingDown || !this.worker) return;
-
-    if (this.workerBridge) {
-      this.workerBridge.sendLifecycleHint(event);
-      return;
-    }
-
-    this.worker.postMessage({
-      type: "lifecycle-hint",
-      event,
-      sentAtMs: Date.now(),
-    });
-  }
-
-  private async deleteBrokerStorageFiles(): Promise<void> {
-    if (!this.primaryDbName) {
-      throw new Error("Browser storage reset requires an initialized primary Db namespace.");
-    }
-
-    const rootDirectory = await navigator.storage.getDirectory();
-    const namespaces = await this.collectBrokerStorageNamespaces(rootDirectory, this.primaryDbName);
-    for (const namespace of namespaces) {
-      await this.removeBrokerStorageNamespace(rootDirectory, namespace);
-    }
-  }
-
-  private async collectBrokerStorageNamespaces(
-    rootDirectory: FileSystemDirectoryHandle,
-    primaryDbName: string,
-  ): Promise<string[]> {
-    const namespaces = new Set<string>([primaryDbName]);
-    const rootWithEntries = rootDirectory as FileSystemDirectoryHandle & {
-      entries?: () => AsyncIterable<[string, FileSystemHandle]>;
-    };
-    if (typeof rootWithEntries.entries !== "function") {
-      return [...namespaces];
-    }
-
-    const suffix = ".opfsbtree";
-    const legacyFallbackPrefix = `${primaryDbName}__fallback__`;
-    for await (const [name] of rootWithEntries.entries()) {
-      if (!name.endsWith(suffix)) continue;
-      const namespace = name.slice(0, -suffix.length);
-      if (namespace === primaryDbName || namespace.startsWith(legacyFallbackPrefix)) {
-        namespaces.add(namespace);
-      }
-    }
-
-    return [...namespaces];
-  }
-
-  private async removeBrokerStorageNamespace(
-    rootDirectory: FileSystemDirectoryHandle,
-    namespace: string,
-  ): Promise<void> {
-    const fileName = `${namespace}.opfsbtree`;
-    for (let attempt = 0; attempt <= BROKER_STORAGE_DELETE_MAX_RETRIES; attempt++) {
-      try {
-        await rootDirectory.removeEntry(fileName, { recursive: false });
-        return;
-      } catch (error) {
-        const name = (error as { name?: string } | undefined)?.name;
-        if (name === "NotFoundError") {
-          return;
-        }
-        if (!isBrokerStorageLockedError(error)) {
-          throw new Error(
-            `Failed to delete browser storage for "${namespace}": ${stringifyError(error)}`,
-          );
-        }
-        if (attempt === BROKER_STORAGE_DELETE_MAX_RETRIES) {
-          throw new Error(
-            `Failed to delete browser storage for "${namespace}" because OPFS is locked by another tab. Close other tabs and retry.`,
-          );
-        }
-        await sleepMs(brokerStorageDeleteRetryDelayMs(attempt));
-      }
-    }
-  }
-
-  private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
-    const currentWorker = this.worker;
-    const firstClient = this.clients.entries().next();
-    this.brokerResetSchema = firstClient.done
-      ? null
-      : (this.clientSchemas.get(firstClient.value[0]) ??
-        normalizeRuntimeSchema(firstClient.value[1].getSchema()));
-
-    if (this.workerBridge && currentWorker) {
-      try {
-        await this.workerBridge.shutdown();
-      } catch {
-        // Best effort: if the bridge shutdown times out, we still terminate below.
-      }
-    }
-    this.workerBridge = null;
-    this.bridgeReady = null;
-    this.brokerLeaderReadyLeadershipId = null;
-    this.closePendingLeaderFollowerPorts();
-    this.closeFollowerPortState(undefined);
-
-    for (const client of this.clients.values()) {
-      await client.shutdown();
-    }
-    this.clients.clear();
-    this.clientSchemas.clear();
-    this.brokerSchemaFingerprint = null;
-
-    if (currentWorker) {
-      currentWorker.terminate();
-    }
-    this.worker = null;
-  }
-
-  private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
-    let worker: Worker;
-
-    if (runtimeSources?.workerUrl || runtimeSources?.baseUrl) {
-      // Explicit worker location — use dynamic URL resolution.
-      const locationHref = typeof location !== "undefined" ? location.href : undefined;
-      const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
-      const wasmUrl = syncInitInput
-        ? null
-        : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
-      const workerUrl = appendWorkerRuntimeWasmUrl(
-        resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
-        wasmUrl,
-      );
-      worker = new Worker(workerUrl, { type: "module" });
-    } else {
-      // Static URL pattern — bundlers (Turbopack, webpack, Vite) detect this
-      // and automatically bundle the worker script + its WASM dependency.
-      worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
-        type: "module",
-      });
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
-      const handler = (event: MessageEvent) => {
-        if (event.data.type === "ready") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          resolve();
-        } else if (event.data.type === "error") {
-          clearTimeout(timeout);
-          worker.removeEventListener("message", handler);
-          reject(new Error(event.data.message));
-        }
-      };
-      worker.addEventListener("message", handler);
-      worker.addEventListener("error", (e) => {
-        clearTimeout(timeout);
-        reject(new Error(`Worker load error: ${e.message}`));
-      });
-    });
-
-    // Swallow the inert trap from the worker's dying WASM heap on navigation;
-    // only during the teardown window — a genuine worker fault still propagates.
-    worker.addEventListener("error", (e) => {
-      if (!isWasmTeardownInProgress()) return;
-      if (!isWasmTeardownTrap(e.message)) return;
-      e.preventDefault();
-    });
-
-    return worker;
   }
 
   updateAuthToken(jwtToken: string | null): void {
@@ -2412,31 +1384,7 @@ export class Db {
    * - Tears down worker + clients, deletes OPFS files, and reconnects participating tabs
    */
   async deleteClientStorage(): Promise<void> {
-    if (resolveStorageDriver(this.config.driver).type !== "persistent") {
-      throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
-    }
-
-    if (!isBrowser()) {
-      console.error(
-        "deleteClientStorage() is only available on browser worker-backed Db instances.",
-      );
-      return;
-    }
-
-    const brokerClient = this.brokerClient;
-    if (!brokerClient) {
-      throw new Error("deleteClientStorage() requires an initialized browser broker.");
-    }
-    const operation = this.workerReconfigure.then(async () => {
-      await brokerClient.requestStorageReset(`storage-reset-${Date.now()}`);
-    });
-
-    this.workerReconfigure = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-
-    await operation;
+    return this.connection.deleteClientStorage();
   }
 
   /**
@@ -2658,7 +1606,7 @@ export class Db {
       );
     };
 
-    if (this.brokerClient && this.tabRole === "follower") {
+    if (this.connection.shouldDeferSubscriptionStart()) {
       void this.ensureQueryReady(queryOptions)
         .then(startSubscription)
         .catch((error) => {
@@ -2699,34 +1647,13 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
-    this.closePendingLeaderFollowerPorts();
-    this.closeFollowerPortState(new Error("Db shutdown"));
-    this.detachLifecycleHooks();
 
     let shutdownError: unknown = null;
 
     try {
-      await this.workerReconfigure;
+      await this.connection.shutdown();
     } catch (error) {
       shutdownError = error;
-    }
-
-    // Ensure bridge init has completed before sending shutdown —
-    // otherwise the worker may still be opening OPFS handles
-    try {
-      await this.ensureBridgeReady();
-    } catch (error) {
-      shutdownError ??= error;
-    }
-
-    // Shutdown worker bridge — waits for OPFS handles to be released
-    if (this.workerBridge && this.worker) {
-      try {
-        await this.workerBridge.shutdown();
-      } catch (error) {
-        shutdownError ??= error;
-      }
-      this.workerBridge = null;
     }
 
     this.mutationErrorListeners.clear();
@@ -2737,21 +1664,6 @@ export class Db {
     }
     this.clients.clear();
     this.clientSchemas.clear();
-
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
-    }
-
-    this.releaseBrokerLeadershipResources();
-    if (this.brokerClient) {
-      try {
-        await this.brokerClient.shutdown();
-      } catch (error) {
-        shutdownError ??= error;
-      }
-      this.brokerClient = null;
-    }
 
     if (shutdownError) {
       throw shutdownError;

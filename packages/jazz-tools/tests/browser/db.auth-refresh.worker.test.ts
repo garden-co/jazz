@@ -83,6 +83,10 @@ const allTodos: QueryBuilder<Todo> = {
 // Helper: intercept outbound postMessage to the worker
 // ---------------------------------------------------------------------------
 
+function getPrivateWorker(db: Db): Worker | null {
+  return (db as any).connection?.activeRoleBridge?.worker ?? null;
+}
+
 /**
  * Wraps worker.postMessage to capture every message the main thread sends
  * to the worker.  Returns snapshot / dispose functions.
@@ -99,8 +103,7 @@ function attachOutboundMessageProbe(db: Db): {
   snapshot: () => Array<{ type: string; [k: string]: unknown }>;
   dispose: () => void;
 } {
-  // @ts-expect-error worker is private
-  const worker = (db as { worker?: Worker | null }).worker;
+  const worker = getPrivateWorker(db);
   const captured: Array<{ type: string; [k: string]: unknown }> = [];
 
   if (!worker) {
@@ -184,8 +187,7 @@ describe("Db worker-path auth refresh — update-auth dispatch chain", () => {
       }),
     );
 
-    // @ts-expect-error worker is private
-    const worker = db.worker as Worker | null;
+    const worker = getPrivateWorker(db);
     expect(worker, "createDb with persistent driver in browser must spawn a worker").toBeTruthy();
 
     // Trigger lazy bridge init: WorkerBridge is created on first getClient() call.
