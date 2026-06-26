@@ -4494,44 +4494,62 @@ fn apply_index_by(
     input_descriptor: &RecordDescriptor,
     input_deltas: &[RecordDelta],
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-    input_deltas
-        .iter()
-        .map(|delta| {
-            let key = index_key(index_by, input_descriptor, delta.raw())?;
-            let value = if index_by.store_value {
-                primary_key_value_bytes(input_descriptor, delta.raw(), &index_by.value_fields)?
-            } else {
-                Vec::new()
-            };
-            Ok(RecordDelta {
+    let mut deltas = Vec::new();
+    for delta in input_deltas {
+        let keys = index_keys(index_by, input_descriptor, delta.raw())?;
+        let value = if index_by.store_value {
+            primary_key_value_bytes(input_descriptor, delta.raw(), &index_by.value_fields)?
+        } else {
+            Vec::new()
+        };
+        for key in keys {
+            deltas.push(RecordDelta {
                 record: index_record_descriptor()
-                    .create(&[Value::Bytes(key), Value::Bytes(value)])?,
+                    .create(&[Value::Bytes(key), Value::Bytes(value.clone())])?,
                 weight: delta.weight,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(deltas)
 }
 
-fn index_key(
+fn index_keys(
     index_by: &IndexByOp,
     input_descriptor: &RecordDescriptor,
     record: &[u8],
-) -> Result<Vec<u8>, IvmRuntimeError> {
-    let mut key = Vec::new();
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    let mut keys = vec![Vec::new()];
+    let mut seen = HashSet::new();
+
     for field_idx in &index_by.key_fields {
-        encode_record_field_key_part(&mut key, input_descriptor, record, *field_idx)?;
+        let parts = record_field_key_parts(input_descriptor, record, *field_idx)?;
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
+        for key in &keys {
+            for part in &parts {
+                let mut next = key.clone();
+                next.extend(part);
+                if seen.insert(next.clone()) {
+                    next_keys.push(next);
+                }
+            }
+        }
+        keys = next_keys;
+        seen.clear();
     }
     if index_by.append_value_to_key {
+        let value = primary_key_value_bytes(input_descriptor, record, &index_by.value_fields)?;
         // Non-unique indices append the primary key so equal index values remain
         // distinct and ordered for range scans.
-        key.push(0xff);
-        key.extend(primary_key_value_bytes(
-            input_descriptor,
-            record,
-            &index_by.value_fields,
-        )?);
+        for key in &mut keys {
+            key.push(0xff);
+            key.extend(&value);
+        }
     }
-    Ok(key)
+    Ok(keys)
 }
 
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
@@ -4586,6 +4604,77 @@ fn encode_record_field_key_part(
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
             let value = descriptor.get(record, field_name)?;
             encode_key_part(key, &value)
+        }
+    }
+}
+
+fn record_field_key_parts(
+    descriptor: &RecordDescriptor,
+    record: &[u8],
+    field_idx: usize,
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    let field = descriptor
+        .fields()
+        .get(field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    match &field.value_type {
+        ValueType::Array(_) => {
+            let field_name = field
+                .name
+                .as_deref()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+            let Value::Array(values) = descriptor.get(record, field_name)? else {
+                return Err(IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()));
+            };
+            values
+                .into_iter()
+                .map(|value| {
+                    let mut key = Vec::new();
+                    encode_key_part(&mut key, &value)?;
+                    Ok(key)
+                })
+                .collect()
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)) => {
+            let field_name = field
+                .name
+                .as_deref()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+            match descriptor.get(record, field_name)? {
+                Value::Nullable(None) => {
+                    let mut key = Vec::new();
+                    encode_key_part(&mut key, &Value::Nullable(None))?;
+                    Ok(vec![key])
+                }
+                Value::Nullable(Some(value)) => match *value {
+                    Value::Array(values) => values
+                        .into_iter()
+                        .map(|value| {
+                            let mut key = Vec::new();
+                            encode_key_part(
+                                &mut key,
+                                &Value::Nullable(Some(Box::new(value))),
+                            )?;
+                            Ok(key)
+                        })
+                        .collect(),
+                    value => {
+                        let mut key = Vec::new();
+                        encode_key_part(&mut key, &Value::Nullable(Some(Box::new(value))))?;
+                        Ok(vec![key])
+                    }
+                },
+                value => {
+                    let mut key = Vec::new();
+                    encode_key_part(&mut key, &value)?;
+                    Ok(vec![key])
+                }
+            }
+        }
+        _ => {
+            let mut key = Vec::new();
+            encode_record_field_key_part(&mut key, descriptor, record, field_idx)?;
+            Ok(vec![key])
         }
     }
 }

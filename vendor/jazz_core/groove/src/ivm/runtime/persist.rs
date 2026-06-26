@@ -132,10 +132,7 @@ fn persist_record_keys(
             .as_deref()
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
         let value = descriptor.get(record, field_name)?;
-        let parts = match value {
-            crate::records::Value::Array(values) => values,
-            value => vec![value],
-        };
+        let parts = arrangement_key_parts(value);
 
         if parts.is_empty() {
             return Ok(Vec::new());
@@ -156,4 +153,18 @@ fn persist_record_keys(
     }
 
     Ok(keys)
+}
+
+fn arrangement_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
+    match value {
+        crate::records::Value::Array(values) => values,
+        crate::records::Value::Nullable(Some(value)) => match *value {
+            crate::records::Value::Array(values) => values
+                .into_iter()
+                .map(|value| crate::records::Value::Nullable(Some(Box::new(value))))
+                .collect(),
+            value => vec![crate::records::Value::Nullable(Some(Box::new(value)))],
+        },
+        value => vec![value],
+    }
 }
