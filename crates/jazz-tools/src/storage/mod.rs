@@ -13,6 +13,10 @@
 pub mod conformance;
 mod key_codec;
 mod memory;
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 mod storage_core;
 mod storage_trait;
 pub use memory::MemoryStorage;
@@ -161,8 +165,20 @@ const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
 const BRANCH_NAME_BY_ORD_TABLE: &str = "__branch_name_by_ord";
 const BRANCH_ORD_META_TABLE: &str = "__branch_ord_meta";
 const BRANCH_ORD_NEXT_ORD_KEY: &str = "next_ord";
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) const STORE_MANIFEST_KEY: &str = "__jazz_store_manifest";
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 const STORE_MANIFEST_MAGIC: &[u8; 10] = b"JAZZSTORE1";
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 const STORE_FORMAT_V3: i32 = 3;
 const ROW_STORAGE_FORMAT_V3: i32 = 3;
 const ROW_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
@@ -194,12 +210,20 @@ pub(crate) const SQLITE_STORE_KIND: &str = "sqlite";
 #[cfg(feature = "rocksdb")]
 pub(crate) const ROCKSDB_STORE_KIND: &str = "rocksdb";
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoreManifest {
     pub store_kind: String,
     pub store_format_version: i32,
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) fn expected_store_manifest(store_kind: &str) -> StoreManifest {
     StoreManifest {
         store_kind: store_kind.to_string(),
@@ -207,6 +231,10 @@ pub(crate) fn expected_store_manifest(store_kind: &str) -> StoreManifest {
     }
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) fn encode_store_manifest(manifest: &StoreManifest) -> Result<Vec<u8>, StorageError> {
     let kind_bytes = manifest.store_kind.as_bytes();
     if kind_bytes.len() > u8::MAX as usize {
@@ -225,6 +253,10 @@ pub(crate) fn encode_store_manifest(manifest: &StoreManifest) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) fn decode_store_manifest(bytes: &[u8]) -> Result<StoreManifest, StorageError> {
     let min_len = STORE_MANIFEST_MAGIC.len() + std::mem::size_of::<i32>() + 1;
     if bytes.len() < min_len {
@@ -257,6 +289,10 @@ pub(crate) fn decode_store_manifest(bytes: &[u8]) -> Result<StoreManifest, Stora
     })
 }
 
+#[cfg(all(
+    any(feature = "rocksdb", feature = "sqlite"),
+    not(target_arch = "wasm32")
+))]
 pub(crate) fn validate_store_manifest(
     actual: &StoreManifest,
     expected: &StoreManifest,
