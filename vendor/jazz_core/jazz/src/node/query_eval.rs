@@ -292,6 +292,30 @@ where
         )
     }
 
+    pub(crate) fn query_rows_prefer_settled_result_set(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        prepared_plan: Option<&PreparedQueryPlan>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if !self.uses_partitioned_or_schema_projected_read(shape) {
+            let subscription = SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+            };
+            if self.query.settled_result_sets.contains_key(&subscription) {
+                return self.query_rows_from_result_set(shape, subscription);
+            }
+        }
+
+        self.query_rows_with_prepared_plan(
+            shape,
+            binding,
+            DurabilityTier::Local,
+            prepared_plan,
+        )
+    }
+
     pub(crate) fn query_rows_including_deleted_for_identity(
         &mut self,
         shape: &ValidatedQuery,

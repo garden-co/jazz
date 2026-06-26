@@ -1621,6 +1621,6 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions, r13_permission_filtered_resume
 }
 criterion_main!(benches);
