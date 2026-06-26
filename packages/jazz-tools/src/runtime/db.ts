@@ -1245,8 +1245,8 @@ export class Db {
    * Get or create a JazzClient for the given schema.
    * Synchronous because the runtime module is loaded before Db is created.
    *
-   * In worker mode, the first call per schema also initializes the
-   * WorkerBridge (async). Subsequent calls are sync.
+   * When a durable peer is active, the first call per schema also initializes
+   * the worker or follower bridge (async). Subsequent calls are sync.
    */
   protected getClient(schema: WasmSchema): JazzClient {
     if (!this.runtimeModule) {
@@ -1265,14 +1265,13 @@ export class Db {
 
     if (!this.clients.has(key)) {
       this.installMainThreadWasmTelemetry();
-      const usesDurablePeer = this.worker !== null || this.brokerClient !== null;
+      const durablePeer =
+        this.worker !== null ? "worker" : this.brokerClient !== null ? "browser-broker" : null;
 
       const client = this.runtimeModule.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
-        hasWorker: usesDurablePeer,
-        useBinaryEncoding: usesDurablePeer,
-        bufferOutboxWithoutSyncSender: this.brokerClient !== null,
+        durablePeer,
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
@@ -1288,7 +1287,7 @@ export class Db {
       }
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
-      if (!usesDurablePeer && this.config.serverUrl) {
+      if (!durablePeer && this.config.serverUrl) {
         client.connectTransport(this.config.serverUrl, {
           jwt_token: this.config.jwtToken,
           admin_secret: this.config.adminSecret,
@@ -1975,9 +1974,7 @@ export class Db {
     const client = this.runtimeModule.createClient({
       config: { ...this.config },
       schema,
-      hasWorker: true,
-      useBinaryEncoding: true,
-      bufferOutboxWithoutSyncSender: true,
+      durablePeer: "browser-broker",
       onAuthFailure: (reason) => {
         this.markUnauthenticated(reason);
       },

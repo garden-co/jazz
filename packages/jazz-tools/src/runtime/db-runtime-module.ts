@@ -10,12 +10,12 @@ export interface RuntimeTokenOptions {
   nowSeconds: bigint;
 }
 
+export type DbRuntimeDurablePeer = "worker" | "browser-broker";
+
 export interface DbRuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
-  hasWorker: boolean;
-  useBinaryEncoding: boolean;
-  bufferOutboxWithoutSyncSender?: boolean;
+  durablePeer: DbRuntimeDurablePeer | null;
   onAuthFailure: (reason: AuthFailureReason) => void;
 }
 

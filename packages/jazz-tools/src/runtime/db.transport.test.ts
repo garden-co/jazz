@@ -31,29 +31,29 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
   override createClient({
     config,
     schema,
-    hasWorker,
-    useBinaryEncoding,
+    durablePeer,
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
+    const hasDurablePeer = durablePeer !== null;
     return JazzClient.connectSync(
       TestDb.runtime as never,
       {
         appId: config.appId,
         schema,
         driver: config.driver,
-        serverUrl: hasWorker ? undefined : config.serverUrl,
+        serverUrl: hasDurablePeer ? undefined : config.serverUrl,
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: hasWorker ? undefined : "local",
-        defaultDurabilityTier: hasWorker ? undefined : config.serverUrl ? "edge" : undefined,
+        tier: hasDurablePeer ? undefined : "local",
+        defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,
       },
       {
-        useBinaryEncoding,
+        useBinaryEncoding: hasDurablePeer,
         onAuthFailure,
-        nonDurableClientRuntime: hasWorker,
+        nonDurableClientRuntime: hasDurablePeer,
       },
     );
   }
@@ -293,8 +293,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(runtimeModule.createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
-        hasWorker: false,
-        useBinaryEncoding: false,
+        durablePeer: null,
         config: expect.objectContaining({
           appId: "facade-app",
           jwtToken: "jwt:alice-secret:facade-app:3600",
@@ -309,6 +308,41 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(proof).toBe("jwt:alice-secret:proof-audience:7");
     expect(client.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the durable peer role to runtime modules", () => {
+    const client = makeClientStub();
+    class RecordingRuntimeModule extends DbRuntimeModule<DbConfig> {
+      readonly createClientMock = vi.fn((_context: DbRuntimeClientContext<DbConfig>) => client);
+
+      protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
+        return TestDb.runtime;
+      }
+
+      override createClient(context: DbRuntimeClientContext<DbConfig>): JazzClient {
+        return this.createClientMock(context);
+      }
+    }
+
+    const directRuntime = new RecordingRuntimeModule();
+    new TestDb({ appId: "direct" }, directRuntime).exposeGetClient(makeSchema());
+
+    const workerRuntime = new RecordingRuntimeModule();
+    const workerDb = new TestDb({ appId: "worker" }, workerRuntime);
+    (workerDb as any).worker = {};
+    (workerDb as any).workerBridge = {};
+    workerDb.exposeGetClient(makeSchema());
+
+    const brokerRuntime = new RecordingRuntimeModule();
+    const brokerDb = new TestDb({ appId: "broker" }, brokerRuntime);
+    (brokerDb as any).brokerClient = {
+      reportSchemaReady: vi.fn(),
+    };
+    brokerDb.exposeGetClient(makeSchema());
+
+    expect(directRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBeNull();
+    expect(workerRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBe("worker");
+    expect(brokerRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBe("browser-broker");
   });
 
   it("forwards follower auth refreshes through the follower port bridge", () => {
