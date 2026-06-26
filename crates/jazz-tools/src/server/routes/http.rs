@@ -2,7 +2,7 @@
 
 //! HTTP routes for the Jazz server.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -282,9 +282,19 @@ fn schema_connectivity_forward_path(params: &SchemaConnectivityParams) -> String
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
 pub(super) async fn schema_handler(
     State(state): State<Arc<ServerState>>,
-    Path(hash_text): Path<String>,
+    Path(params): Path<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let Some(hash_text) = params.get("hash") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "missing schema hash".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
     let admin_secret = headers
         .get("X-Jazz-Admin-Secret")
         .and_then(|v| v.to_str().ok());
@@ -311,7 +321,7 @@ pub(super) async fn schema_handler(
         };
     }
 
-    let schema_hash = match parse_schema_hash_param(&hash_text) {
+    let schema_hash = match parse_schema_hash_param(hash_text) {
         Ok(hash) => hash,
         Err(message) => {
             return (
