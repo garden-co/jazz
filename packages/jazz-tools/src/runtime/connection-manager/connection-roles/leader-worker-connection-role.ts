@@ -1,11 +1,11 @@
-import { JazzClient, type DurabilityTier, type QueryExecutionOptions } from "../../client.js";
+import { JazzClient, type DurabilityTier } from "../../client.js";
 import {
   WorkerBridge,
   type WorkerBridgeOptions,
   type WorkerLifecycleEvent,
 } from "../../worker-bridge.js";
 import type { BrowserConnectionRole } from "./connection-role.js";
-import type { ConnectionBridgeClientInput, ConnectionManagerHost } from "../types.js";
+import type { ConnectionManagerClientInput, DbForConnection } from "../types.js";
 
 interface LeaderWorkerBridgeCallbacks {
   onFollowerPortAttached(peerId: string, leadershipId: number): void;
@@ -23,14 +23,14 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
   >();
 
   constructor(
-    private readonly host: ConnectionManagerHost,
+    private readonly host: DbForConnection,
     private readonly worker: Worker,
     private readonly leadershipId: number,
     private readonly buildWorkerBridgeOptions: (schemaJson: string) => WorkerBridgeOptions,
     private readonly callbacks: LeaderWorkerBridgeCallbacks,
   ) {}
 
-  onClientCreated({ schemaKey, client }: ConnectionBridgeClientInput): void {
+  onClientCreated({ schemaKey, client }: ConnectionManagerClientInput): void {
     if (this.workerBridge) return;
     this.attachWorkerBridge(schemaKey, client);
   }
@@ -112,16 +112,10 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
     }
   }
 
-  async ensureReadyForQuery(options?: QueryExecutionOptions): Promise<void> {
+  async ensureReady(tier?: DurabilityTier): Promise<void> {
     await this.bridgeReady;
     if (!this.workerBridge || !this.host.config.serverUrl) return;
-    if (!options?.tier || options.tier === "local") return;
-    await this.workerBridge.waitForUpstreamServerConnection();
-  }
-
-  async ensureReadyForWriteWait(tier: DurabilityTier): Promise<void> {
-    await this.bridgeReady;
-    if (!this.workerBridge || !this.host.config.serverUrl || tier === "local") return;
+    if (!tier || tier === "local") return;
     await this.workerBridge.waitForUpstreamServerConnection();
   }
 

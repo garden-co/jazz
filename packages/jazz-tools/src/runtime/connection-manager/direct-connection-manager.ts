@@ -1,20 +1,22 @@
-import type {
+import {
   ConnectionManager,
-  ConnectionBridgeClientInput,
-  ConnectionManagerHost,
+  type ConnectionManagerClientInput,
+  type DbForConnection,
 } from "./types.js";
 
 /**
  * Manages the connection of a DB that is directly connected to a Jazz server
  */
-export class DirectConnectionManager implements ConnectionManager {
-  readonly hasDurablePeer = false;
+export class DirectConnectionManager extends ConnectionManager {
+  protected readonly hasDurablePeer = false;
 
-  constructor(private readonly host: ConnectionManagerHost) {}
+  constructor(host: DbForConnection) {
+    super(host);
+  }
 
   async start(): Promise<void> {}
 
-  onClientCreated({ client }: ConnectionBridgeClientInput): void {
+  protected override onClientCreated({ client }: ConnectionManagerClientInput): void {
     const { config } = this.host;
     if (!config.serverUrl) return;
     client.connectTransport(config.serverUrl, {
@@ -23,11 +25,7 @@ export class DirectConnectionManager implements ConnectionManager {
     });
   }
 
-  async ensureReadyForQuery(): Promise<void> {}
-
-  async ensureReadyForWriteWait(): Promise<void> {}
-
-  updateAuth(): void {}
+  async ensureReady(): Promise<void> {}
 
   sendLifecycleHint(): void {}
 
@@ -38,6 +36,4 @@ export class DirectConnectionManager implements ConnectionManager {
   async deleteClientStorage(): Promise<void> {
     throw new Error("deleteClientStorage() is only available in persistent browser DBs.");
   }
-
-  async shutdown(): Promise<void> {}
 }

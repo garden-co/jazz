@@ -1,7 +1,7 @@
 import type { AuthFailureReason } from "../../sync-transport.js";
 import { MessagePortRuntimeBridge } from "../../worker-bridge.js";
 import type { BrowserConnectionRole } from "./connection-role.js";
-import type { ConnectionBridgeClientInput } from "../types.js";
+import type { ConnectionManagerClientInput } from "../types.js";
 
 interface FollowerPortBridgeCallbacks {
   onReady(leadershipId: number): void;
@@ -26,7 +26,7 @@ export class FollowerPortConnectionRole implements BrowserConnectionRole {
     }
   }
 
-  onClientCreated({ client }: ConnectionBridgeClientInput): void {
+  onClientCreated({ client }: ConnectionManagerClientInput): void {
     if (this.followerPortBridge || !this.followerDataPort) return;
 
     const bridge = new MessagePortRuntimeBridge(this.followerDataPort, client.getRuntime());
@@ -52,9 +52,7 @@ export class FollowerPortConnectionRole implements BrowserConnectionRole {
     this.callbacks.onReady(this.leadershipId);
   }
 
-  async ensureReadyForQuery(): Promise<void> {}
-
-  async ensureReadyForWriteWait(): Promise<void> {}
+  async ensureReady(): Promise<void> {}
 
   updateAuth(auth: { jwtToken?: string }): void {
     this.followerPortBridge?.updateAuth(auth);

@@ -133,6 +133,10 @@ function getBrowserConnection(db: Db): any {
   return (db as any).connection;
 }
 
+function getPrivateClient(db: Db): unknown {
+  return getBrowserConnection(db)?.client ?? null;
+}
+
 function getActiveRoleBridge(db: Db): any {
   return getBrowserConnection(db)?.activeRoleBridge ?? null;
 }
@@ -729,7 +733,6 @@ describe("Worker Bridge with OPFS", () => {
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
     // (Real worker.terminate() doesn't reliably release OPFS exclusive
     // locks within the same page session — only a full page reload does.)
-    await (db1 as any).ensureBridgeReady();
     const worker = getPrivateWorker(db1);
     await getActiveRoleBridge(db1).simulateCrash();
     worker?.terminate();
@@ -1192,8 +1195,8 @@ describe("Worker Bridge with OPFS", () => {
         workerExists: Boolean(getPrivateWorker(fresh)),
         workerOnMessage: Boolean(getPrivateWorker(fresh)?.onmessage),
         bridge: Boolean(getPrivateWorkerBridge(fresh)),
-        clientType: typeof (fresh as unknown as { client?: unknown }).client,
-        hasClient: Boolean((fresh as unknown as { client?: unknown }).client),
+        clientType: typeof getPrivateClient(fresh),
+        hasClient: Boolean(getPrivateClient(fresh)),
       })}`,
     );
     const snapshots: Todo[][] = [];
@@ -1317,7 +1320,6 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     db.insert(todos, { title: "Prime bridge", done: false });
-    await (db as any).ensureBridgeReady();
 
     const bridge = getPrivateWorkerBridge(db);
     expect(bridge).toBeTruthy();
@@ -2994,7 +2996,6 @@ function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unkn
 }
 
 async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
-  await (db as any).ensureBridgeReady();
   const worker = getPrivateWorker(db);
   if (!worker) {
     throw new Error("Expected worker instance to exist");
@@ -3037,7 +3038,6 @@ async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<Debu
 }
 
 async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
-  await (db as any).ensureBridgeReady();
   const worker = getPrivateWorker(db);
   if (!worker) {
     throw new Error("Expected worker instance to exist");
