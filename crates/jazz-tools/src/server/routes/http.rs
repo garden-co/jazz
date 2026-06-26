@@ -11,13 +11,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::jazz_transport::ErrorResponse;
 use crate::middleware::auth::validate_admin_secret;
 use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
+use crate::transport_protocol::ErrorResponse;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,

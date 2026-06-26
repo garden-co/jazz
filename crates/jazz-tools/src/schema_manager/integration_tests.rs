@@ -1,5 +1,7 @@
 //! Integration tests for SchemaManager - full flow from schema to transformation.
 
+#![allow(clippy::empty_line_after_doc_comments)]
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

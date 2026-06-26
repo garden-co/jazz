@@ -22,19 +22,11 @@ pub mod sync_manager;
 pub mod test_support;
 pub mod wire_types;
 
-pub use query_manager::bindings as binding_support;
-#[cfg(any(feature = "cli", feature = "server"))]
-pub use server::routes;
-pub use sync_manager::sync_tracer;
-
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
-#[cfg(feature = "runtime-tokio")]
-pub use runtime_tokio as jazz_tokio;
 
-pub mod transport_protocol;
-pub use transport_protocol as jazz_transport;
 pub mod transport_manager;
+pub mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
 pub mod ws_stream;
 
@@ -47,24 +39,22 @@ use std::path::PathBuf;
 #[cfg(feature = "client")]
 use thiserror::Error;
 
+pub use query_manager::policy::{Operation, PolicyExpr};
+pub use query_manager::query::{Query, QueryBuilder};
+pub use query_manager::session::{Session, WriteContext};
+pub use query_manager::types::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
+    RowDescriptor, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
+};
+pub use schema_manager::AppId;
+
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
 #[cfg(feature = "client")]
 pub use object::ObjectId;
 #[cfg(feature = "client")]
-pub use query_manager::query::{Query, QueryBuilder};
-#[cfg(feature = "client")]
-pub use query_manager::session::{Session, WriteContext};
-#[cfg(feature = "client")]
-pub use query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema, Value,
-};
-#[cfg(feature = "client")]
 pub use row_histories::BatchId;
-#[cfg(feature = "client")]
-pub use schema_manager::AppId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;
 #[cfg(feature = "client")]
@@ -102,7 +92,7 @@ pub struct AppContext {
 
     /// Optional sync message tracer for test observability.
     /// Set via `TestingClient::with_tracer()` — `None` in production.
-    pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
+    pub sync_tracer: Option<(crate::sync_manager::sync_tracer::SyncTracer, String)>,
 }
 
 #[cfg(feature = "test-utils")]

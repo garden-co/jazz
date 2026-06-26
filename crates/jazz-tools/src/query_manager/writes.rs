@@ -980,7 +980,6 @@ impl QueryManager {
     ///
     /// Returns an `InsertResult` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
-    #[cfg(test)]
     pub fn insert<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -995,7 +994,6 @@ impl QueryManager {
     /// If the table has an INSERT WITH CHECK policy and a session is provided,
     /// the policy is evaluated against the new row values. If the policy
     /// denies the insert, `PolicyDenied` is returned.
-    #[cfg(test)]
     pub fn insert_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1008,7 +1006,6 @@ impl QueryManager {
         self.insert_on_branch(storage, table, &current_branch, values, write_context)
     }
 
-    #[cfg(test)]
     pub fn insert_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1023,7 +1020,6 @@ impl QueryManager {
     /// Insert a new row into a table on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware inserts.
-    #[cfg(test)]
     pub fn insert_on_branch<H: Storage>(
         &mut self,
         storage: &mut H,

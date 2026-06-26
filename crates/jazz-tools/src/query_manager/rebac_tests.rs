@@ -2,6 +2,8 @@
 //!
 //! Tests for the async permission evaluation system using policy graphs.
 
+#![allow(clippy::empty_line_after_doc_comments)]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

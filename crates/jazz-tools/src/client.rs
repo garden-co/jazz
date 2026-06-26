@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::batch_fate::BatchMode;
-use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
@@ -15,6 +14,7 @@ use crate::query_manager::types::{OrderedRowDelta, Value};
 use crate::query_manager::types::{RowPolicyMode, Schema};
 use crate::row_histories::BatchId;
 use crate::runtime_core::ReadDurabilityOptions;
+use crate::runtime_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;

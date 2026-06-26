@@ -113,7 +113,7 @@ fn seed_visible_row(
 
 fn persist_visible_row_settlement(
     io: &mut MemoryStorage,
-    row_id: ObjectId,
+    _row_id: ObjectId,
     row: &crate::row_histories::StoredRowBatch,
 ) {
     let Some(confirmed_tier) = row.confirmed_tier else {

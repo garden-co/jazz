@@ -942,7 +942,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Attach a sync-message tracer to this runtime.
-    pub fn set_sync_tracer(&self, tracer: crate::sync_tracer::SyncTracer, name: String) {
+    pub fn set_sync_tracer(
+        &self,
+        tracer: crate::sync_manager::sync_tracer::SyncTracer,
+        name: String,
+    ) {
         if let Ok(mut core) = self.core.lock() {
             core.set_sync_tracer(tracer, name);
         }

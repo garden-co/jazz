@@ -51,7 +51,7 @@ pub(super) async fn direct_ws_handler(
     if state.shutdown.is_shutting_down() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::jazz_transport::ErrorResponse::internal(
+            axum::Json(crate::transport_protocol::ErrorResponse::internal(
                 "server is shutting down".to_string(),
             )),
         )

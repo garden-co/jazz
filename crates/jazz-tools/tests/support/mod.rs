@@ -86,7 +86,7 @@ pub struct TestingClient<'a> {
     storage: TestingClientStorage,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
-    sync_tracer: Option<(jazz_tools::sync_tracer::SyncTracer, String)>,
+    sync_tracer: Option<(jazz_tools::sync_manager::sync_tracer::SyncTracer, String)>,
 }
 
 #[allow(dead_code)]
@@ -155,7 +155,7 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_tracer(
         mut self,
-        tracer: &jazz_tools::sync_tracer::SyncTracer,
+        tracer: &jazz_tools::sync_manager::sync_tracer::SyncTracer,
         name: impl Into<String>,
     ) -> Self {
         self.sync_tracer = Some((tracer.clone(), name.into()));

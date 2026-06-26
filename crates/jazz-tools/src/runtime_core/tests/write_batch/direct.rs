@@ -455,7 +455,7 @@ fn rc_worker_direct_batch_persists_batch_fate_on_seal() {
             Some(&write_context),
         )
         .unwrap();
-    let ((second_row_id, _), second_batch_id) =
+    let ((_second_row_id, _), second_batch_id) =
         s.b.insert(
             "users",
             user_insert_values(ObjectId::new(), "Bob"),

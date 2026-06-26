@@ -14,9 +14,9 @@ use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
 use crate::query_manager::types::{Schema, SchemaHash};
-use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
+use crate::server::routes;
 use crate::server::{ConnectionEventHub, DynStorage, ServerState, ServerTopology};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
@@ -73,7 +73,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     core_server_schema: Option<JazzSchema>,
-    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
 }
@@ -97,7 +97,10 @@ impl ServerBuilder {
         }
     }
 
-    pub fn with_sync_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
+    pub fn with_sync_tracer(
+        mut self,
+        tracer: crate::sync_manager::sync_tracer::SyncTracer,
+    ) -> Self {
         self.sync_tracer = Some(tracer);
         self
     }
