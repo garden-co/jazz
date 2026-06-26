@@ -247,7 +247,7 @@ const FfiConverterTypeBatchedTickCallback =
 
 export interface MutationErrorCallback {
   /**
-   * Invoked when a rejected local mutation was not handled by wait_for_batch.
+   * Invoked when a rejected local mutation was not handled by wait_for_transaction.
    */
   onError(eventJson: string): void;
 }
@@ -746,12 +746,12 @@ export interface RnRuntimeInterface {
    * Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
    */
   batchedTick() /*throws*/ : void;
-  beginBatch(batchMode: string) /*throws*/ : string;
+  beginTransaction(transactionKind: string) /*throws*/ : string;
   /**
    * Flush and close the underlying storage, releasing filesystem locks.
    */
   close() /*throws*/ : void;
-  commitBatch(batchId: string) /*throws*/ : void;
+  commitTransaction(transactionId: string) /*throws*/ : void;
   /**
    * Connect to a Jazz server over WebSocket.
    *
@@ -824,7 +824,7 @@ export interface RnRuntimeInterface {
     valuesJson: string,
     writeContextJson: string | undefined
   ) /*throws*/ : string;
-  rollbackBatch(batchId: string) /*throws*/ : boolean;
+  rollbackTransaction(transactionId: string) /*throws*/ : boolean;
   unsubscribe(handle: /*u64*/ bigint) /*throws*/ : void;
   update(
     objectId: string,
@@ -842,10 +842,10 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined
   ) /*throws*/ : string;
   /**
-   * Wait for a local batch to settle at the requested durability tier.
+   * Wait for a local transaction to settle at the requested durability tier.
    */
-  waitForBatch(
-    batchId: string,
+  waitForTransaction(
+    transactionId: string,
     tier: string,
     asyncOpts_?: { signal: AbortSignal }
   ) /*throws*/ : Promise<void>;
@@ -907,16 +907,16 @@ export class RnRuntime
     );
   }
 
-  beginBatch(batchMode: string): string /*throws*/ {
+  beginTransaction(transactionKind: string): string /*throws*/ {
     return FfiConverterString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
           FfiConverterTypeJazzRnError
         ),
         /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_batch(
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_transaction(
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(batchMode),
+            FfiConverterString.lower(transactionKind),
             callStatus
           );
         },
@@ -943,15 +943,15 @@ export class RnRuntime
     );
   }
 
-  commitBatch(batchId: string): void /*throws*/ {
+  commitTransaction(transactionId: string): void /*throws*/ {
     uniffiCaller.rustCallWithError(
       /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
         FfiConverterTypeJazzRnError
       ),
       /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_commit_batch(
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_commit_transaction(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-          FfiConverterString.lower(batchId),
+          FfiConverterString.lower(transactionId),
           callStatus
         );
       },
@@ -1248,16 +1248,16 @@ export class RnRuntime
     );
   }
 
-  rollbackBatch(batchId: string): boolean /*throws*/ {
+  rollbackTransaction(transactionId: string): boolean /*throws*/ {
     return FfiConverterBool.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
           FfiConverterTypeJazzRnError
         ),
         /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_transaction(
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(batchId),
+            FfiConverterString.lower(transactionId),
             callStatus
           );
         },
@@ -1352,10 +1352,10 @@ export class RnRuntime
   }
 
   /**
-   * Wait for a local batch to settle at the requested durability tier.
+   * Wait for a local transaction to settle at the requested durability tier.
    */
-  async waitForBatch(
-    batchId: string,
+  async waitForTransaction(
+    transactionId: string,
     tier: string,
     asyncOpts_?: { signal: AbortSignal }
   ): Promise<void> /*throws*/ {
@@ -1364,9 +1364,9 @@ export class RnRuntime
       return await uniffiRustCallAsync(
         /*rustCaller:*/ uniffiCaller,
         /*rustFutureFunc:*/ () => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_transaction(
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            FfiConverterString.lower(batchId),
+            FfiConverterString.lower(transactionId),
             FfiConverterString.lower(tier)
           );
         },
@@ -1532,11 +1532,11 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_batch() !==
-    9001
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_transaction() !==
+    38156
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_begin_batch'
+      'uniffi_jazz_rn_checksum_method_rnruntime_begin_transaction'
     );
   }
   if (
@@ -1548,11 +1548,11 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_commit_batch() !==
-    6108
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_commit_transaction() !==
+    28297
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_commit_batch'
+      'uniffi_jazz_rn_checksum_method_rnruntime_commit_transaction'
     );
   }
   if (
@@ -1652,11 +1652,11 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch() !==
-    18093
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_transaction() !==
+    17005
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch'
+      'uniffi_jazz_rn_checksum_method_rnruntime_rollback_transaction'
     );
   }
   if (
@@ -1692,11 +1692,11 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch() !==
-    15795
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_transaction() !==
+    48339
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch'
+      'uniffi_jazz_rn_checksum_method_rnruntime_wait_for_transaction'
     );
   }
   if (
@@ -1725,7 +1725,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error() !==
-    57109
+    20514
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error'

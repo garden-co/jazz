@@ -61,10 +61,10 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string, write_context_json?: string | null): DirectMutationResult;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
-  beginBatch(batch_mode: BatchMode): string;
-  commitBatch(batch_id: string): void;
-  waitForBatch(batch_id: string, tier: string): Promise<void>;
-  rollbackBatch(batch_id: string): boolean;
+  beginTransaction(transactionKind: TransactionKind): string;
+  commitTransaction(transactionId: string): void;
+  waitForTransaction(transactionId: string, tier: string): Promise<void>;
+  rollbackTransaction(transactionId: string): boolean;
   query(
     query_json: string,
     session_json?: string | null,
@@ -156,7 +156,7 @@ export interface QueryExecutionOptions {
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
-  transactionBatchId?: string;
+  transactionId?: string;
   runtimeSettledTier?: DurabilityTier | null;
 };
 
@@ -168,42 +168,43 @@ export interface ResolvedQueryExecutionOptions {
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
-  transactionBatchId?: string;
+  transactionId?: string;
 };
 
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
 
-export type BatchMode = "direct" | "transactional";
+/**
+ * Selects the transaction semantics used for grouped writes.
+ *
+ * - `mergeable`: eventually-consistent writes that merge with concurrent writes.
+ * - `exclusive`: serializable writes that are validated as one unit by the authority.
+ */
+export type TransactionKind = "mergeable" | "exclusive";
 
-export type BatchFate =
+export type TransactionFate =
   | {
       kind: "missing";
-      batchId: BatchId;
+      transactionId: TransactionId;
     }
   | {
       kind: "rejected";
-      batchId: BatchId;
+      transactionId: TransactionId;
       code: string;
       reason: string;
     }
   | {
-      kind: "durableDirect";
-      batchId: BatchId;
-      confirmedTier: DurabilityTier;
-    }
-  | {
-      kind: "acceptedTransaction";
-      batchId: BatchId;
+      kind: "accepted";
+      transactionId: TransactionId;
       confirmedTier: DurabilityTier;
     };
 
-export interface LocalBatchRecord {
-  batchId: BatchId;
-  mode: BatchMode;
+export interface LocalTransactionRecord {
+  transactionId: TransactionId;
+  kind: TransactionKind;
   sealed: boolean;
-  latestSettlement: BatchFate | null;
+  latestSettlement: TransactionFate | null;
   encodedRecord?: Uint8Array;
 }
 
@@ -229,7 +230,7 @@ export interface RestoreOptions extends TimestampOverrideOptions {}
 export interface MutationErrorEvent {
   code: string;
   reason: string;
-  batch: LocalBatchRecord;
+  transaction: LocalTransactionRecord;
 }
 
 /**
@@ -241,18 +242,18 @@ export interface Row {
 }
 
 export interface DirectInsertResult extends Row {
-  batchId: BatchId;
+  transactionId: TransactionId;
 }
 
 export interface DirectMutationResult {
-  batchId: BatchId;
+  transactionId: TransactionId;
 }
 
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
-  batch_mode?: BatchMode;
+  batch_mode?: "direct" | "transactional";
   batch_id?: string;
   target_branch_name?: string;
 }
@@ -372,8 +373,8 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.transactionBatchId) {
-    payload.transaction_batch_id = options.transactionBatchId;
+  if (options.transactionId) {
+    payload.transaction_batch_id = options.transactionId;
   }
 
   if (!payload.propagation && !payload.local_updates && !payload.transaction_batch_id) {
@@ -398,7 +399,7 @@ function normalizeSubscriptionCallbackArgs(
   return undefined;
 }
 
-type BatchId = string;
+type TransactionId = string;
 
 function normalizeUpdatedAt(updatedAt?: number): number | undefined {
   if (updatedAt === undefined) {
@@ -416,7 +417,7 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   }
   const candidate = error as {
     kind?: unknown;
-    batchId?: unknown;
+    transactionId?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -426,11 +427,11 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   if (
     typeof candidate.code !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.batchId !== "string"
+    typeof candidate.transactionId !== "string"
   ) {
     return null;
   }
-  return new PersistedWriteRejectedError(candidate.batchId, candidate.code, candidate.reason);
+  return new PersistedWriteRejectedError(candidate.transactionId, candidate.code, candidate.reason);
 }
 
 /**
@@ -440,23 +441,23 @@ export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
   constructor(
-    readonly batchId: BatchId,
+    readonly transactionId: TransactionId,
     readonly code: string,
     readonly reason: string,
   ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+    super(`Persisted transaction ${transactionId} was rejected (${code}): ${reason}`);
   }
 }
 
 /**
- * Returned by upsert, update, and delete operations, and explicitly-committed transactions.
+ * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
 
   constructor(
-    readonly batchId: BatchId,
+    readonly transactionId: TransactionId,
     client: JazzClient,
   ) {
     this.#client = client;
@@ -468,7 +469,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForBatch(this.batchId, options.tier) as Promise<T>;
+    return this.#client.waitForTransaction(this.transactionId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -484,10 +485,10 @@ export class WriteHandle<T = void> {
 export class WriteResult<T> extends WriteHandle<T> {
   constructor(
     readonly value: T,
-    batchId: BatchId,
+    transactionId: TransactionId,
     client: JazzClient,
   ) {
-    super(batchId, client);
+    super(transactionId, client);
   }
 
   /**
@@ -502,91 +503,45 @@ export class WriteResult<T> extends WriteHandle<T> {
   }
 
   mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
-    return new WriteResult(transformValue(this.value), this.batchId, this.client());
+    return new WriteResult(transformValue(this.value), this.transactionId, this.client());
   }
 }
 
-function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return (
-    value !== null &&
-    (typeof value === "object" || typeof value === "function") &&
-    typeof (value as PromiseLike<T>).then === "function"
-  );
-}
-
-type RunInBatchResult<TResult> =
-  TResult extends PromiseLike<unknown>
-    ? Promise<WriteResult<Awaited<TResult>>>
-    : WriteResult<TResult>;
-
-export type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
-
-function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
-  return new Proxy(batchOrTx, {
-    get(target, property) {
-      if (property === "commit" || property === "rollback") {
-        return undefined;
-      }
-
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-    has(target, property) {
-      if (property === "commit" || property === "rollback") {
-        return false;
-      }
-
-      return Reflect.has(target, property);
-    },
-    set(target, property, value) {
-      return Reflect.set(target, property, value, target);
-    },
-  }) as Scoped<TBatchOrTx>;
-}
-
-function rollback(batchOrTx: { rollback: () => void }): void {
-  try {
-    batchOrTx.rollback();
-  } catch {
-    // Preserve the original callback error.
+/**
+ * Returned by explicitly-committed exclusive transactions.
+ *
+ * Exclusive transactions are accepted or rejected by the global authority, so
+ * callers do not choose a durability tier when waiting for confirmation.
+ */
+export class ExclusiveWriteHandle extends WriteHandle<void> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   */
+  override async wait(): Promise<void> {
+    await this.client().waitForExclusiveTransaction(this.transactionId);
   }
 }
 
-export function runInBatch<
-  TBatchOrTx extends { commit(): WriteHandle; rollback: () => void },
-  TResult,
->(
-  batchOrTx: TBatchOrTx,
-  callback: (target: Scoped<TBatchOrTx>) => TResult,
-  client: JazzClient | (() => JazzClient),
-): RunInBatchResult<TResult> {
-  let value: TResult;
-  try {
-    const scope = createBatchScope(batchOrTx);
-    value = callback(scope);
-  } catch (error) {
-    rollback(batchOrTx);
-    throw error;
+/**
+ * Returned by auto-committed exclusive transactions.
+ */
+export class ExclusiveWriteResult<T> extends WriteResult<T> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * @returns the callback result.
+   */
+  override async wait(): Promise<T> {
+    await this.client().waitForExclusiveTransaction(this.transactionId);
+    return this.value;
   }
-  const resultClient = typeof client === "function" ? client : () => client;
-  if (isPromiseLike(value)) {
-    return value.then(
-      (resolvedValue) => {
-        const committed = batchOrTx.commit();
-        return new WriteResult(
-          resolvedValue as Awaited<TResult>,
-          committed.batchId,
-          resultClient(),
-        );
-      },
-      (error) => {
-        rollback(batchOrTx);
-        throw error;
-      },
-    ) as RunInBatchResult<TResult>;
+
+  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+    return new ExclusiveWriteResult(transformValue(this.value), this.transactionId, this.client());
   }
-  const committed = batchOrTx.commit();
-  return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
 /**
@@ -701,21 +656,21 @@ export class JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginBatch(batchMode: BatchMode): BatchId {
-    return this.runtime.beginBatch(batchMode);
+  beginTransaction(kind: TransactionKind): TransactionId {
+    return this.runtime.beginTransaction(kind);
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
   }
 
-  commitBatch(batchId: BatchId): WriteHandle {
-    this.runtime.commitBatch(batchId);
-    return new WriteHandle(batchId, this);
+  commitTransaction(transactionId: TransactionId): WriteHandle {
+    this.runtime.commitTransaction(transactionId);
+    return new WriteHandle(transactionId, this);
   }
 
-  rollbackBatch(batchId: BatchId): void {
-    this.runtime.rollbackBatch(batchId);
+  rollbackTransaction(transactionId: TransactionId): void {
+    this.runtime.rollbackTransaction(transactionId);
   }
 
   /**
@@ -757,25 +712,25 @@ export class JazzClient {
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
     );
-    if (!options?.transactionBatchId) {
+    if (!options?.transactionId) {
       return resolved;
     }
     return {
       ...resolved,
-      transactionBatchId: options.transactionBatchId,
+      transactionId: options.transactionId,
     };
   }
 
   private encodeWriteContext(
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
     updatedAt?: number,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchId && updatedAt === undefined) {
+    if (!session && attribution === undefined && !transactionId && updatedAt === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchId && updatedAt === undefined) {
+    if (attribution === undefined && session && !transactionId && updatedAt === undefined) {
       return JSON.stringify(session);
     }
 
@@ -789,8 +744,8 @@ export class JazzClient {
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
     }
-    if (batchId) {
-      payload.batch_id = batchId;
+    if (transactionId) {
+      payload.batch_id = transactionId;
     }
     return JSON.stringify(payload);
   }
@@ -816,7 +771,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, row.batchId, this);
+    return new WriteResult(row, row.transactionId, this);
   }
 
   /**
@@ -828,13 +783,13 @@ export class JazzClient {
     options?: CreateOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
+      transactionId,
       options?.updatedAt,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
@@ -856,7 +811,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, row.batchId, this);
+    return new WriteResult(row, row.transactionId, this);
   }
 
   /**
@@ -869,13 +824,13 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
+      transactionId,
       options?.updatedAt,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
@@ -896,7 +851,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.upsertInternal(table, values, options, session, attribution);
-    return new WriteHandle(result.batchId, this);
+    return new WriteHandle(result.transactionId, this);
   }
 
   /**
@@ -908,13 +863,13 @@ export class JazzClient {
     options: UpsertOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
+      transactionId,
       options.updatedAt,
     );
     return this.runtime.upsert(table, options.id, values, writeContext);
@@ -966,7 +921,7 @@ export class JazzClient {
       attribution,
       undefined,
     );
-    return new WriteHandle(result.batchId, this);
+    return new WriteHandle(result.transactionId, this);
   }
 
   /**
@@ -978,10 +933,15 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      transactionId,
+      updatedAt,
+    );
     return this.runtime.update(objectId, updates, writeContext);
   }
 
@@ -995,7 +955,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.deleteInternal(objectId, options?.updatedAt, session, attribution);
-    return new WriteHandle(result.batchId, this);
+    return new WriteHandle(result.transactionId, this);
   }
 
   /**
@@ -1006,10 +966,15 @@ export class JazzClient {
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    transactionId?: TransactionId,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      transactionId,
+      updatedAt,
+    );
     return this.runtime.delete(objectId, writeContext);
   }
 
@@ -1107,15 +1072,20 @@ export class JazzClient {
     return this.runtime;
   }
 
-  async waitForBatch(batchId: BatchId, tier: DurabilityTier): Promise<void> {
+  async waitForTransaction(transactionId: TransactionId, tier: DurabilityTier): Promise<void> {
     try {
-      await this.runtime.waitForBatch(batchId, tier);
+      await this.runtime.waitForTransaction(transactionId, tier);
     } catch (error) {
-      throw this.normalizeBatchWaitError(error);
+      throw this.normalizeTransactionWaitError(error);
     }
   }
 
-  private normalizeBatchWaitError(error: unknown): Error {
+  /** @internal */
+  async waitForExclusiveTransaction(transactionId: TransactionId): Promise<void> {
+    await this.waitForTransaction(transactionId, this.context.serverUrl ? "global" : "local");
+  }
+
+  private normalizeTransactionWaitError(error: unknown): Error {
     return (
       rejectionFromRuntimeWaitError(error) ??
       (error instanceof Error ? error : new Error(String(error)))

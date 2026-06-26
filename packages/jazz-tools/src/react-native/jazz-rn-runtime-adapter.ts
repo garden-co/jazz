@@ -1,9 +1,9 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
-  BatchMode,
   DirectInsertResult,
   DirectMutationResult,
   MutationErrorEvent,
+  TransactionKind,
   Runtime,
 } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
@@ -48,9 +48,9 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
-  beginBatch(batchMode: BatchMode): string;
-  rollbackBatch(batchId: string): boolean;
-  waitForBatch(batchId: string, tier: string): Promise<void>;
+  beginTransaction(transactionKind: TransactionKind): string;
+  rollbackTransaction(transactionId: string): boolean;
+  waitForTransaction(transactionId: string, tier: string): Promise<void>;
   onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
     callback:
@@ -73,7 +73,7 @@ export interface JazzRnRuntimeBinding {
   executeSubscription(handle: bigint, callback: { onUpdate(deltaJson: string): void }): void;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
-  commitBatch(batchId: string): void;
+  commitTransaction(transactionId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -158,17 +158,17 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  async waitForBatch(batch_id: string, tier: string): Promise<void> {
+  async waitForTransaction(transaction_id: string, tier: string): Promise<void> {
     try {
-      await this.binding.waitForBatch(batch_id, tier);
+      await this.binding.waitForTransaction(transaction_id, tier);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  beginBatch(batch_mode: BatchMode): string {
+  beginTransaction(transaction_kind: TransactionKind): string {
     try {
-      return this.binding.beginBatch(batch_mode);
+      return this.binding.beginTransaction(transaction_kind);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -360,17 +360,17 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  commitBatch(batch_id: string): void {
+  commitTransaction(transaction_id: string): void {
     try {
-      this.binding.commitBatch(batch_id);
+      this.binding.commitTransaction(transaction_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  rollbackBatch(batch_id: string): boolean {
+  rollbackTransaction(transaction_id: string): boolean {
     try {
-      return this.binding.rollbackBatch(batch_id);
+      return this.binding.rollbackTransaction(transaction_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

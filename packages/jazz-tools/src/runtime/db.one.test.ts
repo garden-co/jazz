@@ -24,14 +24,14 @@ type QuerySpy = ReturnType<typeof vi.fn<(queryJson: string, options?: unknown) =
 
 function makeClient() {
   const query = vi.fn(async (_queryJson: string, _options?: unknown) => [todoRow]);
-  const beginBatch = vi.fn(() => "batch-1");
+  const beginTransaction = vi.fn(() => "transaction-1");
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
-    beginBatch,
+    beginTransaction,
   } as unknown as JazzClient;
 
-  return { client, query, beginBatch };
+  return { client, query, beginTransaction };
 }
 
 function firstQueryJson(query: QuerySpy): string {
@@ -76,17 +76,17 @@ describe("Db.one", () => {
     expect(rootLimit(firstQueryJson(query))).toBe(1);
   });
 
-  it("adds limit 1 before executing an explicit batch query", async () => {
-    const { client, query, beginBatch } = makeClient();
+  it("adds limit 1 before executing an explicit mergeable transaction query", async () => {
+    const { client, query, beginTransaction } = makeClient();
     const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
-    const batch = db.beginBatch();
+    const tx = db.beginTransaction();
 
-    await batch.one(app.todos.where({ done: false }));
+    await tx.one(app.todos.where({ done: false }));
 
-    expect(beginBatch).toHaveBeenCalledWith("direct");
+    expect(beginTransaction).toHaveBeenCalledWith("mergeable");
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
-      transactionBatchId: "batch-1",
+      transactionId: "transaction-1",
     });
   });
 });

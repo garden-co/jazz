@@ -22,10 +22,10 @@ export declare class NapiRuntime {
   delete(objectId: string, writeContextJson?: string | undefined | null): any
   restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
   onMutationError(callback: (event: any) => void): void
-  rollbackBatch(batchId: string): boolean
-  beginBatch(batchMode: string): string
-  commitBatch(batchId: string): void
-  waitForBatch(batchId: string, tier: string): Promise<void>
+  rollbackTransaction(transactionId: string): boolean
+  beginTransaction(transactionKind: string): string
+  commitTransaction(transactionId: string): void
+  waitForTransaction(transactionId: string, tier: string): Promise<void>
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
   unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */

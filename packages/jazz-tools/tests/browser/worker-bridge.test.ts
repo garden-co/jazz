@@ -1404,7 +1404,7 @@ describe("Worker Bridge with OPFS", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId: insertResult.batchId,
+      transactionId: insertResult.transactionId,
       code: "permission_denied",
     });
 
@@ -1433,13 +1433,13 @@ describe("Worker Bridge with OPFS", () => {
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
       reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      transaction: {
+        transactionId: insertResult.transactionId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: insertResult.transactionId,
           code: "permission_denied",
           reason: "Insert denied by policy on table todos",
         },
@@ -1465,13 +1465,13 @@ describe("Worker Bridge with OPFS", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId: insertResult.batchId,
+      transactionId: insertResult.transactionId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("does not replay delivered rejected worker batches after restart", async () => {
+  it("does not replay delivered rejected worker transactions after restart", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
       readOnlyPermissions,
@@ -1504,13 +1504,13 @@ describe("Worker Bridge with OPFS", () => {
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
       reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      transaction: {
+        transactionId: insertResult.transactionId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: insertResult.transactionId,
           code: "permission_denied",
           reason: "Insert denied by policy on table todos",
         },
@@ -1528,7 +1528,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(replayAfterAckSpy).not.toHaveBeenCalled();
   });
 
-  it("replays undelivered rejected worker batches after restart", async () => {
+  it("replays undelivered rejected worker transactions after restart", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-undelivered-restart",
       readOnlyPermissions,
@@ -1577,13 +1577,13 @@ describe("Worker Bridge with OPFS", () => {
     expect(replayAfterRestartSpy).toHaveBeenCalledWith({
       code: "permission_denied",
       reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      transaction: {
+        transactionId: insertResult.transactionId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: insertResult.transactionId,
           code: "permission_denied",
           reason: "Insert denied by policy on table todos",
         },
@@ -1604,7 +1604,7 @@ describe("Worker Bridge with OPFS", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: insertResult.batchId,
+        transactionId: insertResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1637,7 +1637,7 @@ describe("Worker Bridge with OPFS", () => {
       await insertConfirmed;
       await expect(updateConfirmed).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: updateResult.batchId,
+        transactionId: updateResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1670,7 +1670,7 @@ describe("Worker Bridge with OPFS", () => {
       await insertConfirmed;
       await expect(deleteConfirmed).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: deleteResult.batchId,
+        transactionId: deleteResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1735,7 +1735,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: insertResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: insertResult.transactionId }),
           }),
         );
       });
@@ -1806,7 +1806,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: updateResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: updateResult.transactionId }),
           }),
         );
       });
@@ -1876,7 +1876,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: deleteResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: deleteResult.transactionId }),
           }),
         );
       });
@@ -2662,7 +2662,7 @@ describe("Worker Bridge with OPFS", () => {
     // replays on self-promotion), here the follower stays *bridged* to the
     // leader, so the write actually travels to the leader and is persisted there
     // before the crash. This is the path the design worries about: the leader
-    // produces a BatchFate that is lost when it dies, and the follower's wait
+    // produces a TransactionFate that is lost when it dies, and the follower's wait
     // must still resolve via failover reconciliation rather than hang forever.
     const dbName = uniqueDbName("leader-crash-inflight-follower-wait");
 
@@ -2715,7 +2715,7 @@ describe("Worker Bridge with OPFS", () => {
       "Follower should receive the leader's row through the live data port",
     );
 
-    // Issue the write + local wait but do NOT await it: the batch travels to the
+    // Issue the write + local wait but do NOT await it: the transaction travels to the
     // leader's worker over the live data port while the wait stays pending.
     const marker = "pending-when-bridged-leader-crashed";
     const pendingWrite = follower
@@ -2735,11 +2735,11 @@ describe("Worker Bridge with OPFS", () => {
     expect(settled).toBe(false);
 
     // Crash the leader's worker while the wait is in flight. `simulateCrash`
-    // drains the already-delivered follower batch and flushes the WAL (see
+    // drains the already-delivered follower transaction and flushes the WAL (see
     // handle_shutdown in crates/jazz-wasm/src/worker_host.rs), so the write is
     // persisted on the leader's OPFS, but the noop sender it then installs means
-    // the BatchFate is never delivered back to the follower -- the exact
-    // "lost BatchFate" case. (If the batch had not reached the leader yet,
+    // the TransactionFate is never delivered back to the follower -- the exact
+    // "lost TransactionFate" case. (If the transaction had not reached the leader yet,
     // failover retransmit still drives it to durability; either way the wait
     // must resolve.)
     const leaderWorker = getPrivateWorker(leader);
@@ -2763,7 +2763,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // The assertion that bites: the pending wait resolves through failover
-    // reconciliation instead of hanging forever on the lost BatchFate.
+    // reconciliation instead of hanging forever on the lost TransactionFate.
     await withTimeout(
       pendingWrite,
       12000,

@@ -12,7 +12,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteCalls: Array<[string, string | undefined]> = [];
 
   const runtimeBase: Runtime = {
-    beginBatch: (batchMode) => `batch-${batchMode}`,
+    beginTransaction: (mode) => `transaction-${mode}`,
     insert: (
       table: string,
       values: Record<string, unknown>,
@@ -23,7 +23,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return {
         id: objectId ?? "00000000-0000-0000-0000-000000000001",
         values: [],
-        batchId: writeContextJson ? "insert-with-context-batch-id" : "insert-batch-id",
+        transactionId: writeContextJson
+          ? "insert-with-context-transaction-id"
+          : "insert-transaction-id",
       };
     },
     restore: (
@@ -36,7 +38,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return {
         id: objectId,
         values: [],
-        batchId: writeContextJson ? "restore-with-context-batch-id" : "restore-batch-id",
+        transactionId: writeContextJson
+          ? "restore-with-context-transaction-id"
+          : "restore-transaction-id",
       };
     },
     update: (
@@ -45,7 +49,11 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       updateCalls.push([objectId, updates, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "update-with-context-batch-id" : "update-batch-id" };
+      return {
+        transactionId: writeContextJson
+          ? "update-with-context-transaction-id"
+          : "update-transaction-id",
+      };
     },
     upsert: (
       table: string,
@@ -54,14 +62,22 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       upsertCalls.push([table, objectId, values, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "upsert-with-context-batch-id" : "upsert-batch-id" };
+      return {
+        transactionId: writeContextJson
+          ? "upsert-with-context-transaction-id"
+          : "upsert-transaction-id",
+      };
     },
     delete: (objectId: string, writeContextJson?: string | null) => {
       deleteCalls.push([objectId, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "delete-with-context-batch-id" : "delete-batch-id" };
+      return {
+        transactionId: writeContextJson
+          ? "delete-with-context-transaction-id"
+          : "delete-transaction-id",
+      };
     },
     query: async () => [],
-    waitForBatch: async () => {},
+    waitForTransaction: async () => {},
     onMutationError: () => {},
     connect: () => {},
     disconnect: () => {},
@@ -70,8 +86,8 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    commitBatch: vi.fn(),
-    rollbackBatch: () => false,
+    commitTransaction: vi.fn(),
+    rollbackTransaction: () => false,
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };

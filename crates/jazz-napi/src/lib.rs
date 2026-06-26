@@ -40,9 +40,9 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
-    parse_external_object_id, parse_query_input, parse_read_durability_options,
-    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
+    parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
+    parse_transaction_id_input, parse_transaction_kind_input, parse_write_context_input,
     serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
@@ -193,7 +193,7 @@ fn parse_subscription_inputs(
 )> {
     let query = parse_query(query_json)?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation, _transaction_batch_id) =
+    let (durability, propagation, _transaction_id) =
         parse_read_durability_options(tier.as_deref(), options_json.as_deref())
             .map_err(napi::Error::from_reason)?;
     Ok((query, session, durability, propagation))
@@ -495,7 +495,7 @@ impl NapiRuntime {
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }))
     }
 
@@ -522,7 +522,7 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
 
         Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }))
     }
 
@@ -548,7 +548,7 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Upsert failed: {:?}", e)))?;
 
         Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }))
     }
 
@@ -572,7 +572,7 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
         Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }))
     }
 
@@ -600,7 +600,7 @@ impl NapiRuntime {
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
-            "batchId": batch_id.to_string(),
+            "transactionId": batch_id.to_string(),
         }))
     }
 
@@ -622,58 +622,67 @@ impl NapiRuntime {
         Ok(())
     }
 
-    #[napi(js_name = "rollbackBatch")]
-    pub fn rollback_batch(&self, batch_id: String) -> napi::Result<bool> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+    #[napi(js_name = "rollbackTransaction")]
+    pub fn rollback_transaction(&self, transaction_id: String) -> napi::Result<bool> {
+        let batch_id =
+            parse_transaction_id_input(&transaction_id).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.rollback_batch(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Rollback batch failed: {e}")))
+            .map_err(|e| napi::Error::from_reason(format!("Rollback transaction failed: {e}")))
     }
 
-    #[napi(js_name = "beginBatch")]
-    pub fn begin_batch(&self, batch_mode: String) -> napi::Result<String> {
-        let batch_mode = parse_batch_mode_input(&batch_mode).map_err(napi::Error::from_reason)?;
+    #[napi(js_name = "beginTransaction")]
+    pub fn begin_transaction(&self, transaction_kind: String) -> napi::Result<String> {
+        let transaction_kind =
+            parse_transaction_kind_input(&transaction_kind).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        Ok(core.begin_batch(batch_mode).to_string())
+        Ok(core.begin_batch(transaction_kind).to_string())
     }
 
-    #[napi(js_name = "commitBatch")]
-    pub fn commit_batch(&self, batch_id: String) -> napi::Result<()> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+    #[napi(js_name = "commitTransaction")]
+    pub fn commit_transaction(&self, transaction_id: String) -> napi::Result<()> {
+        let batch_id =
+            parse_transaction_id_input(&transaction_id).map_err(napi::Error::from_reason)?;
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.commit_batch(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Commit batch failed: {e}")))
+            .map_err(|e| napi::Error::from_reason(format!("Commit transaction failed: {e}")))
     }
 
-    #[napi(js_name = "waitForBatch", ts_return_type = "Promise<void>")]
-    pub async fn wait_for_batch(&self, batch_id: String, tier: String) -> napi::Result<()> {
-        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+    #[napi(js_name = "waitForTransaction", ts_return_type = "Promise<void>")]
+    pub async fn wait_for_transaction(
+        &self,
+        transaction_id: String,
+        tier: String,
+    ) -> napi::Result<()> {
+        let batch_id =
+            parse_transaction_id_input(&transaction_id).map_err(napi::Error::from_reason)?;
         let tier = parse_binding_tier(&tier).map_err(napi::Error::from_reason)?;
         let receiver = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.wait_for_batch(batch_id, tier)
-                .map_err(|e| napi::Error::from_reason(format!("Wait for batch failed: {e}")))?
+            core.wait_for_batch(batch_id, tier).map_err(|e| {
+                napi::Error::from_reason(format!("Wait for transaction failed: {e}"))
+            })?
         };
 
         match receiver.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(rejection)) => Err(napi::Error::from_reason(format!(
-                "Persisted batch {} was rejected ({}): {}",
+                "Persisted transaction {} was rejected ({}): {}",
                 rejection.batch_id, rejection.code, rejection.reason
             ))),
-            Err(_) => Err(napi::Error::from_reason("Wait for batch cancelled")),
+            Err(_) => Err(napi::Error::from_reason("Wait for transaction cancelled")),
         }
     }
 
@@ -692,7 +701,7 @@ impl NapiRuntime {
         let query = parse_query(&query_json)?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, transaction_batch_id) =
+        let (durability, propagation, transaction_id) =
             parse_read_durability_options(tier.as_deref(), options_json.as_deref())
                 .map_err(napi::Error::from_reason)?;
 
@@ -701,14 +710,8 @@ impl NapiRuntime {
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.query_with_local_batch(
-                query,
-                session,
-                durability,
-                propagation,
-                transaction_batch_id,
-            )
-            .map_err(|e| napi::Error::from_reason(format!("Query setup failed: {e}")))?
+            core.query_with_local_batch(query, session, durability, propagation, transaction_id)
+                .map_err(|e| napi::Error::from_reason(format!("Query setup failed: {e}")))?
         };
 
         let rows = future

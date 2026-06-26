@@ -36,19 +36,19 @@ export async function flushMicrotasks(): Promise<void> {
 }
 
 export function mockRow(id = "todo-1"): DirectInsertResult {
-  return { id, values: [], batchId: `batch-${id}` };
+  return { id, values: [], transactionId: `transaction-${id}` };
 }
 
-export function mockMutation(batchId = "batch-id"): DirectMutationResult {
-  return { batchId };
+export function mockMutation(transactionId = "transaction-id"): DirectMutationResult {
+  return { transactionId };
 }
 
-export const runtimeBatchRecordStubs = {
-  beginBatch: (batchMode: "direct" | "transactional") => `batch-${batchMode}`,
-  upsert: () => mockMutation("upsert-batch-id"),
-  commitBatch: () => {},
-  waitForBatch: async () => {},
-  rollbackBatch: () => false,
+export const runtimeTransactionRecordStubs = {
+  beginTransaction: (kind: "mergeable" | "exclusive") => `transaction-${kind}`,
+  upsert: () => mockMutation("upsert-transaction-id"),
+  commitTransaction: () => {},
+  waitForTransaction: async () => {},
+  rollbackTransaction: () => false,
   onMutationError: () => {},
   connect: () => {},
   disconnect: () => {},
@@ -67,22 +67,22 @@ export function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      transactionId: "plain-insert-transaction",
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      transactionId: "plain-restore-transaction",
     }),
     update: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     delete: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     query: async (
       queryJson: string,
@@ -148,22 +148,22 @@ export function makeClient() {
 export function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      transactionId: "plain-insert-transaction",
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      transactionId: "plain-restore-transaction",
     }),
     update: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     delete: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     query: async () => [],
     createSubscription: () => nextHandle++,

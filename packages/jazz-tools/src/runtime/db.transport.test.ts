@@ -234,10 +234,10 @@ describe("runtime/Db direct path upstream wiring", () => {
     const runtimeRow: DirectInsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
-      batchId: "batch-1",
+      transactionId: "transaction-1",
     };
     const client = {
-      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
+      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.transactionId, client)),
       shutdown: vi.fn(async () => undefined),
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),

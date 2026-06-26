@@ -13,8 +13,8 @@ import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.j
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
-type RuntimeRowWithBatchId = Row & {
-  batchId: string;
+type RuntimeRowWithTransactionId = Row & {
+  transactionId: string;
 };
 
 type SimpleTodo = {
@@ -355,8 +355,8 @@ describe("NAPI integration", () => {
       "main",
       dataPath,
     ) as unknown as {
-      insert(table: string, values: unknown): RuntimeRowWithBatchId;
-      update(objectId: string, updates: Record<string, unknown>): { batchId: string };
+      insert(table: string, values: unknown): RuntimeRowWithTransactionId;
+      update(objectId: string, updates: Record<string, unknown>): { transactionId: string };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -370,7 +370,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
-      expect(insertedRow.batchId).toEqual(expect.any(String));
+      expect(insertedRow.transactionId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -382,12 +382,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
-      expect(secondRow.batchId).toEqual(expect.any(String));
+      expect(secondRow.transactionId).toEqual(expect.any(String));
 
       const updateResult = runtime.update(secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
-      expect(updateResult.batchId).toEqual(expect.any(String));
+      expect(updateResult.transactionId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);

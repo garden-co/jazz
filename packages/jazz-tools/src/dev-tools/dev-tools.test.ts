@@ -210,19 +210,23 @@ describe("attachDevTools mutation bridge", () => {
     const insertedRow = {
       id: "row-1",
       values: [{ type: "Text", value: "hello" }],
-      batchId: "batch-insert-devtools",
+      transactionId: "transaction-insert-devtools",
     };
-    const waitForBatch = vi.fn(async () => undefined);
+    const waitForTransaction = vi.fn(async () => undefined);
     const insert = vi.fn(
       () =>
-        new WriteResult(insertedRow, insertedRow.batchId, {
-          waitForBatch,
+        new WriteResult(insertedRow, insertedRow.transactionId, {
+          waitForTransaction,
         } as any),
     );
     const fakeClient = {
       insert,
-      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForBatch } as any)),
-      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForBatch } as any)),
+      update: vi.fn(
+        () => new WriteHandle("transaction-update-unused", { waitForTransaction } as any),
+      ),
+      delete: vi.fn(
+        () => new WriteHandle("transaction-delete-unused", { waitForTransaction } as any),
+      ),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -253,26 +257,30 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
     expect(insert).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
-    expect(waitForBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
+    expect(waitForTransaction).toHaveBeenCalledWith("transaction-insert-devtools", "local");
   });
 
   it("routes client.updateDurable to runtime update + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForBatch = vi.fn(async () => undefined);
-    const update = vi.fn(() => new WriteHandle("batch-update-devtools", { waitForBatch } as any));
+    const waitForTransaction = vi.fn(async () => undefined);
+    const update = vi.fn(
+      () => new WriteHandle("transaction-update-devtools", { waitForTransaction } as any),
+    );
     const fakeClient = {
       insert: vi.fn(
         () =>
           new WriteResult(
-            { id: "row-1", values: [], batchId: "batch-insert-unused" },
-            "batch-insert-unused",
-            { waitForBatch } as any,
+            { id: "row-1", values: [], transactionId: "transaction-insert-unused" },
+            "transaction-insert-unused",
+            { waitForTransaction } as any,
           ),
       ),
       update,
-      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForBatch } as any)),
+      delete: vi.fn(
+        () => new WriteHandle("transaction-delete-unused", { waitForTransaction } as any),
+      ),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -305,27 +313,29 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ updated: true });
     expect(update).toHaveBeenCalledWith("row-1", { title: { type: "Text", value: "updated" } });
-    expect(waitForBatch).toHaveBeenCalledWith("batch-update-devtools", "edge");
+    expect(waitForTransaction).toHaveBeenCalledWith("transaction-update-devtools", "edge");
   });
 
   it("routes client.deleteDurable to runtime delete + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForBatch = vi.fn(async () => undefined);
+    const waitForTransaction = vi.fn(async () => undefined);
     const deleteMutation = vi.fn(
-      () => new WriteHandle("batch-delete-devtools", { waitForBatch } as any),
+      () => new WriteHandle("transaction-delete-devtools", { waitForTransaction } as any),
     );
     const fakeClient = {
       insert: vi.fn(
         () =>
           new WriteResult(
-            { id: "row-1", values: [], batchId: "batch-insert-unused" },
-            "batch-insert-unused",
-            { waitForBatch } as any,
+            { id: "row-1", values: [], transactionId: "transaction-insert-unused" },
+            "transaction-insert-unused",
+            { waitForTransaction } as any,
           ),
       ),
-      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForBatch } as any)),
+      update: vi.fn(
+        () => new WriteHandle("transaction-update-unused", { waitForTransaction } as any),
+      ),
       delete: deleteMutation,
       unsubscribe: vi.fn(),
     };
@@ -356,7 +366,7 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
     expect(deleteMutation).toHaveBeenCalledWith("row-1");
-    expect(waitForBatch).toHaveBeenCalledWith("batch-delete-devtools", "global");
+    expect(waitForTransaction).toHaveBeenCalledWith("transaction-delete-devtools", "global");
   });
 
   it("returns command-specific errors for invalid mutation payloads", async () => {
