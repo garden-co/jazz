@@ -15,7 +15,7 @@ import {
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
+import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
@@ -87,15 +87,8 @@ export const JazzProvider = defineComponent({
               triggerRef(clientRef);
             });
 
-            if (
-              process.env.NODE_ENV !== "production" &&
-              props.autoAttachDevTools &&
-              markDevToolsAttached(client.db as object)
-            ) {
-              const db = client.db;
-              void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
-                startInspectorOverlay(db as object),
-              );
+            if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools) {
+              startInspectorOnce(client.db as object);
             }
           })
           .catch((reason) => {

@@ -338,21 +338,14 @@ function mount(): void {
 }
 
 /**
- * Mount the inspector overlay (floating toggle + bottom dock + bridge relay) into
- * the page. Idempotent. No-op at module load — the framework providers call this
- * (and {@link startInspectorOverlay}) from a dev-only dynamic import, so nothing
- * runs unless explicitly started and the whole module is absent from prod builds.
- */
-export function mountOverlay(): void {
-  mount();
-}
-
-/**
- * Start the inspector for an app db: mount the overlay UI and attach the devtools
- * bridge. The schema is resolved from the live runtime at announce time, so none
- * is passed here.
+ * Start the inspector for an app db: mount the overlay UI (floating toggle +
+ * bottom dock + bridge relay) and attach the devtools bridge. Idempotent. No-op
+ * at module load — the framework providers call this from a dev-only dynamic
+ * import, so nothing runs unless explicitly started and the whole module is
+ * absent from prod builds. The schema is resolved from the live runtime at
+ * announce time, so none is passed here.
  */
 export function startInspectorOverlay(db: object): void {
-  mountOverlay();
+  mount();
   void attachDevTools({ db } as Parameters<typeof attachDevTools>[0]);
 }

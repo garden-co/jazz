@@ -6,7 +6,7 @@ Pass a pre-created client or a promise that resolves to one.
 	import type { Db } from '../runtime/db.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
-	import { markDevToolsAttached } from '../dev-tools/auto-attach.js';
+	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 
 	interface Props {
 		client: JazzClient | Promise<JazzClient>;
@@ -49,15 +49,8 @@ Pass a pre-created client or a promise that resolves to one.
 					ctx.session = session ?? null;
 				});
 
-				if (
-					process.env.NODE_ENV !== 'production' &&
-					autoAttachDevTools &&
-					markDevToolsAttached(resolved.db as object)
-				) {
-					const db = resolved.db;
-					void import('../dev/inspector-overlay/loader.js').then(({ startInspectorOverlay }) =>
-						startInspectorOverlay(db as object),
-					);
+				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
+					startInspectorOnce(resolved.db as object);
 				}
 			})
 			.catch((reason) => {
