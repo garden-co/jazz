@@ -17,7 +17,7 @@ required-features = ["cli"]
 
 [features]
 default = []
-rocksdb = ["dep:rocksdb"]
+rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []

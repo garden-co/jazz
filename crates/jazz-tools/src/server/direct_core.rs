@@ -41,7 +41,10 @@ enum DirectCoreCommand {
 }
 
 impl DirectCoreServer {
-    pub(crate) fn in_memory(schema: JazzSchema) -> Result<Self, String> {
+    pub(crate) fn start_with_storage(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+    ) -> Result<Self, String> {
         let (commands, receiver) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
 
@@ -56,8 +59,7 @@ impl DirectCoreServer {
                     },
                 )
                 .with_row_id_seed(0x5e);
-                let shell =
-                    InMemoryServerShell::start_with_storage(config, StorageConfig::InMemory);
+                let shell = InMemoryServerShell::start_with_storage(config, storage_config);
                 let mut shell = match shell {
                     Ok(shell) => {
                         let _ = started_tx.send(Ok(()));
