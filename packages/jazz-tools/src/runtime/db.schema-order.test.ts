@@ -2,14 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
 import { WriteResult, JazzClient, type DirectInsertResult, WriteHandle } from "./client.js";
+import type { Session } from "./context.js";
 
 class TestDb extends Db {
-  constructor(private readonly testClient: JazzClient) {
+  constructor(
+    private readonly testClient: JazzClient,
+    private readonly testContext: { session?: Session } | null = null,
+  ) {
     super({ appId: "schema-order-test" }, null);
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
     return this.testClient;
+  }
+
+  protected override getRuntimeOperationContext(): { session?: Session } | null {
+    return this.testContext;
   }
 }
 
@@ -140,6 +148,72 @@ describe("Db runtime schema order", () => {
         id: "todo-1",
         title: "Sorted title",
         done: true,
+      },
+    ]);
+  });
+
+  it("carries session identity through worker-routed local queries", async () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const session: Session = {
+      user_id: "00000000-0000-0000-0000-0000000000a1",
+      claims: {},
+      authMode: "anonymous",
+    };
+    const query = vi.fn(async () => {
+      throw new Error(
+        "session-scoped worker queries should not fall back to unscoped client query",
+      );
+    });
+    const client = {
+      getSchema: () => new Map(Object.entries(generatedSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client, { session });
+    const workerQueryLocalRows = vi.fn(async (_queryJson: string, receivedSession?: Session) => {
+      expect(receivedSession).toBe(session);
+      return [
+        {
+          id: "todo-1",
+          values: [
+            { type: "Text", value: "Worker scoped" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      ] satisfies WasmRow[];
+    });
+    (db as any).workerBridge = {
+      queryLocalRows: workerQueryLocalRows,
+    };
+    (db as any).tabRole = "leader";
+    const builder = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    const rows = await db.all(builder, { tier: "local" });
+
+    expect(workerQueryLocalRows).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+    expect(rows).toEqual([
+      {
+        id: "todo-1",
+        title: "Worker scoped",
+        done: false,
       },
     ]);
   });
