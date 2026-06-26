@@ -103,9 +103,9 @@ import {
   installWasmTelemetry,
   normalizeOtlpEndpoint,
   resolveTelemetryCollectorUrlFromEnv,
+  type WasmTraceEntry,
 } from "./sync-telemetry.js";
 
-type WasmTraceEntry = import("jazz-wasm").WasmTraceEntry;
 type TraceEntrySubscriber = () => void;
 
 type MockWasmModule = {

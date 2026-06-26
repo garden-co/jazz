@@ -25,7 +25,8 @@ const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE
 ///
 /// This is a protocol boundary, not a compatibility shim for the alpha
 /// `SyncPayload` websocket. The semantic `SyncMessage` loop is deliberately
-/// left unattached until the server owns a real direct `jazz::Db` peer.
+/// gated on the server owning the state needed to open a real direct
+/// `jazz::Db` peer.
 pub(super) async fn direct_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
@@ -154,15 +155,8 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
                         }
                     };
                     if frames.iter().any(|frame| matches!(frame, WireFrame::Message(_))) {
-                        send_direct_wire_error(
-                            &mut socket,
-                            WireError::new(
-                                WireErrorCode::UnsupportedFeature,
-                                WireRetry::Later,
-                                "direct websocket boundary is negotiated but not attached to a jazz_core peer loop yet",
-                            ),
-                        )
-                        .await;
+                        send_direct_wire_error(&mut socket, direct_peer_loop_unavailable_error())
+                            .await;
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -177,6 +171,40 @@ async fn handle_direct_ws_connection(mut socket: WebSocket, state: Arc<ServerSta
     }
 
     let _ = socket.close().await;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MissingDirectPeerLoopState {
+    fields: &'static [&'static str],
+}
+
+impl MissingDirectPeerLoopState {
+    fn current_server_state() -> Self {
+        Self {
+            fields: &[
+                "history-complete jazz::Db stored on ServerState",
+                "jazz::schema::JazzSchema for the direct core node",
+                "groove::storage::OrderedKvStorage + ReopenableStorage for direct core history",
+                "jazz::db::DbIdentity for the direct core node",
+                "authenticated client AuthorId/session admission for accept_subscriber",
+            ],
+        }
+    }
+
+    fn diagnostic(&self) -> String {
+        format!(
+            "direct websocket negotiated jazz_core wire frames, but ServerState cannot start a server-side peer loop yet; missing: {}. TODO: add a ServerState-owned history-complete jazz::Db and call Db::accept_subscriber through WireTransportAdapter instead of routing through the legacy SyncPayload runtime.",
+            self.fields.join(", ")
+        )
+    }
+}
+
+fn direct_peer_loop_unavailable_error() -> WireError {
+    WireError::new(
+        WireErrorCode::Internal,
+        WireRetry::Never,
+        MissingDirectPeerLoopState::current_server_state().diagnostic(),
+    )
 }
 
 fn decode_single_direct_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
@@ -208,7 +236,7 @@ async fn send_direct_wire_frames(
         .iter()
         .map(encode_frame)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| axum::Error::new(error))?;
+        .map_err(axum::Error::new)?;
     let batch = postcard::to_allocvec(&encoded).map_err(axum::Error::new)?;
     socket.send(Message::Binary(batch)).await
 }
@@ -240,5 +268,42 @@ mod tests {
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
         assert_eq!(decode_direct_frame_batch(&batch).unwrap(), frames);
+    }
+
+    #[test]
+    fn direct_peer_loop_error_documents_missing_server_state() {
+        // Internal test: the missing direct jazz_core Db is not observable
+        // through public client APIs until ServerState can own one.
+        let error = direct_peer_loop_unavailable_error();
+
+        assert_eq!(error.code, WireErrorCode::Internal);
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(
+            error
+                .message
+                .contains("history-complete jazz::Db stored on ServerState")
+        );
+        assert!(error.message.contains("jazz::schema::JazzSchema"));
+        assert!(
+            error
+                .message
+                .contains("OrderedKvStorage + ReopenableStorage")
+        );
+        assert!(error.message.contains("jazz::db::DbIdentity"));
+        assert!(
+            error
+                .message
+                .contains("authenticated client AuthorId/session admission")
+        );
+        assert!(
+            error
+                .message
+                .contains("Db::accept_subscriber through WireTransportAdapter")
+        );
+        assert!(
+            !error
+                .message
+                .contains("SyncPayload websocket compatibility")
+        );
     }
 }

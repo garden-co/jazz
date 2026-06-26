@@ -1,9 +1,8 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
-//! Split into three submodules so each piece is independently navigable:
-//! - [`direct_websocket`] — direct jazz_core wire-frame WebSocket boundary
+//! Split into submodules so each piece is independently navigable:
+//! - [`direct_websocket`] — jazz_core wire-frame WebSocket boundary
 //! - [`http`] — HTTP endpoint handlers and their request/response types
-//! - [`websocket`] — WebSocket lifecycle (handshake auth, connection, cleanup)
 //! - [`utils`] — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
@@ -12,7 +11,6 @@
 mod direct_websocket;
 mod http;
 mod utils;
-mod websocket;
 
 use std::sync::Arc;
 
@@ -37,7 +35,6 @@ use http::{
     publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
     schema_handler, schema_hashes_handler,
 };
-use websocket::ws_handler;
 
 async fn app_shutdown_gate(
     State(state): State<Arc<ServerState>>,
@@ -75,8 +72,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         );
     let traced_routes = Router::new()
-        .route("/ws", axum::routing::any(ws_handler))
-        .route("/ws-direct", axum::routing::any(direct_ws_handler))
+        .route("/ws", axum::routing::any(direct_ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
@@ -95,30 +91,18 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 }
 
 #[cfg(test)]
-mod reconnect_storm_tests;
-
-#[cfg(test)]
 mod tests {
     use super::http::*;
-    use super::utils::*;
-    use super::websocket::*;
     use super::*;
 
     use axum::extract::{Path, Query};
     use axum::http::{HeaderMap, StatusCode, Uri};
     use axum::response::Json;
 
-    use uuid::Uuid;
-
-    use crate::object::ObjectId;
     use crate::query_manager::types::{SchemaHash, TableName};
     use crate::schema_manager::{AppId, LensOp};
-    use std::collections::BTreeMap;
-    use std::fmt;
-    use std::sync::{Arc as StdArc, Mutex};
     use std::time::Duration;
 
-    use crate::jazz_transport::SyncBatchRequest;
     use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::types::{
         ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
@@ -129,13 +113,10 @@ mod tests {
     };
     use axum::body;
     use axum::routing::{get, post};
-    use futures::{SinkExt as _, StreamExt as _};
+    use futures::StreamExt as _;
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
-    use tracing::field::{Field, Visit};
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::{Layer, Registry};
 
     use crate::middleware::AuthConfig;
     use crate::server::{ServerBuilder, ServerState, StorageBackend};
@@ -148,17 +129,6 @@ mod tests {
             jwks_url: None,
             ..Default::default()
         }
-    }
-
-    fn mint_test_token(audience: &str) -> String {
-        let seed = [42u8; 32];
-        crate::identity::mint_jazz_self_signed_token(
-            &seed,
-            crate::identity::LOCAL_FIRST_ISSUER,
-            audience,
-            3600,
-        )
-        .unwrap()
     }
 
     /// Spin up a server state backed by an in-process runtime.
@@ -241,108 +211,12 @@ mod tests {
         )
     }
 
-    /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
-    /// in batch request bodies.
-    fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
-        let row_id =
-            ObjectId::from_uuid(Uuid::parse_str(object_id).expect("parse test object id as uuid"));
-        let row = crate::row_histories::StoredRowBatch::new(
-            row_id,
-            "main",
-            Vec::<crate::row_histories::BatchId>::new(),
-            b"alice".to_vec(),
-            crate::metadata::RowProvenance::for_insert(object_id.to_string(), 1_000),
-            Default::default(),
-            crate::row_histories::RowState::VisibleDirect,
-            None,
-        );
-
-        crate::sync_manager::SyncPayload::RowBatchCreated {
-            metadata: None,
-            row,
-        }
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ForwardedAdminRequest {
         method: String,
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct CapturedEvent {
-        level: tracing::Level,
-        message: Option<String>,
-        fields: BTreeMap<String, String>,
-    }
-
-    #[derive(Clone, Default)]
-    struct EventCollector {
-        events: StdArc<Mutex<Vec<CapturedEvent>>>,
-    }
-
-    impl EventCollector {
-        fn snapshot(&self) -> Vec<CapturedEvent> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    impl<S> Layer<S> for EventCollector
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            let mut visitor = CapturedEventVisitor::default();
-            event.record(&mut visitor);
-            self.events.lock().unwrap().push(CapturedEvent {
-                level: *event.metadata().level(),
-                message: visitor.message,
-                fields: visitor.fields,
-            });
-        }
-    }
-
-    #[derive(Default)]
-    struct CapturedEventVisitor {
-        message: Option<String>,
-        fields: BTreeMap<String, String>,
-    }
-
-    impl CapturedEventVisitor {
-        fn record_value(&mut self, field: &Field, value: String) {
-            if field.name() == "message" {
-                self.message = Some(value.clone());
-            }
-            self.fields.insert(field.name().to_string(), value);
-        }
-    }
-
-    impl Visit for CapturedEventVisitor {
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.record_value(field, format!("{value:?}"));
-        }
-
-        fn record_str(&mut self, field: &Field, value: &str) {
-            self.record_value(field, value.to_string());
-        }
-
-        fn record_bool(&mut self, field: &Field, value: bool) {
-            self.record_value(field, value.to_string());
-        }
-
-        fn record_i64(&mut self, field: &Field, value: i64) {
-            self.record_value(field, value.to_string());
-        }
-
-        fn record_u64(&mut self, field: &Field, value: u64) {
-            self.record_value(field, value.to_string());
-        }
     }
 
     #[tokio::test]
@@ -459,264 +333,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn ws_sync_batch_accepts_two_payloads() {
-        // alice fires two payloads over the /ws connection — both should be
-        // ingested without error.
-        //
-        //  alice (ws client)       server
-        //    ──handshake─────────► /ws
-        //    ──p1──────────────►  process_ws_client_frame → ok
-        //    ──p2──────────────►  process_ws_client_frame → ok
-
-        let state = make_sync_test_state("test-backend-secret").await;
-        let client_id = ClientId::new();
-
-        // Simulate the server having registered this client (backend, no session).
-        let _ = state.runtime.ensure_client_as_backend(client_id);
-
-        let p1 = row_version_created_payload("00000000-0000-0000-0000-000000000001");
-        let p2 = row_version_created_payload("00000000-0000-0000-0000-000000000002");
-
-        let batch = SyncBatchRequest {
-            payloads: vec![p1, p2],
-            client_id,
-        };
-        let frame_payload = batch.encode_payload().unwrap();
-        let result = state
-            .process_ws_client_frame(client_id, &frame_payload)
-            .await;
-        assert!(
-            result.is_ok(),
-            "two-payload batch should be accepted: {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_rejects_missing_auth() {
-        // WS handshake with no auth in the AuthHandshake → error frame, no Connected.
-        use crate::transport_manager::AuthHandshake;
-
-        let state = make_sync_test_state("test-backend-secret").await;
-        let client_id = ClientId::new();
-
-        // An AuthHandshake with an empty AuthConfig (no secret, no JWT).
-        let handshake = AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: client_id.to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-
-        // Authenticate should fail — the `authenticate_ws_handshake` function is
-        // private but the rejection path results in `ensure_client_*` never being
-        // called.  We verify indirectly: the client should not be registered.
-        let client_registered = state.runtime.ensure_client_as_backend(client_id).is_ok();
-        // Note: ensure_client_as_backend succeeds because it only checks internal state.
-        // The real gate is at the WS handler level.  This test documents that unauthenticated
-        // handshakes are rejected at the transport layer — covered fully in auth_test.rs
-        // integration tests that connect over the wire.
-        let _ = (handshake, client_registered);
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_accepts_same_origin_cookie_auth() {
-        let token = mint_test_token("test-app");
-        let auth_config = AuthConfig {
-            backend_secret: Some("test-backend-secret".to_string()),
-            admin_secret: None,
-            allow_local_first_auth: true,
-            jwks_url: None,
-            auth_cookie_name: Some("jazz-auth".to_string()),
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build sync test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
-        request_headers.insert(
-            axum::http::header::ORIGIN,
-            "https://example.test".parse().unwrap(),
-        );
-        request_headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-
-        let setup = authenticate_ws_handshake(&handshake, &request_headers, &state)
-            .await
-            .expect("cookie auth should succeed");
-
-        assert!(matches!(setup, WsClientSetup::Session(_)));
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_accepts_loopback_cross_port_cookie_auth() {
-        let token = mint_test_token("test-app");
-        let auth_config = AuthConfig {
-            backend_secret: Some("test-backend-secret".to_string()),
-            admin_secret: None,
-            allow_local_first_auth: true,
-            jwks_url: None,
-            auth_cookie_name: Some("jazz-auth".to_string()),
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build sync test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(axum::http::header::HOST, "localhost:4200".parse().unwrap());
-        request_headers.insert(
-            axum::http::header::ORIGIN,
-            "http://localhost:5173".parse().unwrap(),
-        );
-        request_headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-
-        let setup = authenticate_ws_handshake(&handshake, &request_headers, &state)
-            .await
-            .expect("loopback cross-port cookie auth should succeed");
-
-        assert!(matches!(setup, WsClientSetup::Session(_)));
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_rejects_deceptive_localhost_cookie_origin() {
-        let token = mint_test_token("test-app");
-        let auth_config = AuthConfig {
-            backend_secret: Some("test-backend-secret".to_string()),
-            admin_secret: None,
-            allow_local_first_auth: true,
-            jwks_url: None,
-            auth_cookie_name: Some("jazz-auth".to_string()),
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build sync test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(axum::http::header::HOST, "localhost:4200".parse().unwrap());
-        request_headers.insert(
-            axum::http::header::ORIGIN,
-            "http://localhost.evil.example:5173".parse().unwrap(),
-        );
-        request_headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-
-        let error = authenticate_ws_handshake(&handshake, &request_headers, &state)
-            .await
-            .expect_err("deceptive localhost cookie auth should fail");
-
-        assert!(error.to_lowercase().contains("origin"));
-    }
-
-    #[tokio::test]
-    async fn ws_handshake_rejects_cross_origin_cookie_auth() {
-        let token = mint_test_token("test-app");
-        let auth_config = AuthConfig {
-            backend_secret: Some("test-backend-secret".to_string()),
-            admin_secret: None,
-            allow_local_first_auth: true,
-            jwks_url: None,
-            auth_cookie_name: Some("jazz-auth".to_string()),
-            ..Default::default()
-        };
-        let state = ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("build sync test state")
-            .state;
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
-        request_headers.insert(
-            axum::http::header::ORIGIN,
-            "https://evil.example".parse().unwrap(),
-        );
-        request_headers.insert(
-            axum::http::header::COOKIE,
-            format!("jazz-auth={token}").parse().unwrap(),
-        );
-
-        let error = authenticate_ws_handshake(&handshake, &request_headers, &state)
-            .await
-            .expect_err("cross-origin cookie auth should fail");
-
-        assert!(error.to_lowercase().contains("origin"));
-    }
-
-    #[tokio::test]
-    async fn ws_sync_batch_ingest_sixty_payloads() {
-        // bob sends 60 payloads via the WS path — server must accept all of them.
-        let state = make_sync_test_state("test-backend-secret").await;
-        let client_id = ClientId::new();
-        let _ = state.runtime.ensure_client_as_backend(client_id);
-
-        let payloads: Vec<crate::sync_manager::SyncPayload> = (0..60)
-            .map(|i| row_version_created_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
-            .collect();
-
-        let batch = SyncBatchRequest {
-            payloads,
-            client_id,
-        };
-        let frame_payload = batch.encode_payload().unwrap();
-        let result = state
-            .process_ws_client_frame(client_id, &frame_payload)
-            .await;
-        assert!(
-            result.is_ok(),
-            "sixty-payload batch should be accepted: {result:?}"
-        );
     }
 
     #[tokio::test]
@@ -2305,10 +1921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_handler_dispatches_connection_schema_diagnostics_for_mismatched_schema() {
-        // When a client connects with a schema hash that does not match the server's
-        // current schema, the WS handler should enqueue a ConnectionSchemaDiagnostics
-        // payload into the connection event hub immediately after step 5b.
+    async fn connection_schema_diagnostics_reports_mismatched_schema() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -2320,11 +1933,9 @@ mod tests {
         let declared_hash = SchemaHash::from_bytes([9; 32]);
         let state = make_state_with_schema(schema).await;
 
-        // Simulate step 5b directly: client registered, then diagnostics dispatched.
         let client_id = ClientId::new();
         let _ = state.runtime.ensure_client_as_backend(client_id);
 
-        // Replicate what handle_ws_connection does in step 5b.
         let diagnostics = state
             .runtime
             .with_schema_manager(|sm| sm.connection_schema_diagnostics(declared_hash))
@@ -2342,187 +1953,6 @@ mod tests {
                 unreachable_schema_hashes: vec![],
             }
         );
-    }
-
-    #[tokio::test]
-    async fn ws_handler_uses_declared_schema_hash_for_connection_diagnostics() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
-            .build();
-        let state = make_state_with_schema(schema).await;
-        let declared_hash = SchemaHash::from_bytes([9; 32]);
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig::default(),
-            catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
-            declared_schema_hash: Some(declared_hash.to_string()),
-        };
-
-        let diagnostics = connection_schema_diagnostics_from_handshake(&state, &handshake)
-            .expect("compute diagnostics")
-            .expect("declared schema mismatch should produce diagnostics");
-
-        assert_eq!(diagnostics.client_schema_hash, declared_hash);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ws_handler_logs_when_connection_is_established() {
-        // Exercise the real /ws route so the assertion covers the actual
-        // upgrade, handshake, and ConnectedResponse path the server uses.
-        let collector = EventCollector::default();
-        let subscriber = Registry::default().with(collector.clone());
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let _ = tracing::dispatcher::set_global_default(dispatch.clone());
-        let _guard = tracing::dispatcher::set_default(&dispatch);
-
-        let state = make_sync_test_state("test-backend-secret").await;
-        let app = create_router(state);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ws listener");
-        let addr = listener.local_addr().expect("ws local addr");
-        let server_dispatch = dispatch.clone();
-        let server_task = tokio::spawn(async move {
-            let _guard = tracing::dispatcher::set_default(&server_dispatch);
-            axum::serve(listener, app).await.expect("serve ws app");
-        });
-
-        let client_id = ClientId::new().to_string();
-        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: client_id.clone(),
-            auth: crate::transport_manager::AuthConfig {
-                backend_secret: Some("test-backend-secret".to_string()),
-                ..Default::default()
-            },
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
-        ws.send(WsMessage::Binary(
-            crate::transport_manager::frame_encode(&payload).into(),
-        ))
-        .await
-        .expect("send handshake");
-
-        let connected = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for ConnectedResponse")
-            .expect("ws frame")
-            .expect("ws result");
-        let WsMessage::Binary(connected_frame) = connected else {
-            panic!("expected binary ConnectedResponse frame, got {connected:?}");
-        };
-        let connected_payload = crate::transport_manager::frame_decode(&connected_frame)
-            .expect("decode ConnectedResponse frame");
-        let connected_response: crate::transport_manager::ConnectedResponse =
-            serde_json::from_slice(connected_payload.as_ref()).expect("parse ConnectedResponse");
-        assert_eq!(
-            connected_response.sync_protocol_version,
-            crate::transport_manager::SYNC_PROTOCOL_VERSION
-        );
-
-        let mut events = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                events = collector.snapshot();
-                if events.iter().any(|event| {
-                    event.level == tracing::Level::INFO
-                        && event.message.as_deref() == Some("ws client connected")
-                        && event.fields.get("client_id").map(String::as_str)
-                            == Some(client_id.as_str())
-                        && event.fields.get("connection_id").map(String::as_str) == Some("1")
-                        && event.fields.get("role").map(String::as_str) == Some("backend")
-                }) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!("expected ws client connected log, captured events: {events:#?}")
-        });
-
-        let _ = ws.close(None).await;
-        server_task.abort();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_closes_active_websocket_with_service_restart_code() {
-        let state = make_sync_test_state("test-backend-secret").await;
-        let app = create_router(state.clone());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ws listener");
-        let addr = listener.local_addr().expect("ws local addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve ws app");
-        });
-
-        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-
-        let handshake = crate::transport_manager::AuthHandshake {
-            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
-            client_id: ClientId::new().to_string(),
-            auth: crate::transport_manager::AuthConfig {
-                backend_secret: Some("test-backend-secret".to_string()),
-                ..Default::default()
-            },
-            catalogue_state_hash: None,
-            declared_schema_hash: None,
-        };
-        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
-        ws.send(WsMessage::Binary(
-            crate::transport_manager::frame_encode(&payload).into(),
-        ))
-        .await
-        .expect("send handshake");
-
-        let connected = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for ConnectedResponse")
-            .expect("ws frame")
-            .expect("ws result");
-        assert!(matches!(connected, WsMessage::Binary(_)));
-
-        assert_eq!(state.shutdown.active_websockets(), 1);
-        assert!(state.shutdown.request_shutdown());
-
-        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for close")
-            .expect("ws frame")
-            .expect("ws result");
-        let WsMessage::Close(Some(close)) = close_frame else {
-            panic!("expected close frame, got {close_frame:?}");
-        };
-        assert_eq!(
-            close.code,
-            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
-        );
-        assert_eq!(close.reason.as_ref(), "server shutting down");
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state.shutdown.active_websockets() != 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("websocket cleanup");
-
-        server_task.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2572,84 +2002,6 @@ mod tests {
         })
         .await
         .expect("websocket cleanup");
-
-        server_task.abort();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ws_handler_rejects_pre_versioned_handshake_loudly() {
-        let state = make_sync_test_state("test-backend-secret").await;
-        let app = create_router(state);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ws listener");
-        let addr = listener.local_addr().expect("ws local addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve ws app");
-        });
-
-        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
-        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "client_id": ClientId::new().to_string(),
-            "auth": {
-                "backend_secret": "test-backend-secret"
-            },
-            "catalogue_state_hash": null,
-            "declared_schema_hash": null
-        }))
-        .expect("serialize old handshake");
-        ws.send(WsMessage::Binary(
-            crate::transport_manager::frame_encode(&payload).into(),
-        ))
-        .await
-        .expect("send handshake");
-
-        let error_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for error frame")
-            .expect("ws frame")
-            .expect("ws result");
-        let WsMessage::Binary(error_frame) = error_frame else {
-            panic!("expected binary ServerEvent::Error frame, got {error_frame:?}");
-        };
-        let payload =
-            crate::transport_manager::frame_decode(&error_frame).expect("decode error frame");
-        let event: crate::jazz_transport::ServerEvent =
-            serde_json::from_slice(payload.as_ref()).expect("parse error event");
-        match event {
-            crate::jazz_transport::ServerEvent::Error { message, code } => {
-                assert_eq!(code, crate::jazz_transport::ErrorCode::BadRequest);
-                assert!(
-                    message.contains("Incompatible Jazz sync protocol"),
-                    "unexpected error message: {message}"
-                );
-                assert!(
-                    message.contains("client sent 0"),
-                    "unexpected error message: {message}"
-                );
-            }
-            other => panic!("expected Error event, got {:?}", other.variant_name()),
-        }
-
-        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for close frame")
-            .expect("ws frame")
-            .expect("ws result");
-        let WsMessage::Close(Some(close)) = close_frame else {
-            panic!("expected native close frame, got {close_frame:?}");
-        };
-        assert_eq!(
-            close.code,
-            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Protocol
-        );
-        assert!(
-            close.reason.contains("Incompatible Jazz sync protocol"),
-            "unexpected close reason: {}",
-            close.reason
-        );
 
         server_task.abort();
     }
