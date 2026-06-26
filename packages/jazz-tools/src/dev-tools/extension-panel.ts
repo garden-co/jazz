@@ -544,9 +544,6 @@ class DevToolsJazzClient {
     const value = { ...(values as Record<string, unknown>) } as unknown as Row;
     return this.deferDurableInsert(value, (tier) => this.createDurable(table, values, { tier }));
   }
-  create(table: string, values: InsertValues): DirectInsertResult {
-    return this.insert(table, values);
-  }
   async createDurable(
     table: string,
     values: InsertValues,

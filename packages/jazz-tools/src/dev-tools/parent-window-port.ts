@@ -3,7 +3,6 @@ import { DEVTOOLS_BRIDGE_CHANNEL, isRecord } from "./protocol.js";
 
 export function createParentWindowBridgePort(): Promise<DevtoolsBridgePort> {
   const messageListeners = new Set<(message: unknown) => void>();
-  const disconnectListeners = new Set<() => void>();
   const onWindowMessage = (event: MessageEvent) => {
     if (event.source !== window.parent) return;
     const data = event.data;
@@ -19,9 +18,10 @@ export function createParentWindowBridgePort(): Promise<DevtoolsBridgePort> {
       addListener: (cb) => messageListeners.add(cb),
       removeListener: (cb) => messageListeners.delete(cb),
     },
+    // The window transport has no disconnect signal; satisfy the port shape.
     onDisconnect: {
-      addListener: (cb) => disconnectListeners.add(cb),
-      removeListener: (cb) => disconnectListeners.delete(cb),
+      addListener: () => {},
+      removeListener: () => {},
     },
   };
   return Promise.resolve(port);

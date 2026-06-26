@@ -1,6 +1,10 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
-import { createOverlayHandler, type OverlayResponse } from "./inspector-overlay/serve.js";
+import {
+  attachOverlayMiddleware,
+  overlayHtmlTransform,
+  type OverlayResponse,
+} from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -142,12 +146,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (managed.telemetryCollectorUrl) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
-      const overlay = createOverlayHandler({ appRoot: viteServer.config.root });
-      viteServer.middlewares?.use((req, res, next) => {
-        void overlay(req, res).then((handled) => {
-          if (!handled) next();
-        });
-      });
+      attachOverlayMiddleware(viteServer);
 
       console.log(
         `${LOG_PREFIX} Inspector overlay enabled — click the ⚡ button in your app (Alt+Shift+J).`,
@@ -158,18 +157,6 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       });
     },
 
-    transformIndexHtml(html: string, ctx: { server?: unknown }) {
-      if (!ctx.server) return html;
-      return {
-        html,
-        tags: [
-          {
-            tag: "script",
-            attrs: { type: "module", src: "/__jazz/loader.js" },
-            injectTo: "body" as const,
-          },
-        ],
-      };
-    },
+    transformIndexHtml: overlayHtmlTransform,
   };
 }

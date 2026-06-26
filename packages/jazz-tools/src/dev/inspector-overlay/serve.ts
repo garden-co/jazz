@@ -60,9 +60,47 @@ export interface OverlayResponse {
 export interface OverlayHandlerOptions {
   appRoot: string;
 }
+// Minimal Vite-style dev server shape the overlay needs. Shared so the Vite and
+// SvelteKit plugins wire the overlay the same way (one definition of the contract).
+export interface OverlayDevServer {
+  config: { root: string };
+  middlewares?: {
+    use(fn: (req: { url?: string }, res: OverlayResponse, next: () => void) => void): void;
+  };
+}
+
+/** Register the overlay static-asset middleware (/__jazz/*) on a dev server. */
+export function attachOverlayMiddleware(server: OverlayDevServer): void {
+  const overlay = createOverlayHandler({ appRoot: server.config.root });
+  server.middlewares?.use((req, res, next) => {
+    void overlay(req, res).then((handled) => {
+      if (!handled) next();
+    });
+  });
+}
+
+const OVERLAY_LOADER_TAG = {
+  tag: "script",
+  attrs: { type: "module", src: OVERLAY_LOADER_PATH },
+  injectTo: "body" as const,
+};
+
+/** Vite `transformIndexHtml` hook that injects the overlay loader — dev-server only. */
+export function overlayHtmlTransform(
+  html: string,
+  ctx: { server?: unknown },
+): string | { html: string; tags: Array<typeof OVERLAY_LOADER_TAG> } {
+  if (!ctx.server) return html;
+  return { html, tags: [OVERLAY_LOADER_TAG] };
+}
 
 export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
   let warnedMissing = false;
+  // appRoot is fixed for the handler's lifetime, so resolve the embedded dir
+  // once (require.resolve walks node_modules and hits disk) instead of per request.
+  let dirCache: string | null | undefined;
+  const embeddedDir = (): string | null =>
+    dirCache !== undefined ? dirCache : (dirCache = resolveEmbeddedDir(appRoot));
   return async function handle(req: { url?: string }, res: OverlayResponse): Promise<boolean> {
     const url = (req.url ?? "").split("?")[0];
     if (url === OVERLAY_LOADER_PATH) {
@@ -71,7 +109,7 @@ export function createOverlayHandler({ appRoot }: OverlayHandlerOptions) {
       return true;
     }
     if (url === OVERLAY_EMBEDDED_PREFIX || url.startsWith(OVERLAY_EMBEDDED_PREFIX + "/")) {
-      const dir = resolveEmbeddedDir(appRoot);
+      const dir = embeddedDir();
       if (!dir) {
         if (!warnedMissing) {
           warnedMissing = true;

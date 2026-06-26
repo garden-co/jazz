@@ -7,14 +7,11 @@ import {
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
 import { Db } from "../runtime/db.js";
+import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
 
 type JazzClientContextValue = SolidJazzClient;
 
 export const JazzClientContext = createContext<JazzClientContextValue | undefined>(undefined);
-
-// Tracks db instances that already have devtools attached, so a manual
-// attachDevTools call elsewhere doesn't double-attach via the provider.
-const autoAttachedDbs = new WeakSet<object>();
 
 export type JazzProviderProps = {
   client: PendingSolidJazzClient;
@@ -33,8 +30,7 @@ export function JazzProvider(props: JazzProviderProps) {
       const client = clientReady();
       if (!client || !props.wasmSchema) return;
       const db = client.db;
-      if (autoAttachedDbs.has(db as object)) return;
-      autoAttachedDbs.add(db as object);
+      if (!markDevToolsAttached(db as object)) return;
       const wasmSchema = props.wasmSchema;
       void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
         attachDevTools({ db }, wasmSchema),

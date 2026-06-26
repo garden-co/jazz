@@ -2,6 +2,7 @@ import { useEffect, useMemo, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import type { WasmSchema } from "../index.js";
+import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -27,15 +28,10 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-// Tracks db instances that already have devtools attached, so a manual
-// attachDevTools call elsewhere doesn't double-attach via the provider.
-const autoAttachedDbs = new WeakSet<object>();
-
 function DevToolsAutoAttach({ wasmSchema }: { wasmSchema?: WasmSchema }) {
   const { db } = useCoreJazzClient() as JazzClientContextValue;
   useEffect(() => {
-    if (!wasmSchema || autoAttachedDbs.has(db as object)) return;
-    autoAttachedDbs.add(db as object);
+    if (!wasmSchema || !markDevToolsAttached(db as object)) return;
     void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
       attachDevTools({ db }, wasmSchema),
     );
