@@ -8,7 +8,7 @@ use std::time::Duration;
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::server::JazzServer;
 use jazz_tools::sync_manager::SyncPayload;
-use jazz_tools::sync_tracer::SyncTracer;
+use jazz_tools::sync_manager::sync_tracer::SyncTracer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };

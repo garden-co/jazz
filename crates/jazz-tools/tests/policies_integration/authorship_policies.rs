@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
 use super::{pe, permissions};
-use jazz_tools::jazz_transport::SyncBatchRequest;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::row_input;
@@ -12,6 +11,7 @@ use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::JazzServer;
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, ServerId, SyncManager};
+use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };

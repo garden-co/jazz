@@ -61,9 +61,9 @@ use jazz::query::Query as DirectQuery;
 use jazz::schema::JazzSchema;
 use jazz::tx::{DurabilityTier as DirectDurabilityTier, Fate as DirectFate, TxId as DirectTxId};
 use jazz::wire::{TransportError as DirectTransportError, WireTransport as DirectWireTransport};
+use jazz_tools::AppId;
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
-use jazz_tools::schema_manager::AppId;
 use jazz_tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
@@ -1754,9 +1754,7 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use jazz_tools::query_manager::types::{
-        ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value,
-    };
+    use jazz_tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
 
     #[test]
     fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {

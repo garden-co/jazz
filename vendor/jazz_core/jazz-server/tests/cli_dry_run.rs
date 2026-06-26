@@ -90,20 +90,26 @@ fn author_hex(author: AuthorId) -> String {
 fn connect_server_ws(ws_url: &str, author: AuthorId) -> WebSocket<MaybeTlsStream<TcpStream>> {
     let url = format!("{ws_url}?identity={}", author_hex(author));
     let mut last_error = None;
-    let (mut socket, response) = 'connect: loop {
+    let (mut socket, response) = {
+        let mut connected = None;
         for _ in 0..20 {
             match connect(&url) {
-                Ok(connected) => break 'connect connected,
+                Ok(result) => {
+                    connected = Some(result);
+                    break;
+                }
                 Err(error) => {
                     last_error = Some(error);
                     thread::sleep(Duration::from_millis(10));
                 }
             }
         }
-        panic!(
-            "connect jazz-server WebSocket listener: {:?}",
-            last_error.expect("connection error")
-        );
+        connected.unwrap_or_else(|| {
+            panic!(
+                "connect jazz-server WebSocket listener: {:?}",
+                last_error.expect("connection error")
+            )
+        })
     };
     assert_eq!(response.status().as_u16(), 101);
     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {

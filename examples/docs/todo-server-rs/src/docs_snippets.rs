@@ -2,9 +2,10 @@
 #![allow(dead_code)]
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
-use jazz_tools::query_manager::types::TablePolicies;
-use jazz_tools::{DurabilityTier, JazzClient, ObjectId, QueryBuilder, Session, Value};
+use jazz_tools::{
+    DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder, Session,
+    TablePolicies, Value,
+};
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {

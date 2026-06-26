@@ -431,7 +431,7 @@ pub struct ServerState {
     /// Disconnected clients are reaped after this duration.
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
-    pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    pub sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
     /// Server-side jazz_core peer loop for the direct websocket route.
     pub(crate) core_server: StdRwLock<Option<core_server::CoreServer>>,
     pub(crate) core_server_storage_config: Option<StorageConfig>,

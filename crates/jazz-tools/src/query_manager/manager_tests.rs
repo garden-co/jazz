@@ -2,6 +2,8 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
+#![allow(clippy::empty_line_after_doc_comments)]
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

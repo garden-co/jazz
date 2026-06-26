@@ -38,7 +38,7 @@ pub struct JazzServerBuilder {
     upstream_url: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
-    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    sync_tracer: Option<crate::sync_manager::sync_tracer::SyncTracer>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -126,7 +126,7 @@ impl JazzServerBuilder {
         self
     }
 
-    pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
+    pub fn with_tracer(mut self, tracer: crate::sync_manager::sync_tracer::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
     }
