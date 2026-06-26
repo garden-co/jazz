@@ -935,6 +935,21 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
+/**
+ * @deprecated Use {@link Transaction}. Batches are mergeable transactions.
+ */
+export type DbDirectBatch = Transaction<"mergeable">;
+
+/**
+ * @deprecated Use {@link TransactionScope}. Batches are mergeable transactions.
+ */
+export type BatchScope = TransactionScope<"mergeable">;
+
+/**
+ * @deprecated Use {@link Transaction}. Batches are mergeable transactions.
+ */
+export const DbDirectBatch = Transaction;
+
 interface BrokerPromotionState {
   leadershipId: number;
   cancelled: boolean;
@@ -2451,6 +2466,15 @@ export class Db {
   }
 
   /**
+   * Begin a mergeable transaction.
+   *
+   * @deprecated Use {@link Db.beginTransaction}. Batches are mergeable transactions.
+   */
+  beginBatch(): DbDirectBatch {
+    return this.beginTransaction();
+  }
+
+  /**
    * Begin an exclusive transaction for writes that need serializable validation by the authority.
    *
    * Use {@link Transaction.commit} to commit the transaction.
@@ -2481,6 +2505,25 @@ export class Db {
       callback,
       () => getDbTxHandleBinding(transaction, "result").client,
     );
+  }
+
+  /**
+   * Run {@link callback} inside a mergeable transaction and commit it once the callback returns.
+   *
+   * @deprecated Use {@link Db.transaction}. Batches are mergeable transactions.
+   *
+   * @returns a write result containing the result of the callback
+   */
+  batch<TResult>(
+    callback: (batch: BatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    return this.transaction(callback as (tx: TransactionScope<"mergeable">) => TResult) as
+      | WriteResult<TResult>
+      | Promise<WriteResult<Awaited<TResult>>>;
   }
 
   /**

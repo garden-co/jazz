@@ -31,6 +31,8 @@ export {
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type LogoutOptions,
+  DbDirectBatch,
+  type BatchScope,
   Transaction,
   type TransactionKind,
   type TransactionScope,

@@ -217,3 +217,54 @@ describe("Db mergeable transactions", () => {
     ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
   });
 });
+
+describe("Db batch aliases", () => {
+  it("runs Db.batch through a mergeable transaction for insert, update, delete, and wait", async () => {
+    const result = db.batch((batch) => {
+      const inserted = batch.insert(app.todos, { title: "Batch alias", done: false });
+      batch.update(app.todos, inserted.id, { done: true });
+      batch.delete(app.todos, inserted.id);
+      return inserted.id;
+    });
+
+    const insertedId = await result.wait({ tier: "local" });
+
+    expect(insertedId).toEqual(expect.any(String));
+    await expect(allTodos()).resolves.toEqual([]);
+  });
+
+  it("runs beginBatch through mergeable transactions for insert, update, delete, and wait", async () => {
+    const insertBatch = db.beginBatch();
+    const inserted = insertBatch.insert(app.todos, {
+      title: "Explicit batch alias",
+      done: false,
+    });
+    await insertBatch.commit().wait({ tier: "local" });
+
+    await expect(allTodos()).resolves.toEqual([
+      {
+        id: inserted.id,
+        title: "Explicit batch alias",
+        done: false,
+      },
+    ]);
+
+    const updateBatch = db.beginBatch();
+    updateBatch.update(app.todos, inserted.id, { done: true });
+    await updateBatch.commit().wait({ tier: "local" });
+
+    await expect(allTodos()).resolves.toEqual([
+      {
+        id: inserted.id,
+        title: "Explicit batch alias",
+        done: true,
+      },
+    ]);
+
+    const deleteBatch = db.beginBatch();
+    deleteBatch.delete(app.todos, inserted.id);
+    await deleteBatch.commit().wait({ tier: "local" });
+
+    await expect(allTodos()).resolves.toEqual([]);
+  });
+});
