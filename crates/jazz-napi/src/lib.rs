@@ -357,24 +357,24 @@ impl DirectWireTransport for NapiWireTransport {
     }
 }
 
-#[napi(js_name = "WasmPreparedQuery")]
+#[napi(js_name = "DirectPreparedQuery")]
 pub struct NapiDirectPreparedQuery {
     inner: DirectPreparedQueryInner,
 }
 
-#[napi(js_name = "WasmWrite")]
+#[napi(js_name = "DirectWrite")]
 pub struct NapiDirectWrite {
     payload: Vec<u8>,
     inner: Option<DirectNapiWrite>,
 }
 
-#[napi(js_name = "WasmTransport")]
+#[napi(js_name = "DirectTransport")]
 pub struct NapiDirectTransport {
     inner: DirectNapiTransportInner,
     queues: DirectWireQueues,
 }
 
-#[napi(js_name = "WasmSubscription")]
+#[napi(js_name = "DirectSubscription")]
 pub struct NapiDirectSubscription {
     inner: Option<DirectNapiSubscription>,
 }
@@ -395,7 +395,7 @@ enum DirectNapiSubscription {
     Persistent(DirectSubscriptionStream),
 }
 
-#[napi(js_name = "WasmTx")]
+#[napi(js_name = "DirectTx")]
 pub struct NapiDirectTx {
     db: DirectNapiDb,
     writes: Option<Vec<DirectNapiTxWrite>>,
@@ -781,6 +781,41 @@ impl NapiDirectDb {
                 direct_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
+        };
+        Ok(NapiDirectSubscription { inner: Some(inner) })
+    }
+
+    #[napi(js_name = "subscribeForIdentity")]
+    pub fn subscribe_for_identity(
+        &self,
+        query: &NapiDirectPreparedQuery,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<NapiDirectSubscription> {
+        let author = direct_author_id_from_bytes(&author)?;
+        let opts = direct_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        let inner = match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                DirectNapiSubscription::Memory(
+                    direct_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                DirectNapiSubscription::Persistent(
+                    direct_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
         };
         Ok(NapiDirectSubscription { inner: Some(inner) })
     }

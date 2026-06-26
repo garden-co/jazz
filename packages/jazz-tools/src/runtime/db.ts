@@ -50,7 +50,7 @@ import {
   isIncompatibleBrowserBrokerConfigurationError,
   type IncompatibleBrowserBrokerConfigurationHandler,
 } from "./browser-broker-errors.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";

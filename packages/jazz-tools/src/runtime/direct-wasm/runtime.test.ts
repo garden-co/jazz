@@ -418,6 +418,148 @@ describe("DirectCoreRuntime server transport", () => {
     });
   });
 
+  it("keeps simple equality relation queries supported", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new DirectCoreRuntime(
+      {
+        openMemory: () => ({
+          all: () =>
+            encodeRows([
+              {
+                table: "todos",
+                rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                title: "keep",
+              },
+              {
+                table: "todos",
+                rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+                title: "drop",
+              },
+            ]),
+          prepareQuery: (query: Uint8Array) => {
+            preparedBytes = query;
+            return {};
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "title" },
+                  op: "Eq",
+                  right: { Literal: { type: "Text", value: "keep" } },
+                },
+              },
+            },
+          },
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "keep" }],
+      },
+    ]);
+    expect(readPreparedComparison(preparedBytes!)).toEqual({
+      table: "todos",
+      predicateTag: 3,
+      column: "title",
+      literalTag: 6,
+      value: "keep",
+      limit: undefined,
+    });
+  });
+
+  it("rejects unsupported relation query shapes before preparing or reading", async () => {
+    const calls: string[] = [];
+    const runtime = new DirectCoreRuntime(
+      {
+        openMemory: () => ({
+          all: () => {
+            calls.push("all");
+            return encodeRows([
+              {
+                table: "todos",
+                rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                title: "should not be read",
+              },
+            ]);
+          },
+          prepareQuery: () => {
+            calls.push("prepareQuery");
+            return {};
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", relation_ir: unsupportedJoinRelationIr() })),
+    ).rejects.toThrow("refusing to run an overbroad table query");
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects unsupported subscription relation shapes before subscribing", () => {
+    const calls: string[] = [];
+    const runtime = new DirectCoreRuntime(
+      {
+        openMemory: () => ({
+          prepareQuery: () => {
+            calls.push("prepareQuery");
+            return {};
+          },
+          subscribe: () => {
+            calls.push("subscribe");
+            return new ReadableStream();
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos", relation_ir: unsupportedProjectRelationIr() }),
+      ),
+    ).toThrow("refusing to run an overbroad table query");
+    expect(calls).toEqual([]);
+  });
+
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
     const runtime = directRuntimeWithEmptyDb();
 
@@ -671,6 +813,7 @@ function directRuntimeWithEmptyDb(): DirectCoreRuntime {
         propagateQuery: () => undefined,
         prepareQuery: () => ({}),
         subscribe: () => new ReadableStream(),
+        subscribeForIdentity: () => new ReadableStream(),
         tick: () => undefined,
       }),
       openBrowser: async () => {
@@ -733,6 +876,28 @@ function readPreparedLimit(query: Uint8Array): number | undefined {
   reader.readVec(() => undefined);
   reader.option(() => undefined);
   return reader.option((optionReader) => optionReader.u64());
+}
+
+function unsupportedJoinRelationIr(): unknown {
+  return {
+    Join: {
+      left: { TableScan: { table: "todos" } },
+      right: { TableScan: { table: "projects" } },
+      on: {
+        left: { column: "todos.project_id" },
+        right: { column: "projects.id" },
+      },
+    },
+  };
+}
+
+function unsupportedProjectRelationIr(): unknown {
+  return {
+    Project: {
+      input: { TableScan: { table: "todos" } },
+      columns: [{ source: { column: "title" }, alias: "title" }],
+    },
+  };
 }
 
 const fileSchema = {

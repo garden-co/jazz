@@ -20,8 +20,6 @@ import {
   PostcardReader,
   PostcardWriter,
   openConfig,
-  queryFromTable,
-  queryWithEqFilters,
   queryWithPredicates,
   readAbiRowBatch,
   readAbiSubscriptionDelta,
@@ -56,6 +54,11 @@ type DirectCoreDb = {
   prepareQuery(query: Uint8Array): DirectPreparedQuery;
   subscribe?(
     query: DirectPreparedQuery,
+    opts: unknown,
+  ): ReadableStream<unknown> | DirectSubscription;
+  subscribeForIdentity?(
+    query: DirectPreparedQuery,
+    author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | DirectSubscription;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
@@ -386,6 +389,7 @@ export class DirectCoreRuntime implements Runtime {
       try {
         this.pumpServerTransport();
         write.wait(tier);
+        this.pumpSubscriptions();
         return;
       } catch (error) {
         const rejected = rejectedWaitError(transactionId, error);
@@ -429,13 +433,21 @@ export class DirectCoreRuntime implements Runtime {
     optionsJson?: string | null,
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
-    void readSession(sessionJson);
+    const session = readSession(sessionJson);
     if (!this.db.subscribe) {
       throw new Error("Direct core runtime does not support subscriptions");
     }
+    if (session && !this.db.subscribeForIdentity) {
+      throw new Error("Direct core runtime does not support session-scoped subscriptions");
+    }
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
-    const source = subscriptionSource(this.db.subscribe(query, readOptions(tier)));
+    const opts = readOptions(tier);
+    const identity = session ? parseUuid(session.user_id) : undefined;
+    const nativeSubscription = identity
+      ? this.db.subscribeForIdentity!(query, identity, opts)
+      : this.db.subscribe(query, opts);
+    const source = subscriptionSource(nativeSubscription);
     this.propagateSubscriptionQueryIfNeeded(tier, optionsJson, query);
     this.subscriptions.set(handle, {
       source,
@@ -897,26 +909,26 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     throw new Error("Direct core runtime only supports table queries in this slice");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
-  if (encoded) {
-    return queryWithPredicates(
-      parsed.table,
-      encoded.predicates,
-      encoded.hasPostFilter ? undefined : readLimitIfPresent(parsed.limit),
-    );
-  }
-  if (parsed.limit != null) {
-    return queryWithEqFilters(parsed.table, [], readLimit(parsed.limit));
-  }
-  return queryFromTable(parsed.table);
+  return queryWithPredicates(
+    parsed.table,
+    encoded.predicates,
+    encoded.hasPostFilter ? undefined : readLimitIfPresent(parsed.limit),
+  );
+}
+
+function unsupportedRelationQueryError(): Error {
+  return new Error(
+    "Direct core runtime does not support this relation query shape yet; refusing to run an overbroad table query.",
+  );
 }
 
 function encodeSimpleRelationQuery(
   table: string,
   relationIr: unknown,
   schema: WasmSchema,
-): { predicates: DirectQueryPredicate[]; hasPostFilter: boolean } | null {
+): { predicates: DirectQueryPredicate[]; hasPostFilter: boolean } {
   const unwrapped = unwrapSimpleRelation(table, relationIr);
-  if (!unwrapped) return null;
+  if (!unwrapped) throw unsupportedRelationQueryError();
   const unsupportedIdComparator = unwrapped.predicates.find(
     (filter) => filter.column === "id" && filter.op !== "Eq",
   );
@@ -935,6 +947,44 @@ function encodeSimpleRelationQuery(
         value: coerceQueryLiteral(table, filter.column, filter.value, schema),
       })),
   };
+}
+
+function unwrapSimpleRelationOrThrow(
+  table: string,
+  relationIr: unknown,
+): { predicates: DirectQueryPredicate[] } {
+  const unwrapped = unwrapSimpleRelation(table, relationIr);
+  if (!unwrapped) throw unsupportedRelationQueryError();
+  return unwrapped;
+}
+
+function unwrapSimpleRelation(
+  table: string,
+  relationIr: unknown,
+): { predicates: DirectQueryPredicate[] } | null {
+  if (relationIr == null) return { predicates: [] };
+  if (typeof relationIr !== "object") return null;
+  const relation = relationIr as Record<string, unknown>;
+  const tableScan = relation.TableScan;
+  if (
+    tableScan &&
+    typeof tableScan === "object" &&
+    (tableScan as { table?: unknown }).table === table
+  ) {
+    return { predicates: [] };
+  }
+  const limit = relation.Limit;
+  if (limit && typeof limit === "object") {
+    const limitRecord = limit as { input?: unknown };
+    return unwrapSimpleRelation(table, limitRecord.input);
+  }
+  const filter = relation.Filter;
+  if (!filter || typeof filter !== "object") return null;
+  const filterRecord = filter as { input?: unknown; predicate?: unknown };
+  const input = unwrapSimpleRelation(table, filterRecord.input);
+  if (!input) return null;
+  const predicates = predicateToFilters(filterRecord.predicate);
+  return predicates ? { predicates: input.predicates.concat(predicates) } : null;
 }
 
 function coerceQueryLiteral(
@@ -957,34 +1007,6 @@ function coerceQueryLiteral(
     return { type: "Nullable", value: coerced };
   }
   return coerced;
-}
-
-function unwrapSimpleRelation(
-  table: string,
-  relationIr: unknown,
-): { predicates: DirectQueryPredicate[] } | null {
-  if (!relationIr || typeof relationIr !== "object") return { predicates: [] };
-  const relation = relationIr as Record<string, unknown>;
-  const tableScan = relation.TableScan;
-  if (
-    tableScan &&
-    typeof tableScan === "object" &&
-    (tableScan as { table?: unknown }).table === table
-  ) {
-    return { predicates: [] };
-  }
-  const limit = relation.Limit;
-  if (limit && typeof limit === "object") {
-    const limitRecord = limit as { input?: unknown };
-    return unwrapSimpleRelation(table, limitRecord.input);
-  }
-  const filter = relation.Filter;
-  if (!filter || typeof filter !== "object") return null;
-  const filterRecord = filter as { input?: unknown; predicate?: unknown };
-  const input = unwrapSimpleRelation(table, filterRecord.input);
-  if (!input) return null;
-  const predicates = predicateToFilters(filterRecord.predicate);
-  return predicates ? { predicates: input.predicates.concat(predicates) } : null;
 }
 
 function predicateToFilters(predicate: unknown): DirectQueryPredicate[] | null {
@@ -1066,14 +1088,12 @@ function readLimitIfPresent(value: unknown): number | undefined {
 function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
   const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
   if (typeof parsed.table !== "string") return [];
-  return (
-    unwrapSimpleRelation(parsed.table, parsed.relation_ir)
-      ?.predicates.filter((filter) => filter.op === "Eq")
-      .map((filter) => ({
-        ...filter,
-        value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
-      })) ?? []
-  );
+  return unwrapSimpleRelationOrThrow(parsed.table, parsed.relation_ir)
+    .predicates.filter((filter) => filter.op === "Eq")
+    .map((filter) => ({
+      ...filter,
+      value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
+    }));
 }
 
 function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {

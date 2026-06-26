@@ -1,6 +1,6 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
-import type { AuthFailureReason } from "../sync-transport.js";
+import type { AuthFailureReason } from "../auth-state.js";
 import { PostcardReader, PostcardWriter } from "./direct-codec.js";
 
 export type DirectWebSocketFrameHandler = (frame: Uint8Array) => void;
