@@ -120,6 +120,7 @@ export function makeClient() {
     },
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    composeBranchName: (userBranch: string) => `dev-schema-${userBranch}`,
   };
 
   const context: AppContext = {
@@ -171,6 +172,7 @@ export function makeClientWithContext(context: AppContext): JazzClient {
     unsubscribe: () => {},
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    composeBranchName: (userBranch: string) => `dev-schema-${userBranch}`,
   };
 
   const JazzClientCtor = JazzClient as unknown as {

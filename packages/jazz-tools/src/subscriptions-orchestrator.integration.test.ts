@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "./drivers/types.js";
+import { schema as s } from "./index.js";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "./runtime/db.js";
 import { SubscriptionsOrchestrator } from "./subscriptions-orchestrator.js";
 
@@ -44,6 +45,16 @@ const allTodosQuery: QueryBuilder<Todo> = {
   },
 };
 
+const branchApp = s.defineApp({
+  projects: s.table({ name: s.string(), ownerId: s.string() }),
+  branches: s.table({ projectId: s.ref("projects"), ownerId: s.string() }),
+  todos: s.table({
+    projectId: s.ref("projects"),
+    title: s.string(),
+    ownerId: s.string(),
+  }),
+});
+
 async function waitForCondition(
   condition: () => boolean,
   timeoutMs: number,
@@ -76,6 +87,87 @@ async function withRealManager<T>(
 }
 
 describe("SubscriptionsOrchestrator integration coverage", () => {
+  it("SO-I00 branch QueryOptions isolate useAll-style subscriptions", async () => {
+    const appId = `orchestrator-int-branch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const db = await createDb({
+      appId,
+      driver: { type: "persistent", dbName: appId },
+      cookieSession: { user_id: "alice", claims: {}, authMode: "external" },
+      userBranch: "main",
+    });
+    const manager = new SubscriptionsOrchestrator({ appId }, db);
+
+    try {
+      const projectInsert = db.insert(branchApp.projects, {
+        name: "Website",
+        ownerId: "alice",
+      });
+      await projectInsert.wait({ tier: "local" });
+      const project = projectInsert.value;
+
+      const branchInsert = db.insert(branchApp.branches, {
+        projectId: project.id,
+        ownerId: "alice",
+      });
+      await branchInsert.wait({ tier: "local" });
+      const branch = branchInsert.value;
+
+      const query = branchApp.todos.where({ projectId: project.id });
+      const mainKey = manager.makeQueryKey(query);
+      const branchKey = manager.makeQueryKey(query, { branch: branch.id });
+      const mainEntry = manager.getCacheEntry(mainKey);
+      const branchEntry = manager.getCacheEntry(branchKey);
+      const mainSnapshots: string[][] = [];
+      const branchSnapshots: string[][] = [];
+
+      const unsubscribeMain = mainEntry.subscribe({
+        onfulfilled(data) {
+          mainSnapshots.push(data.map((row) => row.id));
+        },
+        onDelta(delta) {
+          mainSnapshots.push(delta.all.map((row) => row.id));
+        },
+      });
+      const unsubscribeBranch = branchEntry.subscribe({
+        onfulfilled(data) {
+          branchSnapshots.push(data.map((row) => row.id));
+        },
+        onDelta(delta) {
+          branchSnapshots.push(delta.all.map((row) => row.id));
+        },
+      });
+
+      const todoInsert = db.branch(branch.id).insert(branchApp.todos, {
+        projectId: project.id,
+        title: "Draft landing page",
+        ownerId: "alice",
+      });
+      await todoInsert.wait({ tier: "local" });
+      const todo = todoInsert.value;
+      await expect(db.branch(branch.id).all(query)).resolves.toEqual([
+        expect.objectContaining({ id: todo.id }),
+      ]);
+
+      await waitForCondition(
+        () => branchSnapshots.some((snapshot) => snapshot.includes(todo.id)),
+        5_000,
+        "SO-I00 expected branch-scoped subscription to include branch todo",
+      );
+
+      expect(branchSnapshots[branchSnapshots.length - 1]).toContain(todo.id);
+      expect(mainSnapshots.every((snapshot) => !snapshot.includes(todo.id))).toBe(true);
+      if (mainEntry.state.status === "fulfilled") {
+        expect(mainEntry.state.data.some((row) => row.id === todo.id)).toBe(false);
+      }
+
+      unsubscribeMain();
+      unsubscribeBranch();
+    } finally {
+      await manager.shutdown();
+      await db.shutdown();
+    }
+  }, 10_000);
+
   it("SO-I01 first mutation causes first fulfilled cache snapshot", async () => {
     await withRealManager("i01", async ({ manager, db }) => {
       const key = manager.makeQueryKey(allTodosQuery);

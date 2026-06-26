@@ -74,6 +74,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     rollbackBatch: () => false,
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    composeBranchName: (userBranch: string) => `dev-schema-${userBranch}`,
   };
   const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 

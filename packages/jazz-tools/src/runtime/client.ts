@@ -87,6 +87,7 @@ export interface Runtime {
   createWorkerBridge?(worker: Worker, options: object): unknown;
   getSchema(): any;
   getSchemaHash(): string;
+  composeBranchName(userBranch: string): string;
   close?(): void | Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
@@ -771,11 +772,24 @@ export class JazzClient {
     attribution?: string,
     batchId?: BatchId,
     updatedAt?: number,
+    targetBranchName?: string,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchId && updatedAt === undefined) {
+    if (
+      !session &&
+      attribution === undefined &&
+      !batchId &&
+      updatedAt === undefined &&
+      targetBranchName === undefined
+    ) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchId && updatedAt === undefined) {
+    if (
+      attribution === undefined &&
+      session &&
+      !batchId &&
+      updatedAt === undefined &&
+      targetBranchName === undefined
+    ) {
       return JSON.stringify(session);
     }
 
@@ -792,6 +806,9 @@ export class JazzClient {
     if (batchId) {
       payload.batch_id = batchId;
     }
+    if (targetBranchName !== undefined) {
+      payload.target_branch_name = targetBranchName;
+    }
     return JSON.stringify(payload);
   }
 
@@ -805,6 +822,21 @@ export class JazzClient {
     return this.resolvedSession ?? undefined;
   }
 
+  composeBranch(userBranch: string): string {
+    return this.runtime.composeBranchName(userBranch);
+  }
+
+  private resolveQueryJsonForBranch(query: string | QueryInput, targetBranch?: string): string {
+    const queryJson = resolveQueryJson(query);
+    if (targetBranch === undefined) {
+      return queryJson;
+    }
+
+    const queryPayload = JSON.parse(queryJson) as Record<string, unknown>;
+    queryPayload.branches = [this.composeBranch(targetBranch)];
+    return JSON.stringify(queryPayload);
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    */
@@ -814,8 +846,17 @@ export class JazzClient {
     options?: CreateOptions,
     session?: Session,
     attribution?: string,
+    targetBranch?: string,
   ): WriteResult<Row> {
-    const row = this.insertInternal(table, values, options, session, attribution);
+    const row = this.insertInternal(
+      table,
+      values,
+      options,
+      session,
+      attribution,
+      undefined,
+      targetBranch,
+    );
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -829,13 +870,17 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchId?: BatchId,
+    targetBranch?: string,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
+    const targetBranchName =
+      targetBranch === undefined ? undefined : this.composeBranch(targetBranch);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
       batchId,
       options?.updatedAt,
+      targetBranchName,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
@@ -854,8 +899,18 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
+    targetBranch?: string,
   ): WriteResult<Row> {
-    const row = this.restoreInternal(table, objectId, values, options, session, attribution);
+    const row = this.restoreInternal(
+      table,
+      objectId,
+      values,
+      options,
+      session,
+      attribution,
+      undefined,
+      targetBranch,
+    );
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -870,13 +925,17 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchId?: BatchId,
+    targetBranch?: string,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
+    const targetBranchName =
+      targetBranch === undefined ? undefined : this.composeBranch(targetBranch);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
       batchId,
       options?.updatedAt,
+      targetBranchName,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
@@ -931,9 +990,10 @@ export class JazzClient {
     query: string | QueryInput,
     options?: InternalQueryExecutionOptions,
     session?: Session,
+    targetBranch?: string,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const queryJson = resolveQueryJson(query);
+    const queryJson = this.resolveQueryJsonForBranch(query, targetBranch);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -957,6 +1017,7 @@ export class JazzClient {
     options?: UpdateOptions,
     session?: Session,
     attribution?: string,
+    targetBranch?: string,
   ): WriteHandle {
     const result = this.updateInternal(
       objectId,
@@ -965,6 +1026,7 @@ export class JazzClient {
       session,
       attribution,
       undefined,
+      targetBranch,
     );
     return new WriteHandle(result.batchId, this);
   }
@@ -979,9 +1041,18 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchId?: BatchId,
+    targetBranch?: string,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
+    const targetBranchName =
+      targetBranch === undefined ? undefined : this.composeBranch(targetBranch);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchId,
+      updatedAt,
+      targetBranchName,
+    );
     return this.runtime.update(objectId, updates, writeContext);
   }
 
@@ -993,8 +1064,16 @@ export class JazzClient {
     options?: DeleteOptions,
     session?: Session,
     attribution?: string,
+    targetBranch?: string,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, options?.updatedAt, session, attribution);
+    const result = this.deleteInternal(
+      objectId,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      targetBranch,
+    );
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1007,9 +1086,18 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchId?: BatchId,
+    targetBranch?: string,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
+    const targetBranchName =
+      targetBranch === undefined ? undefined : this.composeBranch(targetBranch);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchId,
+      updatedAt,
+      targetBranchName,
+    );
     return this.runtime.delete(objectId, writeContext);
   }
 
@@ -1026,11 +1114,12 @@ export class JazzClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
     session?: Session,
+    targetBranch?: string,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
-    const queryJson = resolveQueryJson(query);
+    const queryJson = this.resolveQueryJsonForBranch(query, targetBranch);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates

@@ -20,8 +20,8 @@ use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, Quer
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies,
-    Value,
+    BranchPolicies, ComposedBranchName, RowDescriptor, RowPolicyMode, Schema, SchemaHash,
+    TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::row_format::decode_row;
@@ -34,8 +34,8 @@ use super::auto_lens::generate_lens;
 use super::context::{SchemaContext, SchemaError};
 use super::encoding::{
     decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
-    decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
-    encode_permissions_head, encode_schema,
+    decode_schema, encode_lens_transform, encode_permissions,
+    encode_permissions_bundle_with_branch_policies, encode_permissions_head, encode_schema,
 };
 use super::lens::Lens;
 use super::types::AppId;
@@ -46,6 +46,7 @@ struct PermissionsBundleState {
     version: u64,
     parent_bundle_object_id: Option<ObjectId>,
     permissions: HashMap<TableName, TablePolicies>,
+    branch_policies: BranchPolicies,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub struct PermissionsHeadSummary {
 pub struct CurrentPermissionsSummary {
     pub head: PermissionsHeadSummary,
     pub permissions: HashMap<TableName, TablePolicies>,
+    pub branch_policies: BranchPolicies,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +174,7 @@ impl SchemaManager {
         Self::new_with_policy_mode(
             sync_manager,
             schema,
+            BranchPolicies::default(),
             app_id,
             env,
             user_branch,
@@ -182,6 +185,7 @@ impl SchemaManager {
     pub fn new_with_policy_mode(
         sync_manager: SyncManager,
         schema: Schema,
+        branch_policies: BranchPolicies,
         app_id: AppId,
         env: &str,
         user_branch: &str,
@@ -201,6 +205,10 @@ impl SchemaManager {
             user_branch,
             row_policy_mode,
         );
+        if !branch_policies.is_empty() {
+            query_manager
+                .set_authorization_schema_with_branch_policies(schema.clone(), branch_policies);
+        }
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
@@ -321,6 +329,12 @@ impl SchemaManager {
         self.context.branch_name()
     }
 
+    /// Compose a branch name for the current environment and schema.
+    pub fn compose_branch_name(&self, user_branch: &str) -> BranchName {
+        ComposedBranchName::new(&self.context.env, self.context.current_hash, user_branch)
+            .to_branch_name()
+    }
+
     /// Get branch names for all live schemas (current + live).
     pub fn all_branches(&self) -> Vec<BranchName> {
         self.context.all_branch_names()
@@ -353,12 +367,16 @@ impl SchemaManager {
     fn resolve_target_branch(
         &self,
         write_context: Option<&WriteContext>,
-    ) -> Result<(String, SchemaHash), QueryError> {
+    ) -> Result<(String, SchemaHash, String), QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
         let current_hash = self.context.current_hash;
         let Some(target_branch_name) = write_context.and_then(WriteContext::target_branch_name)
         else {
-            return Ok((current_branch, current_hash));
+            return Ok((
+                current_branch,
+                current_hash,
+                self.context.user_branch.clone(),
+            ));
         };
 
         let parsed =
@@ -368,46 +386,51 @@ impl SchemaManager {
                 ))
             })?;
 
-        if !parsed.matches_env_and_branch(&self.context.env, &self.context.user_branch) {
+        // A runtime is not pinned to a single data branch: a write may target any
+        // user branch within the same env (this is how `db.branch(...)` routes
+        // writes through one runtime). Only the env must match; the schema hash is
+        // resolved against the current/live schemas below.
+        if parsed.env != self.context.env {
             return Err(QueryError::EncodingError(format!(
-                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/{}",
-                self.context.env, self.context.user_branch
+                "target_branch_name `{target_branch_name}` is outside the current schema family {}/*/*",
+                self.context.env
             )));
         }
 
-        if parsed.schema_hash.short() == current_hash.short() {
-            return Ok((current_branch, current_hash));
-        }
-
-        if let Some(hash) = self
+        let resolved_hash = if parsed.schema_hash.short() == current_hash.short() {
+            current_hash
+        } else if let Some(hash) = self
             .context
             .live_schemas
             .keys()
             .copied()
             .find(|hash| hash.short() == parsed.schema_hash.short())
         {
-            let canonical =
-                ComposedBranchName::new(&self.context.env, hash, &self.context.user_branch)
-                    .to_branch_name();
-            return Ok((canonical.as_str().to_string(), hash));
-        }
+            hash
+        } else {
+            return Err(QueryError::UnknownSchema(parsed.schema_hash));
+        };
 
-        Err(QueryError::UnknownSchema(parsed.schema_hash))
+        let target = ComposedBranchName::new(&self.context.env, resolved_hash, &parsed.user_branch)
+            .to_branch_name();
+        Ok((
+            target.as_str().to_string(),
+            resolved_hash,
+            parsed.user_branch,
+        ))
     }
 
     fn schema_context_for_hash(
         &self,
         schema_hash: SchemaHash,
+        user_branch: &str,
     ) -> Result<SchemaContext, QueryError> {
         let target_schema = self
             .schema_for_hash(schema_hash)
             .ok_or(QueryError::UnknownSchema(schema_hash))?
             .clone();
-        let mut temp_context = SchemaContext::new(
-            target_schema.clone(),
-            &self.context.env,
-            &self.context.user_branch,
-        );
+        let mut temp_context =
+            SchemaContext::new(target_schema.clone(), &self.context.env, user_branch);
 
         for lens in self.context.lenses.values() {
             temp_context.register_lens(lens.clone());
@@ -733,6 +756,7 @@ impl SchemaManager {
         Some(CurrentPermissionsSummary {
             head,
             permissions: bundle.permissions.clone(),
+            branch_policies: bundle.branch_policies.clone(),
         })
     }
 
@@ -1021,11 +1045,12 @@ impl SchemaManager {
         let bundle_metadata = self.permissions_bundle_metadata();
         let head_object_id = self.permissions_head_object_id();
         let head_metadata = self.permissions_head_metadata();
-        let bundle_content = encode_permissions_bundle(
+        let bundle_content = encode_permissions_bundle_with_branch_policies(
             bundle.schema_hash,
             bundle.version,
             bundle.parent_bundle_object_id,
             &bundle.permissions,
+            &bundle.branch_policies,
         );
         let bundle_timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
         self.catalogue_publish_timestamps
@@ -1064,6 +1089,23 @@ impl SchemaManager {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, SchemaError> {
+        self.publish_permissions_bundle_with_branch_policies(
+            storage,
+            schema_hash,
+            permissions,
+            BranchPolicies::default(),
+            expected_parent_bundle_object_id,
+        )
+    }
+
+    pub fn publish_permissions_bundle_with_branch_policies<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        branch_policies: BranchPolicies,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, SchemaError> {
         let current_parent_bundle_object_id = self
             .current_permissions_head
             .map(|head| head.bundle_object_id);
@@ -1078,6 +1120,7 @@ impl SchemaManager {
             && head.schema_hash == schema_hash
             && let Some(existing) = self.known_permissions_bundles.get(&head.bundle_object_id)
             && existing.permissions == permissions
+            && existing.branch_policies == branch_policies
         {
             return Ok(Some(self.permissions_head_object_id()));
         }
@@ -1091,6 +1134,7 @@ impl SchemaManager {
             version,
             parent_bundle_object_id: current_parent_bundle_object_id,
             permissions,
+            branch_policies,
         };
         let bundle_object_id = self.permissions_bundle_object_id(&bundle_state);
         self.known_permissions_bundles
@@ -1154,11 +1198,12 @@ impl SchemaManager {
     fn permissions_bundle_object_id(&self, bundle: &PermissionsBundleState) -> ObjectId {
         let mut identity =
             format!("jazz-catalogue-permissions-bundle:{}:", self.app_id.uuid()).into_bytes();
-        identity.extend_from_slice(&encode_permissions_bundle(
+        identity.extend_from_slice(&encode_permissions_bundle_with_branch_policies(
             bundle.schema_hash,
             bundle.version,
             bundle.parent_bundle_object_id,
             &bundle.permissions,
+            &bundle.branch_policies,
         ));
         ObjectId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &identity))
     }
@@ -1316,7 +1361,7 @@ impl SchemaManager {
             return Ok(());
         }
 
-        let (schema_hash, version, parent_bundle_object_id, permissions) =
+        let (schema_hash, version, parent_bundle_object_id, permissions, branch_policies) =
             decode_permissions_bundle(content)
                 .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
         self.known_permissions_bundles.insert(
@@ -1326,6 +1371,7 @@ impl SchemaManager {
                 version,
                 parent_bundle_object_id,
                 permissions,
+                branch_policies,
             },
         );
 
@@ -1402,6 +1448,7 @@ impl SchemaManager {
                 version: 1,
                 parent_bundle_object_id: None,
                 permissions,
+                branch_policies: BranchPolicies::default(),
             },
         );
         let head = PermissionsHeadState {
@@ -1517,7 +1564,10 @@ impl SchemaManager {
 
         let authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
         self.query_manager
-            .set_authorization_schema(authorization_schema);
+            .set_authorization_schema_with_branch_policies(
+                authorization_schema,
+                bundle.branch_policies.clone(),
+            );
         true
     }
 
@@ -1578,7 +1628,7 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let (target_branch, target_hash, _) = self.resolve_target_branch(write_context)?;
         let table_name = TableName::new(table);
 
         let context = &self.context;
@@ -1618,8 +1668,9 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<crate::row_histories::BatchId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let (target_branch, target_hash, target_user_branch) =
+            self.resolve_target_branch(write_context)?;
+        let target_context = self.schema_context_for_hash(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1673,12 +1724,13 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<crate::row_histories::BatchId, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let (target_branch, target_hash, target_user_branch) =
+            self.resolve_target_branch(write_context)?;
         let target_schema = self
             .schema_for_hash(target_hash)
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let target_context = self.schema_context_for_hash(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1786,12 +1838,13 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let (target_branch, target_hash, target_user_branch) =
+            self.resolve_target_branch(write_context)?;
         let target_schema = self
             .schema_for_hash(target_hash)
             .ok_or(QueryError::UnknownSchema(target_hash))?
             .clone();
-        let target_context = self.schema_context_for_hash(target_hash)?;
+        let target_context = self.schema_context_for_hash(target_hash, &target_user_branch)?;
         let branches = target_context
             .all_branch_names()
             .into_iter()
@@ -1857,7 +1910,7 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
-        let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
+        let (target_branch, target_hash, _) = self.resolve_target_branch(write_context)?;
         let actual_table = self
             .query_manager
             .load_row_table_name(storage, object_id)
@@ -2072,6 +2125,25 @@ mod tests {
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
         assert_eq!(manager.app_id(), test_app_id());
+    }
+
+    #[test]
+    fn compose_branch_name_uses_current_env_and_schema_hash() {
+        let schema = make_schema_v1();
+        let hash_short = SchemaHash::compute(&schema).short();
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        assert_eq!(
+            manager.compose_branch_name("main").as_str(),
+            format!("dev-{hash_short}-main")
+        );
+        assert_eq!(
+            manager
+                .compose_branch_name("0197a60f-6eba-7500-b968-a4ab7af76e39")
+                .as_str(),
+            format!("dev-{hash_short}-0197a60f-6eba-7500-b968-a4ab7af76e39")
+        );
     }
 
     #[test]
@@ -2537,6 +2609,7 @@ mod tests {
             version: 3,
             parent_bundle_object_id: Some(ObjectId::new()),
             permissions: permissions.clone(),
+            branch_policies: BranchPolicies::default(),
         };
         let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
         let head = PermissionsHeadState {
@@ -2565,7 +2638,7 @@ mod tests {
             .process_catalogue_update(
                 bundle_object_id,
                 &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(
+                &crate::schema_manager::encoding::encode_permissions_bundle(
                     schema_hash,
                     bundle.version,
                     bundle.parent_bundle_object_id,
@@ -2608,6 +2681,7 @@ mod tests {
             version: 1,
             parent_bundle_object_id: None,
             permissions: permissions.clone(),
+            branch_policies: BranchPolicies::default(),
         };
         let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
 
@@ -2652,7 +2726,7 @@ mod tests {
             .process_catalogue_update(
                 bundle_object_id,
                 &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(
+                &crate::schema_manager::encoding::encode_permissions_bundle(
                     schema_hash,
                     bundle.version,
                     bundle.parent_bundle_object_id,

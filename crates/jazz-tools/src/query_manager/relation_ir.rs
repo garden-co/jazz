@@ -43,6 +43,7 @@ pub enum RowIdRef {
 pub enum ValueRef {
     Literal(Value),
     SessionRef(Vec<String>),
+    BranchRef(String),
     OuterColumn(ColumnRef),
     FrontierColumn(ColumnRef),
     RowId(RowIdRef),

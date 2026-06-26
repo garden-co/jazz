@@ -241,7 +241,11 @@ function isPermissionsMap(input: unknown): input is Record<string, TablePolicies
   if (typeof input !== "object" || input === null) {
     return false;
   }
-  return Object.values(input).every((value) => isTablePoliciesLike(value));
+  // `branchPolicies` (from policy.forBranch(...)) is a nested map keyed by
+  // backing table, not a TablePolicies — it is not a table entry.
+  return Object.entries(input).every(
+    ([key, value]) => key === "branchPolicies" || isTablePoliciesLike(value),
+  );
 }
 
 async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {

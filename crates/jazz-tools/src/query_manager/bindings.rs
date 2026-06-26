@@ -13,7 +13,7 @@ use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
-use crate::query_manager::types::Schema;
+use crate::query_manager::types::{BranchPolicies, Schema};
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::runtime_core::{MutationErrorEvent, ReadDurabilityOptions, SubscriptionDelta};
@@ -30,6 +30,7 @@ struct QueryExecutionOptionsWire {
 pub struct RuntimeSchemaInput {
     pub schema: Schema,
     pub loaded_policy_bundle: bool,
+    pub branch_policies: BranchPolicies,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,16 +38,11 @@ pub struct RuntimeSchemaInput {
 struct RuntimeSchemaEnvelopeWire {
     #[serde(rename = "__jazzRuntimeSchema")]
     version: u8,
-    schema: Schema,
+    schema: JsonValue,
     #[serde(default)]
     loaded_policy_bundle: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RuntimeSchemaWire {
-    Envelope(RuntimeSchemaEnvelopeWire),
-    Schema(Schema),
+    #[serde(default)]
+    branch_policies: BranchPolicies,
 }
 
 pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
@@ -54,24 +50,40 @@ pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
 }
 
 pub fn parse_runtime_schema_input(schema_json: &str) -> Result<RuntimeSchemaInput, String> {
-    match serde_json::from_str::<RuntimeSchemaWire>(schema_json).map_err(|err| err.to_string())? {
-        RuntimeSchemaWire::Envelope(envelope) => {
-            if envelope.version != 1 {
-                return Err(format!(
-                    "unsupported runtime schema envelope version {}",
-                    envelope.version
-                ));
-            }
-            Ok(RuntimeSchemaInput {
-                schema: envelope.schema,
-                loaded_policy_bundle: envelope.loaded_policy_bundle,
-            })
+    let value = serde_json::from_str::<JsonValue>(schema_json).map_err(|err| err.to_string())?;
+
+    if value
+        .as_object()
+        .and_then(|object| object.get("__jazzRuntimeSchema"))
+        .is_some()
+    {
+        let envelope = serde_json::from_value::<RuntimeSchemaEnvelopeWire>(value)
+            .map_err(|err| err.to_string())?;
+        if envelope.version != 1 {
+            return Err(format!(
+                "unsupported runtime schema envelope version {}",
+                envelope.version
+            ));
         }
-        RuntimeSchemaWire::Schema(schema) => Ok(RuntimeSchemaInput {
-            schema,
-            loaded_policy_bundle: false,
-        }),
+        return Ok(RuntimeSchemaInput {
+            schema: parse_schema_value(envelope.schema)?,
+            loaded_policy_bundle: envelope.loaded_policy_bundle,
+            branch_policies: envelope.branch_policies,
+        });
     }
+
+    Ok(RuntimeSchemaInput {
+        schema: parse_schema_value(value)?,
+        loaded_policy_bundle: false,
+        branch_policies: BranchPolicies::default(),
+    })
+}
+
+fn parse_schema_value(mut schema: JsonValue) -> Result<Schema, String> {
+    if let JsonValue::Object(object) = &mut schema {
+        object.remove("branch_policies");
+    }
+    serde_json::from_value(schema).map_err(|err| err.to_string())
 }
 
 pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>, String> {
@@ -444,6 +456,50 @@ mod tests {
 
         assert!(input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));
+    }
+
+    #[test]
+    fn runtime_schema_envelope_reads_branch_policies() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        }
+                    ]
+                },
+                "branch_policies": {
+                    "branches": {
+                        "todos": {}
+                    }
+                }
+            },
+            "branchPolicies": {
+                "branches": {
+                    "todos": {}
+                }
+            }
+        }"#;
+
+        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+
+        assert_eq!(input.branch_policies.len(), 1);
+        assert!(
+            !input
+                .schema
+                .contains_key(&TableName::new("branch_policies"))
+        );
+        assert!(
+            input
+                .branch_policies
+                .get(&TableName::new("branches"))
+                .expect("branch table policies")
+                .contains_key(&TableName::new("todos"))
+        );
     }
 
     #[test]

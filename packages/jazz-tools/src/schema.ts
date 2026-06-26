@@ -100,6 +100,10 @@ export type PolicyValue =
   | {
       type: "SessionRef";
       path: string[];
+    }
+  | {
+      type: "BranchRef";
+      column: string;
     };
 
 export type PolicyLiteralValue = Extract<PolicyValue, { type: "Literal" }>;

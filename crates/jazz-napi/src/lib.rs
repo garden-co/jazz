@@ -380,6 +380,7 @@ fn build_napi_runtime(
     let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         schema,
+        runtime_schema.branch_policies,
         AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         &jazz_env,
         &user_branch,
@@ -805,6 +806,19 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let schema = core.current_schema();
         Ok(SchemaHash::compute(schema).to_string())
+    }
+
+    #[napi(js_name = "composeBranchName")]
+    pub fn compose_branch_name(&self, user_branch: String) -> napi::Result<String> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core
+            .schema_manager()
+            .compose_branch_name(&user_branch)
+            .as_str()
+            .to_string())
     }
 
     #[napi]

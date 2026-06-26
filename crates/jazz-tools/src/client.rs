@@ -140,6 +140,7 @@ fn build_client_schema_manager_with_policy_mode<S: Storage + ?Sized>(
     let mut schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         context.schema.clone(),
+        crate::query_manager::types::BranchPolicies::default(),
         context.app_id,
         "client",
         "main",

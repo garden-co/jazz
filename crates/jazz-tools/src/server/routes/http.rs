@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::jazz_transport::ErrorResponse;
 use crate::middleware::auth::validate_admin_secret;
 use crate::query_manager::types::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
+    BranchPolicies, ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
@@ -116,6 +116,8 @@ pub(super) struct PublishSchemaRequest {
 pub(super) struct PublishPermissionsRequest {
     schema_hash: String,
     permissions: std::collections::HashMap<String, TablePolicies>,
+    #[serde(default, alias = "branch_policies")]
+    branch_policies: BranchPolicies,
     expected_parent_bundle_object_id: Option<String>,
 }
 
@@ -784,17 +786,21 @@ pub(super) async fn publish_permissions_handler(
         }
     }
 
+    let branch_policies = request.branch_policies;
     let permissions = request
         .permissions
         .into_iter()
         .map(|(table_name, policies)| (TableName::new(table_name), policies))
         .collect();
 
-    match state.runtime.publish_permissions_bundle(
-        schema_hash,
-        permissions,
-        expected_parent_bundle_object_id,
-    ) {
+    match state
+        .runtime
+        .publish_permissions_bundle_with_branch_policies(
+            schema_hash,
+            permissions,
+            branch_policies,
+            expected_parent_bundle_object_id,
+        ) {
         Ok(_) => match state.runtime.with_schema_manager(|schema_manager| {
             schema_manager
                 .current_permissions_head()

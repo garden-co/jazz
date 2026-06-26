@@ -3,7 +3,7 @@ import { Component, Suspense, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { QueryBuilder } from "../runtime/db.js";
+import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { JazzClientProvider } from "./provider.js";
@@ -27,6 +27,7 @@ function delta(all: Todo[]): SubscriptionDelta<Todo> {
 function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
   const subscribeCalls: Array<{
     callback: (d: SubscriptionDelta<Todo>) => void;
+    options: QueryOptions | undefined;
     unsubscribe: ReturnType<typeof vi.fn>;
   }> = [];
 
@@ -34,13 +35,18 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getAuthState: () => ({ authMode: "local-first", session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
-    subscribeAll: (_query: any, callback: (d: SubscriptionDelta<any>) => void) => {
+    subscribeAll: (
+      _query: any,
+      callback: (d: SubscriptionDelta<any>) => void,
+      queryOptions?: QueryOptions,
+    ) => {
       if (options?.throwOnSubscribe) {
         throw options.throwOnSubscribe;
       }
       const unsubscribe = vi.fn();
       subscribeCalls.push({
         callback: callback as (d: SubscriptionDelta<Todo>) => void,
+        options: queryOptions,
         unsubscribe,
       });
       return unsubscribe;
@@ -91,6 +97,24 @@ describe("react-core/useAll", () => {
     act(() => force(2));
 
     expect(subscribeCalls).toHaveLength(1);
+  });
+
+  it("forwards branch QueryOptions into the subscription entry", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-branch-option");
+
+    function Probe() {
+      useAll(makeQuery(), { branch: "branch-row-id" });
+      return null;
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    expect(subscribeCalls).toHaveLength(1);
+    expect(subscribeCalls[0]!.options).toEqual({ branch: "branch-row-id" });
   });
 
   it("renders rows and reflects later deltas", () => {

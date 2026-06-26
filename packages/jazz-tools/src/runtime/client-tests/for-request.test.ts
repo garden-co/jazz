@@ -77,6 +77,16 @@ describe("JazzClient runtime helpers", () => {
     expect(parsed).toHaveProperty("relation_ir");
   });
 
+  it("injects the composed target branch into subscribe queries", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+
+    client.subscribe('{"table":"todos"}', () => {}, undefined, undefined, "branch-row-id");
+
+    expect(createSubscriptionCalls).toHaveLength(1);
+    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as { branches?: string[] };
+    expect(parsed.branches).toEqual(["dev-schema-branch-row-id"]);
+  });
+
   it("forwards structured RN delta payloads to subscription callbacks", async () => {
     const { client, executeSubscriptionCalls } = makeClient();
     const callback = vi.fn();
@@ -205,6 +215,7 @@ describe("JazzClient runtime helpers", () => {
       unsubscribe: () => {},
       getSchema: () => ({}),
       getSchemaHash: () => "schema-hash",
+      composeBranchName: (userBranch: string) => `dev-schema-${userBranch}`,
     };
 
     const JazzClientCtor = JazzClient as unknown as {

@@ -155,6 +155,7 @@ declare module "jazz-wasm" {
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
     getSchema(): unknown;
     getSchemaHash(): string;
+    composeBranchName(userBranch: string): string;
     close?(): void;
 
     /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */

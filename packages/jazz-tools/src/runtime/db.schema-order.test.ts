@@ -81,6 +81,7 @@ describe("Db runtime schema order", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
     );
     expect(row).toEqual({
       id: "todo-1",
@@ -189,6 +190,7 @@ describe("Db runtime schema order", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
     );
     expect(row).toEqual({
       id: "todo-1",
@@ -243,6 +245,7 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: false },
       },
       { id: externalId },
+      undefined,
       undefined,
       undefined,
     );
@@ -355,6 +358,7 @@ describe("Db runtime schema order", () => {
       { updatedAt },
       undefined,
       undefined,
+      undefined,
     );
     expect(update).toHaveBeenCalledWith(
       "todo-1",
@@ -362,6 +366,7 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: true },
       },
       { updatedAt },
+      undefined,
       undefined,
       undefined,
     );
@@ -428,6 +433,7 @@ describe("Db runtime schema order", () => {
       { updatedAt },
       undefined,
       undefined,
+      undefined,
     );
     expect(update).toHaveBeenCalledWith(
       "todo-1",
@@ -435,6 +441,7 @@ describe("Db runtime schema order", () => {
         done: { type: "Boolean", value: true },
       },
       { updatedAt },
+      undefined,
       undefined,
       undefined,
     );

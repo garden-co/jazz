@@ -8,6 +8,7 @@ export type RelRowIdRef = "Current" | "Outer" | "Frontier";
 export type RelValueRef =
   | { Literal: unknown }
   | { SessionRef: string[] }
+  | { BranchRef: string }
   | { OuterColumn: RelColumnRef }
   | { FrontierColumn: RelColumnRef }
   | { RowId: RelRowIdRef };
@@ -92,3 +93,9 @@ export type PolicyExprV2 =
   | { Not: PolicyExprV2 }
   | "True"
   | "False";
+
+export type BranchPolicies<TablePolicies> = Record<string, Record<string, TablePolicies>>;
+
+export type CompiledPermissionsIr<TablePolicies> = Record<string, TablePolicies> & {
+  branchPolicies?: BranchPolicies<TablePolicies>;
+};

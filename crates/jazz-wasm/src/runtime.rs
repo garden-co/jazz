@@ -337,6 +337,7 @@ fn build_schema_manager(
     SchemaManager::new_with_policy_mode(
         sync_manager,
         runtime_schema.schema,
+        runtime_schema.branch_policies,
         app_id,
         env,
         user_branch,
@@ -1469,7 +1470,6 @@ impl WasmRuntime {
         // Parse schema
         let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema = runtime_schema.schema;
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -1484,7 +1484,8 @@ impl WasmRuntime {
         // Create schema manager
         let schema_manager = SchemaManager::new_with_policy_mode(
             sync_manager,
-            schema,
+            runtime_schema.schema,
+            runtime_schema.branch_policies,
             app_id,
             env,
             user_branch,
@@ -1980,6 +1981,16 @@ impl WasmRuntime {
         let core = self.core.borrow();
         let schema = core.current_schema();
         SchemaHash::compute(schema).to_string()
+    }
+
+    /// Compose a raw user branch name for the current environment and schema.
+    #[wasm_bindgen(js_name = composeBranchName)]
+    pub fn compose_branch_name(&self, user_branch: &str) -> String {
+        let core = self.core.borrow();
+        core.schema_manager()
+            .compose_branch_name(user_branch)
+            .as_str()
+            .to_string()
     }
 
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
