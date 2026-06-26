@@ -1,7 +1,9 @@
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
-import { mapAuthReason } from "./auth-state.js";
-import { DirectWebSocketCarrier, type DirectWireError } from "./direct-wasm/direct-websocket.js";
+import {
+  DirectWebSocketCarrier,
+  directWireAuthFailureReason,
+} from "./direct-wasm/direct-websocket.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
 /** Page lifecycle hint forwarded to the worker runtime. */
@@ -428,8 +430,8 @@ export class WorkerBridge {
         this.schedulePump();
       },
       onError: (error) => {
-        if (error.code !== "auth_failed") return;
-        this.listeners.onAuthFailure?.(directWireAuthFailureReason(error));
+        const reason = directWireAuthFailureReason(error);
+        if (reason) this.listeners.onAuthFailure?.(reason);
       },
     });
     this.serverCarrier = carrier;
@@ -494,10 +496,6 @@ export class WorkerBridge {
 
 function stringifyUnknown(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function directWireAuthFailureReason(error: DirectWireError): AuthFailureReason {
-  return mapAuthReason(error.message);
 }
 
 interface WorkerBridgeAuthUpdate {

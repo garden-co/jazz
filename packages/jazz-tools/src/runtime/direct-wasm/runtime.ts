@@ -27,7 +27,7 @@ import {
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
-import { DirectWebSocketCarrier } from "./direct-websocket.js";
+import { DirectWebSocketCarrier, directWireAuthFailureReason } from "./direct-websocket.js";
 import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 type WasmDbConstructor = {
@@ -360,9 +360,8 @@ export class DirectWasmRuntime implements Runtime {
         this.scheduleServerPump();
       },
       onError: (error) => {
-        this.handleServerTransportError(
-          new Error(`direct websocket error: ${error.code} (${error.retry}): ${error.message}`),
-        );
+        const reason = directWireAuthFailureReason(error);
+        if (reason) this.authFailureCallback?.(reason);
       },
     });
     this.serverCarrier = carrier;
