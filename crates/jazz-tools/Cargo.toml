@@ -186,10 +186,6 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
-[[bench]]
-name = "memory_benchmark"
-harness = false
-
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
