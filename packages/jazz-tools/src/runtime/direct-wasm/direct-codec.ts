@@ -222,14 +222,6 @@ export function queryWithPredicates(
   return writer.finish();
 }
 
-function writePredicateEqLiteral(
-  writer: PostcardWriter,
-  column: string,
-  value: DirectQueryLiteral,
-): void {
-  writePredicateCmpLiteral(writer, column, "Eq", value);
-}
-
 function writePredicateCmpLiteral(
   writer: PostcardWriter,
   column: string,
@@ -241,10 +233,6 @@ function writePredicateCmpLiteral(
   writer.string(column);
   writer.u64(3); // Operand::Literal
   writeGrooveValue(writer, value);
-}
-
-function writePredicateEqBool(writer: PostcardWriter, column: string, value: boolean): void {
-  writePredicateEqLiteral(writer, column, { type: "Boolean", value });
 }
 
 function predicateOpTag(op: DirectQueryPredicateOp): number {
