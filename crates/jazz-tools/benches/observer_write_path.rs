@@ -4,13 +4,15 @@
 //! That keeps result cardinality stable so the benchmark isolates the overhead of
 //! maintaining a live query, rather than measuring table growth across iterations.
 
+#![allow(clippy::single_element_loop)]
+
 mod common;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use jazz_tools::query_manager::query::Query;
-use jazz_tools::query_manager::session::WriteContext;
-use jazz_tools::query_manager::types::Value;
+use jazz_tools::Query;
+use jazz_tools::Value;
+use jazz_tools::WriteContext;
 
 const USER_ID: &str = "benchmark_user";
 

@@ -46,15 +46,13 @@ pub use query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
     RowDescriptor, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
 };
+pub use row_histories::BatchId;
 pub use schema_manager::AppId;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
-#[cfg(feature = "client")]
 pub use object::ObjectId;
-#[cfg(feature = "client")]
-pub use row_histories::BatchId;
 #[cfg(feature = "client")]
 pub use sync_manager::ClientId;
 #[cfg(feature = "client")]
