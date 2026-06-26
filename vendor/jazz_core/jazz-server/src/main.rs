@@ -10,6 +10,7 @@ use jazz_server::{
     DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
+    loopback_http::load_latest_admin_schema_for_app,
     loopback_websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig},
 };
 
@@ -125,7 +126,32 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let schema = JazzSchema::new([]);
+    let schema = match &options.storage {
+        StorageConfig::RocksDb { path } => match load_latest_admin_schema_for_app(path, app_id) {
+            Ok(Some(schema)) => schema,
+            Ok(None) => JazzSchema::new([]),
+            Err(error) => {
+                eprintln!("error=load_admin_schema_store: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => JazzSchema::new([]),
+    };
+    let schema_catalogue = if schema.tables.is_empty() {
+        "empty"
+    } else {
+        "admin_schema_store"
+    };
+    let runtime_schema_loading = if schema.tables.is_empty() {
+        "static_empty_schema"
+    } else {
+        "admin_schema_store_latest"
+    };
+    let admin_schema_store = if schema.tables.is_empty() {
+        "not_opened"
+    } else {
+        "opened"
+    };
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
         author: AuthorId::SYSTEM,
@@ -158,10 +184,10 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     println!("websocket_path={websocket_path}");
     print_storage_report(&storage);
     print_auth_report(&auth_admission);
-    println!("schema_catalogue=empty");
-    println!("runtime_schema_loading=static_empty_schema");
+    println!("schema_catalogue={schema_catalogue}");
+    println!("runtime_schema_loading={runtime_schema_loading}");
     println!("admin_schema_api=not_started");
-    println!("admin_schema_store=not_opened");
+    println!("admin_schema_store={admin_schema_store}");
     println!("admin_schema_owner=loopback_http_only");
     println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
     let _ = io::stdout().flush();

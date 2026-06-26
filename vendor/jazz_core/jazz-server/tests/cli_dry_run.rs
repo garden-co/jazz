@@ -1,7 +1,32 @@
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader};
+use std::net::TcpStream;
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::rc::Rc;
+use std::thread;
+use std::time::Duration;
 
+use futures_util::{FutureExt, StreamExt};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream, WireTransportAdapter, block_on,
+};
+use jazz::groove::records::Value;
+use jazz::groove::schema::ColumnType;
+use jazz::groove::storage::MemoryStorage;
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::Query;
 use jazz::schema::JazzSchema;
+use jazz::schema::{ColumnSchema, TableSchema};
+use jazz::tx::{DurabilityTier, Fate};
+use jazz::wire::{TransportError, WireTransport};
+use serde_json::json;
+use tungstenite::protocol::Message;
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{WebSocket, connect};
 
 fn jazz_server_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-server"));
@@ -27,6 +52,300 @@ fn schema_hex(schema: &JazzSchema) -> String {
         .into_iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn todos_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )])
+}
+
+fn identity(node: u8, author: u8) -> DbIdentity {
+    DbIdentity {
+        node: NodeUuid::from_bytes([node; 16]),
+        author: AuthorId::from_bytes([author; 16]),
+    }
+}
+
+fn todo_cells(title: &str, done: bool) -> RowCells {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("done".to_owned(), Value::Bool(done)),
+    ])
+}
+
+fn author_hex(author: AuthorId) -> String {
+    author
+        .0
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn connect_server_ws(ws_url: &str, author: AuthorId) -> WebSocket<MaybeTlsStream<TcpStream>> {
+    let url = format!("{ws_url}?identity={}", author_hex(author));
+    let mut last_error = None;
+    let (mut socket, response) = 'connect: loop {
+        for _ in 0..20 {
+            match connect(&url) {
+                Ok(connected) => break 'connect connected,
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        panic!(
+            "connect jazz-server WebSocket listener: {:?}",
+            last_error.expect("connection error")
+        );
+    };
+    assert_eq!(response.status().as_u16(), 101);
+    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("set read timeout");
+    }
+    socket
+}
+
+#[derive(Clone, Default)]
+struct QueuedWireTransport {
+    queues: Rc<RefCell<WireQueues>>,
+}
+
+#[derive(Default)]
+struct WireQueues {
+    inbound: VecDeque<Vec<u8>>,
+    outbound: VecDeque<Vec<u8>>,
+}
+
+impl QueuedWireTransport {
+    fn drain_outbound(&self) -> Vec<Vec<u8>> {
+        self.queues.borrow_mut().outbound.drain(..).collect()
+    }
+
+    fn push_inbound(&self, frame: Vec<u8>) {
+        self.queues.borrow_mut().inbound.push_back(frame);
+    }
+}
+
+impl WireTransport for QueuedWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.queues.borrow_mut().outbound.push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues.borrow_mut().inbound.pop_front()
+    }
+}
+
+struct ConnectedClient {
+    db: Db<MemoryStorage>,
+    wire: QueuedWireTransport,
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
+}
+
+fn open_connected_client(schema: JazzSchema, ws_url: &str, client: DbIdentity) -> ConnectedClient {
+    let refs = schema.column_families();
+    let cf_refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(
+        DbConfig::new(schema, MemoryStorage::new(&cf_refs), client)
+            .with_id_source(SeededRowIdSource::new(0xc1)),
+    ))
+    .expect("open client db");
+    let wire = QueuedWireTransport::default();
+    db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone())));
+    let socket = connect_server_ws(ws_url, client.author);
+    ConnectedClient { db, wire, socket }
+}
+
+fn pump_websocket(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    db: &Db<MemoryStorage>,
+    wire: &QueuedWireTransport,
+) -> bool {
+    let mut saw_server_frames = false;
+    for _ in 0..64 {
+        db.tick().expect("drive client db");
+        let frames = wire.drain_outbound();
+        if !frames.is_empty() {
+            socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&frames).unwrap().into(),
+                ))
+                .expect("send binary wire frame batch");
+        }
+
+        for frame in read_available_binary_frames(socket) {
+            saw_server_frames = true;
+            wire.push_inbound(frame);
+        }
+
+        db.tick().expect("apply server frames");
+    }
+    saw_server_frames
+}
+
+fn subscription_fields(
+    subscription: &mut SubscriptionStream,
+    table: &TableSchema,
+) -> Vec<(String, bool)> {
+    let mut rows = BTreeMap::<RowUuid, (String, bool)>::new();
+    while let Some(event) = subscription.next().now_or_never() {
+        let Some(event) = event else {
+            break;
+        };
+        match event {
+            SubscriptionEvent::Opened { current, .. }
+            | SubscriptionEvent::Reset { current, .. } => {
+                rows.clear();
+                ingest_current_rows(&mut rows, table, current);
+            }
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => {
+                for removed in removed {
+                    rows.remove(&removed.row_uuid);
+                }
+                ingest_current_rows(&mut rows, table, added);
+                ingest_current_rows(&mut rows, table, updated);
+            }
+            SubscriptionEvent::Closed => break,
+        }
+    }
+    let mut fields = rows.into_values().collect::<Vec<_>>();
+    fields.sort();
+    fields
+}
+
+fn ingest_current_rows(
+    rows: &mut BTreeMap<RowUuid, (String, bool)>,
+    table: &TableSchema,
+    current: Vec<jazz::node::CurrentRow>,
+) {
+    for row in current {
+        let Some(Value::String(title)) = row.cell(table, "title") else {
+            panic!("expected title");
+        };
+        let Some(Value::Bool(done)) = row.cell(table, "done") else {
+            panic!("expected done");
+        };
+        rows.insert(row.row_uuid(), (title, done));
+    }
+}
+
+fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    loop {
+        match socket.read() {
+            Ok(Message::Binary(batch)) => {
+                frames.extend(postcard::from_bytes::<Vec<Vec<u8>>>(&batch).unwrap());
+            }
+            Ok(Message::Ping(payload)) => socket.send(Message::Pong(payload)).unwrap(),
+            Ok(Message::Pong(_)) => {}
+            Ok(message) => panic!("unexpected websocket message: {message:?}"),
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => panic!("read websocket frame: {error}"),
+        }
+    }
+    frames
+}
+
+struct RunningServer {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    ws_url: String,
+    lines: Vec<String>,
+}
+
+impl RunningServer {
+    fn start(app_id: &str, data_dir: &Path) -> Self {
+        let mut child = jazz_server_command()
+            .args([
+                "server",
+                app_id,
+                "--data-dir",
+                data_dir.to_str().expect("temp path is utf-8"),
+                "--allow-legacy-query-identity",
+                "true",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn jazz-server server");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("child stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut lines = Vec::new();
+        let ws_url = loop {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line).expect("read server stdout");
+            assert_ne!(bytes, 0, "server exited before reporting ws_url");
+            let line = line.trim_end().to_owned();
+            let ws_url = line.strip_prefix("ws_url=").map(str::to_owned);
+            lines.push(line);
+            if let Some(ws_url) = ws_url {
+                break ws_url;
+            }
+        };
+        Self {
+            child,
+            stdin,
+            ws_url,
+            lines,
+        }
+    }
+
+    fn shutdown(mut self) {
+        drop(self.stdin.take());
+        let status = self.child.wait().expect("wait for server command");
+        assert!(status.success());
+    }
+}
+
+fn publish_schema_to_data_dir(app_id: &str, data_dir: &Path) {
+    std::fs::create_dir_all(data_dir).expect("create durable data dir");
+    let schema = json!({
+        "todos": {
+            "columns": [
+                { "name": "title", "column_type": "Text" },
+                { "name": "done", "column_type": "Boolean" }
+            ]
+        }
+    });
+    let store = json!({
+        app_id: [
+            {
+                "hash": "seeded-lifecycle-schema",
+                "objectId": format!("schema:{app_id}:seeded-lifecycle-schema"),
+                "publishedAt": 1,
+                "schema": schema,
+                "permissions": null
+            }
+        ]
+    });
+    std::fs::write(
+        data_dir.join("admin-schemas.json"),
+        serde_json::to_vec_pretty(&store).expect("encode schema store"),
+    )
+    .expect("write durable schema store");
 }
 
 #[test]
@@ -242,6 +561,92 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
             .iter()
             .any(|line| line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/custom-ws"))
     );
+}
+
+#[test]
+fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
+    let app_id = "app-lifecycle";
+    let data_dir = std::env::temp_dir().join(format!(
+        "jazz-server-command-lifecycle-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    publish_schema_to_data_dir(app_id, &data_dir);
+
+    let schema = todos_schema();
+    let server = RunningServer::start(app_id, &data_dir);
+    assert!(server.lines.contains(&"command=server".to_owned()));
+    assert!(server.lines.contains(&format!("app_id={app_id}")));
+    assert!(
+        server
+            .lines
+            .contains(&format!("websocket_path=/apps/{app_id}/ws"))
+    );
+    assert!(server.lines.contains(&"storage=rocksdb".to_owned()));
+    assert!(
+        server
+            .lines
+            .contains(&"schema_catalogue=admin_schema_store".to_owned())
+    );
+    assert!(
+        server
+            .lines
+            .contains(&"runtime_schema_loading=admin_schema_store_latest".to_owned())
+    );
+    assert!(
+        server
+            .lines
+            .contains(&"admin_schema_store=opened".to_owned())
+    );
+    assert!(server.ws_url.ends_with(&format!("/apps/{app_id}/ws")));
+
+    let mut writer = open_connected_client(schema.clone(), &server.ws_url, identity(0xc1, 0xc1));
+    let write = writer
+        .db
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0x41; 16]),
+            todo_cells("durable cli row", true),
+        )
+        .expect("write todo through client db");
+    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire,));
+    let state = write.write_state().expect("write state");
+    assert_eq!(state.fate, Fate::Accepted);
+    drop(writer.socket);
+    server.shutdown();
+
+    let restarted = RunningServer::start(app_id, &data_dir);
+    assert!(
+        restarted
+            .lines
+            .contains(&"schema_catalogue=admin_schema_store".to_owned())
+    );
+
+    let mut reader = open_connected_client(schema.clone(), &restarted.ws_url, identity(0xc2, 0xc1));
+    let prepared = reader
+        .db
+        .prepare_query(&Query::from("todos"))
+        .expect("prepare todos query");
+    let mut subscription = block_on(reader.db.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .expect("subscribe to todos");
+    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire,));
+    assert_eq!(
+        subscription_fields(&mut subscription, &schema.tables[0]),
+        vec![("durable cli row".to_owned(), true)]
+    );
+
+    drop(reader.socket);
+    restarted.shutdown();
+    let store = std::fs::read_to_string(data_dir.join("admin-schemas.json"))
+        .expect("schema catalogue survives beside data dir");
+    assert!(store.contains(app_id));
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[test]
