@@ -374,9 +374,10 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(brokerRuntime.createClientMock.mock.calls[0]?.[0].durablePeer).toBe("browser-broker");
   });
 
-  it("forwards follower auth refreshes through the follower port bridge", () => {
+  it("does not send auth refreshes over the follower data port bridge", () => {
     const followerPortBridge = {
-      updateAuth: vi.fn(),
+      detachForReconnect: vi.fn(),
+      shutdown: vi.fn(),
     };
     const db = new TestDb({
       appId: "app",
@@ -390,6 +391,8 @@ describe("runtime/Db direct path upstream wiring", () => {
     const refreshed = makeJwt({ sub: "alice", refresh: 1 });
     db.updateAuthToken(refreshed);
 
-    expect(followerPortBridge.updateAuth).toHaveBeenCalledWith({ jwtToken: refreshed });
+    expect("updateAuth" in followerPortBridge).toBe(false);
+    expect(followerPortBridge.detachForReconnect).not.toHaveBeenCalled();
+    expect(followerPortBridge.shutdown).not.toHaveBeenCalled();
   });
 });

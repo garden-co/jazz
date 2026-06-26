@@ -102,10 +102,7 @@ type WorkerOutbound =
   | { type: "shutdown-ok" }
   | { type: "error"; message: string };
 
-type PortInbound =
-  | { type: "sync"; frames: Uint8Array[] }
-  | { type: "update-auth"; jwtToken?: string | null }
-  | { type: "close" };
+type PortInbound = { type: "sync"; frames: Uint8Array[] } | { type: "close" };
 
 type PortOutbound =
   | { type: "sync"; frames: Uint8Array[] }
@@ -645,13 +642,6 @@ export class MessagePortRuntimeBridge {
     this.unsubscribeSyncNeeded = null;
     this.transport?.close();
     this.transport = null;
-  }
-
-  updateAuth(auth: { jwtToken?: string }): void {
-    this.port.postMessage({
-      type: "update-auth",
-      jwtToken: auth.jwtToken ?? null,
-    } satisfies PortInbound);
   }
 
   onAuthFailure(callback: (reason: AuthFailureReason) => void): void {

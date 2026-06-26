@@ -276,20 +276,6 @@ describe("WorkerBridge", () => {
 });
 
 describe("MessagePortRuntimeBridge", () => {
-  it("forwards auth updates over the follower data port bridge", () => {
-    const { runtime } = testRuntime();
-    const port = testPort();
-
-    const bridge = new MessagePortRuntimeBridge(port, runtime);
-    bridge.init();
-    bridge.updateAuth({ jwtToken: "jwt-refresh" });
-
-    expect(port.postMessage).toHaveBeenCalledWith({
-      type: "update-auth",
-      jwtToken: "jwt-refresh",
-    });
-  });
-
   it("detaches for reconnect without shutting down the runtime sender", () => {
     const { runtime, transport } = testRuntime();
     const port = testPort();
