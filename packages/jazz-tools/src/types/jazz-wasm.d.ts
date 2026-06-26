@@ -51,6 +51,8 @@ declare module "jazz-wasm" {
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+    propagateQuery(query: WasmPreparedQuery, opts: unknown): void;
+    queryIsCovered(query: WasmPreparedQuery): boolean;
     subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
