@@ -1,6 +1,7 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into three submodules so each piece is independently navigable:
+//! - [`direct_websocket`] — direct jazz_core wire-frame WebSocket boundary
 //! - [`http`] — HTTP endpoint handlers and their request/response types
 //! - [`websocket`] — WebSocket lifecycle (handshake auth, connection, cleanup)
 //! - [`utils`] — parser/validator helpers used by both
@@ -8,6 +9,7 @@
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
+mod direct_websocket;
 mod http;
 mod utils;
 mod websocket;
@@ -28,6 +30,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::server::ServerState;
 
+use direct_websocket::direct_ws_handler;
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
     permissions_handler, permissions_head_handler, publish_migration_handler,
@@ -73,6 +76,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         );
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
+        .route("/ws-direct", axum::routing::any(direct_ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)

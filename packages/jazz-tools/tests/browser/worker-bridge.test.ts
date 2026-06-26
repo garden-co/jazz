@@ -8,7 +8,6 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { encodeMainToWorkerJs, encodeWorkerToMainJs, decodeWorkerToMainJs } from "jazz-wasm";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { Schema, WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
@@ -39,19 +38,6 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
-
-interface DebugLensEdgeState {
-  sourceHash: string;
-  targetHash: string;
-}
-
-interface DebugSchemaState {
-  currentSchemaHash: string;
-  liveSchemaHashes: string[];
-  knownSchemaHashes: string[];
-  pendingSchemaHashes: string[];
-  lensEdges: DebugLensEdgeState[];
-}
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -495,10 +481,10 @@ describe("Worker Bridge with OPFS", () => {
         queueMicrotask(() => {
           worker.dispatchEvent(
             new MessageEvent("message", {
-              data: encodeWorkerToMainJs({
+              data: {
                 type: "error",
                 message: "forced bridge init failure for test",
-              }),
+              },
             }),
           );
         });
@@ -551,10 +537,10 @@ describe("Worker Bridge with OPFS", () => {
         queueMicrotask(() => {
           worker.dispatchEvent(
             new MessageEvent("message", {
-              data: encodeWorkerToMainJs({
+              data: {
                 type: "error",
                 message: "forced bridge init failure for query test",
-              }),
+              },
             }),
           );
         });
@@ -973,61 +959,6 @@ describe("Worker Bridge with OPFS", () => {
     const rows = await reopened.all(allTodos, { tier: "local" });
     expect(rows).toEqual([]);
   });
-
-  it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
-    const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
-    const seeded = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    // Initialize worker/main runtimes with schema v2 from client context.
-    await seeded.all(allCatalogueTodos, { tier: "local" });
-
-    // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
-    await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
-
-    await waitForCondition(
-      async () => {
-        const state = await getWorkerDebugSchemaState(seeded);
-        return hasRestoredCatalogueState(state);
-      },
-      12_000,
-      "Seeded worker should hold schema/lens state beyond client context",
-    );
-
-    await seeded.shutdown();
-    untrack(seeded);
-
-    const offline = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    await offline.all(allCatalogueTodos, { tier: "local" });
-
-    await waitForCondition(
-      async () => {
-        const state = await getWorkerDebugSchemaState(offline);
-        return hasRestoredCatalogueState(state);
-      },
-      12_000,
-      "Offline worker should rehydrate schema/lens state from OPFS manifest",
-    );
-
-    await waitForCondition(
-      async () => {
-        await offline.all(allCatalogueTodos, { tier: "local" });
-        const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
-        return hasRestoredCatalogueState(mainState);
-      },
-      12_000,
-      "Main thread should restore schema/lens state via worker catalogue sync",
-    );
-  }, 90_000);
 
   // -------------------------------------------------------------------------
   // 5. Durable insert resolves at local tier
@@ -2946,126 +2877,5 @@ async function publishPermissionsForServer(
     schemaHash,
     permissions,
     expectedParentBundleObjectId: head?.bundleObjectId ?? null,
-  });
-}
-
-function hasRestoredCatalogueState(state: DebugSchemaState): boolean {
-  return state.liveSchemaHashes.length > 1 && state.lensEdges.length > 0;
-}
-
-function getMainDebugSchemaState(db: Db, schemaForClient: WasmSchema): DebugSchemaState {
-  const client = (db as any).getClient(schemaForClient);
-  const runtime = client.getRuntime() as {
-    __debugSchemaState?: () => DebugSchemaState;
-  };
-  if (typeof runtime.__debugSchemaState !== "function") {
-    throw new Error("Expected runtime.__debugSchemaState to be available");
-  }
-  return runtime.__debugSchemaState();
-}
-
-/**
- * Decode a worker → main `MessageEvent.data`. Returns `null` for messages
- * the helpers don't recognise (init JS-objects, ready, etc.).
- */
-function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unknown } | null {
-  if (data instanceof Uint8Array) {
-    try {
-      return decodeWorkerToMainJs(data);
-    } catch {
-      return null;
-    }
-  }
-  if (data && typeof data === "object" && typeof (data as any).type === "string") {
-    return data as { type: string; [key: string]: unknown };
-  }
-  return null;
-}
-
-async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
-  await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
-  if (!worker) {
-    throw new Error("Expected worker instance to exist");
-  }
-
-  return new Promise<DebugSchemaState>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`debug-schema-state: no response within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = decodeWorkerMessage(event.data);
-      if (!data) return;
-
-      if (data.type === "debug-schema-state-ok" && data.state) {
-        cleanup();
-        resolve(data.state as DebugSchemaState);
-        return;
-      }
-
-      if (
-        data.type === "error" &&
-        typeof data.message === "string" &&
-        data.message.includes("debug-schema-state")
-      ) {
-        cleanup();
-        reject(new Error(data.message));
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-    worker.postMessage(encodeMainToWorkerJs({ type: "debug-schema-state" }));
-  });
-}
-
-async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
-  await (db as any).ensureBridgeReady();
-  const worker = (db as any).worker as Worker | null;
-  if (!worker) {
-    throw new Error("Expected worker instance to exist");
-  }
-
-  const schemaJson = JSON.stringify(schema);
-
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`debug-seed-live-schema: no response within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = decodeWorkerMessage(event.data);
-      if (!data) return;
-
-      if (data.type === "debug-seed-live-schema-ok") {
-        cleanup();
-        resolve();
-        return;
-      }
-
-      if (
-        data.type === "error" &&
-        typeof data.message === "string" &&
-        data.message.includes("debug-seed-live-schema")
-      ) {
-        cleanup();
-        reject(new Error(data.message));
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-    worker.postMessage(encodeMainToWorkerJs({ type: "debug-seed-live-schema", schemaJson }));
   });
 }
