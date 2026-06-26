@@ -32,14 +32,31 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jazz::db::{
+    Db as DirectDb, DbConfig as DirectDbConfig, DbIdentity as DirectDbIdentity,
+    LocalUpdates as DirectLocalUpdates, PreparedQuery as DirectPreparedQueryInner,
+    Propagation as DirectPropagation, ReadOpts as DirectReadOpts, RowCells as DirectRowCells,
+    SeededRowIdSource as DirectSeededRowIdSource, WriteHandle as DirectWriteHandle,
+    block_on as direct_block_on,
+};
+use jazz::groove::records::{BorrowedRecord as DirectBorrowedRecord, RecordDescriptor};
+use jazz::groove::storage::{
+    MemoryStorage as DirectMemoryStorage, OrderedKvStorage as DirectOrderedKvStorage,
+    ReopenableStorage as DirectReopenableStorage,
+};
+use jazz::ids::{AuthorId as DirectAuthorId, NodeUuid as DirectNodeUuid, RowUuid as DirectRowUuid};
+use jazz::query::Query as DirectQuery;
 use jazz::schema::JazzSchema;
+use jazz::tx::{DurabilityTier as DirectDurabilityTier, TxId as DirectTxId};
 use jazz_tools::binding_support::{
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
@@ -208,6 +225,350 @@ fn make_subscription_callback(
             Ok(subscription_delta_to_json(&delta)),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DirectOpenDbConfig {
+    identity: DirectOpenDbIdentity,
+    row_id_seed: Option<u64>,
+    history_complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct DirectOpenDbIdentity {
+    node: DirectNodeUuid,
+    author: DirectAuthorId,
+}
+
+impl From<DirectOpenDbIdentity> for DirectDbIdentity {
+    fn from(identity: DirectOpenDbIdentity) -> Self {
+        Self {
+            node: identity.node,
+            author: identity.author,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DirectRowBatch<'a> {
+    table: &'a str,
+    descriptor: RecordDescriptor,
+    rows: Vec<DirectRow<'a>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DirectRow<'a> {
+    row_id: DirectRowUuid,
+    deleted: bool,
+    raw: &'a [u8],
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DirectWriteResult {
+    row_id: DirectRowUuid,
+    tx_id: DirectTxId,
+}
+
+type DirectNapiDbInner = Rc<RefCell<DirectDb<DirectMemoryStorage>>>;
+
+#[napi(js_name = "WasmPreparedQuery")]
+pub struct NapiDirectPreparedQuery {
+    inner: DirectPreparedQueryInner,
+}
+
+#[napi(js_name = "WasmWrite")]
+pub struct NapiDirectWrite {
+    payload: Vec<u8>,
+    inner: Option<DirectWriteHandle<DirectMemoryStorage>>,
+}
+
+#[napi]
+impl NapiDirectWrite {
+    #[napi(getter)]
+    pub fn payload(&self) -> Uint8Array {
+        Uint8Array::new(self.payload.clone())
+    }
+
+    #[napi]
+    pub fn wait(&self, tier: String) -> napi::Result<()> {
+        let tier = direct_durability_tier_from_str(&tier)?;
+        if let Some(write) = &self.inner {
+            direct_block_on(write.wait(tier))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[napi(js_name = "WasmDb")]
+pub struct NapiDirectDb {
+    inner: DirectNapiDbInner,
+}
+
+#[napi]
+impl NapiDirectDb {
+    #[napi(factory, js_name = "openMemory")]
+    pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
+        let (schema, config) = decode_direct_open_args(&schema, &config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = open_direct_db(schema, DirectMemoryStorage::new(&refs), config)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(db)),
+        })
+    }
+
+    #[napi(js_name = "prepareQuery")]
+    pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<NapiDirectPreparedQuery> {
+        let query: DirectQuery = postcard::from_bytes(&query)
+            .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
+        let db = self.inner.borrow();
+        Ok(NapiDirectPreparedQuery {
+            inner: db
+                .prepare_query(&query)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        })
+    }
+
+    #[napi]
+    pub fn all(
+        &self,
+        query: &NapiDirectPreparedQuery,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let opts = direct_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let rows = direct_block_on(db.all(&query.inner, opts))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_direct_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allForIdentity")]
+    pub fn all_for_identity(
+        &self,
+        query: &NapiDirectPreparedQuery,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let author = direct_author_id_from_bytes(&author)?;
+        let opts = direct_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let rows = direct_block_on(db.all_for_identity(&query.inner, opts, author))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_direct_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "insertWithIdEncoded")]
+    pub fn insert_with_id_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let db = self.inner.borrow();
+        let write = db
+            .insert_with_id(&table, row_id, cells)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        direct_write_memory(write)
+    }
+
+    #[napi]
+    pub fn tick(&self) -> napi::Result<()> {
+        let db = self.inner.borrow();
+        db.tick()
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+}
+
+fn decode_direct_open_args(
+    schema: &[u8],
+    config: &[u8],
+) -> napi::Result<(JazzSchema, DirectOpenDbConfig)> {
+    let schema: JazzSchema = postcard::from_bytes(schema)
+        .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+    let config: DirectOpenDbConfig = postcard::from_bytes(config)
+        .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
+    Ok((schema, config))
+}
+
+fn open_direct_db<S>(
+    schema: JazzSchema,
+    storage: S,
+    config: DirectOpenDbConfig,
+) -> std::result::Result<DirectDb<S>, jazz::db::Error>
+where
+    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+{
+    let mut db_config = DirectDbConfig::new(schema, storage, config.identity.into());
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(DirectSeededRowIdSource::new(seed));
+    }
+    if config.history_complete {
+        direct_block_on(DirectDb::open_history_complete(db_config))
+    } else {
+        direct_block_on(DirectDb::open(db_config))
+    }
+}
+
+fn decode_direct_cells(bytes: &[u8]) -> napi::Result<DirectRowCells> {
+    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
+        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
+    let record = DirectBorrowedRecord::new(&raw, &descriptor);
+    let values = record
+        .to_values()
+        .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
+    let mut cells = DirectRowCells::new();
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        let Some(name) = &field.name else {
+            return Err(napi::Error::from_reason(
+                "encoded cells must use named fields",
+            ));
+        };
+        cells.insert(name.clone(), value);
+    }
+    Ok(cells)
+}
+
+fn direct_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<DirectRowUuid> {
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
+    Ok(DirectRowUuid::from_bytes(bytes))
+}
+
+fn direct_author_id_from_bytes(bytes: &[u8]) -> napi::Result<DirectAuthorId> {
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
+    Ok(DirectAuthorId::from_bytes(bytes))
+}
+
+fn direct_write_memory(
+    write: DirectWriteHandle<DirectMemoryStorage>,
+) -> napi::Result<NapiDirectWrite> {
+    let result = DirectWriteResult {
+        row_id: write.row_uuid(),
+        tx_id: write.mergeable_tx_id(),
+    };
+    Ok(NapiDirectWrite {
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        inner: Some(write),
+    })
+}
+
+fn direct_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<DirectReadOpts> {
+    let mut opts = DirectReadOpts::default();
+    let Some(value) = value else {
+        return Ok(opts);
+    };
+    if value.is_null() {
+        return Ok(opts);
+    }
+    if let Some(tier) = optional_json_string_prop(&value, "tier")? {
+        opts.tier = direct_durability_tier_from_str(&tier)?;
+    }
+    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
+        opts.local_updates = match local_updates.as_str() {
+            "Immediate" | "immediate" => DirectLocalUpdates::Immediate,
+            "Deferred" | "deferred" => DirectLocalUpdates::Deferred,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "unknown local_updates {other}"
+                )));
+            }
+        };
+    }
+    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
+        opts.propagation = match propagation.as_str() {
+            "Full" | "full" => DirectPropagation::Full,
+            "LocalOnly" | "local_only" | "localOnly" => DirectPropagation::LocalOnly,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "unknown propagation {other}"
+                )));
+            }
+        };
+    }
+    if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
+        opts.include_deleted = include_deleted;
+    }
+    Ok(opts)
+}
+
+fn direct_durability_tier_from_str(tier: &str) -> napi::Result<DirectDurabilityTier> {
+    match tier {
+        "None" | "none" => Ok(DirectDurabilityTier::None),
+        "Local" | "local" => Ok(DirectDurabilityTier::Local),
+        "Edge" | "edge" => Ok(DirectDurabilityTier::Edge),
+        "Global" | "global" => Ok(DirectDurabilityTier::Global),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown durability tier {other}"
+        ))),
+    }
+}
+
+fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Option<String>> {
+    match value.get(name) {
+        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_bool_prop(value: &JsonValue, name: &str) -> napi::Result<Option<bool>> {
+    match value.get(name) {
+        Some(JsonValue::Bool(value)) => Ok(Some(*value)),
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a boolean"
+        ))),
+    }
+}
+
+fn encode_direct_rows(
+    rows: &[jazz::node::CurrentRow],
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&direct_row_batches(rows))
+}
+
+fn direct_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<DirectRowBatch<'_>> {
+    let mut batches: Vec<DirectRowBatch<'_>> = Vec::new();
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        match batches.last_mut() {
+            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
+                batch.rows.push(direct_row(row, raw));
+            }
+            _ => batches.push(DirectRowBatch {
+                table: row.table(),
+                descriptor: *descriptor,
+                rows: vec![direct_row(row, raw)],
+            }),
+        }
+    }
+    batches
+}
+
+fn direct_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> DirectRow<'a> {
+    DirectRow {
+        row_id: row.row_uuid(),
+        deleted: row.is_deleted(),
+        raw,
     }
 }
 
