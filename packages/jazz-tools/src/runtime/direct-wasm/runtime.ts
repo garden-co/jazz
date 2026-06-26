@@ -27,6 +27,7 @@ import {
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
+import { DirectWebSocketCarrier } from "./direct-websocket.js";
 import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 type WasmDbConstructor = {
@@ -121,7 +122,13 @@ export class DirectWasmRuntime implements Runtime {
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private authFailureCallback: ((reason: string) => void) | null = null;
   private durableQueryExecutor: DurableQueryExecutor | null = null;
+  private serverTransport: DirectTransport | null = null;
+  private serverCarrier: DirectWebSocketCarrier | null = null;
+  private serverCarrierPromise: Promise<DirectWebSocketCarrier> | null = null;
+  private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly syncNeededCallbacks = new Set<() => void>();
+  private serverPumpScheduled = false;
+  private serverPumpAgain = false;
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
@@ -349,11 +356,39 @@ export class DirectWasmRuntime implements Runtime {
     this.subscriptions.delete(handle);
   }
 
-  connect(_url: string, _authJson: string): void {
-    throw new Error("Server websocket transport is not wired to DirectWasmRuntime yet");
+  connect(url: string, _authJson: string): void {
+    this.disconnect();
+    const transport = this.db.connectUpstream();
+    this.serverTransport = transport;
+    const carrier = new DirectWebSocketCarrier({
+      endpointUrl: url,
+      peerIdentity: this.peerIdentity,
+      onFrame: (frame) => {
+        transport.sendWireFrame(frame);
+        this.scheduleServerPump();
+      },
+    });
+    this.serverCarrier = carrier;
+    this.serverCarrierPromise = carrier.ready().then(() => {
+      this.flushQueuedServerFrames(carrier);
+      return carrier;
+    });
+    this.serverCarrierPromise.catch((error) => {
+      this.handleServerTransportError(error);
+    });
+    this.scheduleServerPump();
   }
 
-  disconnect(): void {}
+  disconnect(): void {
+    this.serverCarrier?.close();
+    this.serverCarrier = null;
+    this.serverCarrierPromise = null;
+    this.serverTransport?.close();
+    this.serverTransport = null;
+    this.queuedServerFrames.length = 0;
+    this.serverPumpScheduled = false;
+    this.serverPumpAgain = false;
+  }
 
   updateAuth(_authJson: string): void {}
 
@@ -442,6 +477,7 @@ export class DirectWasmRuntime implements Runtime {
     for (const callback of this.syncNeededCallbacks) {
       callback();
     }
+    this.scheduleServerPump();
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
@@ -478,6 +514,67 @@ export class DirectWasmRuntime implements Runtime {
       subscription.reading = false;
     }
   }
+
+  private scheduleServerPump(): void {
+    if (!this.serverTransport || this.serverPumpScheduled) return;
+    this.serverPumpScheduled = true;
+    queueMicrotask(() => {
+      this.serverPumpScheduled = false;
+      this.pumpServerTransport();
+      if (this.serverPumpAgain) {
+        this.serverPumpAgain = false;
+        this.scheduleServerPump();
+      }
+    });
+  }
+
+  private pumpServerTransport(): void {
+    const transport = this.serverTransport;
+    if (!transport) return;
+    for (let round = 0; round < 32; round += 1) {
+      transport.tick();
+      this.db.tick();
+      const frames = normalizeTransportFrames(transport.recvWireFrames());
+      if (frames.length > 0) {
+        this.sendServerFrames(frames);
+      }
+      this.pumpSubscriptions();
+      if (frames.length === 0) {
+        return;
+      }
+    }
+    this.serverPumpAgain = true;
+  }
+
+  private sendServerFrames(frames: Uint8Array[]): void {
+    const carrier = this.serverCarrier;
+    if (!carrier) {
+      this.queuedServerFrames.push(...frames);
+      return;
+    }
+    void carrier.sendBatch(frames).catch((error) => {
+      this.handleServerTransportError(error);
+    });
+  }
+
+  private flushQueuedServerFrames(carrier: DirectWebSocketCarrier): void {
+    if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
+    const frames = this.queuedServerFrames.splice(0);
+    void carrier.sendBatch(frames).catch((error) => {
+      this.handleServerTransportError(error);
+    });
+  }
+
+  private handleServerTransportError(error: unknown): void {
+    this.authFailureCallback?.(errorMessage(error));
+  }
+}
+
+function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
+  return frames.filter(
+    (frame): frame is Uint8Array =>
+      ArrayBuffer.isView(frame) && frame.constructor.name === "Uint8Array",
+  );
 }
 
 function writeId(write: DirectWrite, writes: Map<string, DirectWrite>): string {
@@ -542,13 +639,19 @@ function rejectionReason(message: string): string {
 }
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
-  const parsed = JSON.parse(queryJson) as { table?: unknown; limit?: unknown; relation_ir?: unknown };
+  const parsed = JSON.parse(queryJson) as {
+    table?: unknown;
+    limit?: unknown;
+    relation_ir?: unknown;
+  };
   if (typeof parsed.table !== "string") {
     throw new Error("Direct WasmDb runtime only supports table queries in this slice");
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
   if (encoded) {
-    return parsed.limit == null ? encoded.query : queryWithEqFilters(parsed.table, encoded.filters, readLimit(parsed.limit));
+    return parsed.limit == null
+      ? encoded.query
+      : queryWithEqFilters(parsed.table, encoded.filters, readLimit(parsed.limit));
   }
   if (parsed.limit != null) {
     return queryWithEqFilters(parsed.table, [], readLimit(parsed.limit));
@@ -591,7 +694,8 @@ function coerceQueryLiteral(
     columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)
       ? { type: "Uuid" as const, value: value.value }
       : value;
-  const nullable = column !== "id" && schema[table]?.columns.find((entry) => entry.name === column)?.nullable;
+  const nullable =
+    column !== "id" && schema[table]?.columns.find((entry) => entry.name === column)?.nullable;
   if (nullable && coerced.type !== "Nullable") {
     return { type: "Nullable", value: coerced };
   }
@@ -605,7 +709,11 @@ function unwrapSimpleRelation(
   if (!relationIr || typeof relationIr !== "object") return { filters: [] };
   const relation = relationIr as Record<string, unknown>;
   const tableScan = relation.TableScan;
-  if (tableScan && typeof tableScan === "object" && (tableScan as { table?: unknown }).table === table) {
+  if (
+    tableScan &&
+    typeof tableScan === "object" &&
+    (tableScan as { table?: unknown }).table === table
+  ) {
     return { filters: [] };
   }
   const filter = relation.Filter;
@@ -685,16 +793,15 @@ function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[
 
 function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {
   if (filters.length === 0) return rows;
-  return rows.filter((row) =>
-    filters.every((filter) => rowMatchesFilter(row, filter, schema)),
-  );
+  return rows.filter((row) => filters.every((filter) => rowMatchesFilter(row, filter, schema)));
 }
 
 function rowMatchesFilter(row: RowState, filter: RowFilter, schema: WasmSchema): boolean {
   if (filter.column === "id") {
     return literalString(filter.value) === row.id;
   }
-  const index = schema[row.table]?.columns.findIndex((column) => column.name === filter.column) ?? -1;
+  const index =
+    schema[row.table]?.columns.findIndex((column) => column.name === filter.column) ?? -1;
   if (index < 0) return false;
   return valueMatchesLiteral(row.values[index], filter.value);
 }
