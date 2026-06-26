@@ -4,7 +4,7 @@ import {
   type ConnectSyncRuntimeOptions,
   type WasmModule,
 } from "./client.js";
-import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
+import { LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
 import type { DbConfig } from "./db.js";
 import {
   DbRuntimeModule,
@@ -22,14 +22,14 @@ function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
 }
 
 function mintWasmToken(
-  _wasmModule: WasmModule,
-  _secret: string,
+  wasmModule: WasmModule,
+  seedB64: string,
   _issuer: string,
-  _audience: string,
-  _ttlSeconds: number,
-  _nowSeconds: bigint,
+  audience: string,
+  ttlSeconds: number,
+  nowSeconds: bigint,
 ): string {
-  throw new Error("Direct jazz-wasm does not expose local JWT minting yet");
+  return wasmModule.mintLocalFirstToken(seedB64, audience, ttlSeconds, nowSeconds);
 }
 
 function deterministicBytes(seed: string): Uint8Array {
@@ -128,10 +128,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
   }
 
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return mintWasmToken(
-      this.wasmModule,
+    return this.wasmModule.mintAnonymousToken(
       options.secret,
-      ANONYMOUS_JWT_ISSUER,
       options.audience,
       options.ttlSeconds,
       options.nowSeconds,

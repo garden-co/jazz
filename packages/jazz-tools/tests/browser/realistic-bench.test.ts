@@ -1751,9 +1751,9 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const deniedLocalSecret = generateAuthSecret();
     const intermediateLocalSecret = generateAuthSecret();
     const wasmModule = await loadWasmModule();
-    const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-    const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-    const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+    const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+    const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+    const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
     const allowedSession = {
       user_id: allowedPrincipalId,
       claims: {
@@ -2333,9 +2333,9 @@ describe("realistic browser benchmark harness", () => {
       const deniedLocalSecret = generateAuthSecret();
       const intermediateLocalSecret = generateAuthSecret();
       const wasmModule = await loadWasmModule();
-      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+      const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+      const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
 
       seedDb = await createServerDb(
         appId,

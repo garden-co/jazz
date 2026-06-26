@@ -15,7 +15,7 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
-import { loadWasmModule } from "./runtime/client.js";
+import { structuralSchemaHash } from "./dev/schema-utils.js";
 import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
@@ -114,21 +114,7 @@ async function captureConsoleLogs<T>(
 }
 
 async function computeTestSchemaHash(schema: object): Promise<string> {
-  const wasmModule = await loadWasmModule();
-  const runtime = new wasmModule.WasmRuntime(
-    JSON.stringify(schema),
-    "jazz-tools-cli-test",
-    "dev",
-    "main",
-    undefined,
-    undefined,
-  );
-
-  try {
-    return runtime.getSchemaHash();
-  } finally {
-    (runtime as { free?: () => void }).free?.();
-  }
+  return structuralSchemaHash(schema as Parameters<typeof structuralSchemaHash>[0]);
 }
 
 function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {

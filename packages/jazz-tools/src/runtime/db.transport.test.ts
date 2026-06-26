@@ -10,7 +10,7 @@ import {
 import type { WasmSchema } from "../drivers/types.js";
 
 class TestDb extends Db {
-  static readonly runtime = { WasmRuntime: class {} };
+  static readonly runtime = { TestRuntime: class {} };
 
   constructor(
     config: DbConfig,
