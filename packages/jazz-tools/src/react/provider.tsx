@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import type { WasmSchema } from "../index.js";
@@ -61,9 +61,16 @@ export function JazzProvider({
   wasmSchema,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  // Enable devMode at client creation so the inspector's Live Query view can see
+  // subscriptions the app creates on mount. devMode gates subscription tracing;
+  // turning it on later (when attachDevTools runs) misses those first subscriptions.
+  const effectiveConfig = useMemo(
+    () => (shouldAutoAttach ? { ...config, devMode: true } : config),
+    [config, shouldAutoAttach],
+  );
   return (
     <CoreJazzProvider
-      config={config}
+      config={effectiveConfig}
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
