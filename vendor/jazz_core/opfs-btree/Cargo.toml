@@ -1,0 +1,43 @@
+[package]
+name = "opfs-btree"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform B-Tree storage used by Jazz core."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustc-hash = "2"
+thiserror = "2"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde-wasm-bindgen = "0.6"
+web-sys = { version = "0.3", features = [
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "Navigator",
+  "StorageManager",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetFileOptions",
+  "FileSystemSyncAccessHandle",
+  "FileSystemReadWriteOptions",
+  "DomException",
+] }
+
+[[bench]]
+name = "hot_paths"
+harness = false

@@ -1,0 +1,2825 @@
+//! High-level thread-affine database facade described by `jazz/API.md`. This
+//! module owns application-facing handles, read/write options, and facade-level
+//! sync plumbing; durable version storage, validation, policy checks, and view
+//! construction live in [`crate::node`], while link-local shipped state lives in
+//! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::{Pin, pin};
+use std::rc::{Rc, Weak};
+use std::task::{Context, Poll, Waker};
+
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures_core::Stream;
+use groove::records::Value;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use thiserror::Error;
+
+use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::node::{
+    CommitUnitIngestContext, CommitUnitTrust, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
+    LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
+};
+use crate::peer::PeerState;
+use crate::protocol::{
+    BindingDelta, ContentExtent, CurrentWriteSchema, MigrationLens, RegisterShapeOptions,
+    SchemaVersion, ShapeAst, SubscriptionKey, SyncMessage,
+};
+use crate::query::{Binding, Query, QueryError, ValidatedQuery};
+use crate::schema::{JazzSchema, TableSchema};
+use crate::time::GlobalSeq;
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
+use crate::wire::{
+    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
+    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
+    WireTransport, decode_frame, decode_sync_message, encode_frame, encode_sync_message,
+};
+
+/// Poll a ready-immediate thread-affine database future to completion.
+///
+/// This helper is intentionally tiny: it drives local-lane futures that are
+/// expected to complete without an async runtime by using a no-op waker and
+/// yielding the current thread when a future reports `Pending`.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = pin!(future);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// Thread-affine high-level database handle.
+pub struct Db<S>
+where
+    S: OrderedKvStorage,
+{
+    schema: JazzSchema,
+    identity: DbIdentity,
+    node: Node<S>,
+    row_id_source: RefCell<Box<dyn RowIdSource>>,
+    next_now_ms: Cell<u64>,
+}
+
+/// Shared list of live subscriptions. Held by both the `Node` and any
+/// [`PeerConnection`], so an inbound sync update can push subscription events
+/// through the same path a local write does.
+type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
+
+/// Locally-authored transactions awaiting upload, oldest first. Shared with
+/// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
+type Outbox = Rc<RefCell<Vec<PendingUpload>>>;
+
+#[derive(Clone)]
+struct PendingUpload {
+    tx_id: TxId,
+    unit: Option<SyncMessage>,
+}
+
+/// Application-visible fate and durability for a local write transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteState {
+    /// Latest authority fate observed by this `Db`.
+    pub fate: Fate,
+    /// Highest durability tier observed by this `Db`.
+    pub durability: DurabilityTier,
+}
+
+impl<S> Db<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    #[cfg(test)]
+    pub(crate) fn commit_unit_for_test(&self, tx_id: TxId) -> Result<SyncMessage, Error> {
+        Ok(self.node.node.borrow_mut().commit_unit_for(tx_id)?)
+    }
+
+    /// Open a database over the supplied storage and recover local state.
+    ///
+    /// ```rust
+    /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
+    /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
+    /// # use jazz::ids::{AuthorId, NodeUuid};
+    /// let schema = schema();
+    /// let column_families = schema.column_families();
+    /// let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    /// let storage = MemoryStorage::new(&refs);
+    ///
+    /// let db = block_on(Db::open(DbConfig {
+    ///     schema,
+    ///     storage,
+    ///     identity: DbIdentity {
+    ///         node: NodeUuid::from_bytes([1; 16]),
+    ///         author: AuthorId::from_bytes([2; 16]),
+    ///     },
+    ///     id_source: Some(Box::new(SeededRowIdSource::new(1))),
+    ///     large_value_checkpoint_op_interval: 1024,
+    /// }))?;
+    ///
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert!(db.read(&todos)?.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
+        let node = NodeState::new_with_large_value_checkpoint_op_interval(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+            config.large_value_checkpoint_op_interval,
+        )?;
+        Ok(Self {
+            schema: config.schema,
+            identity: config.identity,
+            node: Node::new(node),
+            row_id_source: RefCell::new(
+                config
+                    .id_source
+                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+            ),
+            next_now_ms: Cell::new(1),
+        })
+    }
+
+    /// Open a database as a history-complete serving core.
+    ///
+    /// This mode is intended for server shells and tests that own authoritative
+    /// in-memory history rather than a partial client replica.
+    pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+        let node = NodeState::new_history_complete(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+        )?;
+        Ok(Self {
+            schema: config.schema,
+            identity: config.identity,
+            node: Node::new(node),
+            row_id_source: RefCell::new(
+                config
+                    .id_source
+                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+            ),
+            next_now_ms: Cell::new(1),
+        })
+    }
+
+    /// Seed a settled mergeable row for server bootstrap/import flows.
+    ///
+    /// This bypasses the client pending-upload path and immediately finalizes
+    /// the commit in local history. It is intended only for history-complete
+    /// server bootstrap/import state, not for general application writes or
+    /// pending client write semantics.
+    pub fn seed_settled_mergeable_for_bootstrap(
+        &self,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        let tx_id = self.node.node.borrow_mut().commit_mergeable(
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(made_by)
+                .cells(cells),
+        )?;
+        self.node
+            .node
+            .borrow_mut()
+            .finalize_local_mergeable_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+
+    /// Return the locally observed fate and durability for a write transaction.
+    pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            ));
+        };
+        Ok(WriteState { fate, durability })
+    }
+
+    /// Start a query rooted at `table`.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db};
+    /// # use jazz::query::{col, eq, lit};
+    /// let db = block_on(open_todos_db())?;
+    /// let open_todos = db
+    ///     .table("todos")
+    ///     .filter(eq(col("done"), lit(false)))
+    ///     .select(["title", "done"]);
+    ///
+    /// let open_todos = db.prepare_query(&open_todos)?;
+    /// assert!(db.read(&open_todos)?.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn table(&self, table: impl Into<String>) -> Query {
+        Query::from(table)
+    }
+
+    /// Prepare a query for repeated reads or subscriptions.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// let db = block_on(open_todos_db())?;
+    /// let write = db.insert("todos", todo_cells("write docs", false))?;
+    /// let todo = write.row_uuid();
+    ///
+    /// let query = db.prepare_query(&db.table("todos"))?;
+    /// let rows = db.read(&query)?;
+    /// assert_eq!(rows.len(), 1);
+    /// assert_eq!(rows[0].row_uuid(), todo);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.prepare_query_bound(query, BTreeMap::new())
+    }
+
+    /// Prepare a query with explicit parameter bindings.
+    pub fn prepare_query_bound(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+    ) -> Result<PreparedQuery, Error> {
+        let schema = self.current_write_schema_for_query()?;
+        let shape = query.validate(&schema)?;
+        let binding = shape.bind(params)?;
+        let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
+            && !self
+                .node
+                .node
+                .borrow()
+                .uses_partitioned_or_schema_projected_read(&shape)
+        {
+            let mut node = self.node.node.borrow_mut();
+            (
+                Some(node.prepared_query_plan(&shape, DurabilityTier::Local)?),
+                Some(node.prepared_query_plan(&shape, DurabilityTier::Global)?),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(PreparedQuery {
+            shape,
+            binding,
+            local_plan,
+            global_plan,
+        })
+    }
+
+    /// Synchronously read local rows for a prepared query.
+    pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .query_rows_with_prepared_plan(
+                &prepared.shape,
+                &prepared.binding,
+                DurabilityTier::Local,
+                prepared.plan_for_tier(DurabilityTier::Local),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Synchronously read exactly one local row if present.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// let db = block_on(open_todos_db())?;
+    /// let todo = db.insert("todos", todo_cells("first item", false))?.row_uuid();
+    ///
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// let found = db.one(&todos)?;
+    /// assert_eq!(found.map(|row| row.row_uuid()), Some(todo));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn one(&self, prepared: &PreparedQuery) -> Result<Option<CurrentRow>, Error> {
+        Ok(self.read(prepared)?.into_iter().next())
+    }
+
+    /// Read local settled history at an exact global sequence cut.
+    ///
+    /// History-incomplete facades return `HistoricalReadRequiresServer` from
+    /// the node layer instead of answering from a partial local prefix
+    /// (ch11/INV-BRANCH-4).
+    pub fn at(
+        &self,
+        position: GlobalSeq,
+        prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.at_prepared(position, prepared)
+    }
+
+    fn at_prepared(
+        &self,
+        position: GlobalSeq,
+        prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .at(position)
+            .read(&prepared.shape, &prepared.binding)
+            .map_err(Into::into)
+    }
+
+    /// Tier-gated one-shot read.
+    ///
+    /// ```rust
+    /// # use jazz::db::{ReadOpts, LocalUpdates, Propagation};
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::tx::DurabilityTier;
+    /// let db = block_on(open_todos_db())?;
+    /// db.insert("todos", todo_cells("visible locally", false))?;
+    ///
+    /// let opts = ReadOpts {
+    ///     tier: DurabilityTier::Local,
+    ///     local_updates: LocalUpdates::Immediate,
+    ///     propagation: Propagation::LocalOnly,
+    ///     include_deleted: false,
+    /// };
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// let rows = block_on(db.all(&todos, opts))?;
+    /// assert_eq!(rows.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn all(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_for_identity(prepared, opts, self.identity.author)
+            .await
+    }
+
+    /// Tier-gated one-shot read evaluated as `author`.
+    pub async fn all_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = effective_read_tier(opts);
+        let mut node = self.node.node.borrow_mut();
+        if opts.include_deleted {
+            node.query_rows_for_link_including_deleted(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                author,
+            )
+        } else {
+            node.query_rows_for_link(&prepared.shape, &prepared.binding, tier, author)
+        }
+        .map_err(Into::into)
+    }
+
+    /// Subscribe to a query and return a stream of materialized subscription events.
+    ///
+    /// ```rust
+    /// # use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::tx::DurabilityTier;
+    /// let db = block_on(open_todos_db())?;
+    /// let query = db.prepare_query(&db.table("todos"))?;
+    /// let mut subscription = block_on(db.subscribe(
+    ///     &query,
+    ///     ReadOpts {
+    ///         tier: DurabilityTier::Local,
+    ///         local_updates: LocalUpdates::Immediate,
+    ///         propagation: Propagation::LocalOnly,
+    ///         include_deleted: false,
+    ///     },
+    /// ))?;
+    /// let opened = block_on(subscription.next_event()).unwrap();
+    /// assert!(opened.current_rows().unwrap().is_empty());
+    ///
+    /// db.insert("todos", todo_cells("notify subscribers", false))?;
+    /// let changed = block_on(subscription.next_event()).unwrap();
+    /// let SubscriptionEvent::Delta { added, updated, removed, .. } = changed else {
+    ///     panic!("expected subscription delta");
+    /// };
+    /// assert_eq!(added.len(), 1);
+    /// assert!(updated.is_empty());
+    /// assert!(removed.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn subscribe(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        self.open_subscription(prepared, opts).await
+    }
+
+    async fn open_subscription(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        let read_tier = effective_read_tier(opts);
+        let (maintained_subscription, rows) = if read_tier == DurabilityTier::Global {
+            let (subscription, rows) = self
+                .node
+                .node
+                .borrow_mut()
+                .open_local_maintained_view_subscription(
+                    &prepared.shape,
+                    &prepared.binding,
+                    self.identity.author,
+                )?;
+            (Some(subscription), rows)
+        } else {
+            let rows = self.node.node.borrow_mut().query_rows_with_prepared_plan(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                prepared.plan_for_tier(read_tier),
+            )?;
+            (None, rows)
+        };
+        let (sender, receiver) = unbounded();
+        let state = Rc::new(RefCell::new(SubscriptionState {
+            shape: prepared.shape.clone(),
+            binding: prepared.binding.clone(),
+            read_tier,
+            rows: rows.clone(),
+            maintained_subscription,
+            sender,
+        }));
+        state
+            .borrow()
+            .sender
+            .unbounded_send(SubscriptionEvent::Opened {
+                current: rows,
+                settled: true,
+                tier: read_tier,
+            })
+            .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
+        self.node
+            .subscriptions
+            .borrow_mut()
+            .push(Rc::downgrade(&state));
+        // If this Db is attached to upstreams, ask them to carry this shape so
+        // the subscription fills from synced rows, not just local writes. The consumer
+        // sees only the handle; the request flows out on the next `tick`.
+        for connection in self.node.connections.borrow().iter() {
+            connection
+                .borrow_mut()
+                .announce_subscription(prepared.shape.clone(), prepared.binding.clone());
+        }
+        Ok(SubscriptionStream {
+            receiver,
+            _state: state,
+        })
+    }
+
+    /// Insert a row locally, generating a uuidv7-shaped row id.
+    ///
+    /// The generated id is available from [`WriteHandle::row_uuid`].
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db};
+    /// # use jazz::tx::DurabilityTier;
+    /// let db = block_on(open_todos_db())?;
+    /// let write = db.insert("todos", jazz::row! { title: "new todo", done: false })?;
+    /// let row = write.row_uuid();
+    /// block_on(write.wait(DurabilityTier::Local))?;
+    ///
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert_eq!(db.read(&todos)?.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn insert(&self, table: &str, cells: RowCells) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Insert a row while attributing provenance to `made_by`.
+    ///
+    /// The Db's authenticated identity remains the write-policy subject. Client
+    /// facades can only write as themselves; trusted-backend attribution is a
+    /// serving-node concern on inbound commit-unit ingestion.
+    pub fn insert_attributed(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
+    }
+
+    /// Insert a row with a caller-supplied id.
+    ///
+    /// This is a niche path for imports from legacy systems or other cases
+    /// where row identity already exists. New local rows should generally use
+    /// [`Db::insert`] so the database generates the id.
+    pub fn insert_with_id(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Insert a caller-id row while attributing provenance to `made_by`.
+    ///
+    /// See [`Db::insert_attributed`] for the security boundary.
+    pub fn insert_with_id_attributed(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
+    }
+
+    /// Return whether an insert with these cells would pass write policy.
+    ///
+    /// This is a dry-run over the current local preview: it builds the
+    /// hypothetical version used by the write path, evaluates policy as this
+    /// Db's authenticated author, and does not store a version or advance time.
+    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<bool, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_insert_allows(
+                MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
+                    .made_by(self.identity.author)
+                    .cells(cells),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Update a row locally; omitted fields keep their current local value.
+    ///
+    /// ```rust
+    /// # use std::collections::BTreeMap;
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::ids::RowUuid;
+    /// # use jazz::groove::records::Value;
+    /// let db = block_on(open_todos_db())?;
+    /// let todo = RowUuid::from_bytes([1; 16]);
+    /// db.insert_with_id("todos", todo, todo_cells("draft", false))?;
+    ///
+    /// db.update(
+    ///     "todos",
+    ///     todo,
+    ///     BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    /// )?;
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert_eq!(db.read(&todos)?.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn update(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+        )
+    }
+
+    /// Update a row while attributing provenance to `made_by`.
+    ///
+    /// See [`Db::insert_attributed`] for the security boundary.
+    pub fn update_attributed(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_as_session_subject(
+            made_by,
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+        )
+    }
+
+    /// Apply explicit edit operations to a text/blob column.
+    ///
+    /// Insert and delete positions are byte offsets relative to the current
+    /// local parent value for the column.
+    pub fn edit_text(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        edit: TextEdit,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.table_schema(table)?;
+        let tx_id = self.node.node.borrow_mut().commit_large_value_edit(
+            LargeValueEditCommit::new(table, row, column, self.next_now_ms())
+                .made_by(self.identity.author)
+                .ops(edit.into_node_ops()),
+        )?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    /// Upsert a row locally.
+    ///
+    /// This explicit-id path is primarily for importing rows from legacy
+    /// systems. New local rows should generally use [`Db::insert`] and then
+    /// update the returned [`WriteHandle::row_uuid`] when needed.
+    ///
+    /// ```rust
+    /// # use std::collections::BTreeMap;
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::ids::RowUuid;
+    /// # use jazz::groove::records::Value;
+    /// let db = block_on(open_todos_db())?;
+    /// let todo = RowUuid::from_bytes([1; 16]);
+    ///
+    /// db.upsert("todos", todo, todo_cells("created", false))?;
+    /// db.upsert(
+    ///     "todos",
+    ///     todo,
+    ///     BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+    /// )?;
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn upsert(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect())
+        } else {
+            (cells, Vec::new())
+        };
+        self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
+    }
+
+    /// Soft-delete a row locally.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::ids::RowUuid;
+    /// let db = block_on(open_todos_db())?;
+    /// let todo = RowUuid::from_bytes([1; 16]);
+    /// db.insert_with_id("todos", todo, todo_cells("remove me", false))?;
+    ///
+    /// db.delete("todos", todo)?;
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert!(db.read(&todos)?.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn delete(&self, table: &str, row: RowUuid) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            BTreeMap::new(),
+            Vec::new(),
+            Some(DeletionEvent::Deleted),
+        )
+    }
+
+    /// Soft-delete a row while attributing provenance to `made_by`.
+    ///
+    /// See [`Db::insert_attributed`] for the security boundary.
+    pub fn delete_attributed(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_as_session_subject(
+            made_by,
+            table,
+            row,
+            BTreeMap::new(),
+            Vec::new(),
+            Some(DeletionEvent::Deleted),
+        )
+    }
+
+    /// Return whether this Db's author can read the current local row.
+    pub fn can_read(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_read_current_allows(table, row, self.identity.author)
+            .map_err(Into::into)
+    }
+
+    /// Return whether this Db's author can update the current local row.
+    pub fn can_update(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.can_update_for_identity(table, row, self.identity.author)
+    }
+
+    /// Return whether `author` can update the current local row.
+    pub fn can_update_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorId,
+    ) -> Result<bool, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_write_current_allows(table, row, author)
+            .map_err(Into::into)
+    }
+
+    /// Return whether this Db's author can delete the current local row.
+    pub fn can_delete(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.table_schema(table)?;
+        self.node
+            .node
+            .borrow_mut()
+            .dry_run_delete_current_allows(table, row, self.identity.author)
+            .map_err(Into::into)
+    }
+
+    /// Build a mergeable transaction that commits multiple writes under one id.
+    pub fn mergeable_tx(&self) -> MergeableTx<'_, S> {
+        MergeableTx {
+            db: self,
+            writes: Vec::new(),
+        }
+    }
+
+    /// Publish an immutable schema-version payload through the catalogue lane.
+    pub fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_sync_message(SyncMessage::PublishSchema {
+                author: self.identity.author,
+                schema: Box::new(schema),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Publish an immutable migration lens through the catalogue lane.
+    pub fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_sync_message(SyncMessage::PublishLens {
+                author: self.identity.author,
+                lens,
+            })
+            .map_err(Into::into)
+    }
+
+    /// Set the current write-schema pointer through the catalogue lane.
+    pub fn set_current_write_schema(
+        &self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+                author: self.identity.author,
+                pointer,
+            })
+            .map_err(Into::into)
+    }
+
+    /// Open an exclusive transaction over the current local snapshot.
+    pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
+        let tx_id = self.open_exclusive_handle()?;
+        Ok(ExclusiveTx {
+            db: self,
+            tx_id,
+            has_reads: Cell::new(false),
+        })
+    }
+
+    pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_exclusive()
+            .map_err(Into::into)
+    }
+
+    /// Restore a row locally. Data is required by the public API contract.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::ids::RowUuid;
+    /// let db = block_on(open_todos_db())?;
+    /// let todo = RowUuid::from_bytes([1; 16]);
+    /// db.insert_with_id("todos", todo, todo_cells("archived", false))?;
+    /// db.delete("todos", todo)?;
+    ///
+    /// db.restore("todos", todo, todo_cells("restored", false))?;
+    /// let todos = db.prepare_query(&db.table("todos"))?;
+    /// assert_eq!(db.one(&todos)?.unwrap().row_uuid(), todo);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        let data = self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+        )?;
+        let restore = self.write_mergeable(
+            self.identity.author,
+            None,
+            table,
+            row,
+            BTreeMap::new(),
+            Vec::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(WriteHandle {
+            node: restore.node,
+            row_uuid: row,
+            tx_id: restore.tx_id,
+            local_tier: data.local_tier.max(restore.local_tier),
+        })
+    }
+
+    fn write_mergeable_as_session_subject(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.write_mergeable(
+            made_by,
+            Some(self.identity.author),
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+        )
+    }
+
+    fn write_mergeable(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
+            .made_by(made_by)
+            .parents(parents)
+            .cells(cells);
+        if let Some(subject) = permission_subject {
+            commit = commit.permission_subject(subject);
+        }
+        if let Some(deletion) = deletion {
+            commit = commit.deletion(deletion);
+        }
+        let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
+        if made_by == self.identity.author {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorCode::WriteRejected,
+            "attribution requires a trusted serving node",
+        ))
+    }
+
+    fn check_catalogue_admin(&self) -> Result<(), Error> {
+        if self.identity.author == AuthorId::SYSTEM {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorCode::Protocol,
+            "catalogue updates require a serving Node",
+        ))
+    }
+
+    /// Finalize a locally-committed exclusive transaction. A `Core` authority
+    /// validates and accepts/rejects it now, using the in-memory commit unit
+    /// (which still carries `base_snapshot` and the read sets); other roles
+    /// queue it for upstream, leaving it Pending/Local.
+    fn finalize_local_exclusive_unit(
+        &self,
+        tx_id: TxId,
+        unit: SyncMessage,
+    ) -> Result<DurabilityTier, Error> {
+        self.node.queue_pending_upload(tx_id, Some(unit));
+        Ok(DurabilityTier::Local)
+    }
+
+    /// Client writes stay Pending/Local until upstream fates arrive over a
+    /// connection.
+    fn finalize_local_commit(&self, tx_id: TxId) -> Result<DurabilityTier, Error> {
+        self.node.queue_pending_upload(tx_id, None);
+        Ok(DurabilityTier::Local)
+    }
+
+    fn current_write_schema_for_query(&self) -> Result<JazzSchema, Error> {
+        let node = self.node.node.borrow();
+        let current = node.current_write_schema();
+        if current.schema == self.schema.version_id() {
+            return Ok(self.schema.clone());
+        }
+        node.catalogue_schemas()
+            .get(&current.schema)
+            .map(|schema| schema.schema.clone())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "current write schema {:?} is missing from catalogue",
+                        current.schema
+                    ),
+                )
+            })
+    }
+
+    fn next_now_ms(&self) -> u64 {
+        let next = self.next_now_ms.get();
+        self.next_now_ms.set(next + 1);
+        next
+    }
+
+    fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
+        self.schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
+    }
+
+    fn local_row(&self, table: &str, row: RowUuid) -> Result<Option<CurrentRow>, Error> {
+        let query = self.prepare_query(&Query::from(table))?;
+        Ok(self
+            .read(&query)?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn merge_existing_cells(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(RowCells, Option<TxId>), Error> {
+        let table_schema = self.table_schema(table)?;
+        let mut cells = BTreeMap::new();
+        let mut parent = None;
+        if let Some(existing) = self.local_row(table, row)? {
+            for column in &table_schema.columns {
+                if let Some(value) = existing.cell(table_schema, &column.name) {
+                    cells.insert(column.name.clone(), value);
+                }
+            }
+            parent = self.node.node.borrow().current_row_tx_id(&existing);
+        }
+        cells.extend(patch);
+        Ok((cells, parent))
+    }
+
+    /// Attach this `Db` to an upstream peer over a binding-supplied transport.
+    ///
+    /// The returned [`PeerConnection`] carries this Db's subscriptions upstream
+    /// under this Db's own identity and applies the view updates that come back.
+    /// The binding drives it by calling [`PeerConnection::tick`] (or
+    /// [`Db::tick`]) whenever it has staged inbound bytes or wants to flush.
+    pub fn connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node.connect_upstream(transport)
+    }
+
+    /// Accept a subscriber connection served under `identity`.
+    pub fn accept_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node.accept_subscriber(transport, identity)
+    }
+
+    /// Accept a subscriber connection served under `identity` with auth claims.
+    pub fn accept_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node
+            .accept_subscriber_with_claims(transport, identity, claims)
+    }
+
+    /// Accept a reconnecting subscriber, resuming from a previous cursor.
+    pub fn accept_subscriber_with_resume(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        cursor: ResumeCursor,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node
+            .accept_subscriber_with_resume(transport, identity, cursor)
+    }
+
+    /// Detach a previously attached peer connection from this database.
+    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+        self.node.detach_connection(connection)
+    }
+
+    /// Service every connection once (a convenience over
+    /// [`PeerConnection::tick`] for the common single-upstream client).
+    pub fn tick(&self) -> Result<(), Error> {
+        self.node.tick().map(|_| ())
+    }
+
+    /// Service every connection once and return binding-observable wake counts.
+    pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.tick()
+    }
+
+    fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        self.node.refresh_subscriptions()
+    }
+}
+
+/// Counts produced while servicing non-blocking database connection work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DbTickStats {
+    /// Number of live subscriptions that received a queued event.
+    pub subscription_events: usize,
+}
+
+/// Node-owned participant surface for upstream and subscriber connections.
+pub struct Node<S>
+where
+    S: OrderedKvStorage,
+{
+    node: Rc<RefCell<NodeState<S>>>,
+    subscriptions: SubscriptionList,
+    outbox: Outbox,
+    connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
+}
+
+impl<S> Node<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Wrap a node for serving subscriber links.
+    pub fn new(node: NodeState<S>) -> Self {
+        Self {
+            node: Rc::new(RefCell::new(node)),
+            subscriptions: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(Vec::new())),
+            connections: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Borrow the served node.
+    pub fn node(&self) -> Rc<RefCell<NodeState<S>>> {
+        Rc::clone(&self.node)
+    }
+
+    fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
+        self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+    }
+
+    fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        refresh_subscriptions_in(&self.node, &self.subscriptions)
+    }
+
+    /// Attach this node to an upstream peer over a binding-supplied transport.
+    pub fn connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        // Carry any already-registered subscriptions upstream immediately.
+        let pending = self
+            .subscriptions
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .map(|state| {
+                let state = state.borrow();
+                (state.shape.clone(), state.binding.clone())
+            })
+            .collect();
+        let connection = Rc::new(RefCell::new(PeerConnection {
+            transport,
+            node: Rc::clone(&self.node),
+            subscriptions: Rc::clone(&self.subscriptions),
+            link: ConnectionLink::Upstream {
+                pending,
+                announced: BTreeSet::new(),
+                outbox: Rc::clone(&self.outbox),
+                uploaded: BTreeSet::new(),
+            },
+            last_resume_bytes: None,
+        }));
+        self.connections.borrow_mut().push(Rc::clone(&connection));
+        connection
+    }
+
+    /// Accept a subscriber connection served under `identity`.
+    pub fn accept_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.accept_subscriber_with_trust(transport, identity, CommitUnitTrust::Session)
+    }
+
+    /// Accept a subscriber connection with explicit auth claims.
+    pub fn accept_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.accept_subscriber_with_claims_and_trust(
+            transport,
+            identity,
+            claims,
+            CommitUnitTrust::Session,
+        )
+    }
+
+    /// Accept a subscriber connection with an explicit commit-upload trust mode.
+    pub fn accept_subscriber_with_trust(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        trust: CommitUnitTrust,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
+    }
+
+    fn accept_subscriber_with_claims_and_trust(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node.borrow_mut().set_session_claims(identity, claims);
+        self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
+    }
+
+    /// Accept a reconnecting subscriber, resuming from a previous cursor.
+    pub fn accept_subscriber_with_resume(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        cursor: ResumeCursor,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.accept_subscriber_with_resume_and_trust(
+            transport,
+            identity,
+            CommitUnitTrust::Session,
+            Some(cursor),
+        )
+    }
+
+    fn accept_subscriber_with_resume_and_trust(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        trust: CommitUnitTrust,
+        cursor: Option<ResumeCursor>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        let peer = cursor
+            .map(|cursor| cursor.peer)
+            .unwrap_or_else(|| PeerState::for_author(identity));
+        let connection = Rc::new(RefCell::new(PeerConnection {
+            transport,
+            node: Rc::clone(&self.node),
+            subscriptions: Rc::clone(&self.subscriptions),
+            link: ConnectionLink::Subscriber {
+                peer,
+                ingest_context: CommitUnitIngestContext { identity, trust },
+                served: BTreeMap::new(),
+                served_current_rows: BTreeMap::new(),
+            },
+            last_resume_bytes: None,
+        }));
+        self.connections.borrow_mut().push(Rc::clone(&connection));
+        connection
+    }
+
+    /// Detach a previously attached peer connection from this node.
+    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+        let mut connections = self.connections.borrow_mut();
+        let before = connections.len();
+        connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
+        connections.len() != before
+    }
+
+    /// Service every accepted subscriber connection once.
+    pub fn tick(&self) -> Result<DbTickStats, Error> {
+        let mut stats = DbTickStats::default();
+        for connection in self.connections.borrow().iter() {
+            let next = connection.borrow_mut().tick()?;
+            stats.subscription_events += next.subscription_events;
+        }
+        Ok(stats)
+    }
+}
+
+/// Re-evaluate every live subscription against the node and push a delta event
+/// for any whose rows changed. Shared by local writes
+/// ([`Db::refresh_subscriptions`]) and by inbound sync application
+/// ([`PeerConnection::tick`]).
+fn refresh_subscriptions_in<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    subscriptions: &SubscriptionList,
+) -> Result<usize, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut retained = Vec::new();
+    let mut changed = 0;
+    for weak in subscriptions.borrow().iter() {
+        let Some(state) = weak.upgrade() else {
+            continue;
+        };
+        let (read_tier, previous, shape, binding) = {
+            let state = state.borrow();
+            (
+                state.read_tier,
+                state.rows.clone(),
+                state.shape.clone(),
+                state.binding.clone(),
+            )
+        };
+        let maybe_rows = {
+            let mut state_ref = state.borrow_mut();
+            if let Some(maintained) = state_ref.maintained_subscription.as_mut() {
+                let Some(update) = node
+                    .borrow_mut()
+                    .drain_local_maintained_view_subscription(maintained)?
+                else {
+                    retained.push(Rc::downgrade(&state));
+                    continue;
+                };
+                let mut rows_by_id = previous
+                    .iter()
+                    .cloned()
+                    .map(|row| (subscription_row_key(&row), row))
+                    .collect::<BTreeMap<_, _>>();
+                for (_, row_uuid, _) in update.removes {
+                    rows_by_id.retain(|(_, existing_row_uuid), _| *existing_row_uuid != row_uuid);
+                }
+                for row in update.adds {
+                    rows_by_id.insert(subscription_row_key(&row), row);
+                }
+                rows_by_id.into_values().collect::<Vec<_>>()
+            } else {
+                node.borrow_mut()
+                    .query_rows_with_prepared_plan(&shape, &binding, read_tier, None)?
+            }
+        };
+        let rows = maybe_rows;
+        if rows != previous {
+            let mut state = state.borrow_mut();
+            let event = subscription_delta_event(read_tier, &previous, &rows);
+            state.rows = rows;
+            if state.sender.unbounded_send(event).is_ok() {
+                changed += 1;
+            }
+        }
+        retained.push(Rc::downgrade(&state));
+    }
+    *subscriptions.borrow_mut() = retained;
+    Ok(changed)
+}
+
+/// Binding-supplied transport for one peer link.
+///
+/// The `Db` writes outbound messages with [`Transport::send`] and pulls inbound
+/// ones with [`Transport::try_recv`]; the binding owns the actual socket and
+/// scheduling and bridges these to real I/O on its own runtime. Both methods are
+/// non-blocking — `try_recv` returning `None` means "nothing staged right now,"
+/// not "closed" (a disconnect surface lands with a later B slice). This is the
+/// single seam that keeps the async boundary *between* nodes, never inside `Db`.
+pub trait Transport {
+    /// Hand an outbound message to the binding's wire.
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
+    /// Pull the next inbound message the binding has staged, if any.
+    fn try_recv(&mut self) -> Option<SyncMessage>;
+}
+
+/// Adapter from postcard wire frames to the internal sync-message transport.
+pub struct WireTransportAdapter<T> {
+    inner: T,
+    protocol_version: u16,
+    features: WireFeatures,
+    session: Option<WireSession>,
+}
+
+impl<T> WireTransportAdapter<T>
+where
+    T: WireTransport,
+{
+    /// Wrap a byte transport with the current Jazz wire defaults.
+    pub fn current(inner: T) -> Self {
+        Self::new(
+            inner,
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+            None,
+        )
+    }
+
+    /// Wrap a byte transport with explicit negotiated frame metadata.
+    pub fn new(
+        inner: T,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<WireSession>,
+    ) -> Self {
+        Self {
+            inner,
+            protocol_version,
+            features,
+            session,
+        }
+    }
+
+    /// Consume the adapter and return the wrapped byte transport.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    fn send_wire_error(&mut self, error: WireError) {
+        if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
+            let _ = self.inner.send_frame(frame);
+        }
+    }
+
+    fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
+        let Some(expected) = &self.session else {
+            return Ok(());
+        };
+        let Some(actual) = &envelope.session else {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "missing wire session metadata",
+            ));
+        };
+        if actual.session_id != expected.session_id {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session id does not match this connection",
+            ));
+        }
+        if actual.identity != expected.identity {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "wire session identity does not match this connection",
+            ));
+        }
+        if actual.epoch < expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "stale wire session epoch",
+            ));
+        }
+        if actual.epoch != expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session epoch does not match this connection",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<T> Transport for WireTransportAdapter<T>
+where
+    T: WireTransport,
+{
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let payload = match encode_sync_message(&message) {
+            Ok(payload) => payload,
+            Err(err) => {
+                self.send_wire_error(WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Never,
+                    format!("failed to encode sync message: {err}"),
+                ));
+                return Ok(());
+            }
+        };
+        let mut envelope = WireEnvelope::new(self.protocol_version, self.features, payload);
+        if let Some(session) = self.session.clone() {
+            envelope = envelope.with_session(session);
+        }
+        match encode_frame(&WireFrame::Message(envelope)) {
+            Ok(frame) => self.inner.send_frame(frame),
+            Err(err) => {
+                self.send_wire_error(WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Never,
+                    format!("failed to encode wire frame: {err}"),
+                ));
+                Ok(())
+            }
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        while let Some(bytes) = self.inner.try_recv_frame() {
+            let frame = match decode_frame(&bytes) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    self.send_wire_error(WireError::new(
+                        WireErrorCode::MalformedFrame,
+                        WireRetry::Never,
+                        format!("failed to decode wire frame: {err}"),
+                    ));
+                    continue;
+                }
+            };
+            match frame {
+                WireFrame::Message(envelope) => {
+                    if let Err(error) = self.validate_inbound_session(&envelope) {
+                        self.send_wire_error(error);
+                        continue;
+                    }
+                    match decode_sync_message(&envelope.payload) {
+                        Ok(message) => return Some(message),
+                        Err(err) => self.send_wire_error(WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            format!("failed to decode sync message payload: {err}"),
+                        )),
+                    }
+                }
+                WireFrame::Hello(_) => self.send_wire_error(WireError::new(
+                    WireErrorCode::UnsupportedFeature,
+                    WireRetry::AfterResume,
+                    "hello frames must be handled before constructing a peer connection",
+                )),
+                WireFrame::Error(_) => {}
+            }
+        }
+        None
+    }
+}
+
+/// A live link between this `Db` and one peer, owned by the `Db`.
+///
+/// Two link shapes — a client/backend attached to an upstream, or a server
+/// serving one subscriber under their identity. An edge is simply both at once
+/// (one upstream connection plus many subscriber connections); edge authority
+/// (relay/edge/core) stays below this facade in [`crate::peer`].
+pub struct PeerConnection<S>
+where
+    S: OrderedKvStorage,
+{
+    transport: Box<dyn Transport>,
+    node: Rc<RefCell<NodeState<S>>>,
+    subscriptions: SubscriptionList,
+    link: ConnectionLink,
+    last_resume_bytes: Option<usize>,
+}
+
+enum ConnectionLink {
+    /// Attached to an upstream: send subscribe requests and local commit units
+    /// up, apply view updates and fates that come back.
+    Upstream {
+        /// Shapes registered locally but not yet announced upstream.
+        pending: Vec<(ValidatedQuery, Binding)>,
+        /// Subscriptions already announced (dedup across ticks).
+        announced: BTreeSet<SubscriptionKey>,
+        /// Locally-authored transactions to upload (shared with the `Db`).
+        outbox: Outbox,
+        /// Transactions already shipped on this connection (dedup across ticks).
+        uploaded: BTreeSet<TxId>,
+    },
+    /// Serving one subscriber: apply their subscribe requests, ship view
+    /// updates under their identity.
+    Subscriber {
+        peer: PeerState,
+        ingest_context: CommitUnitIngestContext,
+        /// Subscriptions this subscriber registered, served each tick.
+        served: BTreeMap<SubscriptionKey, (ValidatedQuery, Binding)>,
+        /// Whole-table current-row views explicitly served through the facade.
+        served_current_rows: BTreeMap<SubscriptionKey, String>,
+    },
+}
+
+/// Per-connection resume state for a served subscriber.
+///
+/// Bindings keep this after a disconnect and pass it into
+/// [`Node::accept_subscriber_with_resume`] for the reconnecting subscriber. It is
+/// the facade handle for the peer-layer complete-tx payload inventory and
+/// result-set cursor.
+#[derive(Debug)]
+pub struct ResumeCursor {
+    peer: PeerState,
+}
+
+impl<S> PeerConnection<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Queue a shape to be announced upstream on the next tick. No-op on a
+    /// subscriber link (a serving Db does not subscribe through its servees).
+    fn announce_subscription(&mut self, shape: ValidatedQuery, binding: Binding) {
+        if let ConnectionLink::Upstream { pending, .. } = &mut self.link {
+            pending.push((shape, binding));
+        }
+    }
+
+    /// Serve a whole-table current-row view to this subscriber immediately and
+    /// refresh it on later ticks.
+    pub fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
+        let ConnectionLink::Subscriber {
+            peer,
+            served_current_rows,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        let update = {
+            let mut node = self.node.borrow_mut();
+            peer.current_rows_update(&mut node, table)?
+        };
+        self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+        let subscription = view_update_subscription(&update);
+        self.transport.send(update).map_err(transport_error)?;
+        if let Some(subscription) = subscription {
+            served_current_rows.insert(subscription, table.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Return the serialized byte size of the latest resume/catch-up response
+    /// sent by this connection.
+    pub fn last_resume_bytes(&self) -> Option<usize> {
+        self.last_resume_bytes
+    }
+
+    /// Extract this subscriber connection's resume cursor for a reconnect.
+    pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
+        let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
+            return None;
+        };
+        let replacement = PeerState::for_author(peer.identity());
+        Some(ResumeCursor {
+            peer: std::mem::replace(peer, replacement),
+        })
+    }
+
+    /// Service this connection once: drain inbound, apply, wake subscriptions, and
+    /// flush pending outbound. Non-blocking; the binding calls it in its loop.
+    pub fn tick(&mut self) -> Result<DbTickStats, Error> {
+        let mut stats = DbTickStats::default();
+        match &mut self.link {
+            ConnectionLink::Upstream {
+                pending,
+                announced,
+                outbox,
+                uploaded,
+            } => {
+                let pending_index = 0;
+                while pending_index < pending.len() {
+                    let (shape, binding) = &pending[pending_index];
+                    let key = SubscriptionKey {
+                        shape_id: shape.shape_id(),
+                        binding_id: binding.binding_id(),
+                    };
+                    if !announced.insert(key) {
+                        pending.remove(pending_index);
+                        continue;
+                    }
+                    if let Err(error) = self.transport.send(SyncMessage::RegisterShape {
+                        shape_id: shape.shape_id(),
+                        ast: ShapeAst::from_validated(shape),
+                        opts: RegisterShapeOptions::default(),
+                    }) {
+                        announced.remove(&key);
+                        return Err(transport_error(error));
+                    }
+                    let values = binding_values_in_param_order(shape, binding);
+                    if let Err(error) =
+                        self.transport.send(SyncMessage::BindingDelta(BindingDelta {
+                            shape_id: shape.shape_id(),
+                            adds: vec![(binding.binding_id(), values)],
+                            removes: Vec::new(),
+                        }))
+                    {
+                        announced.remove(&key);
+                        return Err(transport_error(error));
+                    }
+                    pending.remove(pending_index);
+                }
+                // Upload locally-authored commits not yet shipped on this link.
+                let to_upload: Vec<TxId> = outbox
+                    .borrow()
+                    .iter()
+                    .map(|pending| pending.tx_id)
+                    .filter(|tx_id| !uploaded.contains(tx_id))
+                    .collect();
+                for tx_id in to_upload {
+                    let unit = outbox
+                        .borrow()
+                        .iter()
+                        .find(|pending| pending.tx_id == tx_id)
+                        .and_then(|pending| pending.unit.clone())
+                        .map(Ok)
+                        .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
+                    send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)?;
+                    uploaded.insert(tx_id);
+                }
+                let mut applied = false;
+                while let Some(message) = self.transport.try_recv() {
+                    self.node.borrow_mut().apply_sync_message(message)?;
+                    applied = true;
+                }
+                if applied {
+                    stats.subscription_events +=
+                        refresh_subscriptions_in(&self.node, &self.subscriptions)?;
+                }
+            }
+            ConnectionLink::Subscriber {
+                peer,
+                ingest_context,
+                served,
+                served_current_rows,
+            } => {
+                while let Some(message) = self.transport.try_recv() {
+                    match message {
+                        SyncMessage::BindingDelta(delta) => {
+                            let shape_id = delta.shape_id;
+                            let adds = delta.adds.clone();
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::BindingDelta(delta))?;
+                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                                continue;
+                            };
+                            for (binding_id, values) in adds {
+                                let value_map = shape
+                                    .params()
+                                    .keys()
+                                    .cloned()
+                                    .zip(values)
+                                    .collect::<BTreeMap<_, _>>();
+                                let binding = shape.bind(value_map)?;
+                                let update = {
+                                    let mut node = self.node.borrow_mut();
+                                    peer.rehydrate_query(&mut node, &shape, &binding)?
+                                };
+                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
+                                served.insert(
+                                    SubscriptionKey {
+                                        shape_id,
+                                        binding_id,
+                                    },
+                                    (shape.clone(), binding),
+                                );
+                            }
+                        }
+                        other => {
+                            // RegisterShape (registers the shape ahead of its
+                            // binding), plus the write-upload path: any
+                            // responses (e.g. fate updates) flow back to the
+                            // subscriber.
+                            let responses = self
+                                .node
+                                .borrow_mut()
+                                .apply_sync_message_with_ingest_context(
+                                    other,
+                                    Some(*ingest_context),
+                                )?;
+                            for response in responses {
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                for (shape, binding) in served.values() {
+                    let update = {
+                        let mut node = self.node.borrow_mut();
+                        peer.query_update(&mut node, shape, binding)?
+                    };
+                    if !view_update_is_empty(&update) {
+                        send_with_content_extents(
+                            &self.node,
+                            peer,
+                            self.transport.as_mut(),
+                            update,
+                        )?;
+                    }
+                }
+                for table in served_current_rows.values() {
+                    let update = {
+                        let mut node = self.node.borrow_mut();
+                        peer.current_rows_update(&mut node, table)?
+                    };
+                    if !view_update_is_empty(&update) {
+                        send_with_content_extents(
+                            &self.node,
+                            peer,
+                            self.transport.as_mut(),
+                            update,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(stats)
+    }
+}
+
+fn serialized_sync_message_len(message: &SyncMessage) -> usize {
+    encode_sync_message(message).map_or(0, |bytes| bytes.len())
+}
+
+fn transport_error(error: TransportError) -> Error {
+    match error {
+        TransportError::Backpressure => {
+            Error::new(ErrorCode::Backpressure, "transport backpressure")
+        }
+        TransportError::Failed(message) => Error::new(ErrorCode::Protocol, message),
+    }
+}
+
+fn send_with_content_extents<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    message: SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let extents = node.borrow().content_refs_in_sync_message(&message)?;
+    let mut extents_by_row = BTreeMap::new();
+    for extent in extents {
+        extents_by_row
+            .entry(extent.row)
+            .or_insert_with(Vec::new)
+            .push(extent);
+    }
+    for (row, extents) in extents_by_row {
+        let response = {
+            let mut node = node.borrow_mut();
+            peer.serve_content_extents(&mut node, row, extents)?
+        };
+        transport.send(response).map_err(transport_error)?;
+    }
+    transport.send(message).map_err(transport_error)
+}
+
+fn send_with_local_content_extents<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    transport: &mut dyn Transport,
+    message: SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let extents = node.borrow().content_refs_in_sync_message(&message)?;
+    if !extents.is_empty() {
+        let response = {
+            let node = node.borrow();
+            let mut out = Vec::new();
+            for extent in extents {
+                out.push(ContentExtent {
+                    bytes: node.content_store().read(&extent)?,
+                    extent,
+                });
+            }
+            SyncMessage::ContentExtents { extents: out }
+        };
+        transport.send(response).map_err(transport_error)?;
+    }
+    transport.send(message).map_err(transport_error)
+}
+
+fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
+    match message {
+        SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
+        _ => None,
+    }
+}
+
+/// Bindings carry values positionally; the shape orders them by param name.
+fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> Vec<Value> {
+    shape
+        .params()
+        .keys()
+        .map(|name| {
+            binding
+                .values()
+                .get(name)
+                .cloned()
+                .expect("binding is missing a shape parameter value")
+        })
+        .collect()
+}
+
+/// A `ViewUpdate` that carries no version or result-set change — nothing to
+/// ship to the subscriber this tick.
+fn view_update_is_empty(message: &SyncMessage) -> bool {
+    match message {
+        SyncMessage::ViewUpdate {
+            reset_result_set,
+            version_bundles,
+            peer_payload_inventory,
+            result_row_adds,
+            result_row_removes,
+            ..
+        } => {
+            !reset_result_set
+                && version_bundles.is_empty()
+                && peer_payload_inventory.complete_tx_payloads.is_empty()
+                && result_row_adds.is_empty()
+                && result_row_removes.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// Identity attached to locally-authored writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct DbIdentity {
+    /// Node identity.
+    pub node: NodeUuid,
+    /// Application author identity.
+    pub author: AuthorId,
+}
+
+/// Configuration for [`Db::open`].
+pub struct DbConfig<S> {
+    /// Runtime schema.
+    pub schema: JazzSchema,
+    /// Storage implementation.
+    pub storage: S,
+    /// Local identity.
+    pub identity: DbIdentity,
+    /// Row id source used by [`Db::insert`].
+    ///
+    /// `None` selects the production source.
+    pub id_source: Option<Box<dyn RowIdSource>>,
+    /// Local large-value checkpoint density in edit operations.
+    ///
+    /// Checkpoints are derived content-store state and are not synced. A zero
+    /// value is treated as one.
+    pub large_value_checkpoint_op_interval: usize,
+}
+
+impl<S> DbConfig<S> {
+    /// Build a config using the production row id source.
+    pub fn new(schema: JazzSchema, storage: S, identity: DbIdentity) -> Self {
+        Self {
+            schema,
+            storage,
+            identity,
+            id_source: None,
+            large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+        }
+    }
+
+    /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
+    pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
+        self.id_source = Some(Box::new(id_source));
+        self
+    }
+}
+
+/// Source of uuidv7-shaped row ids for [`Db::insert`].
+pub trait RowIdSource {
+    /// Return the next row id.
+    fn next_row_id(&mut self) -> RowUuid;
+}
+
+/// Production row id source using the system clock and OS randomness.
+///
+/// Tests and simulations should use [`SeededRowIdSource`] instead.
+#[derive(Clone, Debug, Default)]
+pub struct ProductionRowIdSource;
+
+impl RowIdSource for ProductionRowIdSource {
+    fn next_row_id(&mut self) -> RowUuid {
+        RowUuid(uuid::Uuid::now_v7())
+    }
+}
+
+/// Deterministic uuidv7-shaped row id source for tests and simulations.
+#[derive(Clone, Debug)]
+pub struct SeededRowIdSource {
+    millis: u64,
+    state: u64,
+}
+
+impl SeededRowIdSource {
+    /// Create a deterministic source from a caller-provided seed.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            millis: seed & ((1_u64 << 48) - 1),
+            state: seed ^ 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+}
+
+impl RowIdSource for SeededRowIdSource {
+    fn next_row_id(&mut self) -> RowUuid {
+        let millis = self.millis & ((1_u64 << 48) - 1);
+        self.millis = self.millis.wrapping_add(1);
+
+        let rand_a = (splitmix64(&mut self.state) & 0x0fff) as u16;
+        let rand_b = splitmix64(&mut self.state) & ((1_u64 << 62) - 1);
+
+        let mut bytes = [0_u8; 16];
+        bytes[..6].copy_from_slice(&millis.to_be_bytes()[2..]);
+        let version_and_rand_a = 0x7000_u16 | rand_a;
+        bytes[6..8].copy_from_slice(&version_and_rand_a.to_be_bytes());
+        let variant_and_rand_b = 0x8000_0000_0000_0000_u64 | rand_b;
+        bytes[8..16].copy_from_slice(&variant_and_rand_b.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    }
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// One-shot read options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ReadOpts {
+    /// Durability tier that gates the first result.
+    pub tier: DurabilityTier,
+    /// Whether own local updates are visible immediately.
+    pub local_updates: LocalUpdates,
+    /// Whether evaluation may propagate upstream.
+    pub propagation: Propagation,
+    /// Include current rows whose deletion winner is `Deleted`.
+    pub include_deleted: bool,
+}
+
+impl Default for ReadOpts {
+    fn default() -> Self {
+        Self {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::Full,
+            include_deleted: false,
+        }
+    }
+}
+
+/// Own-write overlay policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LocalUpdates {
+    /// Include local writes immediately.
+    Immediate,
+    /// Defer local writes until the requested tier observes them.
+    Deferred,
+}
+
+/// Read propagation policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum Propagation {
+    /// Full propagation may be used by future remote paths.
+    Full,
+    /// Evaluate only against local knowledge.
+    LocalOnly,
+}
+
+/// Public API error with stable machine-readable codes.
+#[derive(Debug, Error, serde::Deserialize, serde::Serialize)]
+#[error("{code:?}: {message}")]
+pub struct Error {
+    /// Stable error code.
+    pub code: ErrorCode,
+    /// Human-readable detail.
+    pub message: String,
+}
+
+impl Error {
+    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Stable API error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ErrorCode {
+    /// Schema validation failed.
+    Schema,
+    /// Query validation or binding failed.
+    Query,
+    /// Write was rejected.
+    WriteRejected,
+    /// Storage failed.
+    Storage,
+    /// Protocol or local node operation failed.
+    Protocol,
+    /// Local transport queue is full and the operation should be retried later.
+    Backpressure,
+    /// Requested observation is not locally available in this slice.
+    NotObserved,
+    /// Historical read must be evaluated by a complete-history server.
+    HistoricalReadRequiresServer,
+}
+
+impl From<crate::node::Error> for Error {
+    fn from(error: crate::node::Error) -> Self {
+        let code = match &error {
+            crate::node::Error::HistoricalReadRequiresServer => {
+                ErrorCode::HistoricalReadRequiresServer
+            }
+            crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
+            crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::TableNotFound(_)
+            | crate::node::Error::UnsupportedColumnType(_)
+            | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,
+            _ => ErrorCode::Protocol,
+        };
+        Self::new(code, error.to_string())
+    }
+}
+
+impl From<QueryError> for Error {
+    fn from(error: QueryError) -> Self {
+        Self::new(ErrorCode::Query, error.to_string())
+    }
+}
+
+#[doc(hidden)]
+pub mod doctest_support {
+    use std::collections::BTreeMap;
+    use std::future::Future;
+
+    use groove::records::Value;
+    use groove::schema::{ColumnSchema, ColumnType};
+    pub use groove::storage::MemoryStorage;
+
+    use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
+    use crate::ids::{AuthorId, NodeUuid};
+    use crate::schema::{JazzSchema, Policy, TableSchema};
+
+    /// Poll a ready-immediate Db future in examples.
+    pub fn block_on<F: Future>(future: F) -> F::Output {
+        crate::db::block_on(future)
+    }
+
+    /// Example schema used by Db doctests.
+    pub fn schema() -> JazzSchema {
+        JazzSchema::new([TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())])
+    }
+
+    /// Open a fresh Db over in-memory storage.
+    pub async fn open_todos_db() -> Result<Db<MemoryStorage>, Error> {
+        let schema = schema();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        Db::open(DbConfig {
+            schema,
+            storage: MemoryStorage::new(&refs),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0x11; 16]),
+                author: AuthorId::from_bytes([0xa1; 16]),
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
+            large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+        })
+        .await
+    }
+
+    /// Todo row payload for examples.
+    pub fn todo_cells(title: &str, done: bool) -> RowCells {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title.to_owned())),
+            ("done".to_owned(), Value::Bool(done)),
+        ])
+    }
+}
+
+fn effective_read_tier(opts: ReadOpts) -> DurabilityTier {
+    if opts.local_updates == LocalUpdates::Immediate {
+        opts.tier.max(DurabilityTier::Local)
+    } else {
+        opts.tier
+    }
+}
+
+/// Row cells supplied to write methods.
+pub type RowCells = BTreeMap<String, Value>;
+
+/// Builder for explicit text/blob column edits.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextEdit {
+    ops: Vec<TextEditOp>,
+}
+
+impl TextEdit {
+    /// Construct an empty edit builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert bytes at `pos`.
+    pub fn insert(mut self, pos: usize, bytes: impl Into<Vec<u8>>) -> Self {
+        self.ops.push(TextEditOp::Insert {
+            pos,
+            bytes: bytes.into(),
+        });
+        self
+    }
+
+    /// Delete `len` bytes starting at `pos`.
+    pub fn delete(mut self, pos: usize, len: usize) -> Self {
+        self.ops.push(TextEditOp::Delete { pos, len });
+        self
+    }
+
+    fn into_node_ops(self) -> Vec<LargeValueEditOp> {
+        self.ops
+            .into_iter()
+            .map(|op| match op {
+                TextEditOp::Insert { pos, bytes } => LargeValueEditOp::Insert(pos, bytes),
+                TextEditOp::Delete { pos, len } => LargeValueEditOp::Delete(pos, len),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TextEditOp {
+    Insert { pos: usize, bytes: Vec<u8> },
+    Delete { pos: usize, len: usize },
+}
+
+/// Build [`RowCells`] with bare identifier column names.
+///
+/// Keys are converted to column names with `stringify!`, and values are
+/// converted with `Into<Value>`. Column and type validation remains lazy at
+/// write/query validation time.
+///
+/// ```rust
+/// # use jazz::db::doctest_support::{block_on, open_todos_db};
+/// # use jazz::tx::DurabilityTier;
+/// let db = block_on(open_todos_db())?;
+/// let write = db.insert(
+///     "todos",
+///     jazz::row! {
+///         title: "Ship it",
+///         done: false,
+///     },
+/// )?;
+/// block_on(write.wait(DurabilityTier::Local))?;
+///
+/// let todos = db.prepare_query(&db.table("todos"))?;
+/// assert_eq!(db.read(&todos)?.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[macro_export]
+macro_rules! row {
+    () => {
+        $crate::db::RowCells::new()
+    };
+    ($($key:ident : $value:expr),+ $(,)?) => {{
+        let mut cells = $crate::db::RowCells::new();
+        $(
+            cells.insert(::std::string::String::from(stringify!($key)), ($value).into());
+        )+
+        cells
+    }};
+}
+
+struct PendingMergeableWrite {
+    table: String,
+    row_uuid: RowUuid,
+    cells: RowCells,
+    deletion: Option<DeletionEvent>,
+}
+
+/// Builder for a group of mergeable writes committed as one transaction.
+pub struct MergeableTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    writes: Vec<PendingMergeableWrite>,
+}
+
+impl<S> MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Stage an insert with a generated row id.
+    pub fn insert(&mut self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db.row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells)?;
+        Ok(row)
+    }
+
+    /// Stage an insert with a caller-supplied row id.
+    pub fn insert_with_id(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db.table_schema(table)?;
+        self.stage_value_write(PendingMergeableWrite {
+            table: table.to_owned(),
+            row_uuid: row,
+            cells,
+            deletion: None,
+        });
+        Ok(())
+    }
+
+    /// Stage an update; omitted fields keep the transaction-local value.
+    pub fn update(&mut self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        let mut cells = self.current_cells(table, row)?;
+        cells.extend(patch);
+        self.insert_with_id(table, row, cells)
+    }
+
+    /// Stage a soft delete.
+    pub fn delete(&mut self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db.table_schema(table)?;
+        self.stage_deletion_write(PendingMergeableWrite {
+            table: table.to_owned(),
+            row_uuid: row,
+            cells: BTreeMap::new(),
+            deletion: Some(DeletionEvent::Deleted),
+        });
+        Ok(())
+    }
+
+    /// Stage a restore with explicit row data.
+    pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        self.db.table_schema(table)?;
+        self.stage_value_write(PendingMergeableWrite {
+            table: table.to_owned(),
+            row_uuid: row,
+            cells,
+            deletion: None,
+        });
+        self.stage_deletion_write(PendingMergeableWrite {
+            table: table.to_owned(),
+            row_uuid: row,
+            cells: BTreeMap::new(),
+            deletion: Some(DeletionEvent::Restored),
+        });
+        Ok(())
+    }
+
+    /// Commit all staged writes as one mergeable transaction.
+    pub fn commit(self) -> Result<TxId, Error> {
+        let writes = self
+            .writes
+            .into_iter()
+            .map(|write| {
+                let mut commit =
+                    MergeableCommit::new(write.table, write.row_uuid, self.db.next_now_ms())
+                        .made_by(self.db.identity.author)
+                        .cells(write.cells);
+                if let Some(deletion) = write.deletion {
+                    commit = commit.deletion(deletion);
+                }
+                commit
+            })
+            .collect();
+        let tx_id = self
+            .db
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many(writes)?;
+        self.db.finalize_local_commit(tx_id)?;
+        self.db.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+
+    fn current_cells(&self, table: &str, row: RowUuid) -> Result<RowCells, Error> {
+        let table_schema = self.db.table_schema(table)?;
+        for write in self.writes.iter().rev() {
+            if write.table == table && write.row_uuid == row && write.deletion.is_none() {
+                if self.writes.iter().rev().any(|deletion| {
+                    deletion.table == table
+                        && deletion.row_uuid == row
+                        && deletion.deletion == Some(DeletionEvent::Deleted)
+                }) {
+                    return Ok(BTreeMap::new());
+                }
+                return Ok(write.cells.clone());
+            }
+        }
+        let mut cells = BTreeMap::new();
+        if let Some(existing) = self.db.local_row(table, row)? {
+            for column in &table_schema.columns {
+                if let Some(value) = existing.cell(table_schema, &column.name) {
+                    cells.insert(column.name.clone(), value);
+                }
+            }
+        }
+        Ok(cells)
+    }
+
+    fn stage_value_write(&mut self, write: PendingMergeableWrite) {
+        if let Some(existing) = self.writes.iter_mut().find(|existing| {
+            existing.table == write.table
+                && existing.row_uuid == write.row_uuid
+                && existing.deletion.is_none()
+        }) {
+            *existing = write;
+        } else {
+            self.writes.push(write);
+        }
+    }
+
+    fn stage_deletion_write(&mut self, write: PendingMergeableWrite) {
+        self.writes.retain(|existing| {
+            existing.table != write.table
+                || existing.row_uuid != write.row_uuid
+                || match write.deletion {
+                    Some(DeletionEvent::Deleted) => false,
+                    Some(DeletionEvent::Restored) => existing.deletion.is_none(),
+                    None => true,
+                }
+        });
+        self.writes.push(write);
+    }
+}
+
+/// Builder for an exclusive transaction over a stable snapshot.
+pub struct ExclusiveTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+    has_reads: Cell<bool>,
+}
+
+impl<S> ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Read one row inside the exclusive transaction.
+    pub fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.has_reads.set(true);
+        self.db
+            .node
+            .node
+            .borrow_mut()
+            .tx_read(self.tx_id, table, row)
+            .map_err(Into::into)
+    }
+
+    /// Read all current rows in a table inside the exclusive transaction.
+    pub fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.has_reads.set(true);
+        self.db
+            .node
+            .node
+            .borrow_mut()
+            .tx_current_rows(self.tx_id, table)
+            .map_err(Into::into)
+    }
+
+    /// Stage an insert with a generated row id.
+    pub fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db.row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells)?;
+        Ok(row)
+    }
+
+    /// Stage an insert with a caller-supplied row id.
+    pub fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db
+            .node
+            .node
+            .borrow_mut()
+            .tx_write(self.tx_id, table, row, cells, None)
+            .map_err(Into::into)
+    }
+
+    /// Stage an update; omitted fields keep the transaction-local value.
+    pub fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        let mut cells = self.read(table, row)?.unwrap_or_default();
+        cells.extend(patch);
+        self.insert_with_id(table, row, cells)
+    }
+
+    /// Stage a soft delete.
+    pub fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db
+            .node
+            .node
+            .borrow_mut()
+            .tx_write(
+                self.tx_id,
+                table,
+                row,
+                BTreeMap::<String, Value>::new(),
+                Some(DeletionEvent::Deleted),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Commit the exclusive transaction.
+    pub fn commit(self) -> Result<TxId, Error> {
+        let (tx_id, unit) = self.db.node.node.borrow_mut().commit_exclusive(
+            self.tx_id,
+            self.db.identity.author,
+            self.db.next_now_ms(),
+        )?;
+        self.db.finalize_local_exclusive_unit(tx_id, unit)?;
+        self.db.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+}
+
+/// Handle for an applied local write.
+pub struct WriteHandle<S>
+where
+    S: OrderedKvStorage,
+{
+    node: Weak<RefCell<NodeState<S>>>,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    local_tier: DurabilityTier,
+}
+
+impl<S> WriteHandle<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Generated or caller-supplied row id affected by this write.
+    pub fn row_uuid(&self) -> RowUuid {
+        self.row_uuid
+    }
+
+    /// Mergeable transaction id backing this write.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// let db = block_on(open_todos_db())?;
+    /// let write = db.insert("todos", todo_cells("has id", false))?;
+    ///
+    /// let _row_id = write.row_uuid();
+    /// let _tx_id = write.mergeable_tx_id();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn mergeable_tx_id(&self) -> TxId {
+        self.tx_id
+    }
+
+    /// Wait until this write has reached the requested tier.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::tx::DurabilityTier;
+    /// let db = block_on(open_todos_db())?;
+    /// let write = db.insert("todos", todo_cells("wait locally", false))?;
+    ///
+    /// let tx_id = block_on(write.wait(DurabilityTier::Local))?;
+    /// assert_eq!(tx_id, write.mergeable_tx_id());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn wait(&self, tier: DurabilityTier) -> Result<TxId, Error> {
+        if tier <= self.local_tier {
+            return Ok(self.tx_id);
+        }
+        let state = self.write_state()?;
+        match state.fate {
+            Fate::Rejected(reason) => Err(write_rejected(reason)),
+            Fate::Pending | Fate::Accepted if state.durability < tier => Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("write has not reached requested tier {tier:?}"),
+            )),
+            Fate::Pending | Fate::Accepted => Ok(self.tx_id),
+        }
+    }
+
+    /// Return the locally observed fate and durability for this write.
+    pub fn write_state(&self) -> Result<WriteState, Error> {
+        let Some(node) = self.node.upgrade() else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "database handle was dropped",
+            ));
+        };
+        let Some((fate, _, durability)) = node.borrow_mut().transaction_state(self.tx_id) else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            ));
+        };
+        Ok(WriteState { fate, durability })
+    }
+}
+
+fn write_rejected(reason: RejectionReason) -> Error {
+    Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
+}
+
+struct SubscriptionState {
+    shape: ValidatedQuery,
+    binding: Binding,
+    read_tier: DurabilityTier,
+    rows: Vec<CurrentRow>,
+    maintained_subscription: Option<LocalMaintainedViewSubscription>,
+    sender: UnboundedSender<SubscriptionEvent>,
+}
+
+/// Row identity removed from a materialized subscription result.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RemovedRow {
+    /// Logical table that contained the removed row.
+    pub table: String,
+    /// Stable row identity.
+    pub row_uuid: RowUuid,
+}
+
+/// Materialized event emitted by a database subscription stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionEvent {
+    /// Initial materialized result for the subscription.
+    Opened {
+        /// Complete materialized rows visible at subscription open.
+        current: Vec<CurrentRow>,
+        /// Whether the result is complete at the requested read tier.
+        settled: bool,
+        /// Read tier used to materialize the rows.
+        tier: DurabilityTier,
+    },
+    /// Incremental materialized result change.
+    Delta {
+        /// Rows newly visible to the subscription.
+        added: Vec<CurrentRow>,
+        /// Rows still visible with changed projected cells.
+        updated: Vec<CurrentRow>,
+        /// Rows no longer visible to the subscription.
+        removed: Vec<RemovedRow>,
+        /// Whether the result is complete at the requested read tier.
+        settled: bool,
+        /// Read tier used to materialize the rows.
+        tier: DurabilityTier,
+    },
+    /// Full replacement result, reserved for future stream resumption and
+    /// internal invalidation cases where a precise delta is unavailable.
+    Reset {
+        /// Complete replacement materialized rows.
+        current: Vec<CurrentRow>,
+        /// Whether the result is complete at the requested read tier.
+        settled: bool,
+        /// Read tier used to materialize the rows.
+        tier: DurabilityTier,
+    },
+    /// The subscription stream was closed by the producer.
+    Closed,
+}
+
+impl SubscriptionEvent {
+    /// Return full materialized rows for snapshot-like events.
+    pub fn current_rows(&self) -> Option<&[CurrentRow]> {
+        match self {
+            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(current),
+            Self::Delta { .. } | Self::Closed => None,
+        }
+    }
+}
+
+/// Stream of materialized subscription events.
+pub struct SubscriptionStream {
+    receiver: UnboundedReceiver<SubscriptionEvent>,
+    _state: Rc<RefCell<SubscriptionState>>,
+}
+
+impl SubscriptionStream {
+    /// Await the next materialized subscription event.
+    pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
+        std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
+    }
+}
+
+impl Stream for SubscriptionStream {
+    type Item = SubscriptionEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.receiver).poll_next(cx)
+    }
+}
+
+/// Validated and bound query plan used by all `Db` reads and subscriptions.
+#[derive(Clone, Debug)]
+pub struct PreparedQuery {
+    shape: ValidatedQuery,
+    binding: Binding,
+    local_plan: Option<PreparedQueryPlan>,
+    global_plan: Option<PreparedQueryPlan>,
+}
+
+impl PreparedQuery {
+    /// Validated query shape.
+    pub fn shape(&self) -> &ValidatedQuery {
+        &self.shape
+    }
+
+    /// Bound parameter values.
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlan> {
+        match tier {
+            DurabilityTier::Local => self.local_plan.as_ref(),
+            DurabilityTier::Global => self.global_plan.as_ref(),
+            DurabilityTier::None | DurabilityTier::Edge => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn has_plan_for_tier(&self, tier: DurabilityTier) -> bool {
+        self.plan_for_tier(tier).is_some()
+    }
+}
+
+fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
+    !shape.query().joins.is_empty() || !shape.query().reachable.is_empty()
+}
+
+fn subscription_delta_event(
+    tier: DurabilityTier,
+    previous: &[CurrentRow],
+    current: &[CurrentRow],
+) -> SubscriptionEvent {
+    let mut previous_by_id = BTreeMap::new();
+    for row in previous {
+        previous_by_id.insert(subscription_row_key(row), row);
+    }
+
+    let mut current_by_id = BTreeMap::new();
+    for row in current {
+        current_by_id.insert(subscription_row_key(row), row);
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+
+    for (key, row) in &current_by_id {
+        match previous_by_id.get(key) {
+            None => added.push((*row).clone()),
+            Some(previous_row) if *previous_row != *row => updated.push((*row).clone()),
+            Some(_) => {}
+        }
+    }
+
+    for (key, _) in &previous_by_id {
+        if !current_by_id.contains_key(key) {
+            removed.push(RemovedRow {
+                table: key.0.clone(),
+                row_uuid: key.1,
+            });
+        }
+    }
+
+    SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        settled: true,
+        tier,
+    }
+}
+
+fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
+    (row.table().to_owned(), row.row_uuid())
+}
+
+#[cfg(test)]
+mod tests;

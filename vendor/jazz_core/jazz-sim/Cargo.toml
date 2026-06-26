@@ -1,0 +1,61 @@
+[package]
+name = "jazz-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+automerge = "0.10.0"
+diamond-types = "1.0.0"
+futures-core = "0.3.32"
+hdrhistogram = "7.5.4"
+jazz = { path = "../jazz", features = ["testing"] }
+libc = "0.2"
+postcard = { version = "1.1.3", features = ["alloc"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0.145"
+tempfile = "3.27.0"
+zstd = "0.13.3"
+
+[[bench]]
+name = "echo"
+harness = false
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bench]]
+name = "fixture_smoke"
+harness = false
+
+[[bench]]
+name = "s1_saas"
+harness = false
+
+[[bench]]
+name = "s2_canvas"
+harness = false
+
+[[bench]]
+name = "s3_permissions"
+harness = false
+
+[[bench]]
+name = "s4_order_processing"
+harness = false
+
+[[bench]]
+name = "s5_durable_stream"
+harness = false
+
+[[bench]]
+name = "s6_text_traces"
+harness = false
+
+[[bench]]
+name = "s7_migrations"
+harness = false
+
+[[bench]]
+name = "s9_durable_execution"
+harness = false

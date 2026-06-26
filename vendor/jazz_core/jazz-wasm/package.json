@@ -1,0 +1,11 @@
+{
+  "name": "jazz-wasm",
+  "private": true,
+  "type": "module",
+  "main": "pkg/jazz_wasm.js",
+  "types": "pkg/jazz_wasm.d.ts",
+  "scripts": {
+    "build": "wasm-pack build --target web --release",
+    "build:node": "wasm-pack build --target nodejs --release"
+  }
+}

@@ -1,0 +1,3412 @@
+//! Storage-backed Jazz node core. This module owns the `NodeState` state struct,
+//! public node API surface, shared errors, and cross-cutting in-memory indexes;
+//! specialized behavior lives in sibling modules such as [`policy`] for policy
+//! evaluation, [`global_state`] for read-only settled-global derivations,
+//! [`ingest`] for commit/fate ingestion, [`query_eval`] for query execution, and
+//! [`views`] for sync view payloads. In the layer map it is the core between the
+//! `Db` facade and groove storage/IVM.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use groove::db::{
+    CommitMetrics, Database, DatabaseBatch, Error as GrooveDbError, GraphBuilder, PredicateExpr,
+    PrimaryKeyValue, Subscription,
+};
+use groove::ivm::PreparedShapeId;
+use groove::ivm::ProjectField;
+use groove::queries::{Query, Select, SelectItem, TableRef};
+use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
+use groove::storage::{self, OrderedKvStorage, ReopenableStorage};
+use thiserror::Error;
+
+use crate::ids::{
+    AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias,
+    SchemaVersionId,
+};
+use crate::protocol::{
+    CurrentWriteSchema, LensOp, MigrationLens, ResultRowEntry, SchemaVersion, ShapeAst,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+};
+use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
+use crate::schema::{JazzSchema, MergeStrategy, TableSchema, registered_column_transform};
+use crate::time::{GlobalSeq, TxTime};
+use crate::tx::{
+    AbsentRead, DeletionEvent, DurabilityTier, Fate, HistoryEntry, PredicateRead,
+    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
+    TransactionRecord, TxId, TxKind,
+};
+
+mod branches;
+mod codec;
+pub mod content_store;
+mod currency;
+mod eviction;
+mod global_state;
+mod ingest;
+pub(crate) mod maintained_subscription_view;
+mod open_tx;
+mod policy;
+mod query_eval;
+mod recovery;
+pub mod text_oplog;
+mod views;
+pub(crate) use query_eval::LocalMaintainedViewSubscription;
+pub(crate) use views::MaintainedViewBundleInputs;
+
+use branches::BranchRecord;
+use codec::*;
+use content_store::ContentStore;
+use open_tx::*;
+use text_oplog::{Content as TextContent, Op as TextOp};
+
+pub use eviction::{EdgeCacheClass, EvictColdReport};
+
+#[cfg(test)]
+mod tests;
+
+/// Default client-clock skew tolerance in milliseconds.
+pub const SKEW_TOLERANCE_MS: u64 = 30_000;
+pub(crate) const LARGE_VALUE_CHECKPOINT_OP_INTERVAL: usize = 1024;
+const LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES: usize = 128;
+const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
+type LargeValueCacheKey = (String, RowUuid, String, TxId);
+
+static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn next_groove_runtime_token() -> u64 {
+    NEXT_GROOVE_RUNTIME_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct MaintainedViewAddBundleStats {
+    pub(super) stream_b_bundles: usize,
+    pub(super) fallback_bundles: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(super) struct MaintainedViewReplacementForRemove {
+    pub(super) content_winner: Option<VersionRow>,
+    pub(super) deletion_winner: Option<VersionRow>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct MaintainedViewRemovalBundleStats {
+    pub(super) stream_bundles: usize,
+    pub(super) fallback_bundles: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAINTAINED_VIEW_MATERIALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAINTAINED_VIEW_REMOVAL_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_query_versions_for_tx_call_count() {
+    QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn query_versions_for_tx_call_count() -> usize {
+    QUERY_VERSIONS_FOR_TX_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_query_versions_for_tx_call() {
+    QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn reset_maintained_view_materialize_call_count() {
+    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn maintained_view_materialize_call_count() -> usize {
+    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_maintained_view_materialize_call() {
+    MAINTAINED_VIEW_MATERIALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn reset_maintained_view_add_bundle_stats() {
+    MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(|bundles| bundles.set(0));
+    MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(|fallbacks| fallbacks.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn maintained_view_add_bundle_stats() -> MaintainedViewAddBundleStats {
+    MaintainedViewAddBundleStats {
+        stream_b_bundles: MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(std::cell::Cell::get),
+        fallback_bundles: MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(std::cell::Cell::get),
+    }
+}
+
+#[cfg(test)]
+fn record_maintained_view_stream_b_add_bundle() {
+    MAINTAINED_VIEW_STREAM_B_ADD_BUNDLES.with(|bundles| bundles.set(bundles.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_maintained_view_stream_b_add_bundle() {}
+
+#[cfg(test)]
+fn record_maintained_view_add_bundle_fallback() {
+    MAINTAINED_VIEW_ADD_BUNDLE_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_maintained_view_add_bundle_fallback() {}
+
+#[cfg(test)]
+pub(super) fn reset_maintained_view_removal_bundle_stats() {
+    MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(|bundles| bundles.set(0));
+    MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(|fallbacks| fallbacks.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn maintained_view_removal_bundle_stats() -> MaintainedViewRemovalBundleStats {
+    MaintainedViewRemovalBundleStats {
+        stream_bundles: MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(std::cell::Cell::get),
+        fallback_bundles: MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(std::cell::Cell::get),
+    }
+}
+
+#[cfg(test)]
+fn record_maintained_view_removal_stream_bundle() {
+    MAINTAINED_VIEW_REMOVAL_STREAM_BUNDLES.with(|bundles| bundles.set(bundles.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_maintained_view_removal_stream_bundle() {}
+
+#[cfg(test)]
+fn record_maintained_view_removal_bundle_fallback() {
+    MAINTAINED_VIEW_REMOVAL_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
+}
+
+#[cfg(not(test))]
+fn record_maintained_view_removal_bundle_fallback() {}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum LensPathDirection {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LensPathCacheKey {
+    source: SchemaVersionId,
+    target: SchemaVersionId,
+    direction: LensPathDirection,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CompiledLensCacheKey {
+    source: SchemaVersionId,
+    target: SchemaVersionId,
+    direction: LensPathDirection,
+    table: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CompiledLensPath {
+    target_table: String,
+    ops: Vec<CompiledLensOp>,
+}
+
+#[derive(Clone, Debug)]
+enum CompiledLensOp {
+    Rename { from: String, to: String },
+    Copy { from: String, to: String },
+    Add { column: String, default: Value },
+    Drop { column: String },
+}
+
+/// Storage-backed Jazz node: mergeable history, local reads, and commit-unit sync.
+pub struct NodeState<S> {
+    /// Stable UUID identifying this node across storage reopen.
+    node_uuid: NodeUuid,
+    /// Compact alias assigned to this node for on-disk transaction keys.
+    self_node_alias: Option<NodeAlias>,
+    /// Schema catalogue, migration lenses, and schema-partition state.
+    catalogue: SchemaCatalogue,
+    /// In-memory branch records and branch-specific storage partitions.
+    branches: Branches,
+    /// Local logical time and global-application progress counters.
+    clock: Clock,
+    /// Commit-unit and shape-registration payloads waiting for missing context.
+    parking: Parking,
+    /// Query registration, binding, cache, graph, and settled-result state.
+    query: QueryServing,
+    /// Locally opened exclusive transactions and authoring attribution state.
+    open_tx: OpenTxState,
+    /// Rejected transaction records and pending-cascade parent/child indexes.
+    rejections: RejectionTracking,
+    /// Groove database slot over this node's storage.
+    database: DatabaseSlot<S>,
+    /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
+    groove_runtime_token: u64,
+    /// Whether this node has complete settled history for historical reads.
+    history_complete: bool,
+    /// Mapping from stable node UUIDs to compact on-disk aliases.
+    pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
+    ahead_current_keys: BTreeSet<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
+    /// Rows touched by the ahead-current overlay.
+    ahead_current_rows: BTreeSet<(String, RowUuid)>,
+    /// Latest ahead-current key per table/layer/row for local overlay reads.
+    ahead_current_latest: BTreeMap<(String, VersionLayer, RowUuid), (TxTime, NodeAlias)>,
+    /// Minimum number of large-value ops replayed before storing a checkpoint.
+    large_value_checkpoint_op_interval: usize,
+    /// Runtime counters for large-value materialization and checkpoint behavior.
+    large_value_metrics: LargeValueMetrics,
+    /// Immutable materialized large-value bytes keyed by exact version.
+    large_value_materialization_cache: BTreeMap<LargeValueCacheKey, Vec<u8>>,
+    /// Runtime counters for sync parking, draining, and ingestion behavior.
+    sync_metrics: SyncMetrics,
+    /// Process-local claims attached to authenticated subscriber sessions.
+    session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
+}
+
+/// Schema catalogue and schema-version storage layout known by the node.
+#[derive(Clone, Debug)]
+struct SchemaCatalogue {
+    /// Schema version used for the node's base/local API schema.
+    current_schema_version_id: SchemaVersionId,
+    /// Compact alias for `current_schema_version_id` once recovered or allocated.
+    current_schema_version_alias: Option<SchemaVersionAlias>,
+    /// Base schema supplied when the node was opened.
+    schema: JazzSchema,
+    /// Mapping from schema version IDs to compact on-disk aliases.
+    schema_version_aliases: BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    /// Catalogue entries for all schema versions known to this node.
+    catalogue_schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
+    /// Catalogue entries for migration lenses known to this node.
+    catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
+    /// Shortest migration-lens paths by schema pair and traversal direction.
+    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
+    /// Table-specific, already-validated lens programs used by hot read/write paths.
+    compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
+    /// Schema version currently used for newly authored writes.
+    current_write_schema: CurrentWriteSchema,
+    /// Storage partitions materialized for table/schema-version pairs.
+    partitions: BTreeSet<(String, SchemaVersionId)>,
+}
+
+/// Branch metadata and branch-partition layout known by the node.
+#[derive(Clone, Debug, Default)]
+struct Branches {
+    /// In-memory branch records indexed by branch ID.
+    branches: BTreeMap<BranchId, BranchRecord>,
+    /// Storage partitions materialized for table/schema-version/branch triples.
+    branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+}
+
+/// Local transaction clock and settled-global application progress.
+#[derive(Clone, Debug)]
+struct Clock {
+    /// Highest local transaction timestamp observed or minted by this node.
+    tx_time: TxTime,
+    /// Next global sequence number to allocate when accepting local work globally.
+    next_global_seq: GlobalSeq,
+    /// Contiguous global sequence watermark already applied to local storage.
+    applied_global_watermark: GlobalSeq,
+    /// Applied global sequence numbers above the contiguous watermark.
+    applied_global_above_watermark: BTreeSet<GlobalSeq>,
+}
+
+/// Payloads parked until missing schema or catalogue context arrives.
+#[derive(Clone, Debug, Default)]
+struct Parking {
+    /// Shape registrations waiting for an unknown schema version.
+    parked_shape_registrations: BTreeMap<ShapeId, ShapeAst>,
+    /// Commit units waiting for parent transactions or schema context.
+    parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
+    /// Catalogue commit units waiting to be applied in dependency order.
+    parked_catalogue_commit_units: BTreeSet<TxId>,
+}
+
+/// Query registration, cache, current-row graph, and settled-result state.
+#[derive(Clone, Debug, Default)]
+struct QueryServing {
+    /// Prepared current-row graph per table and durability tier.
+    current_row_graphs: BTreeMap<(String, DurabilityTier), GraphBuilder>,
+    /// Prepared query plans keyed by shape and durability tier.
+    query_shape_cache: BTreeMap<(crate::query::ShapeId, DurabilityTier), PreparedQueryPlan>,
+    /// Logical tables that have history rows for a stored transaction.
+    tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
+    /// Approximate insertion order for bounding `tx_version_tables_cache`.
+    tx_version_tables_cache_order: VecDeque<TxId>,
+    /// Live membership for `tx_version_tables_cache_order`.
+    tx_version_tables_cache_order_set: BTreeSet<TxId>,
+    /// Registered validated query shapes keyed by stable shape ID.
+    registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
+    /// Registered query binding values keyed by shape and binding ID.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, Vec<Value>>>,
+    /// Subscriber-side settled subscription result-set/completeness state for query bindings.
+    settled_result_sets: BTreeMap<SubscriptionKey, BTreeSet<ResultRowEntry>>,
+}
+
+/// Locally open exclusive transactions and local-only permission attribution.
+struct OpenTxState {
+    /// Open exclusive transaction handles keyed by local handle ID.
+    open_exclusive: BTreeMap<OpenTxId, OpenExclusive>,
+    /// Next local exclusive transaction handle ID to allocate.
+    next_open_tx_id: u64,
+    /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
+    local_permission_subjects: BTreeMap<TxId, AuthorId>,
+}
+
+/// Rejection records and derived indexes used for pending-cascade handling.
+#[derive(Clone, Debug, Default)]
+struct RejectionTracking {
+    /// Transactions rejected by local policy or conflict checks.
+    rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
+    /// Pending child transactions grouped by pending parent transaction.
+    child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
+}
+
+/// Authenticated identity attached to an inbound commit-unit upload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommitUnitIngestContext {
+    /// Identity authenticated by the connection carrying the upload.
+    pub identity: AuthorId,
+    /// Whether the connection may attribute writes to a different `made_by`.
+    pub trust: CommitUnitTrust,
+}
+
+/// Trust mode for an inbound commit-unit upload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitUnitTrust {
+    /// Session/client links must honestly set `made_by` to the link identity.
+    Session,
+    /// Trusted backends may preserve user provenance in `made_by`.
+    TrustedBackend,
+}
+
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Open or create a node over the supplied storage.
+    pub fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_history_complete(node_uuid, schema, storage, false)
+    }
+
+    /// Open or create a node that is known to hold complete settled history.
+    ///
+    /// This is the authority/local-complete constructor for historical reads.
+    /// Ordinary downstream clients should use [`NodeState::new`], which fails
+    /// historical handle reads closed until a complete-history subscription
+    /// path marks the queried shape complete in a later slice.
+    pub fn new_history_complete(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_history_complete(node_uuid, schema, storage, true)
+    }
+
+    /// Open or create a node with a specific local checkpoint density.
+    pub fn new_with_large_value_checkpoint_op_interval(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_options(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            large_value_checkpoint_op_interval,
+        )
+    }
+
+    /// Rebuild the groove layer over the same storage using the standard open path.
+    pub fn reopen_in_place(self) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let NodeState {
+            node_uuid,
+            catalogue,
+            database,
+            history_complete,
+            ..
+        } = self;
+        let storage = database.into_inner().into_storage();
+        Self::new_with_history_complete(node_uuid, catalogue.schema, storage, history_complete)
+    }
+
+    fn new_with_history_complete(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_options(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+        )
+    }
+
+    fn new_with_options(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let current_schema_version_id = schema.version_id();
+        let CatalogueOpenState {
+            storage,
+            mut schemas,
+            lenses,
+            current_write_schema,
+            partitions,
+            branch_partitions,
+        } = Self::open_catalogue_stage(schema.clone(), storage)?;
+        let had_base_schema = schemas.contains_key(&current_schema_version_id);
+        if !had_base_schema {
+            schemas.insert(
+                current_schema_version_id,
+                SchemaVersion::new(schema.clone()),
+            );
+        }
+        let refs = schema
+            .lower_to_groove_with_partitions(&schemas, &partitions, &branch_partitions)
+            .column_families()
+            .into_iter()
+            .chain(std::iter::once("indices"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = storage.reopen(&refs)?;
+        let database =
+            Self::open_full_database(&schema, &schemas, &partitions, &branch_partitions, storage)?;
+        let current_row_graphs = current_row_graphs(&schema);
+        let mut node = Self {
+            node_uuid,
+            self_node_alias: None,
+            catalogue: SchemaCatalogue {
+                current_schema_version_id,
+                current_schema_version_alias: None,
+                schema: schema.clone(),
+                schema_version_aliases: BTreeMap::new(),
+                catalogue_schemas: schemas,
+                catalogue_lenses: lenses,
+                lens_path_cache: BTreeMap::new(),
+                compiled_lens_cache: BTreeMap::new(),
+                current_write_schema,
+                partitions,
+            },
+            branches: Branches {
+                branches: BTreeMap::new(),
+                branch_partitions,
+            },
+            clock: Clock {
+                tx_time: TxTime::default(),
+                next_global_seq: GlobalSeq(1),
+                applied_global_watermark: GlobalSeq(0),
+                applied_global_above_watermark: BTreeSet::new(),
+            },
+            parking: Parking::default(),
+            query: QueryServing {
+                current_row_graphs,
+                query_shape_cache: BTreeMap::new(),
+                tx_version_tables_cache: BTreeMap::new(),
+                tx_version_tables_cache_order: VecDeque::new(),
+                tx_version_tables_cache_order_set: BTreeSet::new(),
+                registered_shapes: BTreeMap::new(),
+                registered_bindings: BTreeMap::new(),
+                settled_result_sets: BTreeMap::new(),
+            },
+            open_tx: OpenTxState {
+                open_exclusive: BTreeMap::new(),
+                next_open_tx_id: 1,
+                local_permission_subjects: BTreeMap::new(),
+            },
+            rejections: RejectionTracking::default(),
+            database: DatabaseSlot::new(database),
+            groove_runtime_token: next_groove_runtime_token(),
+            history_complete,
+            node_aliases: BTreeMap::new(),
+            ahead_current_keys: BTreeSet::new(),
+            ahead_current_rows: BTreeSet::new(),
+            ahead_current_latest: BTreeMap::new(),
+            large_value_checkpoint_op_interval: large_value_checkpoint_op_interval.max(1),
+            large_value_metrics: LargeValueMetrics::default(),
+            large_value_materialization_cache: BTreeMap::new(),
+            sync_metrics: SyncMetrics::default(),
+            session_claims: BTreeMap::new(),
+        };
+        node.recover_from_storage()?;
+        node.rebuild_ahead_current_keys()?;
+        let self_node_alias = node.ensure_node_alias(node_uuid)?;
+        node.self_node_alias = Some(self_node_alias);
+        let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
+        node.catalogue.current_schema_version_alias = Some(schema_alias);
+        if !had_base_schema {
+            node.persist_catalogue_schema(&SchemaVersion::new(schema.clone()))?;
+        }
+        for table in schema.tables.iter().map(|table| table.name.clone()) {
+            node.persist_partition(table, current_schema_version_id)?;
+        }
+        Ok(node)
+    }
+
+    fn open_full_database(
+        schema: &JazzSchema,
+        catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        partitions: &BTreeSet<(String, SchemaVersionId)>,
+        branch_partitions: &BTreeSet<(String, SchemaVersionId, BranchId)>,
+        storage: S,
+    ) -> Result<Database<S>, Error> {
+        debug_assert_lowered_layouts(schema);
+        Database::new(
+            schema.lower_to_groove_with_partitions(
+                catalogue_schemas,
+                partitions,
+                branch_partitions,
+            ),
+            storage,
+        )
+        .map_err(Error::from)
+    }
+
+    /// Return the pure-storage large-value content store.
+    pub fn content_store(&self) -> ContentStore<'_, S> {
+        ContentStore::new(&self.database)
+    }
+
+    /// Attach process-local auth claims to an accepted subscriber identity.
+    pub(crate) fn set_session_claims(
+        &mut self,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) {
+        self.session_claims.insert(identity, claims);
+    }
+
+    fn rebuild_database_slot(&mut self) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let old_database = self.database.take();
+        let refs = self
+            .catalogue
+            .schema
+            .lower_to_groove_with_partitions(
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.partitions,
+                &self.branches.branch_partitions,
+            )
+            .column_families()
+            .into_iter()
+            .chain(std::iter::once("indices"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = old_database.into_storage().reopen(&refs)?;
+        let database = Self::open_full_database(
+            &self.catalogue.schema,
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.partitions,
+            &self.branches.branch_partitions,
+            storage,
+        )?;
+        self.database.replace(database);
+        self.groove_runtime_token = next_groove_runtime_token();
+        self.rederive_restart_state()?;
+        Ok(())
+    }
+
+    fn rederive_restart_state(&mut self) -> Result<(), Error> {
+        self.self_node_alias = None;
+        self.catalogue.current_schema_version_alias = None;
+        self.clock.tx_time = TxTime::default();
+        self.clock.next_global_seq = GlobalSeq(1);
+        self.clock.applied_global_watermark = GlobalSeq(0);
+        self.clock.applied_global_above_watermark.clear();
+        self.node_aliases.clear();
+        self.catalogue.schema_version_aliases.clear();
+        self.rejections.child_txs_by_parent.clear();
+        self.rejections.rejected_transactions.clear();
+        self.branches.branches.clear();
+        self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
+        self.query.query_shape_cache.clear();
+        self.query.tx_version_tables_cache.clear();
+        self.query.tx_version_tables_cache_order.clear();
+        self.query.tx_version_tables_cache_order_set.clear();
+        self.query.settled_result_sets.clear();
+        self.parking.parked_shape_registrations.clear();
+        self.recover_from_storage()?;
+        let self_node_alias = self.ensure_node_alias(self.node_uuid)?;
+        self.self_node_alias = Some(self_node_alias);
+        let schema_alias =
+            self.ensure_schema_version_alias(self.catalogue.current_schema_version_id)?;
+        self.catalogue.current_schema_version_alias = Some(schema_alias);
+        Ok(())
+    }
+
+    fn open_catalogue_stage(schema: JazzSchema, storage: S) -> Result<CatalogueOpenState<S>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let current_schema_version_id = schema.version_id();
+        let meta_database = Database::new(schema.lower_catalogue_meta_to_groove(), storage)?;
+        let mut catalogue_schemas = BTreeMap::new();
+        let mut catalogue_lenses = BTreeMap::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+            let record = raw.record();
+            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
+                b"schema" => {
+                    let schema_version: SchemaVersion = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema_version.id
+                        != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                    catalogue_schemas.insert(schema_version.id, schema_version);
+                }
+                b"lens" => {
+                    let lens: MigrationLens = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if lens.id
+                        != MigrationLensId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue lens id mismatch"));
+                    }
+                    catalogue_lenses.insert(lens.id, lens);
+                }
+                _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
+            }
+        }
+        let mut current_write_schema = CurrentWriteSchema {
+            revision: 0,
+            schema: current_schema_version_id,
+        };
+        if let Some(raw) = meta_database.primary_key_last_raw("jazz_catalogue_pointer", &[])? {
+            let record = raw.record();
+            current_write_schema = CurrentWriteSchema {
+                revision: record.get_u64(CataloguePointerRowRecord::FIELD_REVISION_IDX)?,
+                schema: SchemaVersionId(
+                    record.get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                ),
+            };
+        }
+        let mut partitions = BTreeSet::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_partitions", &[])? {
+            let record = raw.record();
+            let table = String::from_utf8(
+                record
+                    .get_bytes(PartitionRowRecord::FIELD_TABLE_NAME_IDX)?
+                    .to_vec(),
+            )
+            .map_err(|_| Error::InvalidStoredValue("partition table name must be utf8"))?;
+            let schema_version =
+                SchemaVersionId(record.get_uuid(PartitionRowRecord::FIELD_SCHEMA_VERSION_IDX)?);
+            partitions.insert((table, schema_version));
+        }
+        let mut branch_partitions = BTreeSet::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_branch_partitions", &[])? {
+            let record = raw.record();
+            let table = String::from_utf8(
+                record
+                    .get_bytes(BranchPartitionRowRecord::FIELD_TABLE_NAME_IDX)?
+                    .to_vec(),
+            )
+            .map_err(|_| Error::InvalidStoredValue("branch partition table name must be utf8"))?;
+            let schema_version = SchemaVersionId(
+                record.get_uuid(BranchPartitionRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
+            );
+            let branch_id =
+                BranchId(record.get_uuid(BranchPartitionRowRecord::FIELD_BRANCH_ID_IDX)?);
+            branch_partitions.insert((table, schema_version, branch_id));
+        }
+        Ok(CatalogueOpenState {
+            storage: meta_database.into_storage(),
+            schemas: catalogue_schemas,
+            lenses: catalogue_lenses,
+            current_write_schema,
+            partitions,
+            branch_partitions,
+        })
+    }
+
+    /// Commit a local mergeable write and leave its fate pending.
+    pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
+        commit.validate()?;
+        let made_at = self.mint_tx_time(commit.now_ms);
+        self.commit_mergeable_at(commit, made_at)
+    }
+
+    /// Commit multiple local mergeable writes as one transaction.
+    pub fn commit_mergeable_many(&mut self, commits: Vec<MergeableCommit>) -> Result<TxId, Error> {
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+        }
+        let made_at = self.mint_tx_time(commits[0].now_ms);
+        self.commit_mergeable_many_at(commits, made_at)
+    }
+
+    /// Commit explicit text/blob edit operations for one large-value column.
+    pub fn commit_large_value_edit(&mut self, edit: LargeValueEditCommit) -> Result<TxId, Error> {
+        edit.validate()?;
+        let made_at = self.mint_tx_time(edit.now_ms);
+        self.commit_large_value_edit_at(edit, made_at)
+    }
+
+    fn commit_mergeable_at(
+        &mut self,
+        commit: MergeableCommit,
+        made_at: TxTime,
+    ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_at(vec![commit], made_at)
+    }
+
+    fn commit_mergeable_many_at(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+        made_at: TxTime,
+    ) -> Result<TxId, Error> {
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let tx_id = TxId::new(made_at, self.node_uuid);
+        let made_by = commits[0].made_by;
+        let permission_subject = commits[0].effective_permission_subject();
+        let user_metadata_json = commits[0].user_metadata_json.clone();
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: commits.len().try_into().map_err(|_| {
+                Error::InvalidMergeableCommit("transaction write count exceeds u32")
+            })?,
+            made_by,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json,
+            source_branch: None,
+        };
+        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
+        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
+        let mut batch = self.database.open_batch();
+        batch.insert(
+            "jazz_transactions",
+            transaction_values(
+                tx_node_alias,
+                &tx,
+                Fate::Pending,
+                None,
+                DurabilityTier::Local,
+            ),
+        );
+        let mut stored_versions = Vec::new();
+        for commit in commits {
+            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+            let layer = VersionLayer::for_commit(&commit);
+            let previous_current =
+                self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)?;
+
+            let implicit_parent = if table_schema
+                .columns
+                .iter()
+                .any(|column| column.large_value.is_some())
+            {
+                previous_current
+                    .as_ref()
+                    .map(|previous| self.version_tx_id(previous))
+                    .transpose()?
+            } else {
+                None
+            };
+            let parents = if commit.parents.is_empty() {
+                implicit_parent.into_iter().collect()
+            } else {
+                commit.parents
+            };
+            let cells = self.encode_large_value_cells(
+                &table_schema,
+                commit.row_uuid,
+                commit.made_by,
+                commit.cells,
+                previous_current.as_ref(),
+            )?;
+            let stored = VersionRow::from_parts_with_schema_version(
+                &table_schema,
+                VersionRowParts {
+                    table: commit.table,
+                    row_uuid: commit.row_uuid,
+                    tx_node_alias,
+                    schema_version_alias,
+                    tx_time: made_at,
+                    parents,
+                    cells,
+                    deletion: commit.deletion,
+                },
+                (write_schema_version != self.catalogue.current_schema_version_id)
+                    .then_some(write_schema_version),
+            )?;
+            let previous_winner = if let Some(previous) = previous_current.as_ref() {
+                Some((
+                    previous,
+                    self.version_tx_id(previous)?,
+                    self.version_made_at(previous)?,
+                ))
+            } else {
+                None
+            };
+            let new_is_current =
+                version_wins_over_open_winner(&stored, tx_id, made_at, previous_winner);
+            let _ = (new_is_current, previous_current);
+            batch.insert_raw(
+                version_storage_table_name_for_schema(
+                    &table_schema.name,
+                    stored.layer(),
+                    write_schema_version,
+                    self.catalogue.current_schema_version_id,
+                ),
+                history_primary_key(&stored),
+                stored.record.raw().to_vec(),
+            );
+            self.write_ahead_current_insert(&mut batch, &stored);
+            for parent in stored.parents() {
+                if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
+                    batch.insert(
+                        "jazz_pending_edges",
+                        pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
+                    );
+                }
+            }
+            stored_versions.push(stored);
+        }
+        self.database.commit_batch(batch)?;
+        self.invalidate_tx_version_tables_cache(tx_id);
+        if permission_subject != made_by {
+            self.open_tx
+                .local_permission_subjects
+                .insert(tx_id, permission_subject);
+        }
+        for stored in &stored_versions {
+            self.record_child_edges(tx_id, stored.parents());
+        }
+        Ok(tx_id)
+    }
+
+    fn commit_large_value_edit_at(
+        &mut self,
+        edit: LargeValueEditCommit,
+        made_at: TxTime,
+    ) -> Result<TxId, Error> {
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(&edit.table, write_schema_version)?;
+        let column = table_schema
+            .columns
+            .iter()
+            .find(|column| column.name == edit.column)
+            .ok_or(Error::InvalidMergeableCommit(
+                "large-value edit column not found",
+            ))?;
+        if column.large_value.is_none() {
+            return Err(Error::InvalidMergeableCommit(
+                "large-value edit column must be text or blob",
+            ));
+        }
+
+        let tx_id = TxId::new(made_at, self.node_uuid);
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: edit.made_by,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: edit.user_metadata_json.clone(),
+            source_branch: None,
+        };
+        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
+        let previous_current = self.query_local_layer_winner(
+            &table_schema.name,
+            edit.row_uuid,
+            VersionLayer::Content,
+        )?;
+        let parent_len = match previous_current.as_ref() {
+            Some(parent) => self.large_value_column_len(&table_schema, parent, &edit.column)?,
+            None => 0,
+        };
+        let table = edit.table.clone();
+        let row_uuid = edit.row_uuid;
+        let made_by = edit.made_by;
+        let column_name = edit.column.clone();
+        let inline_ops = edit.into_text_ops();
+        validate_text_edit_ranges(parent_len, &inline_ops)?;
+        let ops = self.extent_back_text_ops(made_by, row_uuid, &column_name, inline_ops)?;
+        let cells = BTreeMap::from([(column_name, Value::Bytes(text_oplog::encode(&ops)))]);
+        let parents = previous_current
+            .as_ref()
+            .map(|previous| self.version_tx_id(previous))
+            .transpose()?
+            .into_iter()
+            .collect();
+        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
+        let stored = VersionRow::from_parts_with_schema_version(
+            &table_schema,
+            VersionRowParts {
+                table,
+                row_uuid,
+                tx_node_alias,
+                schema_version_alias,
+                tx_time: made_at,
+                parents,
+                cells,
+                deletion: None,
+            },
+            (write_schema_version != self.catalogue.current_schema_version_id)
+                .then_some(write_schema_version),
+        )?;
+        let mut batch = self.database.open_batch();
+        batch.insert(
+            "jazz_transactions",
+            transaction_values(
+                tx_node_alias,
+                &tx,
+                Fate::Pending,
+                None,
+                DurabilityTier::Local,
+            ),
+        );
+        batch.insert_raw(
+            version_storage_table_name_for_schema(
+                &table_schema.name,
+                stored.layer(),
+                write_schema_version,
+                self.catalogue.current_schema_version_id,
+            ),
+            history_primary_key(&stored),
+            stored.record.raw().to_vec(),
+        );
+        self.write_ahead_current_insert(&mut batch, &stored);
+        for parent in stored.parents() {
+            if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
+                batch.insert(
+                    "jazz_pending_edges",
+                    pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
+                );
+            }
+        }
+        self.database.commit_batch(batch)?;
+        self.invalidate_tx_version_tables_cache(tx_id);
+        self.record_child_edges(tx_id, stored.parents());
+        Ok(tx_id)
+    }
+
+    /// Commit a local mergeable write and return its sync commit unit.
+    pub fn commit_mergeable_unit(
+        &mut self,
+        commit: MergeableCommit,
+    ) -> Result<(TxId, SyncMessage), Error> {
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
+        let version = VersionRecord::from_commit(&commit, &table_schema, write_schema_version)?;
+        let tx_id = self.commit_mergeable(commit)?;
+        let tx = self
+            .query_transaction(tx_id)?
+            .ok_or(Error::MissingTransaction(tx_id))?
+            .tx
+            .clone();
+        Ok((
+            tx_id,
+            SyncMessage::CommitUnit {
+                tx,
+                versions: vec![version],
+            },
+        ))
+    }
+
+    /// Rebuild the sync commit unit for an already-committed local transaction
+    /// from its stored versions.
+    ///
+    /// Used by the `Db` sync surface to upload a client's local writes upstream
+    /// on a connection. Unlike [`NodeState::commit_mergeable_unit`] this reads the
+    /// stored versions (carrying any large-value extent refs), so the shipped
+    /// unit matches what the author actually stored.
+    pub fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
+        let tx = self
+            .query_transaction(tx_id)?
+            .ok_or(Error::MissingTransaction(tx_id))?
+            .tx
+            .clone();
+        let versions = self
+            .query_versions_for_tx(tx_id)?
+            .into_iter()
+            .map(|row| self.version_record_from_row(&row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(SyncMessage::CommitUnit { tx, versions })
+    }
+
+    /// Open an exclusive transaction over the current snapshot.
+    pub fn visible_current_cells(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        Ok(self
+            .current_rows(table, DurabilityTier::Local)?
+            .into_iter()
+            .find(|row| row.row_uuid() == row_uuid)
+            .map(|row| {
+                let table_schema = self.table(table).expect("table exists");
+                table_schema
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        row.cell(table_schema, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect()
+            }))
+    }
+
+    /// Return current rows at the requested durability tier.
+    pub fn current_rows(
+        &mut self,
+        table: &str,
+        settled: DurabilityTier,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table(table)?.clone();
+        if matches!(settled, DurabilityTier::Global) {
+            return self.global_current_rows_from_storage(table, &table_schema);
+        }
+        if matches!(settled, DurabilityTier::Edge) && self.ahead_current_table_is_empty(table) {
+            return self.global_current_rows_from_storage(table, &table_schema);
+        }
+        if matches!(settled, DurabilityTier::Local) && self.ahead_current_table_is_empty(table) {
+            return self.global_current_rows_from_storage(table, &table_schema);
+        }
+        if matches!(settled, DurabilityTier::Edge) {
+            return self.edge_current_rows_from_overlay(table, &table_schema);
+        }
+        if matches!(settled, DurabilityTier::Local) {
+            return self.local_current_rows_from_overlay(table, &table_schema);
+        }
+        let graph = self
+            .query
+            .current_row_graphs
+            .get(&(table.to_owned(), settled))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue("missing current row graph"))?;
+        let deltas = self.database.query_graph(graph).map_err(Error::Groove)?;
+        let mut rows = Vec::new();
+        for (record, weight) in deltas.iter() {
+            if weight <= 0 {
+                continue;
+            }
+            let row = decode_current_row(&table_schema, record)?;
+            rows.push(self.materialize_current_row(&table_schema, row)?);
+        }
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
+    fn local_current_rows_from_overlay(
+        &mut self,
+        table: &str,
+        table_schema: &TableSchema,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.current_rows_from_overlay(table, table_schema, None)
+    }
+
+    fn edge_current_rows_from_overlay(
+        &mut self,
+        table: &str,
+        table_schema: &TableSchema,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.current_rows_from_overlay(table, table_schema, Some(DurabilityTier::Edge))
+    }
+
+    fn current_rows_from_overlay(
+        &mut self,
+        table: &str,
+        table_schema: &TableSchema,
+        min_ahead_durability: Option<DurabilityTier>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut rows = self
+            .global_current_rows_from_storage(table, table_schema)?
+            .into_iter()
+            .map(|row| (row.row_uuid(), row))
+            .collect::<BTreeMap<_, _>>();
+        let affected_rows = self
+            .ahead_current_rows
+            .iter()
+            .filter_map(|(candidate, row_uuid)| (candidate == table).then_some(*row_uuid))
+            .collect::<BTreeSet<_>>();
+
+        for row_uuid in affected_rows {
+            let content = self.current_layer_winner_for_ahead_row(
+                table,
+                row_uuid,
+                VersionLayer::Content,
+                min_ahead_durability,
+            )?;
+            let deletion = self.current_layer_winner_for_ahead_row(
+                table,
+                row_uuid,
+                VersionLayer::Deletion,
+                min_ahead_durability,
+            )?;
+            if deletion
+                .as_ref()
+                .and_then(VersionRow::deletion)
+                .is_some_and(|event| event == DeletionEvent::Deleted)
+            {
+                rows.remove(&row_uuid);
+            } else if let Some(content) = content {
+                rows.insert(
+                    row_uuid,
+                    self.current_row_from_materialized_version(table_schema, &content)?,
+                );
+            } else {
+                rows.remove(&row_uuid);
+            }
+        }
+
+        let mut rows = rows.into_values().collect::<Vec<_>>();
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
+    fn current_layer_winner_for_ahead_row(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        min_ahead_durability: Option<DurabilityTier>,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = self.query_global_layer_winner(table, row_uuid, layer)?;
+        if min_ahead_durability.is_none() {
+            if let Some((tx_time, tx_node_alias)) = self
+                .ahead_current_latest
+                .get(&(table.to_owned(), layer, row_uuid))
+                .copied()
+                && winner.as_ref().is_none_or(|current| {
+                    (tx_time, tx_node_alias) > (current.tx_time(), current.tx_node_alias())
+                })
+            {
+                winner =
+                    self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)?;
+            }
+            return Ok(winner);
+        }
+        let ahead_candidates = self
+            .ahead_current_keys
+            .iter()
+            .filter_map(
+                |(candidate, candidate_layer, candidate_row, tx_time, tx_node_alias)| {
+                    (candidate == table && *candidate_layer == layer && *candidate_row == row_uuid)
+                        .then_some((*tx_time, *tx_node_alias))
+                },
+            )
+            .collect::<Vec<_>>();
+
+        for (tx_time, tx_node_alias) in ahead_candidates {
+            let Some(candidate) =
+                self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)?
+            else {
+                continue;
+            };
+            if let Some(min_durability) = min_ahead_durability {
+                let tx_id = self.version_tx_id(&candidate)?;
+                let Some(tx) = self.query_transaction(tx_id)? else {
+                    continue;
+                };
+                if !matches!(tx.fate, Fate::Accepted) || tx.durability < min_durability {
+                    continue;
+                }
+            }
+            if winner.as_ref().is_none_or(|current| {
+                (candidate.tx_time(), candidate.tx_node_alias())
+                    > (current.tx_time(), current.tx_node_alias())
+            }) {
+                winner = Some(candidate);
+            }
+        }
+
+        Ok(winner)
+    }
+
+    fn ahead_current_table_is_empty(&self, table: &str) -> bool {
+        !self
+            .ahead_current_rows
+            .iter()
+            .any(|(candidate, _)| candidate == table)
+    }
+
+    fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+        self.ahead_current_keys.clear();
+        self.ahead_current_rows.clear();
+        self.ahead_current_latest.clear();
+        for table in self.catalogue.schema.tables.clone() {
+            let storage_tables = table.ahead_current_storage_tables();
+            let content_rows = self
+                .database
+                .primary_key_scan_raw(&storage_tables[0].name, &[])?
+                .into_iter()
+                .map(|raw| raw.raw().to_vec())
+                .collect::<Vec<_>>();
+            let content_descriptor = storage_tables[0].record_schema();
+            for raw in content_rows {
+                let record = BorrowedRecord::new(&raw, &content_descriptor);
+                self.insert_ahead_current_key(
+                    table.name.clone(),
+                    VersionLayer::Content,
+                    RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
+                    TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
+                );
+            }
+            let deletion_descriptor = storage_tables[1].record_schema();
+            let deletion_rows = self
+                .database
+                .primary_key_scan_raw(&storage_tables[1].name, &[])?
+                .into_iter()
+                .map(|raw| raw.raw().to_vec())
+                .collect::<Vec<_>>();
+            for raw in deletion_rows {
+                let record = BorrowedRecord::new(&raw, &deletion_descriptor);
+                self.insert_ahead_current_key(
+                    table.name.clone(),
+                    VersionLayer::Deletion,
+                    RowUuid(record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
+                    TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                    NodeAlias(
+                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_ahead_current_key(
+        &mut self,
+        table: String,
+        layer: VersionLayer,
+        row_uuid: RowUuid,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) {
+        self.ahead_current_keys
+            .insert((table.clone(), layer, row_uuid, tx_time, tx_node_alias));
+        self.ahead_current_rows.insert((table.clone(), row_uuid));
+        self.ahead_current_latest
+            .entry((table, layer, row_uuid))
+            .and_modify(|latest| {
+                if (tx_time, tx_node_alias) > *latest {
+                    *latest = (tx_time, tx_node_alias);
+                }
+            })
+            .or_insert((tx_time, tx_node_alias));
+    }
+
+    fn remove_ahead_current_key(
+        &mut self,
+        table: &str,
+        layer: VersionLayer,
+        row_uuid: RowUuid,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) {
+        let table_key = table.to_owned();
+        self.ahead_current_keys.remove(&(
+            table_key.clone(),
+            layer,
+            row_uuid,
+            tx_time,
+            tx_node_alias,
+        ));
+        let latest_key = (table_key.clone(), layer, row_uuid);
+        if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
+            let start = (table_key.clone(), layer, row_uuid, TxTime(0), NodeAlias(0));
+            let end = (
+                table_key.clone(),
+                layer,
+                row_uuid,
+                TxTime(u64::MAX),
+                NodeAlias(u64::MAX),
+            );
+            if let Some((_, _, _, next_time, next_alias)) = self
+                .ahead_current_keys
+                .range(start..=end)
+                .next_back()
+                .cloned()
+            {
+                self.ahead_current_latest
+                    .insert(latest_key, (next_time, next_alias));
+            } else {
+                self.ahead_current_latest.remove(&latest_key);
+            }
+        }
+        if !self.ahead_current_latest.contains_key(&(
+            table_key.clone(),
+            VersionLayer::Content,
+            row_uuid,
+        )) && !self.ahead_current_latest.contains_key(&(
+            table_key.clone(),
+            VersionLayer::Deletion,
+            row_uuid,
+        )) {
+            self.ahead_current_rows.remove(&(table_key, row_uuid));
+        }
+    }
+
+    fn global_current_rows_from_storage(
+        &mut self,
+        table: &str,
+        table_schema: &TableSchema,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let storage_tables = table_schema.global_current_storage_tables();
+        let content_current_table = &storage_tables[0].name;
+        let deletion_current_table = &storage_tables[1].name;
+        let content_current_descriptor = storage_tables[0].record_schema();
+        let deletion_current_descriptor = storage_tables[1].record_schema();
+        let needs_large_value_materialization = table_schema
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some());
+        let content_descriptor = needs_large_value_materialization
+            .then(|| table_schema.history_storage_table().record_schema());
+
+        let mut deleted_rows = BTreeSet::new();
+        let deletion_records = self
+            .database
+            .primary_key_scan_raw(deletion_current_table, &[])?
+            .into_iter()
+            .map(|raw| raw.raw().to_vec())
+            .collect::<Vec<_>>();
+        for raw in deletion_records {
+            let record = BorrowedRecord::new(&raw, &deletion_current_descriptor);
+            let deletion = deletion_event_from_value(
+                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+            )?;
+            if deletion == DeletionEvent::Deleted {
+                deleted_rows.insert(RowUuid(
+                    record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
+                ));
+            }
+        }
+
+        let content_records = self
+            .database
+            .primary_key_scan_raw(content_current_table, &[])?
+            .into_iter()
+            .map(|raw| raw.raw().to_vec())
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for raw in content_records {
+            let record = BorrowedRecord::new(&raw, &content_current_descriptor);
+            let row_uuid = RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
+            if deleted_rows.contains(&row_uuid) {
+                continue;
+            }
+            let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+            let tx_node_alias =
+                NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            if !needs_large_value_materialization {
+                rows.push(current_row_from_global_current_record(
+                    table_schema,
+                    record,
+                )?);
+                continue;
+            }
+            let version = self
+                .query_version_by_alias_with_descriptor(
+                    table,
+                    row_uuid,
+                    VersionLayer::Content,
+                    tx_time,
+                    tx_node_alias,
+                    content_descriptor
+                        .as_ref()
+                        .expect("large-value path has history descriptor"),
+                )?
+                .ok_or(Error::MissingTransaction(TxId::new(
+                    tx_time,
+                    self.node_for_alias(tx_node_alias)
+                        .ok_or(Error::InvalidStoredValue(
+                            "global current node alias must exist",
+                        ))?,
+                )))?;
+            rows.push(self.current_row_from_materialized_version(table_schema, &version)?);
+        }
+        sort_current_rows(&mut rows);
+        Ok(rows)
+    }
+
+    fn encode_large_value_cells(
+        &mut self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+        writer: AuthorId,
+        mut cells: BTreeMap<String, Value>,
+        parent: Option<&VersionRow>,
+    ) -> Result<BTreeMap<String, Value>, Error> {
+        for column in table
+            .columns
+            .iter()
+            .filter(|column| column.large_value.is_some())
+        {
+            let Some(Value::Bytes(new_value)) = cells.get(&column.name).cloned() else {
+                continue;
+            };
+            let parent_value = match parent {
+                Some(parent) => self.materialize_large_value_column(table, parent, &column.name)?,
+                None => Vec::new(),
+            };
+            let ops = text_oplog::diff(&parent_value, &new_value)
+                .into_iter()
+                .collect::<Vec<_>>();
+            let ops = self.extent_back_text_ops(writer, row_uuid, &column.name, ops)?;
+            cells.insert(column.name.clone(), Value::Bytes(text_oplog::encode(&ops)));
+        }
+        Ok(cells)
+    }
+
+    fn extent_back_text_ops(
+        &self,
+        writer: AuthorId,
+        row_uuid: RowUuid,
+        column: &str,
+        ops: Vec<TextOp>,
+    ) -> Result<Vec<TextOp>, Error> {
+        ops.into_iter()
+            .map(|op| match op {
+                TextOp::Insert {
+                    pos,
+                    content: TextContent::Inline(bytes),
+                } => {
+                    let extent = self
+                        .content_store()
+                        .append(writer, row_uuid, column, &bytes)?;
+                    Ok(TextOp::Insert {
+                        pos,
+                        content: TextContent::Ref(extent),
+                    })
+                }
+                TextOp::Insert {
+                    content: TextContent::Ref(_),
+                    ..
+                } => Err(Error::InvalidStoredValue(
+                    "text op input already has ref content",
+                )),
+                TextOp::Delete { pos, len } => Ok(TextOp::Delete { pos, len }),
+            })
+            .collect()
+    }
+
+    fn materialize_large_value_column(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+    ) -> Result<Vec<u8>, Error> {
+        self.large_value_metrics.materializations =
+            self.large_value_metrics.materializations.saturating_add(1);
+        let winner_tx_id = self.version_tx_id(winner)?;
+        let cache_key = large_value_cache_key(table, winner.row_uuid(), column, winner_tx_id);
+        if let Some(value) = self.large_value_materialization_cache.get(&cache_key) {
+            self.large_value_metrics.last_replayed_ops = 0;
+            self.large_value_metrics.last_replayed_versions = 0;
+            return Ok(value.clone());
+        }
+        let mut suffix = Vec::new();
+        let mut current = winner_tx_id;
+        let mut checkpoint = None;
+        loop {
+            let version = self
+                .query_versions_for_tx(current)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(current))?;
+            if let Some(value) =
+                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
+            {
+                checkpoint = Some(value);
+                self.large_value_metrics.checkpoint_hits =
+                    self.large_value_metrics.checkpoint_hits.saturating_add(1);
+                break;
+            }
+            let parents = version.parents();
+            suffix.push(version);
+            match parents.as_slice() {
+                [] => break,
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+        suffix.reverse();
+
+        let mut value = checkpoint.unwrap_or_default();
+        let mut replayed_ops = 0usize;
+        for version in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+                continue;
+            };
+            let stored_ops = text_oplog::decode(&payload)?;
+            replayed_ops =
+                replayed_ops
+                    .checked_add(stored_ops.len())
+                    .ok_or(Error::InvalidStoredValue(
+                        "large value replay op count overflow",
+                    ))?;
+            let ops = self.resolve_text_op_refs(stored_ops)?;
+            value = text_oplog::replay(&value, &ops);
+        }
+        self.large_value_metrics.last_replayed_ops = replayed_ops;
+        self.large_value_metrics.total_replayed_ops = self
+            .large_value_metrics
+            .total_replayed_ops
+            .saturating_add(replayed_ops as u64);
+        self.large_value_metrics.last_replayed_versions = suffix.len();
+        if replayed_ops >= self.large_value_checkpoint_op_interval {
+            self.put_large_value_checkpoint(table, winner, column, &value)?;
+            self.large_value_metrics.checkpoint_writes =
+                self.large_value_metrics.checkpoint_writes.saturating_add(1);
+        }
+        self.cache_large_value_materialization(cache_key, value.clone());
+        Ok(value)
+    }
+
+    fn cache_large_value_materialization(&mut self, key: LargeValueCacheKey, value: Vec<u8>) {
+        if !self.large_value_materialization_cache.contains_key(&key)
+            && self.large_value_materialization_cache.len()
+                >= LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES
+            && let Some(oldest_key) = self
+                .large_value_materialization_cache
+                .first_key_value()
+                .map(|(key, _)| key.clone())
+        {
+            self.large_value_materialization_cache.remove(&oldest_key);
+        }
+        self.large_value_materialization_cache.insert(key, value);
+    }
+
+    pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
+        self.query.tx_version_tables_cache.get(&tx_id).cloned()
+    }
+
+    pub(super) fn cache_tx_version_tables(&mut self, tx_id: TxId, tables: BTreeSet<String>) {
+        if self.query.tx_version_tables_cache_order_set.insert(tx_id) {
+            self.query.tx_version_tables_cache_order.push_back(tx_id);
+        }
+        self.query.tx_version_tables_cache.insert(tx_id, tables);
+        while self.query.tx_version_tables_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES {
+            let Some(oldest) = self.query.tx_version_tables_cache_order.pop_front() else {
+                break;
+            };
+            if !self.query.tx_version_tables_cache_order_set.remove(&oldest) {
+                continue;
+            }
+            self.query.tx_version_tables_cache.remove(&oldest);
+        }
+    }
+
+    pub(super) fn invalidate_tx_version_tables_cache(&mut self, tx_id: TxId) {
+        self.query.tx_version_tables_cache.remove(&tx_id);
+        self.query.tx_version_tables_cache_order_set.remove(&tx_id);
+    }
+
+    fn large_value_checkpoint(
+        &self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+        column: &str,
+        version: TxId,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.content_store()
+            .checkpoint(&table.name, row_uuid, column, version)
+    }
+
+    fn put_large_value_checkpoint(
+        &self,
+        table: &TableSchema,
+        version: &VersionRow,
+        column: &str,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        let tx_id = self.version_tx_id(version)?;
+        self.content_store()
+            .put_checkpoint(&table.name, version.row_uuid(), column, tx_id, value)
+    }
+
+    pub(super) fn checkpoint_large_values_for_tx(&mut self, tx_id: TxId) -> Result<(), Error> {
+        let versions = self.query_versions_for_tx(tx_id)?;
+        for version in versions {
+            if version.layer() != VersionLayer::Content {
+                continue;
+            }
+            let table = self.table(version.table())?.clone();
+            for column in table
+                .columns
+                .iter()
+                .filter(|column| column.large_value.is_some())
+            {
+                if version.cell(&table, &column.name)?.is_none() {
+                    continue;
+                }
+                if self.large_value_replay_ops_since_checkpoint(&table, &version, &column.name)?
+                    < self.large_value_checkpoint_op_interval
+                {
+                    continue;
+                }
+                let _ = self.materialize_large_value_column(&table, &version, &column.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn large_value_replay_ops_since_checkpoint(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+    ) -> Result<usize, Error> {
+        let mut replayed_ops = 0usize;
+        let mut current = self.version_tx_id(winner)?;
+        loop {
+            let version = self
+                .query_versions_for_tx(current)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(current))?;
+            if self
+                .large_value_checkpoint(table, version.row_uuid(), column, current)?
+                .is_some()
+            {
+                return Ok(replayed_ops);
+            }
+            if let Some(Value::Bytes(payload)) = version.cell(table, column)? {
+                let op_count = text_oplog::decode(&payload)?.len();
+                replayed_ops =
+                    replayed_ops
+                        .checked_add(op_count)
+                        .ok_or(Error::InvalidStoredValue(
+                            "large value replay op count overflow",
+                        ))?;
+            }
+            let parents = version.parents();
+            match parents.as_slice() {
+                [] => return Ok(replayed_ops),
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+    }
+
+    fn large_value_column_len(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+    ) -> Result<usize, Error> {
+        let mut suffix = Vec::new();
+        let mut current = self.version_tx_id(winner)?;
+        let mut checkpoint_len = None;
+        loop {
+            let version = self
+                .query_versions_for_tx(current)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(current))?;
+            if let Some(value) =
+                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
+            {
+                checkpoint_len = Some(value.len());
+                break;
+            }
+            let parents = version.parents();
+            suffix.push(version);
+            match parents.as_slice() {
+                [] => break,
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+        suffix.reverse();
+
+        let mut value_len = checkpoint_len.unwrap_or_default();
+        for version in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+                continue;
+            };
+            for op in text_oplog::decode(&payload)? {
+                match op {
+                    TextOp::Insert { content, .. } => {
+                        value_len = value_len
+                            .checked_add(text_content_len(&content)?)
+                            .ok_or(Error::InvalidStoredValue("large value length overflow"))?;
+                    }
+                    TextOp::Delete { len, .. } => {
+                        value_len = value_len
+                            .checked_sub(len)
+                            .ok_or(Error::InvalidStoredValue("large value length underflow"))?;
+                    }
+                }
+            }
+        }
+        Ok(value_len)
+    }
+
+    fn large_value_primary_parent(&mut self, parents: &[TxId]) -> Result<TxId, Error> {
+        parents
+            .iter()
+            .copied()
+            .map(|parent| {
+                let made_at = self
+                    .transaction_made_at(parent)?
+                    .ok_or(Error::MissingTransaction(parent))?;
+                Ok((made_at.sort_key(parent.node), parent))
+            })
+            .collect::<Result<Vec<_>, Error>>()?
+            .into_iter()
+            .max_by_key(|(key, _)| *key)
+            .map(|(_, parent)| parent)
+            .ok_or(Error::InvalidStoredValue(
+                "large value materialization requires at least one parent",
+            ))
+    }
+
+    /// Deterministic counters for large-value materialization and checkpoint use.
+    pub fn large_value_metrics(&self) -> &LargeValueMetrics {
+        &self.large_value_metrics
+    }
+
+    /// Reset large-value materialization counters.
+    pub fn reset_large_value_metrics(&mut self) {
+        self.large_value_metrics = LargeValueMetrics::default();
+    }
+
+    fn resolve_text_op_refs(&self, ops: Vec<TextOp>) -> Result<Vec<TextOp>, Error> {
+        ops.into_iter()
+            .map(|op| match op {
+                TextOp::Insert {
+                    pos,
+                    content: TextContent::Ref(extent),
+                } => Ok(TextOp::Insert {
+                    pos,
+                    content: TextContent::Inline(self.content_store().read(&extent)?),
+                }),
+                TextOp::Insert { .. } | TextOp::Delete { .. } => Ok(op),
+            })
+            .collect()
+    }
+
+    fn materialize_current_row(
+        &mut self,
+        table: &TableSchema,
+        row: CurrentRow,
+    ) -> Result<CurrentRow, Error> {
+        if !table
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some())
+        {
+            return Ok(row);
+        }
+        let Some((tx_time, tx_node_alias)) = row.projected_tx_alias() else {
+            return Ok(row);
+        };
+        let Some(version) = self.query_version_by_alias(
+            &table.name,
+            row.row_uuid(),
+            VersionLayer::Content,
+            tx_time,
+            tx_node_alias,
+        )?
+        else {
+            return Ok(row);
+        };
+        self.current_row_from_materialized_version(table, &version)
+    }
+
+    fn current_row_from_materialized_version(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+    ) -> Result<CurrentRow, Error> {
+        if !table
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some())
+        {
+            return current_row_from_version_projection(table, version);
+        }
+        let mut cells = BTreeMap::new();
+        for column in &table.columns {
+            let value = if column.large_value.is_some() {
+                Some(Value::Bytes(self.materialize_large_value_column(
+                    table,
+                    version,
+                    &column.name,
+                )?))
+            } else {
+                version.cell(table, &column.name)?
+            };
+            if let Some(value) = value {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+        current_row_from_materialized_cells(table, version, &cells)
+    }
+
+    /// Subscribe to the raw history storage table.
+    pub fn sync_metrics(&self) -> &SyncMetrics {
+        &self.sync_metrics
+    }
+
+    /// Published schema-version payloads known to this node.
+    pub fn catalogue_schemas(&self) -> &BTreeMap<SchemaVersionId, SchemaVersion> {
+        &self.catalogue.catalogue_schemas
+    }
+
+    /// Published migration lenses known to this node.
+    pub fn catalogue_lenses(&self) -> &BTreeMap<MigrationLensId, MigrationLens> {
+        &self.catalogue.catalogue_lenses
+    }
+
+    /// Current write-schema pointer known to this node.
+    pub fn current_write_schema(&self) -> CurrentWriteSchema {
+        self.catalogue.current_write_schema
+    }
+
+    /// Durable partition registry entries known at open time.
+    pub fn partitions(&self) -> &BTreeSet<(String, SchemaVersionId)> {
+        &self.catalogue.partitions
+    }
+
+    /// Return a historical read handle at an exact global settle position.
+    pub fn at(&mut self, position: GlobalSeq) -> HistoricalRead<'_, S> {
+        HistoricalRead {
+            node: self,
+            position,
+        }
+    }
+
+    /// Return a historical read handle for the latest settle position whose
+    /// transaction time is less than or equal to `time`.
+    ///
+    /// This is deterministic, not a wall-clock truth claim: concurrent or
+    /// offline writers can settle in an order that disagrees with transaction
+    /// HLC time, so this convenience address is best-effort under clock skew.
+    pub fn at_time(&mut self, time: TxTime) -> Result<HistoricalRead<'_, S>, Error> {
+        let position = self.resolve_time_travel_position(time)?;
+        Ok(self.at(position))
+    }
+
+    /// Return whether this node can answer a historical query locally.
+    ///
+    /// v1 is conservative: authorities/history-complete nodes can answer cuts
+    /// up to their contiguous applied watermark; partial clients return false
+    /// so callers route the one-shot read to a server in a later protocol slice.
+    pub fn is_history_complete_for(&self, _shape: &ValidatedQuery, position: GlobalSeq) -> bool {
+        self.history_complete && position <= self.clock.applied_global_watermark
+    }
+
+    /// Return current rows for a subscription at the requested tier.
+    pub fn subscription_current_rows(
+        &mut self,
+        table: &str,
+        settled: DurabilityTier,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table_schema = self.table(table)?.clone();
+        let subscription = self.whole_table_subscription_key(table)?;
+        match settled {
+            DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled),
+            DurabilityTier::Edge => self.current_rows(table, settled),
+            DurabilityTier::Global => {
+                let Some(row_result_set) = self.query.settled_result_sets.get(&subscription) else {
+                    return Ok(Vec::new());
+                };
+                let content_descriptor = table_schema.history_storage_table().record_schema();
+                let mut rows = Vec::new();
+                for (entry_table, row_uuid, tx_id) in row_result_set.clone() {
+                    if entry_table.as_str() != table {
+                        continue;
+                    }
+                    let tx_node_alias = self
+                        .node_aliases
+                        .get(&tx_id.node)
+                        .copied()
+                        .ok_or(Error::MissingTransaction(tx_id))?;
+                    let version = self
+                        .query_version_by_alias_with_descriptor(
+                            table,
+                            row_uuid,
+                            VersionLayer::Content,
+                            tx_id.time,
+                            tx_node_alias,
+                            &content_descriptor,
+                        )?
+                        .ok_or(Error::MissingTransaction(tx_id))?;
+                    rows.push(current_row_from_cells(
+                        &table_schema,
+                        version.row_uuid(),
+                        &version.cells(&table_schema)?,
+                    )?);
+                }
+                sort_current_rows(&mut rows);
+                Ok(rows)
+            }
+        }
+    }
+
+    /// Return the legacy transaction fate tuple.
+    pub fn transaction_state(
+        &mut self,
+        tx_id: TxId,
+    ) -> Option<(Fate, Option<GlobalSeq>, DurabilityTier)> {
+        self.transaction_record(tx_id)
+            .map(|record| (record.fate, record.global_seq, record.durability))
+    }
+
+    /// Return the durable audit record for a transaction, including rejected
+    /// transactions whose row versions were removed from history.
+    pub fn transaction_record(&mut self, tx_id: TxId) -> Option<TransactionRecord> {
+        self.query_transaction(tx_id)
+            .ok()
+            .flatten()
+            .map(|stored| stored.to_record())
+    }
+
+    pub(crate) fn current_row_tx_id(&self, row: &CurrentRow) -> Option<TxId> {
+        let (time, alias) = row.projected_tx_alias()?;
+        Some(TxId::new(time, self.node_for_alias(alias)?))
+    }
+
+    /// Return locally-originated rejected transactions retained for retry.
+    pub fn rejected_transactions(&self) -> Vec<TxId> {
+        self.rejections
+            .rejected_transactions
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Return a locally-originated rejected transaction payload retained for retry.
+    pub fn rejected_transaction(&self, tx_id: TxId) -> Option<RejectedTransaction> {
+        self.rejections.rejected_transactions.get(&tx_id).cloned()
+    }
+
+    /// Discard a locally-retained rejected transaction after the app acknowledges it.
+    pub fn discard_rejection(&mut self, tx_id: TxId) -> Result<(), Error> {
+        if tx_id.node != self.node_uuid {
+            return Ok(());
+        }
+        let Some(alias) = self.node_aliases.get(&self.node_uuid).copied() else {
+            return Ok(());
+        };
+        let mut batch = self.database.open_batch();
+        batch.delete(
+            "jazz_rejected_transactions",
+            rejected_transaction_primary_key(alias, tx_id),
+        );
+        for table in self.catalogue.schema.tables.clone() {
+            let storage_table = rejected_versions_table_name(&table.name);
+            for raw in self.database.primary_key_scan_raw(
+                &storage_table,
+                &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+            )? {
+                let record = raw.record();
+                let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
+                let time = record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?;
+                if node_id != alias.0 || time != tx_id.time.0 {
+                    continue;
+                }
+                batch.delete(
+                    storage_table.clone(),
+                    rejected_version_primary_key_from_record(&record)?,
+                );
+            }
+        }
+        self.database.commit_batch(batch)?;
+        self.rejections.rejected_transactions.remove(&tx_id);
+        Ok(())
+    }
+
+    /// Return stored edit-history entries for one row ordered by HLC
+    /// observation order.
+    ///
+    /// The parents DAG is the authoritative causal structure; HLC order is a
+    /// readable observation order. This method intentionally does no policy
+    /// filtering: per the README visibility rule, if a current version is
+    /// readable then all history for that visible row is readable, and a node
+    /// only stores versions it may hold. Rejected transaction versions are not
+    /// returned because rejection cleanup removes their stored row versions;
+    /// use [`SingleNode::transaction_record`] for the transaction audit state.
+    pub fn row_history(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<HistoryEntry>, Error> {
+        let mut entries = Vec::new();
+        for version in self.query_row_versions(table, row_uuid)? {
+            let tx_id = self.version_tx_id(&version)?;
+            let tx = self
+                .query_transaction(tx_id)?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            let local_current = self
+                .query_local_layer_winner(table, row_uuid, version.layer())?
+                .as_ref()
+                .map(|winner| {
+                    self.version_tx_id(winner)
+                        .is_ok_and(|winner_tx| winner_tx == tx_id)
+                })
+                .unwrap_or(false);
+            let global_current = self
+                .query_global_layer_winner(table, row_uuid, version.layer())?
+                .as_ref()
+                .map(|winner| {
+                    self.version_tx_id(winner)
+                        .is_ok_and(|winner_tx| winner_tx == tx_id)
+                })
+                .unwrap_or(false);
+            entries.push(version.to_history_entry(&tx, local_current, global_current));
+        }
+        entries.sort_by_key(|entry| entry.tx_id().time.sort_key(entry.tx_id().node));
+        Ok(entries)
+    }
+
+    /// Consume the node and return the underlying groove database.
+    pub fn into_database(self) -> Database<S> {
+        self.database.into_inner()
+    }
+
+    /// Eagerly remove a Groove subscription from the runtime.
+    pub(crate) fn unsubscribe_groove_subscription(
+        &mut self,
+        subscription_id: groove::ivm::SubscriptionId,
+    ) -> bool {
+        self.database.unsubscribe(subscription_id)
+    }
+
+    pub(crate) fn groove_runtime_token(&self) -> u64 {
+        self.groove_runtime_token
+    }
+
+    /// Return metrics for the most recent committed storage batch, if any.
+    pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
+        self.database.last_commit_metrics()
+    }
+
+    /// Return accumulated storage-read metrics since the last reset.
+    pub fn storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
+        self.database.storage_read_metrics()
+    }
+
+    /// Reset accumulated storage-read metrics.
+    pub fn reset_storage_read_metrics(&self) {
+        self.database.reset_storage_read_metrics();
+    }
+
+    /// Return accumulated storage-read metrics and reset them.
+    pub fn take_storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
+        self.database.take_storage_read_metrics()
+    }
+
+    fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema".to_vec()),
+                Value::Uuid(schema.id.0),
+                Value::Bytes(serde_json::to_vec(schema)?),
+            ],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn persist_catalogue_lens(&mut self, lens: &MigrationLens) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"lens".to_vec()),
+                Value::Uuid(lens.id.0),
+                Value::Bytes(serde_json::to_vec(lens)?),
+            ],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn persist_catalogue_pointer(&mut self, pointer: CurrentWriteSchema) -> Result<(), Error> {
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_catalogue_pointer",
+            vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn persist_partition(
+        &mut self,
+        table: impl Into<String>,
+        schema_version: SchemaVersionId,
+    ) -> Result<bool, Error> {
+        let table = table.into();
+        if !self
+            .catalogue
+            .partitions
+            .insert((table.clone(), schema_version))
+        {
+            return Ok(false);
+        }
+        let mut batch = self.database.open_batch();
+        batch.update(
+            "jazz_partitions",
+            vec![
+                Value::Bytes(table.as_bytes().to_vec()),
+                Value::Uuid(schema_version.0),
+            ],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(true)
+    }
+
+    fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
+        if node_uuid == self.node_uuid
+            && let Some(alias) = self.self_node_alias
+        {
+            return Ok(alias);
+        }
+        if let Some(alias) = self.node_aliases.get(&node_uuid) {
+            if node_uuid == self.node_uuid {
+                self.self_node_alias = Some(*alias);
+            }
+            return Ok(*alias);
+        }
+        let mut max_alias = self
+            .node_aliases
+            .values()
+            .map(|alias| alias.0)
+            .max()
+            .unwrap_or(0);
+        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+            let record = raw.record();
+            let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
+            max_alias = max_alias.max(alias.0);
+            if record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)? == node_uuid.0 {
+                self.node_aliases.insert(node_uuid, alias);
+                if node_uuid == self.node_uuid {
+                    self.self_node_alias = Some(alias);
+                }
+                return Ok(alias);
+            }
+        }
+        let alias = NodeAlias(max_alias + 1);
+        self.node_aliases.insert(node_uuid, alias);
+        if node_uuid == self.node_uuid {
+            self.self_node_alias = Some(alias);
+        }
+        let mut batch = self.database.open_batch();
+        batch.insert(
+            "jazz_nodes",
+            vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(alias)
+    }
+
+    fn ensure_schema_version_alias(
+        &mut self,
+        schema_version_id: SchemaVersionId,
+    ) -> Result<SchemaVersionAlias, Error> {
+        if schema_version_id == self.catalogue.current_schema_version_id
+            && let Some(alias) = self.catalogue.current_schema_version_alias
+        {
+            return Ok(alias);
+        }
+        if let Some(alias) = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version_id)
+        {
+            if schema_version_id == self.catalogue.current_schema_version_id {
+                self.catalogue.current_schema_version_alias = Some(*alias);
+            }
+            return Ok(*alias);
+        }
+        let mut max_alias = self
+            .catalogue
+            .schema_version_aliases
+            .values()
+            .map(|alias| alias.0)
+            .max()
+            .unwrap_or(0);
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_schema_versions", &[])?
+        {
+            let record = raw.record();
+            let alias =
+                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
+            max_alias = max_alias.max(alias.0);
+            if record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)? == schema_version_id.0
+            {
+                self.catalogue
+                    .schema_version_aliases
+                    .insert(schema_version_id, alias);
+                if schema_version_id == self.catalogue.current_schema_version_id {
+                    self.catalogue.current_schema_version_alias = Some(alias);
+                }
+                return Ok(alias);
+            }
+        }
+        let alias = SchemaVersionAlias(max_alias + 1);
+        self.catalogue
+            .schema_version_aliases
+            .insert(schema_version_id, alias);
+        if schema_version_id == self.catalogue.current_schema_version_id {
+            self.catalogue.current_schema_version_alias = Some(alias);
+        }
+        let mut batch = self.database.open_batch();
+        batch.insert(
+            "jazz_schema_versions",
+            vec![Value::U64(alias.0), Value::Uuid(schema_version_id.0)],
+        );
+        self.database.commit_batch(batch)?;
+        Ok(alias)
+    }
+
+    pub(super) fn schema_version_for_alias(
+        &self,
+        alias: SchemaVersionAlias,
+    ) -> Option<SchemaVersionId> {
+        self.catalogue
+            .schema_version_aliases
+            .iter()
+            .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
+    }
+
+    fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
+        if self
+            .query_transaction(child)
+            .ok()
+            .flatten()
+            .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
+        {
+            return;
+        }
+        for parent in parents {
+            if self
+                .query_transaction(parent)
+                .ok()
+                .flatten()
+                .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
+            {
+                continue;
+            }
+            self.rejections
+                .child_txs_by_parent
+                .entry(parent)
+                .or_default()
+                .insert(child);
+        }
+    }
+
+    fn prune_child_edges(&mut self, child: TxId) {
+        self.rejections.child_txs_by_parent.retain(|_, children| {
+            children.remove(&child);
+            !children.is_empty()
+        });
+    }
+
+    pub(crate) fn table(&self, table: &str) -> Result<&TableSchema, Error> {
+        self.catalogue
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+    }
+
+    pub(super) fn table_in_schema(
+        &self,
+        table: &str,
+        schema_version: SchemaVersionId,
+    ) -> Result<TableSchema, Error> {
+        if schema_version == self.catalogue.current_schema_version_id {
+            return self.table(table).cloned();
+        }
+        self.catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .and_then(|schema| {
+                schema
+                    .schema
+                    .tables
+                    .iter()
+                    .find(|candidate| candidate.name == table)
+                    .cloned()
+            })
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+    }
+
+    pub(super) fn shortest_lens_path_ids_cached(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        direction: LensPathDirection,
+    ) -> Option<Vec<MigrationLensId>> {
+        let key = LensPathCacheKey {
+            source,
+            target,
+            direction,
+        };
+        if let Some(path) = self.catalogue.lens_path_cache.get(&key) {
+            return path.clone();
+        }
+        let path = self.shortest_lens_path_ids(source, target, direction);
+        self.catalogue.lens_path_cache.insert(key, path.clone());
+        path
+    }
+
+    fn shortest_lens_path_ids(
+        &self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        direction: LensPathDirection,
+    ) -> Option<Vec<MigrationLensId>> {
+        if source == target {
+            return Some(Vec::new());
+        }
+
+        let mut seen = BTreeSet::from([source]);
+        let mut queue = VecDeque::from([(source, Vec::<MigrationLensId>::new())]);
+        while let Some((schema, path)) = queue.pop_front() {
+            for lens in self.ordered_lens_edges(schema, direction) {
+                let next = match direction {
+                    LensPathDirection::Forward => lens.target,
+                    LensPathDirection::Reverse => lens.source,
+                };
+                if seen.contains(&next) {
+                    continue;
+                }
+                let mut next_path = path.clone();
+                next_path.push(lens.id);
+                if next == target {
+                    return Some(next_path);
+                }
+                seen.insert(next);
+                queue.push_back((next, next_path));
+            }
+        }
+        None
+    }
+
+    pub(super) fn compiled_lens_path(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        direction: LensPathDirection,
+        table: &str,
+    ) -> Result<Option<CompiledLensPath>, Error> {
+        let key = CompiledLensCacheKey {
+            source,
+            target,
+            direction,
+            table: table.to_owned(),
+        };
+        if let Some(path) = self.catalogue.compiled_lens_cache.get(&key) {
+            return Ok(path.clone());
+        }
+
+        let Some(lens_ids) = self.shortest_lens_path_ids_cached(source, target, direction) else {
+            self.catalogue.compiled_lens_cache.insert(key, None);
+            return Ok(None);
+        };
+        let mut current_table = table.to_owned();
+        let mut ops = Vec::new();
+        for lens_id in lens_ids {
+            let lens = self
+                .catalogue
+                .catalogue_lenses
+                .get(&lens_id)
+                .ok_or(Error::InvalidCatalogueUpdate("lens chain is unknown"))?;
+            let table_lens = match direction {
+                LensPathDirection::Forward => lens
+                    .table_lenses
+                    .iter()
+                    .find(|candidate| candidate.source_table == current_table),
+                LensPathDirection::Reverse => lens
+                    .table_lenses
+                    .iter()
+                    .find(|candidate| candidate.target_table == current_table),
+            }
+            .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            match direction {
+                LensPathDirection::Forward => {
+                    for op in &table_lens.ops {
+                        push_compiled_forward_lens_op(op, &mut ops)?;
+                    }
+                    current_table = table_lens.target_table.clone();
+                }
+                LensPathDirection::Reverse => {
+                    for op in table_lens.ops.iter().rev() {
+                        push_compiled_reverse_lens_op(op, &mut ops)?;
+                    }
+                    current_table = table_lens.source_table.clone();
+                }
+            }
+        }
+        let path = Some(CompiledLensPath {
+            target_table: current_table,
+            ops,
+        });
+        self.catalogue.compiled_lens_cache.insert(key, path.clone());
+        Ok(path)
+    }
+
+    fn ordered_lens_edges(
+        &self,
+        schema: SchemaVersionId,
+        direction: LensPathDirection,
+    ) -> Vec<&MigrationLens> {
+        let mut edges = self
+            .catalogue
+            .catalogue_lenses
+            .values()
+            .filter(|lens| match direction {
+                LensPathDirection::Forward => lens.source == schema,
+                LensPathDirection::Reverse => lens.target == schema,
+            })
+            .collect::<Vec<_>>();
+        edges.sort_by(|left, right| {
+            let left_next = match direction {
+                LensPathDirection::Forward => left.target,
+                LensPathDirection::Reverse => left.source,
+            };
+            let right_next = match direction {
+                LensPathDirection::Forward => right.target,
+                LensPathDirection::Reverse => right.source,
+            };
+            left_next
+                .cmp(&right_next)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        edges
+    }
+
+    fn node_for_alias(&self, alias: NodeAlias) -> Option<NodeUuid> {
+        self.node_aliases
+            .iter()
+            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+    }
+
+    pub(super) fn version_tx_id(&self, version: &VersionRow) -> Result<TxId, Error> {
+        let node =
+            self.node_for_alias(version.tx_node_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "history tx node alias must exist",
+                ))?;
+        Ok(TxId::new(version.tx_time(), node))
+    }
+
+    fn version_made_at(&mut self, version: &VersionRow) -> Result<TxTime, Error> {
+        let tx_id = self.version_tx_id(version)?;
+        self.transaction_made_at(tx_id)?
+            .ok_or(Error::MissingTransaction(tx_id))
+    }
+
+    fn version_record_from_row(&self, version: &VersionRow) -> Result<VersionRecord, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "history schema version alias must exist",
+            ))?;
+        let table = self.table_in_schema(version.table(), schema_version)?;
+        VersionRecord::from_stored(version, &table, schema_version)
+    }
+
+    fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {
+        let made_at = TxTime::tick(self.clock.tx_time, now_ms);
+        self.clock.tx_time = made_at;
+        made_at
+    }
+
+    fn merge_tx_time(&mut self, observed: TxTime) {
+        self.clock.tx_time = self.clock.tx_time.max(observed);
+    }
+}
+
+pub(super) fn apply_compiled_lens_path(
+    path: &CompiledLensPath,
+    cells: &mut BTreeMap<String, Value>,
+) -> String {
+    for op in &path.ops {
+        match op {
+            CompiledLensOp::Rename { from, to } => {
+                if let Some(value) = cells.remove(from) {
+                    cells.insert(to.clone(), value);
+                }
+            }
+            CompiledLensOp::Copy { from, to } => {
+                if let Some(value) = cells.get(from).cloned() {
+                    cells.insert(to.clone(), value);
+                }
+            }
+            CompiledLensOp::Add { column, default } => {
+                cells
+                    .entry(column.clone())
+                    .or_insert_with(|| default.clone());
+            }
+            CompiledLensOp::Drop { column } => {
+                cells.remove(column);
+            }
+        }
+    }
+    path.target_table.clone()
+}
+
+fn push_compiled_forward_lens_op(
+    op: &LensOp,
+    compiled: &mut Vec<CompiledLensOp>,
+) -> Result<(), Error> {
+    match op {
+        LensOp::RenameTable { .. } => {}
+        LensOp::RenameColumn { from, to } => {
+            compiled.push(CompiledLensOp::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        LensOp::CopyColumn { from, to } => {
+            compiled.push(CompiledLensOp::Copy {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        LensOp::AddColumn { column, default } => {
+            compiled.push(CompiledLensOp::Add {
+                column: column.clone(),
+                default: default.clone(),
+            });
+        }
+        LensOp::DropColumn { column, .. } => {
+            compiled.push(CompiledLensOp::Drop {
+                column: column.clone(),
+            });
+        }
+        LensOp::TransformColumn { transform, .. } => {
+            validate_registered_transform(transform)?;
+        }
+        LensOp::RejectSourceDelta { .. } => {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens op is not naturally mappable",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn push_compiled_reverse_lens_op(
+    op: &LensOp,
+    compiled: &mut Vec<CompiledLensOp>,
+) -> Result<(), Error> {
+    match op {
+        LensOp::RenameTable { .. } => {}
+        LensOp::RenameColumn { from, to } => {
+            compiled.push(CompiledLensOp::Rename {
+                from: to.clone(),
+                to: from.clone(),
+            });
+        }
+        LensOp::CopyColumn { to, .. } => {
+            compiled.push(CompiledLensOp::Drop { column: to.clone() });
+        }
+        LensOp::AddColumn { column, .. } => {
+            compiled.push(CompiledLensOp::Drop {
+                column: column.clone(),
+            });
+        }
+        LensOp::DropColumn {
+            column,
+            backwards_default,
+        } => {
+            compiled.push(CompiledLensOp::Add {
+                column: column.clone(),
+                default: backwards_default.clone(),
+            });
+        }
+        LensOp::TransformColumn { transform, .. } => {
+            validate_registered_transform(transform)?;
+        }
+        LensOp::RejectSourceDelta { .. } => {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens op is not naturally mappable",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_registered_transform(transform: &str) -> Result<(), Error> {
+    let Some(semantics) = registered_column_transform(transform) else {
+        return Err(Error::InvalidCatalogueUpdate(
+            "transform column is not registered",
+        ));
+    };
+    if !semantics.bijective || !semantics.canonical_equality_preserving {
+        return Err(Error::InvalidCatalogueUpdate(
+            "transform column is not bijective and canonical-preserving",
+        ));
+    }
+    Ok(())
+}
+
+/// Current-row result backed by an encoded projected record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentRow {
+    table: groove::Intern<String>,
+    record: OwnedRecord,
+    deleted: bool,
+}
+
+impl CurrentRow {
+    /// Construct a current row from an encoded projection record.
+    pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
+        Self {
+            table: groove::Intern::new(table.into()),
+            record,
+            deleted: false,
+        }
+    }
+
+    pub(crate) fn into_deleted(mut self) -> Self {
+        self.deleted = true;
+        self
+    }
+
+    /// Whether this row was returned as a current deleted row by an opt-in read.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// Logical table name.
+    pub fn table(&self) -> &str {
+        self.table.as_str()
+    }
+
+    /// Row id.
+    pub fn row_uuid(&self) -> RowUuid {
+        RowUuid(
+            self.record
+                .borrowed()
+                .get_uuid(CurrentRowRecord::FIELD_ROW_UUID_IDX)
+                .expect("valid current row_uuid"),
+        )
+    }
+
+    /// Cell value by application-schema column position.
+    pub fn cell_at(&self, column_position: usize) -> Option<Value> {
+        nullable_value(
+            self.record
+                .borrowed()
+                .get_idx(CurrentRowRecord::USER_CELLS + column_position)
+                .expect("valid current user cell"),
+        )
+        .expect("valid nullable current user cell")
+    }
+
+    /// Cell value by application column name using the table schema to resolve position.
+    pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
+        let _ = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        let user_name = format!("user_{column}");
+        let idx = self.record.descriptor().fields().iter().position(|field| {
+            field.name.as_deref() == Some(user_name.as_str())
+                || field.name.as_deref() == Some(column)
+        })?;
+        nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()?
+    }
+
+    /// Encoded groove record backing this projected current row.
+    pub fn encoded_record(&self) -> (&records::RecordDescriptor, &[u8]) {
+        (self.record.descriptor(), self.record.raw())
+    }
+
+    pub(crate) fn project(&self, table: &TableSchema, columns: &[String]) -> Result<Self, Error> {
+        let selected = columns.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let projected_columns = table
+            .columns
+            .iter()
+            .filter(|column| selected.contains(column.name.as_str()))
+            .collect::<Vec<_>>();
+        let descriptor = records::RecordDescriptor::new(
+            std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
+                .chain(projected_columns.iter().map(|column| {
+                    (
+                        format!("user_{}", column.name),
+                        records::ValueType::Nullable(Box::new(
+                            column.column_type.clone().value_type(),
+                        )),
+                    )
+                }))
+                .chain([
+                    ("tx_time".to_owned(), records::ValueType::U64),
+                    ("tx_node_id".to_owned(), records::ValueType::U64),
+                ]),
+        );
+        let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        for column in projected_columns {
+            values.push(Value::Nullable(
+                self.cell(table, &column.name).map(Box::new),
+            ));
+        }
+        if let Some((time, node)) = self.projected_tx_alias() {
+            values.push(Value::U64(time.0));
+            values.push(Value::U64(node.0));
+        } else {
+            values.push(Value::U64(0));
+            values.push(Value::U64(0));
+        }
+        let raw = descriptor.create(&values)?;
+        Ok(Self::new(
+            table.name.clone(),
+            OwnedRecord::new(raw, descriptor),
+        ))
+    }
+
+    pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {
+        // Located by name: graph outputs may project additional fields (e.g.
+        // binding params) after the tx columns, so position is not stable.
+        let fields = self.record.descriptor().fields();
+        let stamp_idx = fields
+            .iter()
+            .position(|field| field.name.as_deref() == Some("tx_time"))?;
+        let alias_idx = stamp_idx + 1;
+        if fields.get(alias_idx)?.name.as_deref() != Some("tx_node_id") {
+            return None;
+        }
+        let borrowed = self.record.borrowed();
+        Some((
+            TxTime(borrowed.get_u64(stamp_idx).ok()?),
+            NodeAlias(borrowed.get_u64(alias_idx).ok()?),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
+        self.record
+            .descriptor()
+            .fields()
+            .iter()
+            .enumerate()
+            .skip(CurrentRowRecord::USER_CELLS)
+            .filter_map(|(idx, field)| {
+                if matches!(field.name.as_deref(), Some("tx_time" | "tx_node_id")) {
+                    return None;
+                }
+                let name = field
+                    .name
+                    .as_ref()?
+                    .strip_prefix("user_")
+                    .unwrap_or(field.name.as_ref()?)
+                    .to_owned();
+                let value = self.cell_at(idx - CurrentRowRecord::USER_CELLS)?;
+                Some((name, value))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<(RowUuid, BTreeMap<String, Value>)> for CurrentRow {
+    fn eq(&self, other: &(RowUuid, BTreeMap<String, Value>)) -> bool {
+        self.row_uuid() == other.0 && self.test_cells_by_descriptor() == other.1
+    }
+}
+
+/// Cheap read-only handle for historical settled-state reads.
+pub struct HistoricalRead<'node, S>
+where
+    S: OrderedKvStorage,
+{
+    node: &'node mut NodeState<S>,
+    position: GlobalSeq,
+}
+
+impl<S> HistoricalRead<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    /// Global settle position this handle reads at.
+    pub fn position(&self) -> GlobalSeq {
+        self.position
+    }
+}
+
+/// Deterministic counters for storage-backed sync ingestion.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyncMetrics {
+    /// Commit units parked because parents were missing.
+    pub parked_orphans: u64,
+    /// Parked commit units later resolved.
+    pub parked_orphans_resolved: u64,
+    /// Commit units parked because row schema versions were missing from the catalogue.
+    pub parked_catalogue_orphans: u64,
+    /// Catalogue-orphan commit units later resolved.
+    pub parked_catalogue_orphans_resolved: u64,
+    /// Shape registrations parked because their schema version was missing.
+    pub parked_catalogue_shapes: u64,
+    /// Parked shape registrations later resolved by catalogue arrival.
+    pub parked_catalogue_shapes_resolved: u64,
+}
+
+/// Deterministic counters for large-value materialization and checkpoint use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LargeValueMetrics {
+    /// Number of large-value materializations performed.
+    pub materializations: u64,
+    /// Total decoded edit operations replayed across materializations.
+    pub total_replayed_ops: u64,
+    /// Edit operations replayed by the most recent materialization.
+    pub last_replayed_ops: usize,
+    /// Version rows replayed by the most recent materialization.
+    pub last_replayed_versions: usize,
+    /// Materializations that found and used a local checkpoint.
+    pub checkpoint_hits: u64,
+    /// Local checkpoints written by materialization.
+    pub checkpoint_writes: u64,
+}
+
+/// Handle for an open exclusive transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpenTxId(u64);
+
+/// Explicit edit operation for one text/blob column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LargeValueEditOp {
+    /// Insert bytes at a parent-relative byte offset.
+    Insert(usize, Vec<u8>),
+    /// Delete bytes from a parent-relative byte range.
+    Delete(usize, usize),
+}
+
+/// Builder for a local mergeable text/blob edit commit.
+#[derive(Clone, Debug)]
+pub struct LargeValueEditCommit {
+    /// Target table.
+    pub table: String,
+    /// Target row.
+    pub row_uuid: RowUuid,
+    /// Target text/blob column.
+    pub column: String,
+    /// Author making the commit.
+    pub made_by: AuthorId,
+    /// Abstract wall clock at the committing node.
+    pub now_ms: u64,
+    /// Explicit edit operations.
+    pub ops: Vec<LargeValueEditOp>,
+    /// Optional application metadata.
+    pub user_metadata_json: Option<String>,
+}
+
+impl LargeValueEditCommit {
+    /// Construct an empty explicit edit commit builder.
+    pub fn new(
+        table: impl Into<String>,
+        row_uuid: RowUuid,
+        column: impl Into<String>,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            table: table.into(),
+            row_uuid,
+            column: column.into(),
+            made_by: AuthorId::SYSTEM,
+            now_ms,
+            ops: Vec::new(),
+            user_metadata_json: None,
+        }
+    }
+
+    /// Set the commit author.
+    pub fn made_by(mut self, made_by: AuthorId) -> Self {
+        self.made_by = made_by;
+        self
+    }
+
+    /// Append an insert operation.
+    pub fn insert(mut self, pos: usize, bytes: impl Into<Vec<u8>>) -> Self {
+        self.ops.push(LargeValueEditOp::Insert(pos, bytes.into()));
+        self
+    }
+
+    /// Append a delete operation.
+    pub fn delete(mut self, pos: usize, len: usize) -> Self {
+        self.ops.push(LargeValueEditOp::Delete(pos, len));
+        self
+    }
+
+    /// Replace the edit operations.
+    pub fn ops(mut self, ops: Vec<LargeValueEditOp>) -> Self {
+        self.ops = ops;
+        self
+    }
+
+    /// Attach application metadata.
+    pub fn user_metadata(mut self, json: String) -> Self {
+        self.user_metadata_json = Some(json);
+        self
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        if self.ops.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "large-value edit requires at least one operation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn into_text_ops(self) -> Vec<TextOp> {
+        self.ops
+            .into_iter()
+            .map(|op| match op {
+                LargeValueEditOp::Insert(pos, bytes) => TextOp::Insert {
+                    pos,
+                    content: TextContent::Inline(bytes),
+                },
+                LargeValueEditOp::Delete(pos, len) => TextOp::Delete { pos, len },
+            })
+            .collect()
+    }
+}
+
+/// Builder for a local mergeable commit.
+pub struct MergeableCommit {
+    /// Target table.
+    pub table: String,
+    /// Target row.
+    pub row_uuid: RowUuid,
+    /// Author making the commit.
+    pub made_by: AuthorId,
+    /// Identity used for write-policy evaluation.
+    pub permission_subject: Option<AuthorId>,
+    /// Abstract wall clock at the committing node.
+    pub now_ms: u64,
+    /// User cells for content versions.
+    pub cells: BTreeMap<String, Value>,
+    /// Deletion-register event, if any.
+    pub deletion: Option<DeletionEvent>,
+    /// Parent content versions.
+    pub parents: Vec<TxId>,
+    /// Optional application metadata.
+    pub user_metadata_json: Option<String>,
+}
+
+impl MergeableCommit {
+    /// Construct an empty mergeable commit builder.
+    pub fn new(table: impl Into<String>, row_uuid: RowUuid, now_ms: u64) -> Self {
+        Self {
+            table: table.into(),
+            row_uuid,
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            now_ms,
+            cells: BTreeMap::new(),
+            deletion: None,
+            parents: Vec::new(),
+            user_metadata_json: None,
+        }
+    }
+
+    /// Set the commit author.
+    pub fn made_by(mut self, made_by: AuthorId) -> Self {
+        self.made_by = made_by;
+        self
+    }
+
+    /// Set the authenticated identity used for write policy.
+    pub fn permission_subject(mut self, permission_subject: AuthorId) -> Self {
+        self.permission_subject = Some(permission_subject);
+        self
+    }
+
+    pub(crate) fn effective_permission_subject(&self) -> AuthorId {
+        self.permission_subject.unwrap_or(self.made_by)
+    }
+
+    /// Set user cells for a content version.
+    pub fn cells<V: Into<Value>>(mut self, cells: BTreeMap<String, V>) -> Self {
+        self.cells = cells
+            .into_iter()
+            .map(|(column, value)| (column, value.into()))
+            .collect();
+        self
+    }
+
+    /// Set one user cell for a content version.
+    pub fn cell(mut self, column: impl Into<String>, value: Value) -> Self {
+        self.cells.insert(column.into(), value);
+        self
+    }
+
+    /// Set a deletion-register event.
+    pub fn deletion(mut self, deletion: DeletionEvent) -> Self {
+        self.deletion = Some(deletion);
+        self
+    }
+
+    /// Set parent content versions.
+    pub fn parents(mut self, parents: Vec<TxId>) -> Self {
+        self.parents = parents;
+        self
+    }
+
+    /// Attach application metadata.
+    pub fn user_metadata(mut self, json: String) -> Self {
+        self.user_metadata_json = Some(json);
+        self
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())
+    }
+}
+
+struct ViewUpdateParts {
+    subscription: SubscriptionKey,
+    reset_result_set: bool,
+    version_bundles: Vec<VersionBundle>,
+    peer_complete_tx_payload_refs: Vec<TxId>,
+    result_row_adds: Vec<ResultRowEntry>,
+    result_row_removes: Vec<ResultRowEntry>,
+}
+
+#[derive(Default)]
+struct IngestMemo {
+    tx_exists: BTreeMap<TxId, bool>,
+    tx_made_at: BTreeMap<TxId, Option<TxTime>>,
+}
+
+struct CatalogueOpenState<S> {
+    storage: S,
+    schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
+    lenses: BTreeMap<MigrationLensId, MigrationLens>,
+    current_write_schema: CurrentWriteSchema,
+    partitions: BTreeSet<(String, SchemaVersionId)>,
+    branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,
+}
+
+struct DatabaseSlot<S> {
+    database: Option<Database<S>>,
+}
+
+impl<S> DatabaseSlot<S> {
+    fn new(database: Database<S>) -> Self {
+        Self {
+            database: Some(database),
+        }
+    }
+
+    fn take(&mut self) -> Database<S> {
+        self.database
+            .take()
+            .expect("node database slot must be populated outside rebuild")
+    }
+
+    fn replace(&mut self, database: Database<S>) {
+        debug_assert!(self.database.is_none());
+        self.database = Some(database);
+    }
+
+    fn into_inner(mut self) -> Database<S> {
+        self.take()
+    }
+}
+
+impl<S> Deref for DatabaseSlot<S> {
+    type Target = Database<S>;
+
+    fn deref(&self) -> &Self::Target {
+        self.database
+            .as_ref()
+            .expect("node database slot must be populated")
+    }
+}
+
+impl<S> DerefMut for DatabaseSlot<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.database
+            .as_mut()
+            .expect("node database slot must be populated")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PreparedQueryPlan {
+    Graph(GraphBuilder),
+    Prepared {
+        shape: PreparedShapeId,
+        param_names: Vec<String>,
+        param_types: Vec<groove::schema::ColumnType>,
+    },
+}
+
+fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> Result<(), Error> {
+    match (cells_empty, deletion_present) {
+        (false, false) | (true, true) => Ok(()),
+        (false, true) => Err(Error::InvalidMergeableCommit(
+            "content versions cannot also carry deletion-register events",
+        )),
+        (true, false) => Err(Error::InvalidMergeableCommit(
+            "mergeable commits must carry content cells or a deletion-register event",
+        )),
+    }
+}
+
+fn validate_text_edit_ranges(parent_len: usize, ops: &[TextOp]) -> Result<(), Error> {
+    let mut value_len = parent_len;
+    for (op_index, op) in ops.iter().enumerate() {
+        let pos = match op {
+            TextOp::Insert { pos, .. } | TextOp::Delete { pos, .. } => *pos,
+        };
+        let adjusted_pos = adjusted_text_edit_pos(pos, &ops[..op_index], value_len)?;
+        match op {
+            TextOp::Insert { content, .. } => {
+                if adjusted_pos > value_len {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value insert position is out of bounds",
+                    ));
+                }
+                value_len = value_len.checked_add(text_content_len(content)?).ok_or(
+                    Error::InvalidMergeableCommit("large-value edit length overflows"),
+                )?;
+            }
+            TextOp::Delete { len, .. } => {
+                let end = adjusted_pos
+                    .checked_add(*len)
+                    .ok_or(Error::InvalidMergeableCommit(
+                        "large-value delete range overflows",
+                    ))?;
+                if end > value_len {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value delete range is out of bounds",
+                    ));
+                }
+                value_len -= len;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn adjusted_text_edit_pos(
+    pos: usize,
+    prior_ops: &[TextOp],
+    value_len: usize,
+) -> Result<usize, Error> {
+    let mut adjusted = pos;
+    for prior_op in prior_ops {
+        match prior_op {
+            TextOp::Insert {
+                pos: prior_pos,
+                content,
+            } => {
+                if *prior_pos <= pos {
+                    adjusted = adjusted.checked_add(text_content_len(content)?).ok_or(
+                        Error::InvalidMergeableCommit("large-value edit position overflows"),
+                    )?;
+                }
+            }
+            TextOp::Delete {
+                pos: prior_pos,
+                len,
+            } => {
+                if *prior_pos < pos {
+                    let deleted_before_pos = (*len).min(pos - prior_pos);
+                    adjusted = adjusted.checked_sub(deleted_before_pos).ok_or(
+                        Error::InvalidMergeableCommit("large-value edit position underflows"),
+                    )?;
+                }
+            }
+        }
+    }
+    if adjusted > value_len {
+        return Err(Error::InvalidMergeableCommit(
+            "large-value edit position is out of bounds",
+        ));
+    }
+    Ok(adjusted)
+}
+
+fn text_content_len(content: &TextContent) -> Result<usize, Error> {
+    match content {
+        TextContent::Inline(bytes) => Ok(bytes.len()),
+        TextContent::Ref(extent) => usize::try_from(extent.len).map_err(|_| {
+            Error::InvalidMergeableCommit("large-value edit content length exceeds usize")
+        }),
+    }
+}
+
+fn large_value_cache_key(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    column: &str,
+    tx_id: TxId,
+) -> LargeValueCacheKey {
+    (table.name.clone(), row_uuid, column.to_owned(), tx_id)
+}
+
+fn select_all(table: &str) -> Query {
+    Query::Select(Box::new(
+        Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
+    ))
+}
+
+/// Error type returned by the storage-backed node API.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// Error returned by groove.
+    #[error(transparent)]
+    Groove(#[from] GrooveDbError),
+    /// Error returned by groove records.
+    #[error(transparent)]
+    Record(#[from] records::Error),
+    /// Error returned by storage.
+    #[error(transparent)]
+    Storage(#[from] storage::Error),
+    /// Error returned by query validation or binding.
+    #[error(transparent)]
+    Query(#[from] QueryError),
+    /// Table was not found in the schema.
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+    /// Column type is not supported by Jazz v0.
+    #[error("M1 only supports string user columns, got unsupported column: {0}")]
+    UnsupportedColumnType(String),
+    /// Mergeable commit shape is invalid.
+    #[error("invalid mergeable commit: {0}")]
+    InvalidMergeableCommit(&'static str),
+    /// Stored value failed validation.
+    #[error("invalid stored value: {0}")]
+    InvalidStoredValue(&'static str),
+    /// Transaction was not known locally.
+    #[error("missing transaction: {0:?}")]
+    MissingTransaction(TxId),
+    /// View update payload was internally inconsistent.
+    #[error("malformed view update: {0}")]
+    MalformedViewUpdate(&'static str),
+    /// Open transaction handle was not known.
+    #[error("missing open transaction: {0:?}")]
+    MissingOpenTx(OpenTxId),
+    /// Fate or global-current update was non-monotone.
+    #[error("non-monotone state update: {0}")]
+    NonMonotoneState(&'static str),
+    /// Commit unit conflicted with an existing transaction.
+    #[error("conflicting commit unit for transaction: {0:?}")]
+    ConflictingCommitUnit(TxId),
+    /// Fate transition conflicted with an existing fate.
+    #[error("conflicting fate transition")]
+    ConflictingFate,
+    /// Commit unit kind is unsupported.
+    #[error("unsupported commit unit: {0}")]
+    UnsupportedCommitUnit(&'static str),
+    /// Sync message kind is unsupported.
+    #[error("unsupported sync message: {0}")]
+    UnsupportedSyncMessage(&'static str),
+    /// Catalogue lane message was not authorized.
+    #[error("unauthorized catalogue update")]
+    UnauthorizedCatalogueUpdate,
+    /// Catalogue payload failed validation.
+    #[error("invalid catalogue update: {0}")]
+    InvalidCatalogueUpdate(&'static str),
+    /// Durable catalogue payload could not be encoded or decoded.
+    #[error(transparent)]
+    CatalogueCodec(#[from] serde_json::Error),
+    /// Historical read must be evaluated by a history-complete server.
+    #[error("historical read requires server evaluation")]
+    HistoricalReadRequiresServer,
+    /// Branch id was not known locally.
+    #[error("branch not found: {0:?}")]
+    BranchNotFound(BranchId),
+    /// Branch is no longer open for writes.
+    #[error("branch is not open: {0:?}")]
+    BranchClosed(BranchId),
+    /// Branch-scoped exclusive transactions are not implemented in v1.
+    #[error("exclusive transactions on branches are unsupported in v1")]
+    UnsupportedBranchExclusive,
+    /// The authenticated identity is not authorized for this operation.
+    #[error("authorization denied")]
+    AuthorizationDenied,
+    /// A prepared point-read subscription closed before its initial snapshot.
+    #[error("prepared point-read subscription closed")]
+    SubscriptionClosed,
+}

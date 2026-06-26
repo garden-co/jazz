@@ -1,0 +1,166 @@
+# jazz — Specification · 7. Authorization (RLS)
+
+jazz authorization is row-level security expressed as queries. Policies describe
+which authenticated identities may read or write rows; the fate authority applies
+write policy before accepting data, and upstream nodes apply read policy before
+shipping data to a peer. This chapter defines the policy model, write
+authorization, read narrowing, and policy composition. It builds on queries
+(ch. 6) and the transaction/fate machinery (ch. 3).
+
+## 7.1 Policies are shapes
+
+Each table may define a read policy and a write policy. A policy is an optional
+`Query` (ch. 6) over the protected row's columns and the authenticated claims
+for the peer being evaluated (`read_policy: Option<Query>` and `write_policy:
+Option<Query>`). If the policy is absent, the operation is **public** for that
+table (`TableSchema::new` defaults both policies to `None`, `INV-RLS-15`).
+
+An owner-only policy is the canonical single-subject policy: it selects rows
+whose ownership column equals the authenticated subject
+(`Policy::owner_only(table, column)` is exactly
+`Query::from(table).filter(eq(col(column), claim("sub")))`). The `claim("sub")`
+operand is the authenticated `AuthorId`, not a caller-supplied parameter
+(`INV-RLS-3`). A policy must validate as a shape rooted at the table that carries
+it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
+(`INV-RLS-2`).
+
+Policy evaluation is **fail-closed**: an unsupported predicate/operator form or
+an unresolved operand denies rather than allows (`INV-RLS-14`). Direct policy
+evaluation supports equality and inequality, boolean composition, columns,
+literals, and authenticated subject claims: `Eq`/`Ne`/`All`/`Any`/`Not` over
+column / literal / `claim("sub")`. The claims `team` and `isAdmin` are valid
+claim names at the query-shape layer, but policies must not rely on them until
+direct evaluation resolves them; unresolved claims deny under the fail-closed
+rule (see Open questions).
+
+## 7.2 Write authorization
+
+Write policy is an acceptance gate, not a post-acceptance filter. The fate
+authority evaluates it **before acceptance** for every version in the commit
+unit. If any version fails, the whole unit is rejected as
+`Fate::Rejected(RejectionReason::AuthorizationDenied)`: it receives no
+`global_seq`, makes no durability claim, is audit-only, contributes no accepted
+rows, and causes descendants to cascade as described in ch. 3 (`INV-RLS-1`).
+
+Uploaded commit units are authorized under the **authenticated link identity**,
+not under the self-declared `Transaction.made_by`. A normal `Session` link must
+upload units whose `made_by` equals that authenticated link identity; otherwise,
+the unit is rejected as `AuthorizationDenied`. A `TrustedBackend` link may
+upload a unit with `made_by != identity`, but write policy is still evaluated
+against the link/backend identity while `made_by` remains provenance
+(`INV-RLS-18`; compare the local facade attribution rule, `INV-RLS-17`). A
+deletion-register version is authorized against the **current global content
+winner** for that row, not against the deletion record; a delete with no current
+global content is denied (`INV-RLS-7`).
+
+Branch-scoped writes add a first-level gate before table write policy. The
+writer must be able to write the branch metadata row, and the table write policy
+is then evaluated inside that branch's overlay-first view (ch. 11,
+`INV-BRANCH-15`).
+
+Authorization deliberately separates authorship from permission identity.
+`made_by` is the *author* attribution and is not necessarily the *permission*
+identity: a trusted backend (ch. 9, ch. 13) may authenticate as itself while
+attributing a mutation to a user. That **attribution-only** case stores user
+authorship while evaluating policy against the backend identity. Four identities
+are worth keeping distinct:
+
+| identity | what it is | used for |
+|---|---|---|
+| `made_by` (author) | who a mutation is *attributed* to (`Transaction.made_by`) | provenance (`$createdBy`); *not* necessarily the permission subject |
+| authenticated identity (`AuthorId`) | who a connection authenticated as | the subject read/write policies are evaluated against |
+| attribution-only | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13) |
+| `AuthorId::SYSTEM` | the system identity | bypasses all policies; relay links carry it (§7.3) |
+
+At the facade boundary, attributed writes are core-only unless `made_by ==
+authenticated identity`. This prevents a client from forging another user's
+provenance while still allowing a trusted core backend to evaluate policy as
+itself and store user attribution (`INV-RLS-17`, `INV-API-29`).
+
+## 7.3 Read narrowing
+
+Read policy is enforced at the point where data leaves an upstream node. For
+each peer identity, the upstream node narrows what it emits before producing any
+result-row add/remove, version bundle, rehydrate output, or query update
+(`INV-RLS-5`). A relay link carries `AuthorId::SYSTEM` and therefore does not
+narrow; an edge-client link narrows under its terminated `AuthorId`
+(`INV-RLS-11`, ch. 9).
+
+The security boundary is *upstream emission*, not local storage. Read-policy
+revocation removes rows from **future** settled result sets but does **not**
+redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
+node does not re-filter its own local reads or subscriptions by policy. The spec
+therefore makes no post-delivery confidentiality promise against a node that
+already received data: revocation is forward-looking sync narrowing.
+
+Branch reads use the same first-level gate for branch metadata. A non-system
+session may see branch overlay/base data only if it can read the branch metadata
+row, and ordinary table read policy is then evaluated inside the branch view
+(ch. 11, `INV-BRANCH-15`).
+
+## 7.4 Policy composition for query-driven sync
+
+Query-driven sync must preserve row-level security while evaluating subscribed
+shapes. It composes the root table's read policy into the subscribed shape and
+**binds the policy's claims from the server-authenticated identity, not from
+client-supplied binding values**, so a client cannot widen its visibility by
+choosing a different claim binding (`INV-RLS-10`).
+
+Join policies extend that same identity-bound evaluation across relationships. A
+join policy passes when a matching global-current row in the joined table reaches
+the protected row and its filters hold under the same identity (`INV-RLS-9`).
+
+*Further invariants.* `INV-RLS-8` — a deletion-register version is readable to a
+non-system identity only when the row has a global content winner that satisfies
+the read policy for that identity. `INV-RLS-16` — a large-value content extent is
+visible to an identity only when referenced by a version whose content row passes
+that identity's read policy (ch. 12).
+
+## 7.5 Exclusive atomicity and historical reads
+
+Exclusive transaction view shipping protects recipients from seeing an incomplete
+policy-visible fragment for the maintained subscription view. It is
+**policy-atomic per recipient and per view**: a non-system recipient receives a
+result row from an exclusive transaction only when every version required for
+that view is readable to it (`INV-RLS-12`). Versions outside that view need not be
+shipped or readable for the view to advance. This is distinct from exclusive
+serializability (ch. 3) and from write authorization: it governs only read/view
+shipping.
+
+Historical/as-of reads served for a link evaluate read policy **at the requested
+cut**. An ownership change across cuts therefore changes visibility at those
+cuts (`INV-RLS-13`, ch. 5, ch. 11).
+
+## Open questions
+
+- 🔶 **Session/auth model for bindings.** `AuthorId` is currently the runtime
+  permission subject and `claim("sub")` value, but the product boundary needs
+  explicit account/user/session/default identity terminology. Define how
+  anonymous/local sessions, authenticated users, trusted backends, system links,
+  and attribution-only writes map to `AuthorId`, claims, and link roles.
+- 🔶 **Admission API.** Server and edge shells need an admission hook that turns
+  connection credentials into a link identity, claims, role, expiry, and optional
+  backend trust. This hook must be the only source for policy claim bindings;
+  client-supplied query bindings must never widen claims (ch. 8, ch. 13).
+- 🔶 **Claims beyond `sub`.** Query validation types `sub`, `team`, and
+  `isAdmin`, but direct policy evaluation resolves only `claim("sub")`; `team`
+  and `isAdmin` currently fail closed. Decide whether `team`/`isAdmin` are
+  normative policy claims needing evaluation support or shape-composition-only.
+- 🔶 **Direct-evaluation predicate subset.** Should ch. 7 normatively pin the
+  supported policy predicate forms (with everything else fail-closed), or is the
+  subset an implementation limitation hidden behind allowed policy shapes?
+  Broader query predicates are validation-recognized but currently fail closed
+  because direct policy evaluation does not resolve them.
+- 🔶 **History visibility rule.** Decide whether current-row readability should
+  imply visibility for all historical versions of that row, or whether history
+  sync/read must evaluate read policy per historical cut.
+- 🔶 **Permission subscriptions and TTL.** Edge mergeable authorization uses
+  upstream permission-scope subscriptions (ch. 9). The current contract is
+  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
+  future policy for cache lifetime, not a source of permission truth here.
+- ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
+  columns cannot express *can-insert* or richer probes; a dry-run is policy
+  evaluation *without ingest* — the write-validation machinery applied
+  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
+  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
+  (`INV-API-28`).

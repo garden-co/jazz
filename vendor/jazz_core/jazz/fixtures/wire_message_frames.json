@@ -1,0 +1,104 @@
+{
+  "fixture_set": "jazz-wire-message-frames-v1",
+  "codec": "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
+  "protocol_version": 1,
+  "features": 1,
+  "fixtures": [
+    {
+      "name": "fate_update_accepted_global",
+      "message_family": "FateUpdate",
+      "frame_hex": "0101010018010c10111111111111111111111111111111110101070103",
+      "frame_base64": "AQEBABgBDBARERERERERERERERERERERAQEHAQM=",
+      "payload_hex": "010c10111111111111111111111111111111110101070103",
+      "decoded_debug": "FateUpdate { tx_id: TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) }, fate: Accepted, global_seq: Some(GlobalSeq(7)), durability: Some(Global) }"
+    },
+    {
+      "name": "register_shape_todos",
+      "message_family": "RegisterShape",
+      "frame_hex": "010101003302102222222222222222222222222222222200104444444444444444444444444444444405746f646f73000000000000000000",
+      "frame_base64": "AQEBADMCECIiIiIiIiIiIiIiIiIiIiIAEEREREREREREREREREREREQFdG9kb3MAAAAAAAAAAAA=",
+      "payload_hex": "02102222222222222222222222222222222200104444444444444444444444444444444405746f646f73000000000000000000",
+      "decoded_debug": "RegisterShape { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), ast: ShapeAst { version: 0, schema_version: SchemaVersionId(44444444-4444-4444-4444-444444444444), query: Query { table: \"todos\", filters: [], joins: [], reachable: [], includes: [], select: None, order_by: [], aggregate: None, limit: None, offset: 0 } }, opts: RegisterShapeOptions }"
+    },
+    {
+      "name": "binding_delta_empty_todos_binding",
+      "message_family": "BindingDelta",
+      "frame_hex": "01010100260310222222222222222222222222222222220110333333333333333333333333333333330000",
+      "frame_base64": "AQEBACYDECIiIiIiIiIiIiIiIiIiIiIBEDMzMzMzMzMzMzMzMzMzMzMAAA==",
+      "payload_hex": "0310222222222222222222222222222222220110333333333333333333333333333333330000",
+      "decoded_debug": "BindingDelta(BindingDelta { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), adds: [(BindingId(33333333-3333-3333-3333-333333333333), [])], removes: [] })"
+    },
+    {
+      "name": "view_update_reset_with_row_add",
+      "message_family": "ViewUpdate",
+      "frame_hex": "010101006308102222222222222222222222222222222210333333333333333333333333333333330100010c10111111111111111111111111111111110105746f646f7310777777777777777777777777777777770c101111111111111111111111111111111100",
+      "frame_base64": "AQEBAGMIECIiIiIiIiIiIiIiIiIiIiIQMzMzMzMzMzMzMzMzMzMzMwEAAQwQEREREREREREREREREREREQEFdG9kb3MQd3d3d3d3d3d3d3d3d3d3dwwQEREREREREREREREREREREQA=",
+      "payload_hex": "08102222222222222222222222222222222210333333333333333333333333333333330100010c10111111111111111111111111111111110105746f646f7310777777777777777777777777777777770c101111111111111111111111111111111100",
+      "decoded_debug": "ViewUpdate { subscription: SubscriptionKey { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), binding_id: BindingId(33333333-3333-3333-3333-333333333333) }, reset_result_set: true, version_bundles: [], peer_payload_inventory: PeerPayloadInventory { complete_tx_payloads: [TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) }] }, result_row_adds: [(\"todos\", RowUuid(77777777-7777-7777-7777-777777777777), TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) })], result_row_removes: [] }"
+    },
+    {
+      "name": "commit_unit_mergeable_empty",
+      "message_family": "CommitUnit",
+      "frame_hex": "0101010040000c1011111111111111111111111111111111000010555555555555555555555555555555550000000001127b2266697874757265223a2277697265227d0000",
+      "frame_base64": "AQEBAEAADBARERERERERERERERERERERAAAQVVVVVVVVVVVVVVVVVVVVVQAAAAABEnsiZml4dHVyZSI6IndpcmUifQAA",
+      "payload_hex": "000c1011111111111111111111111111111111000010555555555555555555555555555555550000000001127b2266697874757265223a2277697265227d0000",
+      "decoded_debug": "CommitUnit { tx: Transaction { tx_id: TxId { time: TxTime(12), node: NodeUuid(11111111-1111-1111-1111-111111111111) }, kind: Mergeable, n_total_writes: 0, made_by: AuthorId(55555555-5555-5555-5555-555555555555), base_snapshot: None, row_read_set: None, absent_read_set: None, predicate_read_set: None, user_metadata_json: Some(\"{\\\"fixture\\\":\\\"wire\\\"}\"), source_branch: None }, versions: [] }"
+    },
+    {
+      "name": "publish_schema_todos_body",
+      "message_family": "PublishSchema",
+      "frame_hex": "010101004204105555555555555555555555555555555510722b6701c5935da6900ca49fe87417060105746f646f7302057469746c65060004626f647907010000000000000000",
+      "frame_base64": "AQEBAEIEEFVVVVVVVVVVVVVVVVVVVVUQcitnAcWTXaaQDKSf6HQXBgEFdG9kb3MCBXRpdGxlBgAEYm9keQcBAAAAAAAAAAA=",
+      "payload_hex": "04105555555555555555555555555555555510722b6701c5935da6900ca49fe87417060105746f646f7302057469746c65060004626f647907010000000000000000",
+      "decoded_debug": "PublishSchema { author: AuthorId(55555555-5555-5555-5555-555555555555), schema: SchemaVersion { id: SchemaVersionId(722b6701-c593-5da6-900c-a49fe8741706), schema: JazzSchema { tables: [TableSchema { name: \"todos\", columns: [ColumnSchema { name: \"title\", column_type: String, large_value: None }, ColumnSchema { name: \"body\", column_type: Bytes, large_value: Some(Text) }], references: {}, read_policy: None, write_policy: None, indexed_columns: {}, merge_strategies: {} }], branch_read_policy: None, branch_write_policy: None } } }"
+    },
+    {
+      "name": "publish_lens_todos_body_identity",
+      "message_family": "PublishLens",
+      "frame_hex": "01010100680510555555555555555555555555555555551067040a1f025850ffa931e97d71aaffec104444444444444444444444444444444410454545454545454545454545454545450105746f646f7305746f646f730202057469746c65057469746c650304626f64790700",
+      "frame_base64": "AQEBAGgFEFVVVVVVVVVVVVVVVVVVVVUQZwQKHwJYUP+pMel9car/7BBEREREREREREREREREREREEEVFRUVFRUVFRUVFRUVFRUUBBXRvZG9zBXRvZG9zAgIFdGl0bGUFdGl0bGUDBGJvZHkHAA==",
+      "payload_hex": "0510555555555555555555555555555555551067040a1f025850ffa931e97d71aaffec104444444444444444444444444444444410454545454545454545454545454545450105746f646f7305746f646f730202057469746c65057469746c650304626f64790700",
+      "decoded_debug": "PublishLens { author: AuthorId(55555555-5555-5555-5555-555555555555), lens: MigrationLens { id: MigrationLensId(67040a1f-0258-50ff-a931-e97d71aaffec), source: SchemaVersionId(44444444-4444-4444-4444-444444444444), target: SchemaVersionId(45454545-4545-4545-4545-454545454545), table_lenses: [TableLens { source_table: \"todos\", target_table: \"todos\", ops: [CopyColumn { from: \"title\", to: \"title\" }, AddColumn { column: \"body\", default: Bytes([]) }] }] } }"
+    },
+    {
+      "name": "set_current_write_schema_revision",
+      "message_family": "SetCurrentWriteSchema",
+      "frame_hex": "0101010024061055555555555555555555555555555555091045454545454545454545454545454545",
+      "frame_base64": "AQEBACQGEFVVVVVVVVVVVVVVVVVVVVUJEEVFRUVFRUVFRUVFRUVFRUU=",
+      "payload_hex": "061055555555555555555555555555555555091045454545454545454545454545454545",
+      "decoded_debug": "SetCurrentWriteSchema { author: AuthorId(55555555-5555-5555-5555-555555555555), pointer: CurrentWriteSchema { revision: 9, schema: SchemaVersionId(45454545-4545-4545-4545-454545454545) } }"
+    },
+    {
+      "name": "catalogue_ack_schema_applied",
+      "message_family": "CatalogueAck",
+      "frame_hex": "010101002807010301104444444444444444444444444444444401106666666666666666666666666666666601",
+      "frame_base64": "AQEBACgHAQMBEEREREREREREREREREREREQBEGZmZmZmZmZmZmZmZmZmZmYB",
+      "payload_hex": "07010301104444444444444444444444444444444401106666666666666666666666666666666601",
+      "decoded_debug": "CatalogueAck(CatalogueAck { revision: Some(3), schema: Some(SchemaVersionId(44444444-4444-4444-4444-444444444444)), lens: Some(MigrationLensId(66666666-6666-6666-6666-666666666666)), applied: true })"
+    },
+    {
+      "name": "rehydrate_todos_subscription",
+      "message_family": "Rehydrate",
+      "frame_hex": "01010100230910222222222222222222222222222222221033333333333333333333333333333333",
+      "frame_base64": "AQEBACMJECIiIiIiIiIiIiIiIiIiIiIQMzMzMzMzMzMzMzMzMzMzMw==",
+      "payload_hex": "0910222222222222222222222222222222221033333333333333333333333333333333",
+      "decoded_debug": "Rehydrate { subscription: SubscriptionKey { shape_id: ShapeId(22222222-2222-2222-2222-222222222222), binding_id: BindingId(33333333-3333-3333-3333-333333333333) } }"
+    },
+    {
+      "name": "fetch_content_extent_body",
+      "message_family": "FetchContentExtent",
+      "frame_hex": "010101003b0a10777777777777777777777777777777771055555555555555555555555555555555107777777777777777777777777777777704626f6479100c",
+      "frame_base64": "AQEBADsKEHd3d3d3d3d3d3d3d3d3d3cQVVVVVVVVVVVVVVVVVVVVVRB3d3d3d3d3d3d3d3d3d3d3BGJvZHkQDA==",
+      "payload_hex": "0a10777777777777777777777777777777771055555555555555555555555555555555107777777777777777777777777777777704626f6479100c",
+      "decoded_debug": "FetchContentExtent { row: RowUuid(77777777-7777-7777-7777-777777777777), extent: Extent { writer: AuthorId(55555555-5555-5555-5555-555555555555), row: RowUuid(77777777-7777-7777-7777-777777777777), column: \"body\", offset: 16, len: 12 } }"
+    },
+    {
+      "name": "content_extents_body_bytes",
+      "message_family": "ContentExtents",
+      "frame_hex": "01010100380b011055555555555555555555555555555555107777777777777777777777777777777704626f6479100c0c68656c6c6f20776f726c6421",
+      "frame_base64": "AQEBADgLARBVVVVVVVVVVVVVVVVVVVVVEHd3d3d3d3d3d3d3d3d3d3cEYm9keRAMDGhlbGxvIHdvcmxkIQ==",
+      "payload_hex": "0b011055555555555555555555555555555555107777777777777777777777777777777704626f6479100c0c68656c6c6f20776f726c6421",
+      "decoded_debug": "ContentExtents { extents: [ContentExtent { extent: Extent { writer: AuthorId(55555555-5555-5555-5555-555555555555), row: RowUuid(77777777-7777-7777-7777-777777777777), column: \"body\", offset: 16, len: 12 }, bytes: [104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 33] }] }"
+    }
+  ]
+}
