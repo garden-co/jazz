@@ -4,8 +4,9 @@ import { PostcardReader, PostcardWriter } from "./direct-codec.js";
 export type DirectWebSocketFrameHandler = (frame: Uint8Array) => void;
 
 export type DirectWebSocketCarrierOptions = {
-  serverUrl: string;
-  appId: string;
+  serverUrl?: string;
+  endpointUrl?: string;
+  appId?: string;
   peerIdentity: Uint8Array;
   onFrame: DirectWebSocketFrameHandler;
   WebSocket?: DirectWebSocketConstructor;
@@ -34,6 +35,12 @@ export function directWebSocketUrl(
   return url.toString();
 }
 
+export function directWebSocketEndpointUrl(endpointUrl: string, peerIdentity: Uint8Array): string {
+  const url = new URL(endpointUrl);
+  url.searchParams.set("identity", bytesToHex(peerIdentity));
+  return url.toString();
+}
+
 export function encodeDirectWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
@@ -53,7 +60,13 @@ export class DirectWebSocketCarrier {
 
   constructor(options: DirectWebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
-    this.url = directWebSocketUrl(options.serverUrl, options.appId, options.peerIdentity);
+    this.url = options.endpointUrl
+      ? directWebSocketEndpointUrl(options.endpointUrl, options.peerIdentity)
+      : directWebSocketUrl(
+          required(options.serverUrl, "serverUrl"),
+          required(options.appId, "appId"),
+          options.peerIdentity,
+        );
     this.onFrame = options.onFrame;
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
@@ -113,6 +126,11 @@ function browserWebSocketConstructor(): DirectWebSocketConstructor {
     throw new Error("browser WebSocket is not available");
   }
   return candidate;
+}
+
+function required(value: string | undefined, name: string): string {
+  if (value == null) throw new Error(`DirectWebSocketCarrier requires ${name}`);
+  return value;
 }
 
 function waitForOpen(socket: DirectBrowserWebSocket): Promise<void> {

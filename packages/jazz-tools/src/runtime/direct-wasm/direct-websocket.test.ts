@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeDirectWebSocketFrameBatch,
+  directWebSocketEndpointUrl,
   directWebSocketUrl,
   encodeDirectWebSocketFrameBatch,
 } from "./direct-websocket.js";
@@ -19,9 +20,14 @@ describe("direct websocket frame carrier", () => {
 
   it("uses app-scoped websocket URLs and carries the direct peer identity", () => {
     expect(
-      directWebSocketUrl(
-        "http://127.0.0.1:4200",
-        "app-a",
+      directWebSocketUrl("http://127.0.0.1:4200", "app-a", Uint8Array.from([0, 1, 10, 255])),
+    ).toBe("ws://127.0.0.1:4200/apps/app-a/ws?identity=00010aff");
+  });
+
+  it("adds the direct peer identity to an already scoped websocket endpoint", () => {
+    expect(
+      directWebSocketEndpointUrl(
+        "ws://127.0.0.1:4200/apps/app-a/ws",
         Uint8Array.from([0, 1, 10, 255]),
       ),
     ).toBe("ws://127.0.0.1:4200/apps/app-a/ws?identity=00010aff");
