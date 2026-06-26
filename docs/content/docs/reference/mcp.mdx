@@ -12,8 +12,8 @@ assistant is reading documentation for the exact API you have available. To use 
 version's docs, specify a version tag instead (e.g. `pnpm dlx jazz-tools@2.0.0 mcp`).
 
 <Callout type="warn">
-  Node.js 22.12 or later is required. Older runtimes (and any runtime without `node:sqlite`) fall
-  back to a basic keyword search that is deprecated and will be removed in a future release.
+  Node.js 22.12 or later is required. The MCP server uses `node:sqlite` with SQLite FTS5 for docs
+  search and does not provide a fallback for older runtimes.
 </Callout>
 
 ## Installation
