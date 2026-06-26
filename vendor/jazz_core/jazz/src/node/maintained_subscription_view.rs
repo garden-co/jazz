@@ -635,7 +635,7 @@ mod tests {
             ),
             ("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
             (
-                "user_title",
+                "user__todos__title",
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
         ])

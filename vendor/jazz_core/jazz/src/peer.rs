@@ -3606,6 +3606,134 @@ mod tests {
     }
 
     #[test]
+    fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_peer() {
+        let (_core_dir, mut core) = open_node_with_uuid(node(0x98));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(0x99));
+        let (shape, binding) = title_shape_binding("match");
+        let mut peer = PeerState::new();
+        peer.set_ship_complete_exclusive_payloads(true);
+
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let tx = core.open_exclusive().unwrap();
+        core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
+            .unwrap();
+        core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
+            .unwrap();
+        let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
+        accept_global(&mut core, tx_id, 1);
+
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            version_bundles,
+            peer_payload_inventory:
+                crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: complete_tx_payload_refs,
+                },
+            result_row_adds,
+            result_row_removes,
+            ..
+        } = &update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            &vec![("todos".to_owned().into(), row(0x71), tx_id)]
+        );
+        assert!(result_row_removes.is_empty());
+        assert!(complete_tx_payload_refs.is_empty());
+        assert_eq!(version_bundles.len(), 1);
+        assert_eq!(version_bundles[0].tx.tx_id, tx_id);
+        assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+        assert_eq!(version_bundles[0].versions.len(), 2);
+        assert_eq!(
+            version_bundles[0]
+                .versions
+                .iter()
+                .map(VersionRecord::row_uuid)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([row(0x71), row(0x72)])
+        );
+
+        reader.apply_sync_message(update).unwrap();
+        assert_eq!(
+            reader
+                .current_rows("todos", DurabilityTier::Global)
+                .unwrap(),
+            vec![
+                (row(0x71), title_cells("match")),
+                (row(0x72), title_cells("other")),
+            ]
+        );
+        let open = reader.open_exclusive().unwrap();
+        assert_eq!(
+            reader.tx_read(open, "todos", row(0x72)).unwrap(),
+            Some(title_cells("other"))
+        );
+    }
+
+    #[test]
+    fn maintained_subscription_view_tags_terminal_columns_by_table() {
+        let schema = JazzSchema::new([
+            TableSchema::new("warehouses", [ColumnSchema::new("ytd", ColumnType::F64)]),
+            TableSchema::new("stock", [ColumnSchema::new("ytd", ColumnType::U64)]),
+            TableSchema::new(
+                "orderLines",
+                [
+                    ColumnSchema::new("warehouse", ColumnType::Uuid),
+                    ColumnSchema::new("stock", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("warehouse", "warehouses")
+            .with_reference("stock", "stock"),
+        ]);
+        let (_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+        let warehouse = row(0x80);
+        let stock = row(0x81);
+        let line = row(0x82);
+        let warehouse_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("warehouses", warehouse, 10)
+                    .cells(BTreeMap::from([("ytd".to_owned(), Value::F64(1.5))])),
+            )
+            .unwrap();
+        accept_global(&mut core, warehouse_tx, 1);
+        let stock_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("stock", stock, 11)
+                    .cells(BTreeMap::from([("ytd".to_owned(), Value::U64(2))])),
+            )
+            .unwrap();
+        accept_global(&mut core, stock_tx, 2);
+        let line_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("orderLines", line, 12).cells(BTreeMap::from([
+                    ("warehouse".to_owned(), Value::Uuid(warehouse.0)),
+                    ("stock".to_owned(), Value::Uuid(stock.0)),
+                ])),
+            )
+            .unwrap();
+        accept_global(&mut core, line_tx, 3);
+
+        let mut peer = PeerState::new();
+        let update = peer.current_rows_update(&mut core, "orderLines").unwrap();
+        let SyncMessage::ViewUpdate {
+            result_row_adds,
+            version_bundles,
+            ..
+        } = update
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(
+            result_row_adds,
+            vec![("orderLines".to_owned().into(), line, line_tx)]
+        );
+        assert_eq!(version_bundles.len(), 1);
+        assert_eq!(version_bundles[0].tx.tx_id, line_tx);
+    }
+
+    #[test]
     fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scoped_partial_bundle()
      {
         let schema = access_policy_schema();
