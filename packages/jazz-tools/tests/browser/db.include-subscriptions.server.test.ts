@@ -66,9 +66,12 @@ afterEach(async () => {
 });
 
 describe("direct websocket include subscriptions", () => {
-  // TODO: unskip when direct core subscription invalidation rematerializes
-  // remote reverse include chains. Today client B receives the root org but not
-  // nested rows inserted by client A over direct websocket sync.
+  // TODO: unskip when direct core subscription lowering/maintenance supports
+  // reverse include scopes. The direct WASM query encoder currently prepares a
+  // plain table subscription for direct core and drops the array_subqueries
+  // produced for reverse includes, while direct core maintained include graphs
+  // only walk forward TableSchema.references. Today client B receives the root
+  // org but not nested rows inserted by client A over direct websocket sync.
   it.skip("delivers depth-3 reverse include material from client A to client B subscribeAll", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("include-subscriptions"),
