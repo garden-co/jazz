@@ -8,7 +8,7 @@ use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
 };
 
-use crate::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
+use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, Schema, TableName, Value,
 };
@@ -46,12 +46,13 @@ pub(crate) fn convert_alpha_schema(
     tables.sort_by_key(|(name, _)| name.as_str());
     tables
         .into_iter()
-        .map(|(name, table)| convert_table(name, table))
+        .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()
         .map(JazzSchema::new)
 }
 
 fn convert_table(
+    schema: &Schema,
     name: &TableName,
     table: &crate::query_manager::types::TableSchema,
 ) -> Result<CoreTableSchema, DirectSchemaConversionError> {
@@ -89,11 +90,14 @@ fn convert_table(
         .unwrap_or_default();
     converted.merge_strategies = merge_strategies;
     converted.read_policy = convert_optional_policy(
+        schema,
+        table,
         name,
         "policies.select.using",
         table.policies.select.using.as_ref(),
     )?;
-    converted.write_policy = convert_optional_policy(name, "policies.write", write_policy(table))?;
+    converted.write_policy =
+        convert_optional_policy(schema, table, name, "policies.write", write_policy(table))?;
     Ok(converted)
 }
 
@@ -190,20 +194,130 @@ fn write_policy(table: &crate::query_manager::types::TableSchema) -> Option<&Pol
 }
 
 fn convert_optional_policy(
+    schema: &Schema,
+    table_schema: &crate::query_manager::types::TableSchema,
     table: &TableName,
     path: &str,
     expr: Option<&PolicyExpr>,
 ) -> Result<Option<Query>, DirectSchemaConversionError> {
-    expr.map(|expr| convert_policy(table, path, expr))
+    expr.map(|expr| convert_policy(schema, table_schema, table, path, expr))
         .transpose()
 }
 
 fn convert_policy(
+    schema: &Schema,
+    table_schema: &crate::query_manager::types::TableSchema,
     table: &TableName,
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, DirectSchemaConversionError> {
-    Ok(Query::from(table.as_str()).filter(convert_policy_predicate(table, path, expr)?))
+    match expr {
+        PolicyExpr::And(exprs) => {
+            if !exprs.iter().any(is_direct_inherited_select) {
+                return Ok(Query::from(table.as_str())
+                    .filter(convert_policy_predicate(table, path, expr)?));
+            }
+            let mut query = Query::from(table.as_str());
+            for (index, expr) in exprs.iter().enumerate() {
+                query = append_policy_clause(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    query,
+                    expr,
+                )?;
+            }
+            Ok(query)
+        }
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column,
+            max_depth: None,
+        } => append_inherited_select_policy(
+            schema,
+            table_schema,
+            table,
+            path,
+            Query::from(table.as_str()),
+            via_column,
+        ),
+        _ => Ok(Query::from(table.as_str()).filter(convert_policy_predicate(table, path, expr)?)),
+    }
+}
+
+fn is_direct_inherited_select(expr: &PolicyExpr) -> bool {
+    matches!(
+        expr,
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            max_depth: None,
+            ..
+        }
+    )
+}
+
+fn append_policy_clause(
+    schema: &Schema,
+    table_schema: &crate::query_manager::types::TableSchema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    expr: &PolicyExpr,
+) -> Result<Query, DirectSchemaConversionError> {
+    match expr {
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column,
+            max_depth: None,
+        } => append_inherited_select_policy(schema, table_schema, table, path, query, via_column),
+        _ => Ok(query.filter(convert_policy_predicate(table, path, expr)?)),
+    }
+}
+
+fn append_inherited_select_policy(
+    schema: &Schema,
+    table_schema: &crate::query_manager::types::TableSchema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    via_column: &str,
+) -> Result<Query, DirectSchemaConversionError> {
+    let column = table_schema
+        .columns
+        .columns
+        .iter()
+        .find(|column| column.name.as_str() == via_column)
+        .ok_or_else(|| {
+            err(
+                format!("$.{}.{}", table.as_str(), path),
+                format!("INHERITS via_column '{via_column}' was not found"),
+            )
+        })?;
+    let parent_table = column.references.as_ref().ok_or_else(|| {
+        err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("INHERITS via_column '{via_column}' has no FK reference"),
+        )
+    })?;
+    let parent_schema = schema.get(parent_table).ok_or_else(|| {
+        err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
+        )
+    })?;
+    let parent_policy = parent_schema.policies.select.using.as_ref().ok_or_else(|| {
+        err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a SELECT policy"),
+        )
+    })?;
+    let parent_filter = convert_policy_predicate(
+        parent_table,
+        &format!("{path}.Inherits[{parent_table}]"),
+        parent_policy,
+    )?;
+    Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
 }
 
 fn convert_policy_predicate(
@@ -251,6 +365,10 @@ fn convert_policy_predicate(
         PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
             Operand::Column(column.clone()),
         )))),
+        PolicyExpr::Contains { column, value } => Ok(Predicate::Contains(
+            Operand::Column(column.clone()),
+            convert_policy_operand(table, path, value)?,
+        )),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("direct fixed-schema policies do not support {other:?} yet"),
@@ -312,7 +430,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
-    use jazz::query::{Operand, Predicate};
+    use jazz::query::{JoinTarget, Operand, Predicate};
     use uuid::Uuid;
 
     #[test]
@@ -475,16 +593,68 @@ mod tests {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::Contains {
-                        column: "title".to_owned(),
-                        value: PolicyValue::Literal("x".into()),
-                    })),
+                    .policies(
+                        TablePolicies::new().with_select(PolicyExpr::SessionContains {
+                            path: vec!["roles".to_owned()],
+                            value: "admin".into(),
+                        }),
+                    ),
             )
             .build();
 
         let error = convert_alpha_schema(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
-            "$.todos.policies.select.using: direct fixed-schema policies do not support Contains"
+            "$.todos.policies.select.using: direct fixed-schema policies do not support SessionContains"
         ));
+    }
+
+    #[test]
+    fn converts_unbounded_inherited_select_to_row_id_join() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("folders")
+                    .column(
+                        "owners",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    )
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Contains {
+                        column: "owners".to_owned(),
+                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .nullable_fk_column("folder_id", "folders")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "folder_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build();
+
+        let converted = convert_alpha_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        let policy = documents.read_policy.as_ref().unwrap();
+        assert!(policy.filters.is_empty());
+        assert_eq!(policy.joins.len(), 1);
+        let join = &policy.joins[0];
+        assert_eq!(join.table, "folders");
+        assert_eq!(join.on_column, "id");
+        assert_eq!(join.target, JoinTarget::RowId);
+        assert_eq!(join.source_column.as_deref(), Some("folder_id"));
+        assert_eq!(
+            join.filters,
+            vec![Predicate::Contains(
+                Operand::Column("owners".to_owned()),
+                Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
+            )]
+        );
     }
 }

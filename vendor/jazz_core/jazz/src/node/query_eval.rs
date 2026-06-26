@@ -17,7 +17,7 @@ use super::maintained_subscription_view::MaintainedSubscriptionView;
 use super::policy::ViewEvaluationContext;
 use crate::protocol::{BindingDelta, ResultRowEntry, ShapeAst, SubscriptionKey};
 use crate::query::{
-    Aggregate, AggregateFunction, AggregateQuery, Binding, Include, JoinVia, Operand,
+    Aggregate, AggregateFunction, AggregateQuery, Binding, Include, JoinTarget, JoinVia, Operand,
     OrderDirection, Predicate, QUERY_NAMESPACE, ShapeId, ValidatedQuery,
 };
 
@@ -1993,7 +1993,7 @@ where
         )?;
         for join in &shape.query().joins {
             let join_table = self.lowered_related_table(&join.table, &options)?;
-            let join_key = format!("user_{}", join.on_column);
+            let join_key = join_key(join);
             let left_key = if let Some(source_column) = &join.source_column {
                 format!("user_{source_column}")
             } else {
@@ -3080,7 +3080,7 @@ where
             .as_ref()
             .map(|column| format!("user_{column}"))
             .unwrap_or_else(|| "row_uuid".to_owned());
-        let join_key = format!("user_{}", join.on_column);
+        let join_key = join_key(join);
         let joined = if join.source_column.is_none() {
             let eligible = GraphBuilder::join(
                 root.project(["row_uuid"]),
@@ -3752,6 +3752,7 @@ where
             JoinVia {
                 table: join.table,
                 on_column: join.on_column,
+                target: join.target,
                 source_column: join.source_column,
                 filters: join
                     .filters
@@ -3808,6 +3809,7 @@ where
             .map(|join| JoinVia {
                 table: join.table,
                 on_column: join.on_column,
+                target: join.target,
                 source_column: join.source_column,
                 filters: join
                     .filters
@@ -5782,6 +5784,13 @@ pub(crate) fn maintained_view_tagged_user_field(table: &str, column: &str) -> St
 
 fn query_field(column: &str) -> String {
     format!("user_{column}")
+}
+
+fn join_key(join: &JoinVia) -> String {
+    match join.target {
+        JoinTarget::Column => query_field(&join.on_column),
+        JoinTarget::RowId => "row_uuid".to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -110,6 +110,7 @@ impl Query {
         self.joins.push(JoinVia {
             table: table.into(),
             on_column: on_column.into(),
+            target: JoinTarget::Column,
             source_column: None,
             filters: filters.into_iter().collect(),
         });
@@ -129,6 +130,26 @@ impl Query {
         self.joins.push(JoinVia {
             table: table.into(),
             on_column: on_column.into(),
+            target: JoinTarget::Column,
+            source_column: Some(source_column.into()),
+            filters: filters.into_iter().collect(),
+        });
+        self
+    }
+
+    /// Add a row-correlated traversal to rows whose id is referenced by a root-table column.
+    ///
+    /// This expresses `exists table where table.id = root.source_column`.
+    pub fn join_via_row_id(
+        mut self,
+        table: impl Into<String>,
+        source_column: impl Into<String>,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: "id".to_owned(),
+            target: JoinTarget::RowId,
             source_column: Some(source_column.into()),
             filters: filters.into_iter().collect(),
         });
@@ -484,13 +505,27 @@ impl Include {
 pub struct JoinVia {
     /// Junction table.
     pub table: String,
-    /// Column on the junction that references the current/root table.
+    /// Column on the junction/target table. For [`JoinTarget::RowId`], this is
+    /// the public row-id name and execution uses the table's internal row UUID.
     pub on_column: String,
+    /// Which target-table field `on_column` names.
+    #[serde(default)]
+    pub target: JoinTarget,
     /// Optional root-table column used for row-correlated policy joins.
     #[serde(default)]
     pub source_column: Option<String>,
     /// Filters evaluated on the junction table.
     pub filters: Vec<Predicate>,
+}
+
+/// Target-table field used by a [`JoinVia`] traversal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum JoinTarget {
+    /// Join against a declared application column.
+    #[default]
+    Column,
+    /// Join against the target table's row id.
+    RowId,
 }
 
 /// Recursive reachability through a transitive edge table plus an access table.
@@ -909,7 +944,19 @@ fn validate_query_canonical_parts(
     }
     for join in &query.joins {
         let join_table = table(schema, &join.table)?;
-        planner_column_type(&join_table, &join.on_column)?;
+        match join.target {
+            JoinTarget::Column => {
+                planner_column_type(&join_table, &join.on_column)?;
+            }
+            JoinTarget::RowId => {
+                if join.on_column != "id" {
+                    return Err(QueryError::UnknownColumn {
+                        table: join.table.clone(),
+                        column: join.on_column.clone(),
+                    });
+                }
+            }
+        }
         let target_table = if let Some(source_column) = &join.source_column {
             planner_column_type(&root, source_column)?;
             root.references
@@ -922,14 +969,25 @@ fn validate_query_canonical_parts(
         } else {
             &query.table
         };
-        match join_table.references.get(&join.on_column) {
-            Some(target) if target == target_table => {}
-            _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: join.table.clone(),
-                    column: join.on_column.clone(),
-                    target_table: target_table.clone(),
-                });
+        match join.target {
+            JoinTarget::Column => match join_table.references.get(&join.on_column) {
+                Some(target) if target == target_table => {}
+                _ => {
+                    return Err(QueryError::JoinNotRefCompatible {
+                        join_table: join.table.clone(),
+                        column: join.on_column.clone(),
+                        target_table: target_table.clone(),
+                    });
+                }
+            },
+            JoinTarget::RowId => {
+                if &join.table != target_table {
+                    return Err(QueryError::JoinNotRefCompatible {
+                        join_table: join.table.clone(),
+                        column: join.on_column.clone(),
+                        target_table: target_table.clone(),
+                    });
+                }
             }
         }
         for predicate in &join.filters {
@@ -1363,6 +1421,10 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, &join.table);
     put_str(&mut bytes, &join.on_column);
+    match join.target {
+        JoinTarget::Column => {}
+        JoinTarget::RowId => bytes.push(b'r'),
+    }
     if let Some(column) = &join.source_column {
         bytes.push(b's');
         put_str(&mut bytes, column);

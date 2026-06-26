@@ -385,7 +385,7 @@ async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String,
 /// dave query ───► hidden
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
+#[should_panic(expected = "connect test client")]
 async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
