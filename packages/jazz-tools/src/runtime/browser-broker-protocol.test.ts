@@ -67,7 +67,7 @@ describe("browser broker protocol", () => {
       authClass: "user:stable-id",
       runtimeSourceIdentity: "default",
       persistentDriverNamespace: "db",
-      storageFormatVersion: "opfs-btree-v1",
+      storageFormatVersion: "jazz-core-v1",
     };
 
     expect(createBrowserBrokerFingerprint(input)).toBe(createBrowserBrokerFingerprint(input));

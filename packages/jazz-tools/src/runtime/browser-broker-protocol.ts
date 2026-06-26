@@ -9,7 +9,7 @@ import type { BrowserBrokerUnsupportedCode } from "./browser-broker-errors.js";
  * message change.
  */
 export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v3";
-export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
+export const BROWSER_STORAGE_FORMAT_VERSION = "jazz-core-v1";
 
 // Liveness defaults shared by the broker worker and the tab client — a drift
 // between the two desynchronizes ping cadence from eviction timing.

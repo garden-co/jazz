@@ -8,9 +8,19 @@ members = [
   "crates/wasm-tracing",
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
-  "crates/opfs-btree",
   "dev/benchmarks/storage/bench-core",
   "dev/benchmarks/storage/native",
 ]
+exclude = [
+  "vendor/jazz_core/groove",
+  "vendor/jazz_core/jazz",
+  "vendor/jazz_core/jazz-wasm",
+  "vendor/jazz_core/opfs-btree",
+]
+
+[workspace.dependencies]
+groove = { path = "vendor/jazz_core/groove", default-features = false }
+jazz = { path = "vendor/jazz_core/jazz", default-features = false }
+
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }

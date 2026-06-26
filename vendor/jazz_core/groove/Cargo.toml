@@ -22,7 +22,7 @@ opfs-btree = { path = "../opfs-btree" }
 
 [dev-dependencies]
 hdrhistogram = "7.5.4"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3.27.0"
 
 [[bench]]

@@ -181,7 +181,7 @@ fn synced_insert_many_large_json_configs_survive_opfs_splits() {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema.clone(), "dev", "main");
 
-    let mut storage = OpfsBTreeStorage::memory(4 * 1024 * 1024).expect("open opfs storage");
+    let mut storage = MemoryStorage::new();
     persist_test_schema(&mut storage, &schema);
 
     let branch = get_branch(&qm);

@@ -24,8 +24,8 @@ use crate::query_manager::types::{
 use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
-    HistoryRowBytes, IndexMutation, MemoryStorage, OpfsBTreeStorage, OwnedHistoryRowBytes,
-    OwnedVisibleRowBytes, RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
+    RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
 };
 use crate::sync_manager::{DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_support::{
