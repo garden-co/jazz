@@ -128,6 +128,110 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
+  it("keeps deleted rows hidden by default and restores them over websocket", async () => {
+    const requestedAppId = uniqueDbName("alpha-public-delete-restore");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const sharedSecret = generateAuthSecret();
+    const db = await openAlphaDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "alpha-public-delete-a",
+      sharedSecret,
+    );
+    const todo = await withTimeout(
+      db
+        .insert(app.todos, {
+          title: "Restore alpha public flow",
+          done: false,
+          list: "tombstones",
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "insert before delete was not accepted at the server",
+    );
+
+    await withTimeout(
+      db.delete(app.todos, todo.id).wait({ tier: "edge" }),
+      10_000,
+      "delete was not accepted at the server",
+    );
+
+    await waitForQuery(
+      db,
+      app.todos.where({ id: todo.id }),
+      (todos) => todos.length === 0,
+      "deleted todo is hidden from default reads",
+      15_000,
+      "edge",
+    );
+    const restored = await withTimeout(
+      db
+        .restore(app.todos, todo.id, {
+          title: "Restored alpha public flow",
+          done: true,
+          list: "tombstones",
+        })
+        .wait({ tier: "edge" }),
+      10_000,
+      "restore was not accepted at the server",
+    );
+    expect(restored).toEqual({
+      id: todo.id,
+      title: "Restored alpha public flow",
+      done: true,
+      list: "tombstones",
+    });
+
+    const dbB = await openAlphaDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "alpha-public-delete-b",
+      sharedSecret,
+    );
+    const rowsOnB = await waitForSubscribedTodoSummaries(dbB, ["Restored alpha public flow:done"]);
+    expect(rowsOnB).toEqual([restored]);
+  });
+
+  it.skip("TODO: exposes edge-confirmed browser deletes through includeDeleted over direct websocket", async () => {
+    // Proven blocker: with an edge-confirmed delete, querying
+    // app.todos.includeDeleted().where({ id }) at tier:"edge" timed out after
+    // 15s with lastRows=[] in this browser direct websocket gate.
+    const requestedAppId = uniqueDbName("alpha-public-include-deleted");
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const db = await openAlphaDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "alpha-public-include-deleted",
+      generateAuthSecret(),
+    );
+    const todo = await db
+      .insert(app.todos, {
+        title: "Include deleted alpha public flow",
+        done: false,
+        list: "tombstones",
+      })
+      .wait({ tier: "edge" });
+    await db.delete(app.todos, todo.id).wait({ tier: "edge" });
+
+    const [deletedTodo] = await waitForQuery(
+      db,
+      app.todos.includeDeleted().where({ id: todo.id }),
+      (todos) => todos.length === 1,
+      "deleted todo is visible with includeDeleted",
+      15_000,
+      "edge",
+    );
+    expect(deletedTodo).toEqual(todo);
+    expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
+  });
+
   it("opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file parts", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
