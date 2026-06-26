@@ -2060,13 +2060,10 @@ mod tests {
                 .expect("serve direct ws app");
         });
 
-        let ws_url = format!(
-            "ws://{addr}{}?identity=0102030405060708090a0b0c0d0e0f10",
-            test_app_route("/ws")
-        );
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
         ws.send(WsMessage::Binary(
-            br#"{"admin_secret":"admin-secret"}"#.to_vec(),
+            br#"{"peer_identity":"0102030405060708090a0b0c0d0e0f10","auth":{"admin_secret":"admin-secret"}}"#.to_vec(),
         ))
         .await
         .expect("send direct ws auth prelude");

@@ -29,17 +29,13 @@ export type DirectBrowserWebSocket = {
 export function directWebSocketUrl(
   serverUrl: string,
   appId: string,
-  peerIdentity: Uint8Array,
+  _peerIdentity: Uint8Array,
 ): string {
-  const url = new URL(httpUrlToWs(serverUrl, appId));
-  url.searchParams.set("identity", bytesToHex(peerIdentity));
-  return url.toString();
+  return httpUrlToWs(serverUrl, appId);
 }
 
-export function directWebSocketEndpointUrl(endpointUrl: string, peerIdentity: Uint8Array): string {
-  const url = new URL(endpointUrl);
-  url.searchParams.set("identity", bytesToHex(peerIdentity));
-  return url.toString();
+export function directWebSocketEndpointUrl(endpointUrl: string, _peerIdentity: Uint8Array): string {
+  return endpointUrl;
 }
 
 export function encodeDirectWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
@@ -94,7 +90,9 @@ export class DirectWebSocketCarrier {
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = waitForOpen(this.socket).then(() => {
-      this.socket.send(encodeDirectWebSocketAuthPrelude(options.authJson ?? "{}"));
+      this.socket.send(
+        encodeDirectWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity),
+      );
       this.socket.send(encodeDirectWebSocketFrameBatch([encodeDirectWireClientHello()]));
     });
     this.socket.addEventListener("message", (event) => {
@@ -129,8 +127,16 @@ export class DirectWebSocketCarrier {
   }
 }
 
-export function encodeDirectWebSocketAuthPrelude(authJson: string): Uint8Array {
-  return new TextEncoder().encode(authJson);
+export function encodeDirectWebSocketPrelude(
+  authJson: string,
+  peerIdentity: Uint8Array,
+): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      peer_identity: bytesToHex(peerIdentity),
+      auth: JSON.parse(authJson) as unknown,
+    }),
+  );
 }
 
 export async function connectDirectWebSocketCarrier(

@@ -4,7 +4,7 @@ import {
   directWebSocketEndpointUrl,
   directWebSocketUrl,
   encodeDirectWireClientHello,
-  encodeDirectWebSocketAuthPrelude,
+  encodeDirectWebSocketPrelude,
   encodeDirectWebSocketFrameBatch,
   isDirectWireHello,
   isDirectWireMessage,
@@ -22,25 +22,32 @@ describe("direct websocket frame carrier", () => {
     ]);
   });
 
-  it("uses app-scoped websocket URLs and carries the direct peer identity", () => {
+  it("uses app-scoped websocket URLs without identity query parameters", () => {
     expect(
       directWebSocketUrl("http://127.0.0.1:4200", "app-a", Uint8Array.from([0, 1, 10, 255])),
-    ).toBe("ws://127.0.0.1:4200/apps/app-a/ws?identity=00010aff");
+    ).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
   });
 
-  it("adds the direct peer identity to an already scoped websocket endpoint", () => {
+  it("leaves already scoped websocket endpoints unchanged", () => {
     expect(
       directWebSocketEndpointUrl(
         "ws://127.0.0.1:4200/apps/app-a/ws",
         Uint8Array.from([0, 1, 10, 255]),
       ),
-    ).toBe("ws://127.0.0.1:4200/apps/app-a/ws?identity=00010aff");
+    ).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
   });
 
-  it("encodes auth prelude as alpha-shaped JSON bytes", () => {
-    expect(new TextDecoder().decode(encodeDirectWebSocketAuthPrelude('{"admin_secret":"s"}'))).toBe(
-      '{"admin_secret":"s"}',
-    );
+  it("encodes peer identity and alpha-shaped auth in the direct websocket prelude", () => {
+    expect(
+      JSON.parse(
+        new TextDecoder().decode(
+          encodeDirectWebSocketPrelude('{"admin_secret":"s"}', Uint8Array.from([0, 1, 10, 255])),
+        ),
+      ),
+    ).toEqual({
+      peer_identity: "00010aff",
+      auth: { admin_secret: "s" },
+    });
   });
 
   it("encodes the client wire hello as a websocket-negotiation frame", () => {
