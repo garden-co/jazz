@@ -1023,6 +1023,10 @@ fn open_clients(
                 inbound,
                 _upstream: upstream,
             };
+            client.edge_peer.set_ship_complete_exclusive_payloads(true);
+            client
+                .client_peer
+                .set_ship_complete_exclusive_payloads(true);
             refresh_client(core, &mut client);
             client
         })

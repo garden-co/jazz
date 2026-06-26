@@ -35,6 +35,7 @@ pub struct PeerState {
     role: PeerRole,
     permission_identity: Option<AuthorId>,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
+    ship_complete_exclusive_payloads: bool,
     subscriptions: BTreeMap<SubscriptionKey, PeerSubscriptionState>,
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
@@ -174,6 +175,7 @@ impl Default for PeerState {
             role: PeerRole::Relay,
             permission_identity: None,
             shipped_complete_tx_payloads: BTreeSet::new(),
+            ship_complete_exclusive_payloads: false,
             subscriptions: BTreeMap::new(),
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
@@ -673,6 +675,7 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
                     peer_complete_tx_payloads,
+                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: previous_result_tx_ids,
                     result_row_adds,
                     result_row_removes,
@@ -745,6 +748,7 @@ impl PeerState {
             crate::node::MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads,
+                complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                 previous_result_set: BTreeSet::new(),
                 result_row_adds,
                 result_row_removes,
@@ -1019,6 +1023,13 @@ impl PeerState {
     /// Return transaction refs whose complete payload bundles have shipped on this peer.
     pub fn shipped_complete_tx_payloads(&self) -> &BTreeSet<TxId> {
         &self.shipped_complete_tx_payloads
+    }
+
+    /// Configure whether accepted exclusive transactions should ship complete
+    /// payloads so the downstream can safely author later exclusive
+    /// transactions from refreshed state.
+    pub fn set_ship_complete_exclusive_payloads(&mut self, enabled: bool) {
+        self.ship_complete_exclusive_payloads = enabled;
     }
 
     /// Snapshot peer-owned pin-set roots for edge-cache eviction.

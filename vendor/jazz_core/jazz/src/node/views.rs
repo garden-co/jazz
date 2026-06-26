@@ -55,6 +55,9 @@ pub(crate) struct MaintainedViewBundleInputs<V, R> {
     /// already shipped on this link. Partial payload coverage is not recorded
     /// here, even when it is enough for a subscription-scoped exclusive result.
     pub(crate) peer_complete_tx_payloads: BTreeSet<TxId>,
+    /// Ship complete accepted exclusive transaction payloads so the receiver can
+    /// use refreshed rows as a write base for later exclusive transactions.
+    pub(crate) complete_exclusive_payloads: bool,
     pub(crate) previous_result_set: BTreeSet<TxId>,
     pub(crate) result_row_adds: Vec<ResultRowEntry>,
     pub(crate) result_row_removes: Vec<ResultRowEntry>,
@@ -731,6 +734,7 @@ where
         let MaintainedViewBundleInputs {
             subscription,
             peer_complete_tx_payloads,
+            complete_exclusive_payloads,
             previous_result_set: _previous_result_set,
             result_row_adds,
             result_row_removes,
@@ -817,13 +821,19 @@ where
                 let wanted_rows = wanted_add_rows_by_tx
                     .get(tx_id)
                     .ok_or(Error::MissingTransaction(*tx_id))?;
-                let filtered_tx_versions = tx_versions
-                    .iter()
-                    .filter(|version| {
-                        wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let filtered_tx_versions = if complete_exclusive_payloads
+                    && stored_tx.tx.kind == TxKind::Exclusive
+                {
+                    self.query_versions_for_tx_memo_cloned(*tx_id, &mut context)?
+                } else {
+                    tx_versions
+                        .iter()
+                        .filter(|version| {
+                            wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
                 version_bundles.push(
                     self.version_bundle_for_maintained_view_policy_readable_versions_with_tx(
                         &stored_tx,
@@ -853,13 +863,17 @@ where
                 let wanted_rows = wanted_add_rows_by_tx
                     .get(tx_id)
                     .ok_or(Error::MissingTransaction(*tx_id))?;
-                let bundle_versions = tx_versions
-                    .iter()
-                    .filter(|version| {
-                        wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let bundle_versions = if complete_exclusive_payloads {
+                    tx_versions.clone()
+                } else {
+                    tx_versions
+                        .iter()
+                        .filter(|version| {
+                            wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
                 version_bundles.push(self.version_bundle_for_view_memo_with_versions(
                     &table_schema,
                     version,
@@ -1029,6 +1043,9 @@ where
         }
         for bundle in &mut version_bundles {
             if bundle.tx.kind != TxKind::Exclusive {
+                continue;
+            }
+            if complete_exclusive_payloads {
                 continue;
             }
             let Some(wanted_rows) = wanted_add_rows_by_tx.get(&bundle.tx.tx_id) else {
@@ -1217,26 +1234,37 @@ where
             Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
         })?;
         let tx_id = bundle.tx.tx_id;
-        let mut known_keys = if self.query_transaction(tx_id)?.is_some() {
+        let mut stored_versions = if self.query_transaction(tx_id)?.is_some() {
             self.query_versions_for_tx(tx_id)?
                 .iter()
                 .map(|stored| self.version_record_from_row(stored))
                 .collect::<Result<Vec<_>, Error>>()?
-                .iter()
-                .map(view_version_key)
-                .collect::<BTreeSet<_>>()
         } else {
-            BTreeSet::new()
+            Vec::new()
         };
+        let mut known_keys = stored_versions
+            .iter()
+            .map(view_version_key)
+            .collect::<BTreeSet<_>>();
         known_keys.extend(bundle.versions.iter().map(view_version_key));
         if known_keys.len() > complete_len {
             return Err(Error::ConflictingCommitUnit(tx_id));
         }
         let is_tx_complete = known_keys.len() == complete_len;
         if is_tx_complete {
+            let mut complete_versions = Vec::with_capacity(complete_len);
+            let mut complete_keys = BTreeSet::new();
+            for version in stored_versions
+                .drain(..)
+                .chain(bundle.versions.iter().cloned())
+            {
+                if complete_keys.insert(view_version_key(&version)) {
+                    complete_versions.push(version);
+                }
+            }
             self.ingest_known_transaction(
                 bundle.tx,
-                bundle.versions,
+                complete_versions,
                 bundle.fate.clone(),
                 bundle.global_seq,
                 bundle.durability,
