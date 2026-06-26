@@ -222,8 +222,11 @@ const catalogueSchemaDefinitionV2 = {
 
 const catalogueAppV1 = s.defineApp(catalogueSchemaDefinitionV1);
 const catalogueAppV2 = s.defineApp(catalogueSchemaDefinitionV2);
+const { todos: catalogueTodosV1 } = catalogueAppV1;
 const { todos: catalogueTodos } = catalogueAppV2;
+type CatalogueTodoV1 = s.RowOf<typeof catalogueTodosV1>;
 type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+const allCatalogueTodosV1: QueryBuilder<CatalogueTodoV1> = catalogueAppV1.todos;
 const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
 
 const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
@@ -1000,6 +1003,60 @@ describe("Worker Bridge with OPFS", () => {
       "local",
     );
     expect(rowsAfterRehydrate.find((row) => row.title === marker)?.completed).toBe(false);
+  });
+
+  it.skip("TODO: rehydrates historical catalogue schemas/lenses for v1 queries after reopen", async () => {
+    const dbName = uniqueDbName("catalogue-rehydrate-historical");
+    const testingServer = await publishCatalogueSchemaFamily("catalogue-rehydrate-historical");
+
+    const db = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const marker = `catalogue-rehydrate-historical-${Date.now()}`;
+    await db
+      .insert(catalogueTodos, {
+        title: marker,
+        completed: false,
+        description: "written with v2 for historical lens coverage",
+      })
+      .wait({ tier: "edge" });
+
+    await waitForCatalogueTodos(
+      db,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("v2")),
+      "initial catalogue v2 query should read the inserted row",
+      15000,
+      "local",
+    );
+
+    await db.shutdown();
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const historicalRowsAfterRehydrate = await waitForCatalogueTodosV1(
+      reopened,
+      (rows) => rows.some((row) => row.title === marker && row.completed === false),
+      "reopened worker catalogue should answer the historical v1 query via persisted lenses",
+      15000,
+      "local",
+    );
+    expect(historicalRowsAfterRehydrate.find((row) => row.title === marker)).not.toHaveProperty(
+      "description",
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -2918,6 +2975,16 @@ async function waitForCatalogueTodos(
   tier?: "local" | "edge",
 ): Promise<CatalogueTodo[]> {
   return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
+}
+
+async function waitForCatalogueTodosV1(
+  db: Db,
+  predicate: (rows: CatalogueTodoV1[]) => boolean,
+  label: string,
+  timeoutMs = 15000,
+  tier?: "local" | "edge",
+): Promise<CatalogueTodoV1[]> {
+  return waitForQuery(db, allCatalogueTodosV1, predicate, label, timeoutMs, tier);
 }
 
 async function waitForSubscribedTodos(
