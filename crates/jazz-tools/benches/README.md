@@ -39,12 +39,15 @@ than old helper behavior:
   is smaller than the full snapshot. The `r12_recursive_permissions` group ports
   the spirit of the old R5 recursive permission benchmark to direct public
   `Db` APIs with a `docs`/`teams`/`doc_access`/`team_edges` schema, prepared
-  recursive read-policy query/subscription visibility. It does not currently
-  benchmark allowed/denied recursive write-policy settlement: direct
-  `update_for_identity` exposes a clean permission-subject write surface, but
-  the equivalent recursive `docs` write policy denies a visible-doc update in
-  this schema, so the active slice keeps that as an explicit direct write-policy
-  gap rather than adding a workaround.
+  recursive read-policy query/subscription visibility. A scoped
+  `r13_permission_filtered_resume` reproducer in the same file combines the
+  byte-wire session/resume path with that recursive read policy: a reader first
+  sees direct and inherited docs, disconnects, then resumes after one inherited
+  grant is revoked and another is added. It is intentionally not registered in
+  the default green Criterion group yet, because the resumed client still keeps
+  the revoked doc visible. Recursive write-policy settlement is covered in the
+  `jazz` policy tests with global/settled support rows; local-only support rows
+  correctly do not authorize writes.
 
 ## Intended next ports
 
