@@ -17,7 +17,7 @@ import type {
   WasmRow,
   StorageDriver,
 } from "../drivers/types.js";
-import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
+import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   WriteResult,
@@ -65,13 +65,11 @@ import {
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
 import { resolveSelectedColumns } from "./select-projection.js";
-import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
-  BrowserBrokerConnectionBridge,
-  DirectConnectionBridge,
-  type ConnectionBridge,
-  type ConnectionBridgeClientInput,
-  type ConnectionBridgeHost,
+  BrowserConnectionManager,
+  DirectConnectionManager,
+  type ConnectionManager,
+  type DbForConnection,
 } from "./connection-manager/index.js";
 
 export { resolveDefaultPersistentDbName } from "./connection-manager/browser-broker-utils.js";
@@ -121,35 +119,6 @@ export interface DbConfig {
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
-}
-
-function shouldBypassLocalPolicies(config: DbConfig): boolean {
-  return !!config.adminSecret;
-}
-
-function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
-  return Object.fromEntries(
-    Object.entries(schema).map(([tableName, tableSchema]) => [
-      tableName,
-      {
-        ...tableSchema,
-        policies: undefined,
-      },
-    ]),
-  ) as WasmSchema;
-}
-
-const policyStrippedSchemaCache = new WeakMap<WasmSchema, WasmSchema>();
-
-function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
-  const cached = policyStrippedSchemaCache.get(schema);
-  if (cached) {
-    return cached;
-  }
-
-  const strippedSchema = stripSchemaPolicies(schema);
-  policyStrippedSchemaCache.set(schema, strippedSchema);
-  return strippedSchema;
 }
 
 /**
@@ -786,16 +755,10 @@ export type BatchScope = Scoped<DbDirectBatch>;
  * ```
  */
 export class Db {
-  private client: JazzClient | null = null;
-  /**
-   * Db schema, cached for performance
-   */
-  private clientSchema: WasmSchema | null = null;
   private config: DbConfig;
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
-  private connection: ConnectionBridge;
-  private disposeWasmTelemetry: (() => void) | null = null;
+  private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -830,41 +793,25 @@ export class Db {
     this.config = config;
     this.runtimeModule = runtimeModule;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
-    this.connection = new DirectConnectionBridge(this.createConnectionBridgeHost());
+    this.connection = new DirectConnectionManager(this.dbForConnection());
   }
 
-  private createConnectionBridgeHost(): ConnectionBridgeHost {
+  private dbForConnection(): DbForConnection {
     // oxlint-disable-next-line typescript/no-this-alias
     const thisDb = this;
     return {
       get config() {
         return thisDb.config;
       },
+      get runtimeModule() {
+        return thisDb.runtimeModule;
+      },
       get isShuttingDown() {
         return thisDb.isShuttingDown;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
-      telemetryCollectorUrl: () => this.telemetryCollectorUrl(),
-      clientEntry: () => this.connectionBridgeClientEntry(),
-      shutdownClient: () => this.shutdownClient(),
-      recreateClient: (schema) => this.getClient(schema),
+      onMutationError: (event) => this.handleMutationError(event),
     };
-  }
-
-  private connectionBridgeClientEntry(): ConnectionBridgeClientInput | null {
-    if (!this.client || !this.clientSchema) return null;
-    const schemaKey = getRuntimeSchemaCacheKey(this.clientSchema);
-    return {
-      schemaKey,
-      schema: this.clientSchema,
-      client: this.client,
-    };
-  }
-
-  private async shutdownClient(): Promise<void> {
-    await this.client?.shutdown();
-    this.client = null;
-    this.clientSchema = null;
   }
 
   /** @internal Store the seed used for local-first auth and schedule token refresh. */
@@ -931,8 +878,6 @@ export class Db {
 
     this.config.jwtToken = jwtToken;
 
-    this.client?.updateAuthToken(jwtToken);
-
     this.connection.updateAuth({ jwtToken });
 
     return true;
@@ -951,9 +896,7 @@ export class Db {
 
     this.config.cookieSession = cookieSession;
 
-    this.client?.updateCookieSession(cookieSession);
-
-    this.connection.updateAuth({ jwtToken: this.config.jwtToken });
+    this.connection.updateAuth({ cookieSession });
 
     return true;
   }
@@ -977,9 +920,9 @@ export class Db {
    */
   static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
     const db = new Db(config, runtimeModule);
-    const bridge = new BrowserBrokerConnectionBridge(db.createConnectionBridgeHost());
-    db.connection = bridge;
-    await bridge.start();
+    const connectionManager = new BrowserConnectionManager(db.dbForConnection());
+    db.connection = connectionManager;
+    await connectionManager.start();
     return db;
   }
 
@@ -991,52 +934,7 @@ export class Db {
    * WorkerBridge (async). Subsequent calls are sync.
    */
   protected getClient(schema: WasmSchema): JazzClient {
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
-    }
-
-    const runtimeSchema =
-      this.runtimeModule.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
-        ? getPolicyStrippedSchema(schema)
-        : schema;
-
-    // Use the canonical schema JSON as the client cache key, but memoize it by
-    // schema identity so write-heavy paths don't stringify the same schema per row.
-    const key = getRuntimeSchemaCacheKey(runtimeSchema);
-
-    if (this.client) {
-      if (!this.clientSchema || getRuntimeSchemaCacheKey(this.clientSchema) !== key) {
-        throw new Error(
-          "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
-        );
-      }
-      return this.client;
-    }
-
-    this.installMainThreadWasmTelemetry();
-    const usesDurablePeer = this.connection.hasDurablePeer;
-
-    const client = this.runtimeModule.createClient({
-      config: { ...this.config },
-      schema: runtimeSchema,
-      hasWorker: usesDurablePeer,
-      useBinaryEncoding: usesDurablePeer,
-      bufferOutboxWithoutSyncSender: usesDurablePeer,
-      onAuthFailure: (reason) => {
-        this.markUnauthenticated(reason);
-      },
-    });
-
-    this.attachMutationErrorHandler(client);
-    this.client = client;
-    this.clientSchema = runtimeSchema;
-    this.connection.onClientCreated({
-      schemaKey: key,
-      schema: runtimeSchema,
-      client,
-    });
-
-    return this.client;
+    return this.connection.getClient(schema);
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -1044,62 +942,31 @@ export class Db {
   }
 
   /**
-   * Attaches a mutation error handler to the given client, ensuring all listeners in
-   * {@link Db.mutationErrorListeners} are notified.
+   * Ensures all listeners in {@link Db.mutationErrorListeners} are notified when
+   * the active client reports a mutation error.
    */
-  private attachMutationErrorHandler(client: JazzClient): void {
-    client.onMutationError((event) => {
-      if (this.mutationErrorListeners.size === 0) {
-        console.error("Unhandled Jazz mutation error", event);
-        this.pendingMutationErrorEvents.push(event);
-        return;
-      }
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-    });
-  }
-  /**
-   * Wait for the worker bridge to be initialized (if in worker mode).
-   * No-op if not using a worker.
-   */
-  protected async ensureBridgeReady(): Promise<void> {
-    await this.connection.ensureReadyForQuery({ tier: "local" });
+  private handleMutationError(event: MutationErrorEvent): void {
+    if (this.mutationErrorListeners.size === 0) {
+      console.error("Unhandled Jazz mutation error", event);
+      this.pendingMutationErrorEvents.push(event);
+      return;
+    }
+    for (const listener of this.mutationErrorListeners) {
+      listener(event);
+    }
   }
 
-  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
-    await this.connection.ensureReadyForQuery(options);
-  }
-
-  private async ensureWriteWaitReady(options: { tier: DurabilityTier }): Promise<void> {
-    await this.connection.ensureReadyForWriteWait(options.tier);
+  protected async ensureReady(tier?: DurabilityTier): Promise<void> {
+    await this.connection.ensureReady(tier);
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
     const wait = handle.wait.bind(handle);
     handle.wait = (async (options: { tier: DurabilityTier }) => {
-      await this.ensureWriteWaitReady(options);
+      await this.ensureReady(options.tier);
       return wait(options);
     }) as THandle["wait"];
     return handle;
-  }
-
-  private installMainThreadWasmTelemetry(): void {
-    const collectorUrl = this.telemetryCollectorUrl();
-    if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
-      return;
-    }
-
-    this.disposeWasmTelemetry =
-      this.runtimeModule.installTelemetry?.({
-        config: this.config,
-        collectorUrl,
-        runtimeThread: "main",
-      }) ?? null;
-  }
-
-  private telemetryCollectorUrl(): string | undefined {
-    return resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl;
   }
 
   updateAuthToken(jwtToken: string | null): void {
@@ -1426,7 +1293,7 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
+    await this.ensureReady(queryOptions.tier);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const runtimeQueryOptions = usesRelationTraversal
@@ -1610,7 +1477,7 @@ export class Db {
     };
 
     if (this.connection.shouldDeferSubscriptionStart()) {
-      void this.ensureQueryReady(queryOptions)
+      void this.ensureReady(queryOptions.tier)
         .then(startSubscription)
         .catch((error) => {
           if (unsubscribed) return;
@@ -1660,9 +1527,6 @@ export class Db {
     }
 
     this.mutationErrorListeners.clear();
-    this.disposeWasmTelemetry?.();
-    this.disposeWasmTelemetry = null;
-    await this.shutdownClient();
 
     if (shutdownError) {
       throw shutdownError;

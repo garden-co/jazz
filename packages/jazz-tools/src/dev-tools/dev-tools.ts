@@ -127,13 +127,9 @@ function clearActiveQuerySubscriptionBridge(db: Db): void {
 }
 
 function getDbClient(db: Db): JazzClient | null {
-  const maybeClient = (db as unknown as { client?: unknown }).client;
-  if (maybeClient) return maybeClient as JazzClient;
-
-  const maybeClients = (db as unknown as { clients?: unknown }).clients;
-  if (!(maybeClients instanceof Map)) return null;
-  const firstClient = maybeClients.values().next().value;
-  return firstClient ? (firstClient as JazzClient) : null;
+  const maybeConnection = (db as unknown as { connection?: unknown }).connection;
+  const maybeClient = (maybeConnection as { client?: unknown } | null | undefined)?.client;
+  return (maybeClient ?? null) as JazzClient | null;
 }
 
 function tryGetSchemaFromDb(db: Db): WasmSchema | null {

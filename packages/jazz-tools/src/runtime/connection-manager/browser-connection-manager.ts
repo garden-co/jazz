@@ -1,6 +1,6 @@
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, QueryExecutionOptions } from "../client.js";
-import type { RuntimeSourcesConfig } from "../context.js";
+import type { DurabilityTier } from "../client.js";
+import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { WorkerBridgeOptions, WorkerLifecycleEvent } from "../worker-bridge.js";
 import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "../browser-broker-client.js";
 import {
@@ -24,10 +24,10 @@ import {
 import { FollowerPortConnectionRole } from "./connection-roles/follower-port-connection-role.js";
 import { LeaderWorkerConnectionRole } from "./connection-roles/leader-worker-connection-role.js";
 import type { BrowserConnectionRole } from "./connection-roles/connection-role.js";
-import type {
+import {
   ConnectionManager,
-  ConnectionBridgeClientInput,
-  ConnectionManagerHost,
+  type ConnectionManagerClientInput,
+  type DbForConnection,
 } from "./types.js";
 import {
   BROKER_STORAGE_DELETE_MAX_RETRIES,
@@ -51,12 +51,12 @@ function runtimeModuleUrlForWorkerAssets(): string {
 
 /**
  * Manages the connection of a browser DB. The connection depends on the tab's role
- * (see {@link BrowserBrokerRole}):
+ * (see {@link BrowserConnectionRole}):
  * - the leader connects to a persistent DB in a dedicated worker
  * - followers connect to the leader via
  */
-export class BrowserConnectionManager implements ConnectionManager {
-  readonly hasDurablePeer = true;
+export class BrowserConnectionManager extends ConnectionManager {
+  protected readonly hasDurablePeer = true;
   private brokerClient: BrowserBrokerClient | null = null;
   private brokerPromotion: Promise<void> | null = null;
   private activeBrokerPromotion: BrokerPromotionState | null = null;
@@ -93,7 +93,8 @@ export class BrowserConnectionManager implements ConnectionManager {
     this.sendLifecycleHint("resume");
   };
 
-  constructor(private readonly host: ConnectionManagerHost) {
+  constructor(host: DbForConnection) {
+    super(host);
     this.dbName = resolveDefaultPersistentDbName(host.config);
   }
 
@@ -157,23 +158,21 @@ export class BrowserConnectionManager implements ConnectionManager {
     }
   }
 
-  onClientCreated(input: ConnectionBridgeClientInput): void {
+  protected override onClientCreated(input: ConnectionManagerClientInput): void {
     this.reportBrokerSchemaReady(input.schemaKey);
     this.activeRoleBridge?.onClientCreated(input);
   }
 
-  async ensureReadyForQuery(options?: QueryExecutionOptions): Promise<void> {
+  async ensureReady(tier?: DurabilityTier): Promise<void> {
     await this.ensureBridgeReady();
-    await this.activeRoleBridge?.ensureReadyForQuery(options);
+    await this.activeRoleBridge?.ensureReady(tier);
   }
 
-  async ensureReadyForWriteWait(tier: DurabilityTier): Promise<void> {
-    await this.ensureBridgeReady();
-    await this.activeRoleBridge?.ensureReadyForWriteWait(tier);
-  }
-
-  updateAuth(auth: { jwtToken?: string }): void {
-    this.activeRoleBridge?.updateAuth(auth);
+  override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
+    super.updateAuth(auth);
+    if ("jwtToken" in auth) {
+      this.activeRoleBridge?.updateAuth({ jwtToken: auth.jwtToken });
+    }
   }
 
   sendLifecycleHint(event: WorkerLifecycleEvent): void {
@@ -229,6 +228,12 @@ export class BrowserConnectionManager implements ConnectionManager {
         shutdownError ??= error;
       }
       this.brokerClient = null;
+    }
+
+    try {
+      await super.shutdown();
+    } catch (error) {
+      shutdownError ??= error;
     }
 
     if (shutdownError) {
@@ -345,7 +350,7 @@ export class BrowserConnectionManager implements ConnectionManager {
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
       this.recreateClientAfterBrokerReset();
       this.attachActiveRoleBridgeForExistingClient();
-      if (resetRequestId && !this.host.clientEntry()) {
+      if (resetRequestId && !this.clientEntry) {
         this.reportBrokerLeaderReady({ bridgelessStorageReset: true });
       }
     } catch (error) {
@@ -587,7 +592,7 @@ export class BrowserConnectionManager implements ConnectionManager {
   }
 
   private attachActiveRoleBridgeForExistingClient(): void {
-    const clientEntry = this.host.clientEntry();
+    const clientEntry = this.clientEntry;
     if (!clientEntry) return;
     this.activeRoleBridge?.onClientCreated(clientEntry);
   }
@@ -613,10 +618,10 @@ export class BrowserConnectionManager implements ConnectionManager {
   }
 
   private recreateClientAfterBrokerReset(): void {
-    if (this.host.clientEntry() || !this.brokerResetSchema) return;
+    if (this.clientEntry || !this.brokerResetSchema) return;
     const schema = this.brokerResetSchema;
     this.brokerResetSchema = null;
-    this.host.recreateClient(schema);
+    this.getClient(schema);
   }
 
   private closeActiveRoleBridge(error?: Error, options: { preserveOutbox?: boolean } = {}): void {
@@ -738,7 +743,7 @@ export class BrowserConnectionManager implements ConnectionManager {
   }
 
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
-    this.brokerResetSchema = this.host.clientEntry()?.schema ?? null;
+    this.brokerResetSchema = this.clientEntry?.schema ?? null;
     const roleBridge = this.activeRoleBridge;
     if (roleBridge instanceof LeaderWorkerConnectionRole) {
       await roleBridge.shutdownForStorageReset();
@@ -748,7 +753,7 @@ export class BrowserConnectionManager implements ConnectionManager {
     this.activeRoleBridge = null;
     this.brokerLeaderReadyLeadershipId = null;
     this.brokerSchemaFingerprint = null;
-    await this.host.shutdownClient();
+    await this.shutdownClient();
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -795,7 +800,7 @@ export class BrowserConnectionManager implements ConnectionManager {
       workerLockName: this.tabRole === "leader" ? this.brokerWorkerLockName() : undefined,
       leadershipId: this.tabRole === "leader" ? this.currentLeadershipId : undefined,
       logLevel: this.host.config.logLevel,
-      telemetryCollectorUrl: this.host.telemetryCollectorUrl(),
+      telemetryCollectorUrl: this.telemetryCollectorUrl(),
     };
   }
 
