@@ -25,7 +25,10 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
-use jazz::wire::{TransportError, WireTransport};
+use jazz::wire::{
+    FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
+    WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
+};
 #[cfg(feature = "rocksdb")]
 use tempfile::TempDir;
 
@@ -258,6 +261,42 @@ fn byte_duplex() -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>)
     (
         Box::new(WireTransportAdapter::current(left_transport)),
         Box::new(WireTransportAdapter::current(right_transport)),
+    )
+}
+
+fn byte_duplex_with_session(
+    identity: AuthorId,
+    epoch: u64,
+) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let left_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&left),
+        inbound: Rc::clone(&right),
+    };
+    let right_transport = ByteDuplexTransport {
+        outbound: right,
+        inbound: left,
+    };
+    let session = WireSession {
+        session_id: "realistic-phase1-direct-resume".to_owned(),
+        epoch,
+        identity: Some(identity),
+    };
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS;
+    (
+        Box::new(WireTransportAdapter::new(
+            left_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session.clone()),
+        )),
+        Box::new(WireTransportAdapter::new(
+            right_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session),
+        )),
     )
 }
 
@@ -505,6 +544,65 @@ where
                 .expect("seed activity"),
         );
     }
+
+    Fixture {
+        users,
+        projects,
+        tasks,
+    }
+}
+
+fn seed_resume_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    let users = (0..profile.users)
+        .map(|index| {
+            let row = row_uuid(0x41, index);
+            wait_local(
+                db.insert_with_id("users", row, user_cells(index))
+                    .expect("seed resume user"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let organizations = (0..profile.organizations)
+        .map(|index| {
+            let row = row_uuid(0x42, index);
+            wait_local(
+                db.insert_with_id("organizations", row, organization_cells(index))
+                    .expect("seed resume organization"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let projects = (0..profile.projects)
+        .map(|index| {
+            let row = row_uuid(0x43, index);
+            wait_local(
+                db.insert_with_id(
+                    "projects",
+                    row,
+                    project_cells(index, &organizations, &users),
+                )
+                .expect("seed resume project"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let tasks = (0..profile.tasks)
+        .map(|index| {
+            let row = row_uuid(0x44, index);
+            wait_local(
+                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
+                    .expect("seed resume task"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
 
     Fixture {
         users,
@@ -907,9 +1005,144 @@ fn r10_direct_sync_fanout(c: &mut Criterion) {
     group.finish();
 }
 
+fn r11_byte_wire_resume(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r11_byte_wire_resume");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("tasks_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                b.iter(|| {
+                    let writer = open_db(110);
+                    let server = open_core_db(111);
+                    let client = open_db_with_author(112, READER_AUTHOR, false);
+                    let fixture = seed_resume_fixture(&writer, profile);
+                    let subscribed_row = fixture.tasks[0];
+                    let prepared = client
+                        .prepare_query(&Query::from("tasks"))
+                        .expect("prepare resumed tasks query");
+
+                    let (writer_transport, server_writer_transport) =
+                        byte_duplex_with_session(AUTHOR, 1);
+                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_subscriber =
+                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                    writer.tick().expect("ship resume seed rows");
+                    server.tick().expect("ingest resume seed rows");
+                    assert!(writer.detach_connection(&writer_upstream));
+                    assert!(server.detach_connection(&writer_subscriber));
+
+                    let (client_transport, server_transport) =
+                        byte_duplex_with_session(READER_AUTHOR, 2);
+                    let upstream = client.connect_upstream(client_transport);
+                    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+
+                    let mut subscription =
+                        block_on(client.subscribe(&prepared, global_subscribe_opts()))
+                            .expect("subscribe client tasks");
+
+                    assert_eq!(
+                        drain_opened(block_on(subscription.next_event()), "client tasks"),
+                        0
+                    );
+
+                    client.tick().expect("announce client tasks subscription");
+                    server.tick().expect("serve full task snapshot");
+                    let full_bytes = subscriber
+                        .borrow()
+                        .last_resume_bytes()
+                        .expect("full current-row bytes");
+                    client.tick().expect("apply full task snapshot");
+                    client.tick().expect("materialize full task snapshot event");
+
+                    let current_rows =
+                        drain_delta(subscription.try_next_event(), "client tasks seeded");
+                    assert_eq!(current_rows, profile.tasks);
+                    assert!(full_bytes > 0);
+
+                    server.tick().expect("refresh served current rows");
+                    client.tick().expect("apply served cursor state");
+
+                    let cursor = subscriber
+                        .borrow_mut()
+                        .take_resume_cursor()
+                        .expect("take subscriber resume cursor");
+                    assert!(client.detach_connection(&upstream));
+                    assert!(server.detach_connection(&subscriber));
+
+                    let changed_status = "resume-canary";
+                    wait_local(
+                        writer
+                            .update(
+                                "tasks",
+                                subscribed_row,
+                                BTreeMap::from([
+                                    (
+                                        "status".to_owned(),
+                                        Value::String(changed_status.to_owned()),
+                                    ),
+                                    ("updated_at".to_owned(), Value::U64(9_001)),
+                                ]),
+                            )
+                            .expect("writer disconnected task update"),
+                    );
+                    let (writer_transport, server_writer_transport) =
+                        byte_duplex_with_session(AUTHOR, 3);
+                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_subscriber =
+                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                    writer.tick().expect("ship disconnected task update");
+                    server.tick().expect("ingest disconnected task update");
+                    assert!(writer.detach_connection(&writer_upstream));
+                    assert!(server.detach_connection(&writer_subscriber));
+
+                    let (client_transport, server_transport) =
+                        byte_duplex_with_session(READER_AUTHOR, 4);
+                    let _resumed_upstream = client.connect_upstream(client_transport);
+                    let resumed =
+                        server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+                    client.tick().expect("announce resumed tasks subscription");
+                    server.tick().expect("serve task resume catch-up");
+                    client.tick().expect("apply task resume catch-up");
+                    client.tick().expect("materialize task resume event");
+
+                    let resume_bytes = resumed
+                        .borrow()
+                        .last_resume_bytes()
+                        .expect("resume catch-up bytes");
+                    assert!(resume_bytes > 0);
+                    assert!(
+                        resume_bytes < full_bytes,
+                        "resume catch-up ({resume_bytes}) should be smaller than full send ({full_bytes})"
+                    );
+
+                    let delivered =
+                        drain_delta(block_on(subscription.next_event()), "client tasks resumed");
+                    assert!(delivered > 0);
+                    let rows = client.read(&prepared).expect("read resumed task rows");
+                    let changed = rows
+                        .iter()
+                        .find(|row| row.row_uuid() == subscribed_row)
+                        .expect("changed task visible on client");
+                    assert_eq!(
+                        changed.cell_at(2),
+                        Some(Value::String(changed_status.to_owned()))
+                    );
+                    black_box(resume_bytes)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_direct_sync_fanout, r11_byte_wire_resume
 }
 criterion_main!(benches);

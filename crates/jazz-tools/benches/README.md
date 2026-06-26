@@ -33,7 +33,10 @@ than old helper behavior:
   reopen/prepare/first-read scenario, a hot-task comment/activity history workload
   with multiple direct subscriptions, subscribed writes, and a direct
   writer-DB -> server-DB -> reader-DB sync fanout with a reader subscription
-  through `jazz::db::Db` directly.
+  through `jazz::db::Db` directly. It also includes a byte-wire reconnect/resume
+  canary that serves current task rows once, resumes after a disconnected
+  upstream write is ingested by the server, and checks that the catch-up payload
+  is smaller than the full snapshot.
 
 ## Intended next ports
 
