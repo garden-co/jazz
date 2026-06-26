@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,12 +13,10 @@ import { runServer } from "./server.js";
 
 let tmpDir: string;
 let dbPath: string;
-let txtPath: string;
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "server-test-"));
   dbPath = join(tmpDir, "docs-index.db");
-  txtPath = join(tmpDir, "docs-index.txt");
 
   // Build minimal DB
   const db = new DatabaseSync(dbPath);
@@ -42,19 +40,6 @@ beforeEach(async () => {
   is.run("Getting Started", "getting-started", "", "This page explains installation.");
   is.run("Getting Started", "getting-started", "Installation", "Run npm install jazz-tools.");
   db.close();
-
-  // Build minimal txt
-  await writeFile(
-    txtPath,
-    [
-      "===PAGE:getting-started===",
-      "TITLE:Getting Started",
-      "DESCRIPTION:Learn how to install Jazz.",
-      "",
-      "This page explains installation.\n\n## Installation\n\nRun npm install jazz-tools.",
-    ].join("\n"),
-    "utf8",
-  );
 });
 
 afterEach(async () => {
@@ -77,7 +62,7 @@ async function exchange(messages: object[]): Promise<Array<Record<string, unknow
   }
   input.end();
 
-  await runServer({ input, output, dbPath, txtPath });
+  await runServer({ input, output, dbPath });
 
   const text = Buffer.concat(chunks).toString("utf8");
   return text
@@ -144,7 +129,7 @@ describe("malformed JSON", () => {
     input.write("this is not json\n");
     input.end();
 
-    await runServer({ input, output, dbPath, txtPath });
+    await runServer({ input, output, dbPath });
 
     const [res] = Buffer.concat(chunks)
       .toString("utf8")
@@ -324,6 +309,6 @@ describe("stdin EOF", () => {
     const input = new PassThrough();
     const output = new PassThrough();
     input.end();
-    await expect(runServer({ input, output, dbPath, txtPath })).resolves.toBeUndefined();
+    await expect(runServer({ input, output, dbPath })).resolves.toBeUndefined();
   });
 });
