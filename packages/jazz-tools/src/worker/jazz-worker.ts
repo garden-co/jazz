@@ -298,7 +298,6 @@ async function runWorkerHostWithOptionalLock(
 type WorkerInbound =
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "settle"; id: number }
-  | { type: "query"; id: number; query: Uint8Array }
   | { type: "server-in"; frame: Uint8Array }
   | { type: "lifecycle"; event: string }
   | { type: "attach-follower-port"; peerId: string; leadershipId: number; port: MessagePort }
@@ -311,8 +310,6 @@ type WorkerOutbound =
   | { type: "sync"; frames: Uint8Array[] }
   | { type: "server-out"; frames: Uint8Array[] }
   | { type: "settled"; id: number }
-  | { type: "query-result"; id: number; rows: Uint8Array }
-  | { type: "query-error"; id: number; message: string }
   | { type: "follower-port-attached"; peerId: string; leadershipId: number }
   | { type: "follower-port-closed"; peerId: string; leadershipId: number }
   | { type: "shutdown-ok" }
@@ -408,9 +405,6 @@ class DirectWorkerHost {
         this.pump();
         post({ type: "settled", id: message.id });
         return;
-      case "query":
-        this.handleQuery(message.id, message.query);
-        return;
       case "server-in":
         if (message.frame instanceof Uint8Array) {
           this.serverTransport?.sendWireFrame(message.frame);
@@ -460,19 +454,6 @@ class DirectWorkerHost {
     port.start?.();
     post({ type: "follower-port-attached", peerId, leadershipId });
     this.schedulePump();
-  }
-
-  private handleQuery(id: number, queryBytes: Uint8Array): void {
-    try {
-      this.pendingDurabilityTick = true;
-      this.pump();
-      const query = this.db.prepareQuery(queryBytes);
-      const rows = this.db.all(query, { tier: "local" });
-      post({ type: "query-result", id, rows }, [rows.buffer]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      post({ type: "query-error", id, message });
-    }
   }
 
   private detachFollowerPort(peerId: string, leadershipId: number): void {

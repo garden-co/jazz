@@ -73,7 +73,6 @@ function testDirectRuntime() {
         config: new Uint8Array([2]),
         peerIdentity: new Uint8Array([3, 4]),
       })),
-      setDurableQueryExecutor: vi.fn(),
     } as unknown as Runtime,
     transport,
   };

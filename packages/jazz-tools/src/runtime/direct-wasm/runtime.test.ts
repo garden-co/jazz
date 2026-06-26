@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { PostcardWriter } from "./direct-codec.js";
+import { createRecord, PostcardWriter, writeDescriptor } from "./direct-codec.js";
 import {
   decodeDirectWebSocketFrameBatch,
   encodeDirectWebSocketPrelude,
@@ -170,6 +170,68 @@ describe("DirectWasmRuntime server transport", () => {
       ["delete", "projects"],
     ]);
   });
+
+  it("serves default and local queries from fresh local state", async () => {
+    const insertedRowIds: Uint8Array[] = [];
+    const write = {
+      payload: new Uint8Array(),
+      wait: () => undefined,
+      writeState: () => ({}),
+    };
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: () =>
+            encodeRows([
+              {
+                table: "todos",
+                rowId: insertedRowIds[0]!,
+                title: "fresh local write",
+              },
+            ]),
+          prepareQuery: () => ({}),
+          insertWithIdEncoded: (_table: string, rowId: Uint8Array) => {
+            insertedRowIds.push(rowId);
+            return write;
+          },
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "fresh local write" },
+      },
+      null,
+      "00000000-0000-0000-0000-000000000000",
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "fresh local write" }],
+      },
+    ]);
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
+      [
+        {
+          table: "todos",
+          id: "00000000-0000-0000-0000-000000000000",
+          values: [{ type: "Text", value: "fresh local write" }],
+        },
+      ],
+    );
+  });
 });
 
 const testSchema = {
@@ -234,5 +296,21 @@ function encodeDirectWireError(code: number, retry: number, message: string): Ui
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);
+  return writer.finish();
+}
+
+function encodeRows(rows: Array<{ table: string; rowId: Uint8Array; title: string }>): Uint8Array {
+  const descriptor = [{ name: "title", valueType: { tag: 6 } }];
+  const writer = new PostcardWriter();
+  writer.vec((batch) => {
+    batch.string("todos");
+    writeDescriptor(batch, descriptor);
+    batch.vec((row, index) => {
+      const source = rows[index]!;
+      row.bytes(source.rowId);
+      row.bool(false);
+      row.bytes(createRecord(descriptor, [new TextEncoder().encode(source.title)]));
+    }, rows.length);
+  }, 1);
   return writer.finish();
 }
