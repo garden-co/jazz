@@ -234,6 +234,106 @@ export const BROWSER_BENCHMARKS = [
   },
 ];
 
+const JAZZ_SIM_FAST_SCENARIOS = [
+  {
+    id: "s1_saas",
+    label: "Jazz-sim S1 SaaS",
+    bench: "s1_saas",
+    output_path: "s1_saas.jsonl",
+    log_path: "logs/s1_saas.log",
+  },
+  {
+    id: "s2_canvas",
+    label: "Jazz-sim S2 canvas",
+    bench: "s2_canvas",
+    output_path: "s2_canvas.jsonl",
+    log_path: "logs/s2_canvas.log",
+  },
+  {
+    id: "s3_permissions",
+    label: "Jazz-sim S3 permissions",
+    bench: "s3_permissions",
+    output_path: "s3_permissions.jsonl",
+    log_path: "logs/s3_permissions.log",
+  },
+  {
+    id: "s4_order_processing",
+    label: "Jazz-sim S4 order processing",
+    bench: "s4_order_processing",
+    output_path: "s4_order_processing.jsonl",
+    log_path: "logs/s4_order_processing.log",
+  },
+  {
+    id: "s5_durable_stream",
+    label: "Jazz-sim S5 durable stream",
+    bench: "s5_durable_stream",
+    output_path: "s5_durable_stream.jsonl",
+    log_path: "logs/s5_durable_stream.log",
+  },
+  {
+    id: "s6_text_traces",
+    label: "Jazz-sim S6 text traces",
+    bench: "s6_text_traces",
+    output_path: "s6_text_traces.jsonl",
+    log_path: "logs/s6_text_traces.log",
+  },
+  {
+    id: "s7_migrations",
+    label: "Jazz-sim S7 migrations",
+    bench: "s7_migrations",
+    output_path: "s7_migrations.jsonl",
+    log_path: "logs/s7_migrations.log",
+  },
+  {
+    id: "s9_durable_execution",
+    label: "Jazz-sim S9 durable execution",
+    bench: "s9_durable_execution",
+    output_path: "s9_durable_execution.jsonl",
+    log_path: "logs/s9_durable_execution.log",
+  },
+];
+
+export const JAZZ_SIM_BENCHMARKS = [
+  ...JAZZ_SIM_FAST_SCENARIOS.map((scenario) => ({
+    id: `jazz-sim:${scenario.id}`,
+    suite: "jazz-sim",
+    label: scenario.label,
+    kind: "jazz-sim-bench",
+    bench: scenario.bench,
+    output_path: scenario.output_path,
+    log_path: scenario.log_path,
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+    },
+  })),
+  {
+    id: "jazz-sim:s2_canvas:wire_frames",
+    suite: "jazz-sim",
+    label: "Jazz-sim S2 canvas (wire frames)",
+    kind: "jazz-sim-bench",
+    bench: "s2_canvas",
+    output_path: "wire_frames/s2_canvas.jsonl",
+    log_path: "logs/wire_frames_s2_canvas.log",
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+      JAZZ_S2_TRANSPORT_CODEC: "wire_frames",
+    },
+  },
+  {
+    id: "jazz-sim:s1_saas:wire_frames",
+    suite: "jazz-sim",
+    label: "Jazz-sim S1 SaaS reconnect (wire frames)",
+    kind: "jazz-sim-bench",
+    bench: "s1_saas",
+    output_path: "wire_frames/s1_saas.jsonl",
+    log_path: "logs/wire_frames_s1_saas.log",
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+      JAZZ_S1_RECONNECT_TRANSPORT_CODEC: "wire_frames",
+    },
+  },
+];
+
 export function benchmarksForSuite(suite, options = {}) {
   if (suite === "native") {
     if (!options.storageEngine) return NATIVE_BENCHMARKS;
@@ -242,6 +342,7 @@ export function benchmarksForSuite(suite, options = {}) {
     );
   }
   if (suite === "browser") return BROWSER_BENCHMARKS;
+  if (suite === "jazz-sim") return JAZZ_SIM_BENCHMARKS;
   throw new Error(`Unsupported suite: ${suite}`);
 }
 
@@ -268,7 +369,11 @@ export function skipIds(skipSet) {
 
 export function repeatCountForBenchmark(benchmark, requestedCount = DEFAULT_NOISE_REPEAT_COUNT) {
   if (!benchmark || typeof benchmark !== "object") return 1;
-  if (benchmark.kind === "native-example" || benchmark.kind === "browser-scenario") {
+  if (
+    benchmark.kind === "native-example" ||
+    benchmark.kind === "browser-scenario" ||
+    benchmark.kind === "jazz-sim-bench"
+  ) {
     return Math.max(1, Number(requestedCount) || DEFAULT_NOISE_REPEAT_COUNT);
   }
   return 1;

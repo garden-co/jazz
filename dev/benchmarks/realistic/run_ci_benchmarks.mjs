@@ -21,7 +21,7 @@ function fail(message) {
 function printHelp() {
   console.log(`Usage:
   node dev/benchmarks/realistic/run_ci_benchmarks.mjs \\
-    --suite native|browser \\
+    --suite native|browser|jazz-sim \\
     --out-dir bench-out/native \\
     [--storage-engine rocksdb|sqlite] \\
     [--profile s] \\
@@ -85,8 +85,14 @@ function parseArgs(argv) {
   if (out.suite === "native" && !["rocksdb", "sqlite"].includes(out.storageEngine)) {
     fail("--storage-engine must be one of: rocksdb, sqlite");
   }
+  if (!["native", "browser", "jazz-sim"].includes(out.suite)) {
+    fail("--suite must be one of: native, browser, jazz-sim");
+  }
   if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "opfs-btree") {
     fail("--storage-engine is only supported for native suites");
+  }
+  if (out.suite === "jazz-sim" && out.storageEngine) {
+    fail("--storage-engine is not supported for jazz-sim suites");
   }
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds < 1) {
     fail("--timeout-seconds must be a number >= 1");
@@ -518,6 +524,20 @@ export function buildNativeCriterionCommand(benchmark) {
   ];
 }
 
+export function buildJazzSimCommand(benchmark) {
+  return [
+    "cargo",
+    "bench",
+    "--manifest-path",
+    "vendor/jazz_core/Cargo.toml",
+    "-p",
+    "jazz-sim",
+    "--bench",
+    benchmark.bench,
+    "--quiet",
+  ];
+}
+
 async function runNativeBenchmark(benchmark, args) {
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
@@ -718,6 +738,119 @@ async function runNativeBenchmark(benchmark, args) {
   });
 }
 
+async function runJazzSimBenchmark(benchmark, args) {
+  const outputFile = path.resolve(args.outDir, benchmark.output_path);
+  const logFile = path.resolve(args.outDir, benchmark.log_path);
+  const command = buildJazzSimCommand(benchmark);
+  const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
+  const attempts = [];
+  let totalDurationMs = 0;
+
+  fs.rmSync(outputFile, { force: true });
+
+  for (let attemptIndex = 1; attemptIndex <= repeatCount; attemptIndex += 1) {
+    const attemptOutputFile = path.resolve(
+      args.outDir,
+      withAttemptSuffix(benchmark.output_path, attemptIndex),
+    );
+    const attemptLogFile = path.resolve(
+      args.outDir,
+      withAttemptSuffix(benchmark.log_path, attemptIndex),
+    );
+    const tempOutputFile = `${attemptOutputFile}.partial`;
+    const env = {
+      ...process.env,
+      JAZZ_BENCH_PROFILE: "fast",
+      ...benchmark.env,
+    };
+
+    fs.rmSync(tempOutputFile, { force: true });
+    fs.rmSync(attemptOutputFile, { force: true });
+
+    console.log(`\n==> ${benchmark.label} (${attemptIndex}/${repeatCount})`);
+    console.log(shellQuote(command));
+    const result = await runCommand({
+      command,
+      cwd: process.cwd(),
+      env,
+      timeoutSeconds: args.timeoutSeconds,
+      stdoutFile: tempOutputFile,
+      logFile: attemptLogFile,
+      streamStdoutToConsole: true,
+    });
+    totalDurationMs += result.durationMs;
+
+    const status = statusForRun(result);
+    const tempExists = fs.existsSync(tempOutputFile) && fs.statSync(tempOutputFile).size > 0;
+    if (status === "passed" && tempExists) {
+      fs.renameSync(tempOutputFile, attemptOutputFile);
+    } else {
+      fs.rmSync(tempOutputFile, { force: true });
+    }
+
+    const finalStatus =
+      status === "passed" && tempExists ? "passed" : status === "passed" ? "failed" : status;
+    attempts.push({
+      attempt: attemptIndex,
+      status: finalStatus,
+      duration_ms: result.durationMs,
+      output_path: finalStatus === "passed" ? rel(attemptOutputFile) : null,
+      log_path: rel(attemptLogFile),
+      exit_code: result.code,
+      signal: result.signal,
+      note:
+        finalStatus === "failed" && status === "passed" && !tempExists
+          ? "Benchmark completed without emitting JSONL output."
+          : failureNote(result),
+    });
+
+    if (finalStatus !== "passed") {
+      return summarizeBenchmark(benchmark, finalStatus, totalDurationMs, {
+        command,
+        bench: benchmark.bench,
+        output_path: null,
+        log_path: rel(attemptLogFile),
+        timeout_seconds: args.timeoutSeconds,
+        repeat_count: repeatCount,
+        completed_attempts: attempts.filter((attempt) => attempt.status === "passed").length,
+        attempts,
+        env: benchmark.env ?? {},
+        note: attempts.at(-1)?.note ?? failureNote(result),
+      });
+    }
+  }
+
+  mkdirp(path.dirname(outputFile));
+  const merged = attempts
+    .map((attempt) =>
+      attempt.output_path ? fs.readFileSync(path.resolve(attempt.output_path), "utf8") : "",
+    )
+    .filter(Boolean)
+    .join("");
+  fs.writeFileSync(outputFile, merged);
+
+  mkdirp(path.dirname(logFile));
+  const mergedLogs = attempts
+    .map((attempt) =>
+      attempt.log_path ? fs.readFileSync(path.resolve(attempt.log_path), "utf8") : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+  fs.writeFileSync(logFile, mergedLogs);
+
+  return summarizeBenchmark(benchmark, "passed", totalDurationMs, {
+    command,
+    bench: benchmark.bench,
+    output_path: rel(outputFile),
+    log_path: rel(logFile),
+    timeout_seconds: args.timeoutSeconds,
+    repeat_count: repeatCount,
+    completed_attempts: attempts.length,
+    attempts,
+    env: benchmark.env ?? {},
+  });
+}
+
 function parseBrowserReport(lines) {
   const marker = "[realistic-bench]";
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -846,7 +979,7 @@ function countByStatus(results) {
 function summaryMarkdown(suite, results, timeoutSeconds, repeatCount, storageEngine = "") {
   const counts = countByStatus(results);
   const lines = [];
-  const suiteTitle = suite === "native" ? "Native" : "Browser";
+  const suiteTitle = suite === "native" ? "Native" : suite === "browser" ? "Browser" : "Jazz-sim";
   const storageSuffix = storageEngine ? ` (${storageEngine})` : "";
   lines.push(`## ${suiteTitle}${storageSuffix} benchmark status`);
   lines.push("");
@@ -909,6 +1042,11 @@ async function main() {
       continue;
     }
 
+    if (args.suite === "jazz-sim") {
+      results.push(await runJazzSimBenchmark(benchmark, args));
+      continue;
+    }
+
     results.push(await runBrowserBenchmark(benchmark, args));
   }
 
@@ -920,7 +1058,8 @@ async function main() {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
-    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
+    storage_engine:
+      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : null,
     profile: args.profile,
     repeat_count: args.repeatCount,
     timeout_seconds: args.timeoutSeconds,
@@ -934,14 +1073,15 @@ async function main() {
       results,
       args.timeoutSeconds,
       args.repeatCount,
-      args.suite === "browser" ? "opfs-btree" : args.storageEngine,
+      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : "",
     ),
   );
   writeJson(skipCandidatesFile, {
     version: 1,
     generated_at: generatedAt,
     suite: args.suite,
-    storage_engine: args.suite === "browser" ? "opfs-btree" : args.storageEngine,
+    storage_engine:
+      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : null,
     timeout_seconds: args.timeoutSeconds,
     benchmark_ids: results
       .filter((result) => result.status === "timed_out")
