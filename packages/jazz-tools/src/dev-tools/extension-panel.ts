@@ -509,7 +509,7 @@ export function onActiveQuerySubscriptionsChange(
   };
 }
 
-class DevToolsDb extends Db {
+export class DevToolsDb extends Db {
   constructor(config: DbConfig) {
     super(config, null);
   }
@@ -539,10 +539,13 @@ class DevToolsJazzClient {
   }
 
   insert(table: string, values: InsertValues): DirectInsertResult {
-    // The grid awaits .wait() but ignores the returned row; carry the input
-    // values as a stand-in so db.insert's mapValue transform has a row to map.
-    const value = { ...(values as Record<string, unknown>) } as unknown as Row;
-    return this.deferDurableInsert(value, (tier) => this.createDurable(table, values, { tier }));
+    // db.insert maps the returned row through transformRow, which expects a
+    // WasmRow ({ id, values: WasmValue[] }) — not the raw insert input. The grid
+    // awaits .wait() but ignores the mapped row, so a minimal valid WasmRow (no
+    // column values) is enough to satisfy the transform without throwing.
+    const id = (values as Record<string, unknown>).id;
+    const standIn = { id: typeof id === "string" ? id : "", values: [] } as unknown as Row;
+    return this.deferDurableInsert(standIn, (tier) => this.createDurable(table, values, { tier }));
   }
   async createDurable(
     table: string,
