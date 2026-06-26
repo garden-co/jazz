@@ -137,9 +137,13 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        ColumnType::Integer | ColumnType::BigInt => Err(err(
+        ColumnType::Integer => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "signed integer columns are not supported by direct fixed-schema conversion yet",
+            "INTEGER is signed, but direct core fixed schemas only support unsigned integer columns",
+        )),
+        ColumnType::BigInt => Err(err(
+            format!("$.{}.{}", table.as_str(), column),
+            "BIGINT is signed, but direct core fixed schemas only support unsigned integer columns",
         )),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
@@ -224,7 +228,25 @@ mod tests {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column("count", ColumnType::Integer))
             .build();
-        assert!(convert_alpha_schema(&integer_schema).is_err());
+        let integer_error = convert_alpha_schema(&integer_schema).unwrap_err();
+        assert_eq!(
+            integer_error.to_string(),
+            "$.todos.count: INTEGER is signed, but direct core fixed schemas only support unsigned integer columns"
+        );
+
+        let integer_array_schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column(
+                "partSizes",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ))
+            .build();
+        let integer_array_error = convert_alpha_schema(&integer_array_schema).unwrap_err();
+        assert_eq!(
+            integer_array_error.to_string(),
+            "$.todos.partSizes: INTEGER is signed, but direct core fixed schemas only support unsigned integer columns"
+        );
 
         let default_schema = [(
             TableName::new("todos"),
