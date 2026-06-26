@@ -6,17 +6,17 @@
 
 use std::collections::HashMap;
 
-use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
-use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::TablePolicies;
-use jazz_tools::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
-};
+use jazz_tools::ObjectId;
+use jazz_tools::Session;
+use jazz_tools::TablePolicies;
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::SyncManager;
+use jazz_tools::{
+    ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
+};
+use jazz_tools::{Operation, PolicyExpr};
 
 pub type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
 

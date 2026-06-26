@@ -17,9 +17,9 @@ use common::{
     create_runtime, create_session, current_timestamp, document_plaintext_size, format_bytes,
     get_stats, reset_stats, setup_data,
 };
-use jazz_tools::query_manager::query::Query;
-use jazz_tools::query_manager::session::WriteContext;
-use jazz_tools::query_manager::types::Value;
+use jazz_tools::Query;
+use jazz_tools::Value;
+use jazz_tools::WriteContext;
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs

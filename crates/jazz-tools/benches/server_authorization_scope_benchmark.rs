@@ -8,19 +8,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use jazz_tools::query_manager::manager::QueryManager;
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::query::QueryBuilder;
-use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies,
-    TableSchema, Value,
-};
-use jazz_tools::schema_manager::AppId;
+use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{
     ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncManager, SyncPayload,
+};
+use jazz_tools::{
+    AppId, ColumnDescriptor, ColumnType, PolicyExpr, QueryBuilder, RowDescriptor, Schema, Session,
+    TableName, TablePolicies, TableSchema, Value,
 };
 
 const USER_ID: &str = "benchmark_user";
@@ -212,7 +209,8 @@ fn initial_authorized_scope(c: &mut Criterion) {
 fn initial_authorized_scope_with_wide_schema_catalogue(c: &mut Criterion) {
     let mut group = c.benchmark_group("server_authorization_scope/wide_schema_catalogue");
 
-    for (row_count, known_schema_count, extra_columns) in [(2_000usize, 500usize, 256usize)] {
+    {
+        let (row_count, known_schema_count, extra_columns) = (2_000usize, 500usize, 256usize);
         group.throughput(Throughput::Elements(row_count as u64));
         group.bench_with_input(
             BenchmarkId::new(
@@ -244,9 +242,9 @@ fn initial_authorized_scope_with_wide_schema_catalogue(c: &mut Criterion) {
 fn many_initial_authorized_scopes_share_schema_context(c: &mut Criterion) {
     let mut group = c.benchmark_group("server_authorization_scope/many_subscriptions");
 
-    for (row_count, known_schema_count, extra_columns, subscription_count) in
-        [(1_000usize, 500usize, 256usize, 25usize)]
     {
+        let (row_count, known_schema_count, extra_columns, subscription_count) =
+            (1_000usize, 500usize, 256usize, 25usize);
         group.throughput(Throughput::Elements(
             (row_count * subscription_count) as u64,
         ));

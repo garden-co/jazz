@@ -11,8 +11,8 @@ mod common;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use jazz_tools::query_manager::session::WriteContext;
-use jazz_tools::query_manager::types::Value;
+use jazz_tools::Value;
+use jazz_tools::WriteContext;
 
 const USER_ID: &str = "benchmark_user";
 

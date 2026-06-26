@@ -21,12 +21,10 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
+use jazz_tools::ObjectId;
 use jazz_tools::catalogue::CatalogueEntry;
 use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
-use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
-use jazz_tools::query_manager::query::{Query, QueryBuilder};
-use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TablePolicies, TableSchema, Value,
 };
@@ -44,6 +42,8 @@ use jazz_tools::storage::{MemoryStorage, RowLocator};
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
+use jazz_tools::{Query, QueryBuilder};
+use jazz_tools::{Session, WriteContext};
 use serde::Deserialize;
 #[cfg(any(
     all(feature = "rocksdb", not(target_arch = "wasm32")),

@@ -5,6 +5,7 @@ edition = "2024"
 description = "Jazz local-first relational database core, runtime, client, and CLI."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/garden-co/jazz2"
+autobenches = false
 
 [lib]
 name = "jazz_tools"
@@ -158,20 +159,27 @@ tokio = { version = "1", features = ["test-util", "full"] }
 tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
-[[bench]]
-name = "realistic_phase1"
-harness = false
-
+# Keep the active benchmark harness explicit while the old jazz-tools engine is
+# being replaced. Deep-internal benches such as realistic_phase1 and
+# server_authorization_scope_benchmark should be ported before re-enabling.
 [[bench]]
 name = "observer_write_path"
 harness = false
 
 [[bench]]
-name = "limit_offset_benchmark"
+name = "insert_benchmark"
 harness = false
 
 [[bench]]
-name = "server_authorization_scope_benchmark"
+name = "update_benchmark"
+harness = false
+
+[[bench]]
+name = "subscription_benchmark"
+harness = false
+
+[[bench]]
+name = "memory_benchmark"
 harness = false
 
 [[example]]

@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use jazz_tools::query_manager::query::{Query, QueryBuilder};
-use jazz_tools::query_manager::session::WriteContext;
-use jazz_tools::query_manager::types::Value;
+use jazz_tools::Value;
+use jazz_tools::WriteContext;
+use jazz_tools::{Query, QueryBuilder};
 
 const USER_ID: &str = "benchmark_user";
 
