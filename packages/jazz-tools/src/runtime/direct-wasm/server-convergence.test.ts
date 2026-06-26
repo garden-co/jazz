@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { WasmSchema } from "../../drivers/types.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from "../schema-fetch.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
@@ -117,8 +118,39 @@ describe("DirectWasmRuntime server convergence", () => {
         appId,
         dataDir,
         adminSecret,
-        schema: encodeDirectSchema(schema),
       });
+      const published = await publishSchema(server);
+
+      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/schemas`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Jazz-Admin-Secret": "not-the-admin-secret",
+        },
+        body: JSON.stringify({ schema }),
+      });
+      expect(wrongSecretResponse.status).toBe(401);
+
+      const port = server.port;
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        port,
+        dataDir,
+        adminSecret,
+      });
+
+      const catalogue = await fetchSchemaHashes(server.url, { appId, adminSecret });
+      expect(catalogue.hashes).toContain(published.hash);
+
+      const storedSchema = await fetchStoredWasmSchema(server.url, {
+        appId,
+        adminSecret,
+        schemaHash: published.hash,
+      });
+      expect(storedSchema.schema).toEqual(schema);
 
       const writer = await createClient({ appId, serverUrl: server.url, peer: "writer" });
       clients.push(writer);
@@ -135,7 +167,6 @@ describe("DirectWasmRuntime server convergence", () => {
 
       await writer.shutdown();
       clients.splice(clients.indexOf(writer), 1);
-      const port = server.port;
       await server.stop();
       server = null;
 
@@ -144,7 +175,6 @@ describe("DirectWasmRuntime server convergence", () => {
         port,
         dataDir,
         adminSecret,
-        schema: encodeDirectSchema(schema),
       });
 
       const reader = await createClient({ appId, serverUrl: server.url, peer: "reader" });
@@ -189,6 +219,16 @@ describe("DirectWasmRuntime server convergence", () => {
     20_000,
   );
 });
+
+async function publishSchema(
+  server: LocalJazzServerHandle,
+): Promise<{ objectId: string; hash: string }> {
+  return publishStoredSchema(server.url, {
+    appId: server.appId,
+    adminSecret: server.adminSecret,
+    schema,
+  });
+}
 
 async function createClient({
   appId,
