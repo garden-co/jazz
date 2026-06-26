@@ -16,15 +16,23 @@ The active bench harness is the explicit `[[bench]]` list in
 - `subscription_benchmark`
 - `memory_benchmark`
 
-`direct_core_benchmark`, `direct_authorization_scope_benchmark`, and
-`observer_write_path` exercise the new `jazz_core`/`jazz` facade directly
-instead of going through the legacy `jazz-tools::runtime_core::RuntimeCore`
-stack.
+All active Criterion benches except `memory_benchmark` now exercise the new
+`jazz_core`/`jazz` facade directly instead of going through the legacy
+`jazz-tools::runtime_core::RuntimeCore` stack.
 
-The remaining active benches still use the legacy RuntimeCore helpers under
-`benches/common/`. Keep that split visible while porting: direct-core benches are
-the target shape, and RuntimeCore benches are compatibility/source-material
-benches until they are rewritten or retired.
+`memory_benchmark` still uses the legacy RuntimeCore helpers under
+`benches/common/` because it reports internal SyncManager/QueryManager memory
+breakdowns that the direct facade does not expose yet. Keep that split visible
+while porting: direct-core benches are the target shape, and RuntimeCore benches
+are compatibility/source-material benches until they are rewritten or retired.
+
+Two direct ports intentionally measure the nearest direct-core semantics rather
+than old helper behavior:
+
+- `insert_benchmark` models team/folder authorization as a folder-access join
+  policy instead of old `INHERITS SELECT VIA folder_id` session recursion.
+- `subscription_benchmark` consumes one direct subscription delta per insert in
+  the batch case; old RuntimeCore tick coalescing produced one larger callback.
 
 ## Intended next ports
 
