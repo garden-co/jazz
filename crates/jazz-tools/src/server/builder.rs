@@ -165,7 +165,9 @@ impl ServerBuilder {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
-        let direct_core = self.build_direct_core(&runtime)?;
+        let direct_core_storage_config = self.build_direct_core_storage_config();
+        let direct_core = self.build_direct_core(&runtime, direct_core_storage_config.clone())?;
+        let direct_core_storage_config = direct_core_storage_config.ok();
 
         let state = Arc::new(ServerState {
             runtime,
@@ -181,7 +183,8 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
-            direct_core,
+            direct_core: std::sync::RwLock::new(direct_core),
+            direct_core_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -254,12 +257,14 @@ impl ServerBuilder {
     fn build_direct_core(
         &self,
         runtime: &TokioRuntime<DynStorage>,
+        storage_config: Result<StorageConfig, String>,
     ) -> Result<Option<crate::server::direct_core::DirectCoreServer>, String> {
         if let Some(schema) = &self.direct_core_schema {
+            let storage_config = storage_config?;
             return Ok(Some(
                 crate::server::direct_core::DirectCoreServer::start_with_storage(
                     schema.clone(),
-                    self.build_direct_core_storage_config()?,
+                    storage_config,
                 )?,
             ));
         }
@@ -271,12 +276,13 @@ impl ServerBuilder {
         let Some(schema) = schema else {
             return Ok(None);
         };
+        let storage_config = storage_config?;
         let schema = crate::server::direct_schema::convert_alpha_schema(&schema)
             .map_err(|error| format!("failed to build direct core schema: {error}"))?;
         Ok(Some(
             crate::server::direct_core::DirectCoreServer::start_with_storage(
                 schema,
-                self.build_direct_core_storage_config()?,
+                storage_config,
             )?,
         ))
     }
@@ -820,7 +826,7 @@ mod tests {
                 .build()
                 .await
                 .expect("build fixed schema server");
-            assert!(built.state.direct_core.is_some());
+            assert!(built.state.direct_core().is_some());
             built
                 .state
                 .runtime
@@ -842,7 +848,7 @@ mod tests {
             .await
             .expect("build dynamic server from rehydrated catalogue");
 
-        assert!(rebuilt.state.direct_core.is_some());
+        assert!(rebuilt.state.direct_core().is_some());
     }
 
     #[cfg(feature = "rocksdb")]
@@ -868,7 +874,7 @@ mod tests {
                 .await
                 .expect("build RocksDB server with direct core");
 
-            assert!(built.state.direct_core.is_some());
+            assert!(built.state.direct_core().is_some());
             assert!(data_dir.path().join("jazz.rocksdb").exists());
             assert!(data_dir.path().join(DIRECT_CORE_ROCKSDB_DIR).exists());
         }
@@ -882,7 +888,7 @@ mod tests {
             .await
             .expect("rebuild RocksDB server with direct core");
 
-        assert!(rebuilt.state.direct_core.is_some());
+        assert!(rebuilt.state.direct_core().is_some());
         assert!(data_dir.path().join(DIRECT_CORE_ROCKSDB_DIR).exists());
     }
 
