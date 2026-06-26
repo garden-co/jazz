@@ -175,6 +175,10 @@ name = "direct_authorization_scope_benchmark"
 harness = false
 
 [[bench]]
+name = "realistic_phase1_direct"
+harness = false
+
+[[bench]]
 name = "insert_benchmark"
 harness = false
 
