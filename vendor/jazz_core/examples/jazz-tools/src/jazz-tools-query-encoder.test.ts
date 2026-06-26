@@ -76,15 +76,20 @@ test("subscribe simple forward include callbacks include rows", async () => {
   db.insert(app.todos, { title: "Ship relation watches", owner_id: owner.id });
 
   let rows: Array<Record<string, unknown>> = [];
-  const subscription = db.subscribe(app.todos.include("owner"), (nextRows) => {
-    rows = nextRows as Array<Record<string, unknown>>;
+  let subscription: ReturnType<typeof db.subscribe> | undefined;
+  const opened = new Promise<void>((resolve) => {
+    subscription = db.subscribe(app.todos.include("owner"), (nextRows) => {
+      rows = nextRows as Array<Record<string, unknown>>;
+      resolve();
+    });
   });
+  await opened;
   try {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].title, "Ship relation watches");
     assert.deepEqual(rows[0].owner, { id: owner.id, name: "Ada" });
   } finally {
-    subscription.unsubscribe();
+    subscription?.unsubscribe();
     await (db as { close?: () => Promise<void> }).close?.();
   }
 });
@@ -92,8 +97,13 @@ test("subscribe simple forward include callbacks include rows", async () => {
 test("subscribe simple forward include callbacks rows inserted after subscribe", async () => {
   const db = await createDb({ schema: app._schema, appId: "subscribe-forward-include-live" });
   let rows: Array<Record<string, unknown>> = [];
+  let seenExpectedRows: () => void;
+  const sawExpectedRows = new Promise<void>((resolve) => {
+    seenExpectedRows = resolve;
+  });
   const subscription = db.subscribe(app.todos.include("owner"), (nextRows) => {
     rows = nextRows as Array<Record<string, unknown>>;
+    if (rows.length === 2) seenExpectedRows();
   });
   try {
     const first = db.insert(app.users, { name: "Ada" });
@@ -101,6 +111,7 @@ test("subscribe simple forward include callbacks rows inserted after subscribe",
     db.insert(app.todos, { title: "First live relation", owner_id: first.id });
     db.insert(app.todos, { title: "Second live relation", owner_id: second.id });
 
+    await sawExpectedRows;
     rows.sort((left, right) => String(left.title).localeCompare(String(right.title)));
     assert.deepEqual(
       rows.map((row) => [row.title, (row.owner as { name?: string } | null)?.name]),

@@ -154,7 +154,7 @@ The workflow currently:
 - keeps a checked-in skip set at `dev/benchmarks/realistic/ci_skip_set.json`
 - only activates configured skips after 3 timed-out observations for the same benchmark id
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
-- records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; these artifacts have a manifest and feed skip/status summaries, but `update_history.mjs` does not yet ingest JSONL metrics into the static site history
+- records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; `update_history.mjs` ingests passed JSONL outputs into history as suite `jazz-sim`, keyed by scenario plus phase/variant, and exposes numeric JSONL fields to the static site/report as per-phase metrics
 - records browser outputs per scenario when they complete within budget
 
 The `site` job:
