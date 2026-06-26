@@ -1399,6 +1399,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_schema_rejects_shapes_unsupported_by_direct_core() {
+        let initial_schema = Schema::new();
+        let state = make_state_with_schema(initial_schema).await;
+        let app = make_test_router(state);
+        let unsupported_schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column_with_default(
+                        "name",
+                        ColumnType::Text,
+                        QueryValue::Text("anonymous".to_owned()),
+                    ),
+            )
+            .build();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": unsupported_schema }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn edge_mode_forwards_admin_catalogue_publishing() {
         use std::sync::{Arc, Mutex};
 

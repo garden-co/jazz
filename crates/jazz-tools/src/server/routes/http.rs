@@ -565,6 +565,22 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
+    let direct_schema = match state.direct_core.as_ref() {
+        Some(_) => match crate::server::direct_schema::convert_alpha_schema(&request.schema) {
+            Ok(schema) => Some(schema),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "schema is not supported by direct core: {err}"
+                    ))),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
     let schema_hash = SchemaHash::compute(&request.schema);
     let object_id = match state.runtime.publish_schema(request.schema) {
         Ok(object_id) => object_id,
@@ -578,6 +594,17 @@ pub(super) async fn publish_schema_handler(
                 .into_response();
         }
     };
+    if let (Some(direct_core), Some(schema)) = (state.direct_core.as_ref(), direct_schema)
+        && let Err(err) = direct_core.publish_schema(schema).await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to publish schema to direct core: {err}"
+            ))),
+        )
+            .into_response();
+    }
 
     (
         StatusCode::CREATED,
