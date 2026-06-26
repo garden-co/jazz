@@ -63,6 +63,7 @@ interface DirectTransport {
 interface RuntimeWithDirectTransport extends Runtime {
   connectUpstreamPeer?(): DirectTransport;
   getDirectOpenPayload?(): DirectOpenPayload;
+  onDirectSyncNeeded?(callback: () => void): () => void;
 }
 
 type WorkerInbound =
@@ -114,8 +115,10 @@ export class WorkerBridge {
   private clientIdPromise: Promise<string> | null = null;
   private workerClientId: string | null = null;
   private disposed = false;
+  private unsubscribeSyncNeeded: (() => void) | null = null;
 
   private pumpScheduled = false;
+  private pumpAgain = false;
   private shutdownResolve: (() => void) | null = null;
 
   constructor(worker: Worker, runtime: Runtime) {
@@ -143,6 +146,7 @@ export class WorkerBridge {
     }
 
     this.transport = connectUpstreamPeer.call(this.runtime);
+    this.unsubscribeSyncNeeded = this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
     const initOptions: WorkerBridgeOptions = {
       ...options,
       directOpen: getDirectOpenPayload.call(this.runtime),
@@ -181,9 +185,10 @@ export class WorkerBridge {
 
   async shutdown(): Promise<void> {
     if (this.disposed) return;
+    this.pumpTransport();
     this.disposed = true;
-    this.transport?.close();
-    this.transport = null;
+    this.unsubscribeSyncNeeded?.();
+    this.unsubscribeSyncNeeded = null;
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 1_000);
       this.shutdownResolve = () => {
@@ -192,6 +197,8 @@ export class WorkerBridge {
       };
       this.postToWorker({ type: "shutdown" });
     });
+    this.transport?.close();
+    this.transport = null;
   }
 
   getWorkerClientId(): string | null {
@@ -310,17 +317,30 @@ export class WorkerBridge {
     queueMicrotask(() => {
       this.pumpScheduled = false;
       this.pumpTransport();
+      if (this.pumpAgain) {
+        this.pumpAgain = false;
+        this.schedulePump();
+      }
     });
   }
 
   private pumpTransport(): void {
     const transport = this.transport;
     if (!transport || this.disposed) return;
-    transport.tick();
-    const frames = normalizeFrames(transport.recvWireFrames());
-    if (frames.length > 0) {
-      this.postToWorker({ type: "sync", frames }, frames.map((frame) => frame.buffer));
+    for (let round = 0; round < 32; round += 1) {
+      transport.tick();
+      const frames = normalizeFrames(transport.recvWireFrames());
+      if (frames.length > 0) {
+        this.postToWorker(
+          { type: "sync", frames },
+          frames.map((frame) => frame.buffer),
+        );
+      }
+      if (frames.length === 0) {
+        return;
+      }
     }
+    this.pumpAgain = true;
   }
 
   private postToWorker(message: WorkerInbound, transfer: Transferable[] = []): void {
@@ -333,7 +353,9 @@ export class MessagePortRuntimeBridge {
   private readonly runtime: RuntimeWithDirectTransport;
   private transport: DirectTransport | null = null;
   private authFailureCallback: ((reason: AuthFailureReason) => void) | null = null;
+  private unsubscribeSyncNeeded: (() => void) | null = null;
   private pumpScheduled = false;
+  private pumpAgain = false;
 
   constructor(port: MessagePort, runtime: Runtime) {
     this.port = port;
@@ -347,6 +369,7 @@ export class MessagePortRuntimeBridge {
       throw new Error("MessagePortRuntimeBridge requires a direct WasmDb runtime");
     }
     this.transport = connectUpstreamPeer.call(this.runtime);
+    this.unsubscribeSyncNeeded = this.runtime.onDirectSyncNeeded?.(() => this.schedulePump()) ?? null;
     this.port.addEventListener("message", (event: MessageEvent<PortOutbound>) => {
       this.handlePortMessage(event.data);
     });
@@ -355,18 +378,25 @@ export class MessagePortRuntimeBridge {
   }
 
   shutdown(): void {
+    this.unsubscribeSyncNeeded?.();
+    this.unsubscribeSyncNeeded = null;
     this.transport?.close();
     this.transport = null;
     this.port.postMessage({ type: "close" } satisfies PortInbound);
   }
 
   detachForReconnect(): void {
+    this.unsubscribeSyncNeeded?.();
+    this.unsubscribeSyncNeeded = null;
     this.transport?.close();
     this.transport = null;
   }
 
   updateAuth(auth: { jwtToken?: string }): void {
-    this.port.postMessage({ type: "update-auth", jwtToken: auth.jwtToken ?? null } satisfies PortInbound);
+    this.port.postMessage({
+      type: "update-auth",
+      jwtToken: auth.jwtToken ?? null,
+    } satisfies PortInbound);
   }
 
   onAuthFailure(callback: (reason: AuthFailureReason) => void): void {
@@ -393,16 +423,29 @@ export class MessagePortRuntimeBridge {
     queueMicrotask(() => {
       this.pumpScheduled = false;
       this.pumpTransport();
+      if (this.pumpAgain) {
+        this.pumpAgain = false;
+        this.schedulePump();
+      }
     });
   }
 
   private pumpTransport(): void {
     const transport = this.transport;
     if (!transport) return;
-    transport.tick();
-    const frames = normalizeFrames(transport.recvWireFrames());
-    if (frames.length > 0) {
-      this.port.postMessage({ type: "sync", frames } satisfies PortInbound, frames.map((frame) => frame.buffer));
+    for (let round = 0; round < 32; round += 1) {
+      transport.tick();
+      const frames = normalizeFrames(transport.recvWireFrames());
+      if (frames.length > 0) {
+        this.port.postMessage(
+          { type: "sync", frames } satisfies PortInbound,
+          frames.map((frame) => frame.buffer),
+        );
+      }
+      if (frames.length === 0) {
+        return;
+      }
     }
+    this.pumpAgain = true;
   }
 }

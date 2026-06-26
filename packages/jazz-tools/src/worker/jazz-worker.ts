@@ -215,7 +215,10 @@ async function bootstrapAndHandoff(init: WorkerInitOptions): Promise<void> {
   }
 }
 
-async function runWorkerHostWithOptionalLock(wasmModule: any, init: WorkerInitOptions): Promise<void> {
+async function runWorkerHostWithOptionalLock(
+  wasmModule: any,
+  init: WorkerInitOptions,
+): Promise<void> {
   const handoff = async () => {
     host = await DirectWorkerHost.open(wasmModule, init);
     for (const message of pendingMessages.splice(0)) {
@@ -335,12 +338,16 @@ function post(message: WorkerOutbound, transfer: Transferable[] = []): void {
 }
 
 function frameTransfers(frames: Uint8Array[]): Transferable[] {
-  return frames.map((frame) => frame.buffer).filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
+  return frames
+    .map((frame) => frame.buffer)
+    .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
 }
 
 class DirectWorkerHost {
   private readonly peers = new Map<string, { port: MessagePort; transport: DirectTransport }>();
   private pumpScheduled = false;
+  private pumpAgain = false;
+  private pendingDurabilityTick = false;
 
   private constructor(
     private readonly db: DirectDb,
@@ -356,11 +363,11 @@ class DirectWorkerHost {
     if (!wasmModule.WasmDb?.openBrowser) {
       throw new Error("jazz-wasm does not expose direct WasmDb.openBrowser");
     }
-    const db = await wasmModule.WasmDb.openBrowser(
+    const db = (await wasmModule.WasmDb.openBrowser(
       init.dbName,
       init.directOpen.schema,
       init.directOpen.config,
-    ) as DirectDb;
+    )) as DirectDb;
     const mainTransport = db.connectUpstream();
     const serverTransport = init.serverUrl ? db.connectUpstream() : null;
     const host = new DirectWorkerHost(
@@ -382,12 +389,14 @@ class DirectWorkerHost {
       case "sync":
         for (const frame of normalizeFrames(message.frames)) {
           this.mainTransport.sendWireFrame(frame);
+          this.pendingDurabilityTick = true;
         }
         this.schedulePump();
         return;
       case "server-in":
         if (message.frame instanceof Uint8Array) {
           this.serverTransport?.sendWireFrame(message.frame);
+          this.pendingDurabilityTick = true;
           this.schedulePump();
         }
         return;
@@ -423,6 +432,7 @@ class DirectWorkerHost {
       if (msg.type === "sync") {
         for (const frame of normalizeFrames(msg.frames)) {
           transport.sendWireFrame(frame);
+          this.pendingDurabilityTick = true;
         }
         this.schedulePump();
       } else if (msg.type === "close") {
@@ -444,6 +454,8 @@ class DirectWorkerHost {
   }
 
   private shutdown(): void {
+    this.pendingDurabilityTick = true;
+    this.pump();
     this.mainTransport.close();
     this.serverTransport?.close();
     for (const [peerId] of this.peers) {
@@ -459,26 +471,50 @@ class DirectWorkerHost {
     queueMicrotask(() => {
       this.pumpScheduled = false;
       this.pump();
+      if (this.pumpAgain) {
+        this.pumpAgain = false;
+        this.schedulePump();
+      }
     });
   }
 
   private pump(): void {
-    this.db.tick();
-    this.pumpTransport(this.mainTransport, (frames) => post({ type: "sync", frames }, frameTransfers(frames)));
-    if (this.serverTransport) {
-      this.pumpTransport(this.serverTransport, (frames) => post({ type: "server-out", frames }, frameTransfers(frames)));
+    for (let round = 0; round < 32; round += 1) {
+      const hadPendingDurabilityTick = this.pendingDurabilityTick;
+      this.pendingDurabilityTick = false;
+      this.db.tick();
+      let madeProgress = hadPendingDurabilityTick;
+      madeProgress =
+        this.pumpTransport(this.mainTransport, (frames) =>
+          post({ type: "sync", frames }, frameTransfers(frames)),
+        ) || madeProgress;
+      if (this.serverTransport) {
+        madeProgress =
+          this.pumpTransport(this.serverTransport, (frames) =>
+            post({ type: "server-out", frames }, frameTransfers(frames)),
+          ) || madeProgress;
+      }
+      for (const { port, transport } of this.peers.values()) {
+        madeProgress =
+          this.pumpTransport(transport, (frames) => {
+            port.postMessage({ type: "sync", frames }, frameTransfers(frames));
+          }) || madeProgress;
+      }
+      if (hadPendingDurabilityTick) {
+        this.db.tick();
+      }
+      if (!madeProgress) {
+        return;
+      }
     }
-    for (const { port, transport } of this.peers.values()) {
-      this.pumpTransport(transport, (frames) => {
-        port.postMessage({ type: "sync", frames }, frameTransfers(frames));
-      });
-    }
+    this.pumpAgain = true;
   }
 
-  private pumpTransport(transport: DirectTransport, send: (frames: Uint8Array[]) => void): void {
+  private pumpTransport(transport: DirectTransport, send: (frames: Uint8Array[]) => void): boolean {
     transport.tick();
     const frames = normalizeFrames(transport.recvWireFrames());
     if (frames.length > 0) send(frames);
+    return frames.length > 0;
   }
 }
 
