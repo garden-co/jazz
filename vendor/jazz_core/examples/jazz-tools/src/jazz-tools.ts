@@ -2479,7 +2479,7 @@ function encodeBuiltQuery(built: string, schema?: SchemaDefinition): Uint8Array 
   const filters =
     query.filters ??
     (query.filter ? [query.filter] : filtersFromConditions(schema, table, query.conditions ?? []));
-  const includes = encodeableForwardIncludes(query, schema, table);
+  const includes = legacyByteIncludes(query, schema, table);
   if (
     filters.length === 0 &&
     includes.length === 0 &&
@@ -2571,17 +2571,39 @@ export function assertSubscribeQuerySupportedForTest<Row>(
   assertSubscribeQuerySupported(tableOrQuery);
 }
 
-function encodeableForwardIncludes(
+function legacyByteIncludes(
   query: BuiltQuery,
   schema: SchemaDefinition | undefined,
   table: string,
 ): EncodedInclude[] {
   if (query.includes == null || Object.keys(query.includes).length === 0) return [];
   if (!schema) throw new Error("query includes require a schema");
-  return encodeableForwardIncludeEntries(query.includes, schema, table, "");
+  validateAlphaIncludes(schema, table, query.includes);
+  if (!legacyByteIncludesCanRepresent(query.includes, schema, table)) return [];
+  return legacyByteIncludeEntries(query.includes, schema, table, "");
 }
 
-function encodeableForwardIncludeEntries(
+function legacyByteIncludesCanRepresent(
+  includes: QueryInclude,
+  schema: SchemaDefinition,
+  table: string,
+): boolean {
+  for (const [property, includeValue] of Object.entries(includes)) {
+    if (includeValue === undefined) continue;
+    const relation = includeRelation(schema, table, property);
+    const include = normalizeIncludeOptions(includeValue);
+    if (relation.direction !== "forward" || include.select != null) return false;
+    if (
+      include.include != null &&
+      !legacyByteIncludesCanRepresent(include.include, schema, relation.table)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function legacyByteIncludeEntries(
   includes: QueryInclude,
   schema: SchemaDefinition,
   table: string,
@@ -2590,21 +2612,11 @@ function encodeableForwardIncludeEntries(
   return Object.entries(includes).flatMap(([property, include]) => {
     if (include === undefined) return [];
     const relation = includeRelation(schema, table, property);
-    if (relation.direction !== "forward") {
-      throw new Error(
-        "current jazz-tools/WasmDb query byte encoding only supports forward relation includes",
-      );
-    }
     const normalized = normalizeIncludeOptions(include);
-    if (normalized.select != null) {
-      throw new Error(
-        "current jazz-tools/WasmDb query byte encoding does not support selected include projections yet",
-      );
-    }
     const path = prefix ? `${prefix}.${relation.column}` : relation.column;
     return [
       { path, required: normalized.required === true },
-      ...encodeableForwardIncludeEntries(normalized.include ?? {}, schema, relation.table, path),
+      ...legacyByteIncludeEntries(normalized.include ?? {}, schema, relation.table, path),
     ];
   });
 }
@@ -2832,7 +2844,7 @@ function subscribeRelationQuery<Row>(
   if (!relationQuery) return undefined;
   const table = queryTableName(relationQuery);
   if (relationQuery.includes && Object.keys(relationQuery.includes).length > 0) {
-    validateSimpleForwardSubscribeIncludes(schema, table, relationQuery.includes);
+    validateAlphaIncludes(schema, table, relationQuery.includes);
   }
   if (relationQuery.hops?.length || relationQuery.gather) {
     throw new Error(
@@ -2848,7 +2860,7 @@ function assertSubscribeQuerySupported<Row>(
   subscribeRelationQuery(tableOrQuery, "_schema" in tableOrQuery ? tableOrQuery._schema : {});
 }
 
-function validateSimpleForwardSubscribeIncludes(
+function validateAlphaIncludes(
   schema: SchemaDefinition,
   table: string,
   includes: QueryInclude,
@@ -2856,19 +2868,10 @@ function validateSimpleForwardSubscribeIncludes(
   for (const [property, includeValue] of Object.entries(includes)) {
     if (includeValue === undefined) continue;
     const relation = includeRelation(schema, table, property);
-    if (relation.direction !== "forward") {
-      throw new Error(
-        "current jazz-tools/WasmDb subscribe with relation includes only supports forward includes",
-      );
-    }
     const include = normalizeIncludeOptions(includeValue);
-    if (include.select != null) {
-      throw new Error(
-        "current jazz-tools/WasmDb subscribe with relation includes does not support selected projections yet",
-      );
-    }
+    validateIncludeSpec(schema, relation.table, include);
     if (include.include != null) {
-      validateSimpleForwardSubscribeIncludes(schema, relation.table, include.include);
+      validateAlphaIncludes(schema, relation.table, include.include);
     }
   }
 }
