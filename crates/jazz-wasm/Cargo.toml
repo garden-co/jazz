@@ -9,13 +9,16 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 vendored_core_wasm = { package = "jazz-core-wasm", path = "../../vendor/jazz_core/jazz-wasm" }
+jazz-tools = { path = "../jazz-tools" }
 wasm-bindgen = "0.2"
 console_error_panic_hook = { version = "0.1", optional = true }
 uuid = { version = "1.0", features = ["v7", "serde", "js"] }
 web-time = "1.1"
+base64 = "0.22"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

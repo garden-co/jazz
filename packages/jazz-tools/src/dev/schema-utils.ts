@@ -3,6 +3,8 @@ import type {
   ColumnType as WasmColumnType,
   WasmSchema,
 } from "../drivers/types.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { createHash } from "node:crypto";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
 
@@ -16,6 +18,10 @@ export function normalizeSchemaHashInput(hash: string, label: string): string {
 
 export function shortSchemaHash(hash: string): string {
   return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
+}
+
+export function structuralSchemaHash(schema: WasmSchema): string {
+  return createHash("sha256").update(serializeRuntimeSchema(schema)).digest("hex");
 }
 
 export function columnTypeSignature(columnType: WasmColumnType): string {

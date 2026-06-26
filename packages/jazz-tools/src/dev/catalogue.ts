@@ -5,7 +5,6 @@ import { build } from "esbuild";
 import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
-import { loadWasmModule } from "../runtime/client.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
 import {
@@ -27,6 +26,7 @@ import {
   columnTypeSignature,
   normalizeSchemaHashInput,
   shortSchemaHash,
+  structuralSchemaHash,
   wasmSchemasEqual,
 } from "./schema-utils.js";
 
@@ -636,33 +636,8 @@ async function resolveExportedSchemaByHash(
   };
 }
 
-let wasmModulePromise: Promise<any> | null = null;
-
-async function loadCatalogueWasmModule(): Promise<any> {
-  if (!wasmModulePromise) {
-    wasmModulePromise = loadWasmModule();
-  }
-  return wasmModulePromise;
-}
-
 async function computeSchemaHash(schema: WasmSchema): Promise<string> {
-  const wasmModule = await loadCatalogueWasmModule();
-  const runtime = new wasmModule.WasmRuntime(
-    JSON.stringify(schema),
-    "jazz-tools-cli",
-    "dev",
-    "main",
-    null,
-    null,
-  );
-
-  try {
-    return runtime.getSchemaHash();
-  } finally {
-    if (typeof runtime.free === "function") {
-      runtime.free();
-    }
-  }
+  return structuralSchemaHash(schema);
 }
 
 function tableSchemasRequireRowTransform(

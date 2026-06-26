@@ -3,6 +3,19 @@ declare module "jazz-wasm" {
   export function initSync(input?: unknown): void;
   export function generateId(): string;
   export function currentTimestamp(): bigint;
+  export function deriveUserId(seedB64: string): string;
+  export function mintLocalFirstToken(
+    seedB64: string,
+    audience: string,
+    ttlSeconds: number,
+    nowSeconds: bigint,
+  ): string;
+  export function mintAnonymousToken(
+    seedB64: string,
+    audience: string,
+    ttlSeconds: number,
+    nowSeconds: bigint,
+  ): string;
 
   export class WasmPreparedQuery {}
 
