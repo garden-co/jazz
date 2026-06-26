@@ -2065,6 +2065,11 @@ mod tests {
             test_app_route("/ws")
         );
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect direct ws");
+        ws.send(WsMessage::Binary(
+            br#"{"admin_secret":"admin-secret"}"#.to_vec(),
+        ))
+        .await
+        .expect("send direct ws auth prelude");
         let hello = WireFrame::Hello(WireHello::current(
             WirePeerRole::Client,
             FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,

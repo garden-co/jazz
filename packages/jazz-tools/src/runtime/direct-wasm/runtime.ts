@@ -356,13 +356,14 @@ export class DirectWasmRuntime implements Runtime {
     this.subscriptions.delete(handle);
   }
 
-  connect(url: string, _authJson: string): void {
+  connect(url: string, authJson: string): void {
     this.disconnect();
     const transport = this.db.connectUpstream();
     this.serverTransport = transport;
     const carrier = new DirectWebSocketCarrier({
       endpointUrl: url,
       peerIdentity: this.peerIdentity,
+      authJson,
       onFrame: (frame) => {
         transport.sendWireFrame(frame);
         this.scheduleServerPump();

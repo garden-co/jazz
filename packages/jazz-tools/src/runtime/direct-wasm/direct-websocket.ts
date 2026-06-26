@@ -8,6 +8,7 @@ export type DirectWebSocketCarrierOptions = {
   endpointUrl?: string;
   appId?: string;
   peerIdentity: Uint8Array;
+  authJson?: string;
   onFrame: DirectWebSocketFrameHandler;
   WebSocket?: DirectWebSocketConstructor;
 };
@@ -52,6 +53,28 @@ export function decodeDirectWebSocketFrameBatch(batch: Uint8Array): Uint8Array[]
   return reader.readVec((itemReader) => itemReader.bytes());
 }
 
+export function encodeDirectWireClientHello(): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0); // WireFrame::Hello
+  writer.u64(1); // min_protocol_version
+  writer.u64(1); // max_protocol_version
+  writer.u64(5); // FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
+  writer.u64(0); // WirePeerRole::Client
+  return writer.finish();
+}
+
+export function isDirectWireHello(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 0;
+}
+
+export function isDirectWireMessage(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 1;
+}
+
+export function isDirectWireError(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 2;
+}
+
 export class DirectWebSocketCarrier {
   readonly url: string;
   private readonly socket: DirectBrowserWebSocket;
@@ -70,7 +93,10 @@ export class DirectWebSocketCarrier {
     this.onFrame = options.onFrame;
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
-    this.opened = waitForOpen(this.socket);
+    this.opened = waitForOpen(this.socket).then(() => {
+      this.socket.send(encodeDirectWebSocketAuthPrelude(options.authJson ?? "{}"));
+      this.socket.send(encodeDirectWebSocketFrameBatch([encodeDirectWireClientHello()]));
+    });
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data);
     });
@@ -96,9 +122,15 @@ export class DirectWebSocketCarrier {
 
   private async handleMessage(data: unknown): Promise<void> {
     for (const frame of decodeDirectWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
+      if (isDirectWireHello(frame)) continue;
+      if (isDirectWireError(frame)) continue;
       this.onFrame(frame);
     }
   }
+}
+
+export function encodeDirectWebSocketAuthPrelude(authJson: string): Uint8Array {
+  return new TextEncoder().encode(authJson);
 }
 
 export async function connectDirectWebSocketCarrier(

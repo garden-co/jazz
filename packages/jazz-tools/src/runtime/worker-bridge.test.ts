@@ -1,5 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
-import { MessagePortRuntimeBridge } from "./worker-bridge.js";
+
+const directWebSocketCarrierMock = vi.hoisted(() => {
+  const instances: Array<{ options: any; close: ReturnType<typeof vi.fn> }> = [];
+
+  class DirectWebSocketCarrier {
+    readonly options: any;
+    readonly close = vi.fn();
+
+    constructor(options: any) {
+      this.options = options;
+      instances.push({ options, close: this.close });
+    }
+
+    ready(): Promise<DirectWebSocketCarrier> {
+      return Promise.resolve(this);
+    }
+
+    sendBatch(): Promise<void> {
+      return Promise.resolve();
+    }
+  }
+
+  return { DirectWebSocketCarrier, instances };
+});
+
+vi.mock("./direct-wasm/direct-websocket.js", () => ({
+  DirectWebSocketCarrier: directWebSocketCarrierMock.DirectWebSocketCarrier,
+}));
+
+import { MessagePortRuntimeBridge, WorkerBridge } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 
 function testPort(): MessagePort & { sent: unknown[]; emit(message: unknown): void } {
@@ -32,6 +61,97 @@ function testRuntime() {
   } as unknown as Runtime;
   return { runtime, transport };
 }
+
+function testDirectRuntime() {
+  const { runtime, transport } = testRuntime();
+  return {
+    runtime: {
+      ...runtime,
+      connectUpstreamPeer: vi.fn(() => transport),
+      getDirectOpenPayload: vi.fn(() => ({
+        schema: new Uint8Array([1]),
+        config: new Uint8Array([2]),
+        peerIdentity: new Uint8Array([3, 4]),
+      })),
+      setDurableQueryExecutor: vi.fn(),
+    } as unknown as Runtime,
+    transport,
+  };
+}
+
+function testWorker(): Worker & { emit(message: unknown): void; sent: unknown[] } {
+  let listener: ((event: MessageEvent) => void) | null = null;
+  const sent: unknown[] = [];
+  return {
+    sent,
+    postMessage: vi.fn((message: unknown) => {
+      sent.push(message);
+    }),
+    addEventListener: vi.fn((_type: string, next: (event: MessageEvent) => void) => {
+      listener = next;
+    }),
+    removeEventListener: vi.fn(),
+    terminate: vi.fn(),
+    emit(message: unknown) {
+      listener?.({ data: message } as MessageEvent);
+    },
+  } as unknown as Worker & { emit(message: unknown): void; sent: unknown[] };
+}
+
+describe("WorkerBridge", () => {
+  it("passes worker bridge auth JSON to direct websocket carriers", async () => {
+    directWebSocketCarrierMock.instances.splice(0);
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "auth-forwarding-app",
+      env: "dev",
+      userBranch: "main",
+      dbName: "auth-forwarding-db",
+      serverUrl: "http://localhost:4200",
+      jwtToken: "jwt-initial",
+      adminSecret: "admin-secret",
+    });
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+
+    await expect(initPromise).resolves.toBe("worker-client");
+    expect(directWebSocketCarrierMock.instances).toHaveLength(1);
+    expect(directWebSocketCarrierMock.instances[0]!.options).toMatchObject({
+      serverUrl: "http://localhost:4200",
+      appId: "auth-forwarding-app",
+      peerIdentity: new Uint8Array([3, 4]),
+      authJson: JSON.stringify({
+        jwt_token: "jwt-initial",
+        admin_secret: "admin-secret",
+      }),
+    });
+  });
+
+  it("uses a null jwt in direct websocket auth JSON when no token is configured", async () => {
+    directWebSocketCarrierMock.instances.splice(0);
+    const { runtime } = testDirectRuntime();
+    const worker = testWorker();
+    const bridge = new WorkerBridge(worker, runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "anonymous-app",
+      env: "dev",
+      userBranch: "main",
+      dbName: "anonymous-db",
+      serverUrl: "http://localhost:4200",
+    });
+    worker.emit({ type: "init-ok", clientId: "worker-client" });
+
+    await expect(initPromise).resolves.toBe("worker-client");
+    expect(directWebSocketCarrierMock.instances[0]!.options.authJson).toBe(
+      JSON.stringify({ jwt_token: null }),
+    );
+  });
+});
 
 describe("MessagePortRuntimeBridge", () => {
   it("forwards auth updates over the follower data port bridge", () => {
