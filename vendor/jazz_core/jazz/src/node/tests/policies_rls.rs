@@ -3105,6 +3105,123 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     );
 }
 
+fn recursive_doc_write_policy_schema() -> JazzSchema {
+    let policy = Policy::shape(Query::from("docs").reachable_via(
+        "doc_access",
+        "doc",
+        "team",
+        claim("sub"),
+        "team_edges",
+        "member",
+        "parent",
+        [],
+    ));
+
+    JazzSchema::new([
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("kind", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(policy),
+        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "doc_access",
+            [
+                ColumnSchema::new("doc", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("doc", "docs")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_edges",
+            [
+                ColumnSchema::new("member", ColumnType::Uuid),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("member", "teams")
+        .with_reference("parent", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("kind".to_owned(), Value::String(kind.to_owned())),
+    ])
+}
+
+#[test]
+fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
+    let schema = recursive_doc_write_policy_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
+    let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
+    let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
+    let parent_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000002"));
+    let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
+
+    for (team, name) in [
+        (RowUuid(reader.0), "reader"),
+        (parent_team, "parent"),
+        (hidden_team, "hidden"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (doc, title, kind) in [
+        (direct_doc, "direct", "visible"),
+        (closure_doc, "closure", "visible"),
+        (hidden_doc, "hidden", "hidden"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, 20).cells(recursive_doc_cells(title, kind)),
+        );
+    }
+    for (idx, doc, team) in [
+        (0xa1, direct_doc, RowUuid(reader.0)),
+        (0xa2, closure_doc, parent_team),
+        (0xa3, hidden_doc, hidden_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(idx), 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0xe1), 40).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("parent".to_owned(), Value::Uuid(parent_team.0)),
+        ])),
+    );
+
+    assert!(core.dry_run_write_current_allows("docs", direct_doc, reader).unwrap());
+    assert!(core.dry_run_write_current_allows("docs", closure_doc, reader).unwrap());
+    assert!(!core.dry_run_write_current_allows("docs", hidden_doc, reader).unwrap());
+}
+
 #[test]
 fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
     let schema = JazzSchema::new([TableSchema::new(

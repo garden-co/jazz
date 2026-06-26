@@ -3,7 +3,7 @@
 //! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
-#![allow(clippy::single_element_loop)]
+#![allow(clippy::single_element_loop, dead_code)]
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -709,9 +709,19 @@ where
 const RECURSIVE_DOC_DIRECT: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
 const RECURSIVE_DOC_CLOSURE: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
 const RECURSIVE_DOC_HIDDEN: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
+const RESUME_DOC_DIRECT: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000001"));
+const RESUME_DOC_REVOKED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000002"));
+const RESUME_DOC_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000003"));
+const RESUME_DOC_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000004"));
 const RECURSIVE_READER_TEAM: RowUuid = RowUuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 const RECURSIVE_PARENT_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000002"));
 const RECURSIVE_HIDDEN_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
+const RESUME_ACCESS_DIRECT: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000101"));
+const RESUME_ACCESS_REVOKED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000102"));
+const RESUME_ACCESS_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000103"));
+const RESUME_ACCESS_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000104"));
+const RESUME_EDGE_READER_PARENT: RowUuid =
+    RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000201"));
 
 fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -743,6 +753,19 @@ fn open_recursive_permissions_db(seed: u64) -> BenchDb {
         seed,
         AuthorId::SYSTEM,
         false,
+        recursive_permissions_schema(),
+    )
+}
+
+fn open_recursive_permissions_db_with_author(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+) -> BenchDb {
+    open_db_with_schema(
+        seed,
+        author,
+        history_complete,
         recursive_permissions_schema(),
     )
 }
@@ -790,6 +813,59 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
     );
 }
 
+fn seed_permission_resume_fixture(db: &BenchDb) {
+    for (team, name) in [
+        (RECURSIVE_READER_TEAM, "reader"),
+        (RECURSIVE_PARENT_TEAM, "parent"),
+        (RECURSIVE_HIDDEN_TEAM, "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("teams", team, recursive_team_cells(name))
+                .expect("seed resume permission team"),
+        );
+    }
+
+    wait_local(
+        db.insert_with_id(
+            "team_edges",
+            RESUME_EDGE_READER_PARENT,
+            recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+        )
+        .expect("seed resume permission team edge"),
+    );
+
+    for (doc, title, kind) in [
+        (RESUME_DOC_DIRECT, "direct", "visible"),
+        (RESUME_DOC_REVOKED, "revoked", "visible-then-revoked"),
+        (RESUME_DOC_GRANTED, "granted", "hidden-then-granted"),
+        (RESUME_DOC_NEVER, "never", "never-visible"),
+    ] {
+        wait_local(
+            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
+                .expect("seed resume permission doc"),
+        );
+    }
+
+    for (access, doc, team) in [
+        (
+            RESUME_ACCESS_DIRECT,
+            RESUME_DOC_DIRECT,
+            RECURSIVE_READER_TEAM,
+        ),
+        (
+            RESUME_ACCESS_REVOKED,
+            RESUME_DOC_REVOKED,
+            RECURSIVE_PARENT_TEAM,
+        ),
+        (RESUME_ACCESS_NEVER, RESUME_DOC_NEVER, RECURSIVE_HIDDEN_TEAM),
+    ] {
+        wait_local(
+            db.insert_with_id("doc_access", access, recursive_doc_access_cells(doc, team))
+                .expect("seed resume permission access"),
+        );
+    }
+}
+
 fn recursive_docs_query<S>(db: &Db<S>) -> jazz::db::PreparedQuery
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
@@ -813,6 +889,53 @@ fn assert_recursive_docs_visible(rows: &[jazz::node::CurrentRow]) {
             .any(|row| row.row_uuid() == RECURSIVE_DOC_HIDDEN)
     );
     assert_eq!(rows.len(), 2);
+}
+
+fn assert_permission_resume_docs(rows: &[jazz::node::CurrentRow], visible: &[RowUuid]) {
+    for doc in [
+        RESUME_DOC_DIRECT,
+        RESUME_DOC_REVOKED,
+        RESUME_DOC_GRANTED,
+        RESUME_DOC_NEVER,
+    ] {
+        let expected = visible.contains(&doc);
+        assert_eq!(
+            rows.iter().any(|row| row.row_uuid() == doc),
+            expected,
+            "unexpected visibility for {doc:?}"
+        );
+    }
+    assert_eq!(rows.len(), visible.len());
+}
+
+fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, usize, usize) {
+    match event {
+        Some(SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        }) => {
+            for row in added.iter().chain(updated.iter()) {
+                assert_ne!(row.row_uuid(), RESUME_DOC_REVOKED);
+                assert_ne!(row.row_uuid(), RESUME_DOC_NEVER);
+            }
+            assert!(removed.iter().any(|row| row.row_uuid == RESUME_DOC_REVOKED));
+            assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
+            (added.len(), updated.len(), removed.len())
+        }
+        None => (0, 0, 0),
+        other => panic!("expected permission-filtered resume delta event, got {other:?}"),
+    }
+}
+
+fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
+    match event {
+        Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
+        Some(SubscriptionEvent::Reset { current, .. }) => current.len(),
+        None => 0,
+        other => panic!("unexpected permission snapshot subscription event {other:?}"),
+    }
 }
 
 fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
@@ -1335,6 +1458,160 @@ fn r12_recursive_permissions(c: &mut Criterion) {
             }
 
             black_box(rows.len())
+        });
+    });
+
+    group.finish();
+}
+
+fn r13_permission_filtered_resume(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1_direct/r13_permission_filtered_resume");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("docs_recursive_resume_s", |b| {
+        b.iter(|| {
+            let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
+            let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+            let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+            seed_permission_resume_fixture(&writer);
+            let prepared = client
+                .prepare_query(&Query::from("docs"))
+                .expect("prepare permission-filtered docs query");
+
+            let (writer_transport, server_writer_transport) =
+                byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+            let writer_upstream = writer.connect_upstream(writer_transport);
+            let writer_subscriber =
+                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+            writer.tick().expect("ship permission seed rows");
+            server.tick().expect("ingest permission seed rows");
+            assert!(writer.detach_connection(&writer_upstream));
+            assert!(server.detach_connection(&writer_subscriber));
+
+            let (client_transport, server_transport) =
+                byte_duplex_with_session(READER_AUTHOR, 13_002);
+            let upstream = client.connect_upstream(client_transport);
+            let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+            let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+                .expect("subscribe permission-filtered docs");
+            assert_eq!(
+                drain_opened(block_on(subscription.next_event()), "permission docs"),
+                0
+            );
+
+            client
+                .tick()
+                .expect("announce permission docs subscription");
+            server.tick().expect("serve full permission docs snapshot");
+            let full_bytes = subscriber
+                .borrow()
+                .last_resume_bytes()
+                .expect("full permission current-row bytes");
+            client.tick().expect("apply full permission docs snapshot");
+            client
+                .tick()
+                .expect("materialize full permission docs snapshot event");
+            let seeded = drain_optional_permission_rows(subscription.try_next_event());
+            assert!(full_bytes > 0);
+            let rows = client
+                .read(&prepared)
+                .expect("read initial permission-filtered docs");
+            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
+            if seeded > 0 {
+                assert_eq!(seeded, rows.len());
+            }
+
+            server.tick().expect("refresh permission docs cursor");
+            client.tick().expect("apply permission docs cursor state");
+            let cursor = subscriber
+                .borrow_mut()
+                .take_resume_cursor()
+                .expect("take permission subscriber resume cursor");
+            assert!(client.detach_connection(&upstream));
+            assert!(server.detach_connection(&subscriber));
+
+            wait_local(
+                writer
+                    .update(
+                        "doc_access",
+                        RESUME_ACCESS_REVOKED,
+                        recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                    )
+                    .expect("hide disconnected doc access before revoke"),
+            );
+            wait_local(
+                writer
+                    .delete("doc_access", RESUME_ACCESS_REVOKED)
+                    .expect("revoke disconnected doc access"),
+            );
+            wait_local(
+                writer
+                    .insert_with_id(
+                        "doc_access",
+                        RESUME_ACCESS_GRANTED,
+                        recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                    )
+                    .expect("grant disconnected doc access"),
+            );
+
+            let (writer_transport, server_writer_transport) =
+                byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+            let writer_upstream = writer.connect_upstream(writer_transport);
+            let writer_subscriber =
+                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+            writer.tick().expect("ship disconnected permission changes");
+            server
+                .tick()
+                .expect("ingest disconnected permission changes");
+            writer
+                .tick()
+                .expect("ship settled disconnected permission changes");
+            server
+                .tick()
+                .expect("ingest settled disconnected permission changes");
+            assert!(writer.detach_connection(&writer_upstream));
+            assert!(server.detach_connection(&writer_subscriber));
+
+            let (client_transport, server_transport) =
+                byte_duplex_with_session(READER_AUTHOR, 13_004);
+            let _resumed_upstream = client.connect_upstream(client_transport);
+            let resumed =
+                server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+            client
+                .tick()
+                .expect("announce resumed permission docs subscription");
+            server.tick().expect("serve permission resume catch-up");
+            client.tick().expect("apply permission resume catch-up");
+            client.tick().expect("materialize permission resume event");
+            server
+                .tick()
+                .expect("serve settled permission resume state");
+            client
+                .tick()
+                .expect("apply settled permission resume state");
+            client
+                .tick()
+                .expect("materialize settled permission resume state");
+
+            let resume_bytes = resumed
+                .borrow()
+                .last_resume_bytes()
+                .expect("permission resume catch-up bytes");
+            assert!(resume_bytes > 0);
+
+            let (added, updated, removed) =
+                drain_permission_resume_delta(subscription.try_next_event());
+            if added + updated + removed > 0 {
+                assert_eq!(added + updated, 1);
+                assert_eq!(removed, 1);
+            }
+            let rows = client
+                .read(&prepared)
+                .expect("read final permission-filtered docs");
+            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_GRANTED]);
+
+            black_box((resume_bytes, full_bytes, added, updated, removed))
         });
     });
 
