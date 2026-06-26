@@ -1,4 +1,8 @@
-//! Direct subscription latency benchmarks.
+//! Direct jazz_core subscription latency benchmarks.
+//!
+//! These benchmarks intentionally exercise `jazz::db::Db` directly, bypassing
+//! the legacy RuntimeCore/SchemaManager/SyncManager stack while that path is
+//! being replaced.
 //!
 //! Measures:
 //! - Single subscription: time from insert to update appearing
@@ -20,7 +24,7 @@ use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
 
-type DirectDb = Db<MemoryStorage>;
+type DirectCoreDb = Db<MemoryStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
@@ -42,7 +46,7 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
-fn open_db(seed: u64) -> DirectDb {
+fn open_db(seed: u64) -> DirectCoreDb {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -92,7 +96,7 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     cells
 }
 
-fn seed_documents(db: &DirectDb, count: usize) {
+fn seed_documents(db: &DirectCoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", cells(index))
@@ -101,7 +105,7 @@ fn seed_documents(db: &DirectDb, count: usize) {
     }
 }
 
-fn seed_filtered_documents(db: &DirectDb, count: usize) {
+fn seed_filtered_documents(db: &DirectCoreDb, count: usize) {
     for index in 0..count {
         let write = db
             .insert("documents", filtered_cells(index))
@@ -110,17 +114,17 @@ fn seed_filtered_documents(db: &DirectDb, count: usize) {
     }
 }
 
-fn all_documents_query(db: &DirectDb) -> jazz::db::PreparedQuery {
+fn all_documents_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents"))
         .expect("prepare documents query")
 }
 
-fn author_filter_query(db: &DirectDb) -> jazz::db::PreparedQuery {
+fn author_filter_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(eq(col("author"), lit(AUTHOR.0))))
         .expect("prepare author-filtered documents query")
 }
 
-fn narrow_filter_query(db: &DirectDb) -> jazz::db::PreparedQuery {
+fn narrow_filter_query(db: &DirectCoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(all_of([
         eq(col("author"), lit(AUTHOR.0)),
         eq(col("folder"), lit(row_uuid(0).0)),

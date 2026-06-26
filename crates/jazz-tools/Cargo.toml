@@ -160,8 +160,8 @@ tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 # Keep the active benchmark harness explicit while the old jazz-tools engine is
-# being replaced. Deep-internal benches such as realistic_phase1 and
-# server_authorization_scope_benchmark should be ported before re-enabling.
+# being replaced. Deep-internal benches such as realistic_phase1 should be ported
+# before re-enabling.
 [[bench]]
 name = "observer_write_path"
 harness = false
