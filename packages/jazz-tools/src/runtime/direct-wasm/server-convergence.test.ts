@@ -22,6 +22,12 @@ const schema = {
   },
 } satisfies WasmSchema;
 
+const fileSchema = {
+  file_parts: {
+    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
+  },
+} satisfies WasmSchema;
+
 describe("DirectWasmRuntime server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
   const clients: JazzClient[] = [];
@@ -238,6 +244,67 @@ describe("DirectWasmRuntime server convergence", () => {
     },
     20_000,
   );
+
+  maybeIt("replays accepted BYTEA rows to a fresh websocket subscriber", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const appId = "00000000-0000-0000-0000-00000000c003";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "direct-wasm-bytea-convergence-admin",
+      schema: encodeDirectSchema(fileSchema),
+    });
+
+    const writer = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "bytea-writer",
+      schema: fileSchema,
+    });
+    clients.push(writer);
+    writer.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    const inserted = writer.insert("file_parts", {
+      data: { type: "Bytea", value: Uint8Array.from([1, 2, 3, 4]) },
+    });
+    await waitForPromise(inserted.wait({ tier: "edge" }), "BYTEA insert did not settle at edge");
+    await writer.shutdown();
+    clients.splice(clients.indexOf(writer), 1);
+
+    const reader = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "bytea-reader",
+      schema: fileSchema,
+    });
+    clients.push(reader);
+    reader.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    const replayedToSubscription = new Promise<Uint8Array>((resolve) => {
+      reader.subscribe(
+        JSON.stringify({ table: "file_parts" }),
+        (delta) => {
+          if (!Array.isArray(delta)) return;
+          for (const change of delta) {
+            if ("row" in change && change.row?.id === inserted.value.id) {
+              const firstValue = change.row.values[0];
+              if (firstValue?.type === "Bytea") {
+                resolve(firstValue.value);
+              }
+            }
+          }
+        },
+        { tier: "local" },
+      );
+    });
+
+    const bytes = await waitForPromise(
+      replayedToSubscription,
+      "fresh reader subscription did not replay accepted BYTEA row",
+    );
+    expect(Array.from(bytes)).toEqual([1, 2, 3, 4]);
+  });
 });
 
 async function publishSchema(
@@ -254,15 +321,17 @@ async function createClient({
   appId,
   serverUrl,
   peer,
+  schema: clientSchema = schema,
 }: {
   appId: string;
   serverUrl: string;
   peer: string;
+  schema?: WasmSchema;
 }): Promise<JazzClient> {
-  const runtime = await createWasmRuntime(schema, { appId, userBranch: peer });
+  const runtime = await createWasmRuntime(clientSchema, { appId, userBranch: peer });
   return JazzClient.connectWithRuntime(runtime, {
     appId,
-    schema,
+    schema: clientSchema,
     serverUrl,
     userBranch: peer,
   });

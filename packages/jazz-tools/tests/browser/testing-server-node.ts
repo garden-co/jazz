@@ -28,7 +28,10 @@ const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRo
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
-async function startJazzServer(appId?: string, schema?: ArrayLike<number>): Promise<StartedJazzServer> {
+async function startJazzServer(
+  appId?: string,
+  schema?: ArrayLike<number>,
+): Promise<StartedJazzServer> {
   const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
@@ -55,7 +58,7 @@ async function getOrStartJazzServer(
 ): Promise<StartedJazzServer> {
   const key = schema
     ? `schema:${appId ?? DEFAULT_JAZZ_SERVER_KEY}:${schemaCacheKey(schema)}`
-    : appId ?? DEFAULT_JAZZ_SERVER_KEY;
+    : (appId ?? DEFAULT_JAZZ_SERVER_KEY);
   const existing = jazzServerPromises.get(key);
 
   if (!existing) {
@@ -79,7 +82,10 @@ function schemaCacheKey(schema: ArrayLike<number>): string {
   return `${schema.length}:${(hash >>> 0).toString(16)}`;
 }
 
-export async function jazzServerInfo(appId?: string, schema?: ArrayLike<number>): Promise<{
+export async function jazzServerInfo(
+  appId?: string,
+  schema?: ArrayLike<number>,
+): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;

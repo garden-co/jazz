@@ -128,7 +128,7 @@ describe("alpha public package flow", () => {
     ).toBe(true);
   });
 
-  it.skip("repro: public file/blob helpers do not settle through direct server while UUID[] partIds hit unsupported join key", async () => {
+  it("opens public file/blob helpers with persistent OPFS and direct websocket server config, then converges file parts", async () => {
     const requestedAppId = uniqueDbName("alpha-public-file-flow");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
@@ -203,11 +203,23 @@ describe("alpha public package flow", () => {
       "alpha-public-file-b",
       sharedSecret,
     );
-    await withTimeout(
-      waitForFileParts(secondDb, file.partIds, "edge"),
+    const secondLocalParts = await withTimeout(
+      waitForSubscribedFileParts(secondDb, file.partIds),
       20_000,
-      "file parts did not converge to the second websocket client",
+      "no file parts were visible to the second websocket client locally",
     );
+    expect(secondLocalParts.map((part) => part.id).sort()).toEqual([...file.partIds].sort());
+    await withTimeout(
+      waitForSubscribedFileRecord(secondDb, file.id),
+      20_000,
+      "file metadata did not converge to the second websocket client",
+    );
+    const secondEdgeParts = await withTimeout(
+      waitForFilePartsRows(secondDb, file.partIds, "edge"),
+      20_000,
+      "no file parts were visible to the second websocket client at edge",
+    );
+    expect(secondEdgeParts.map((part) => part.id).sort()).toEqual([...file.partIds].sort());
     const secondClientBlob = await withTimeout(
       secondDb.loadFileAsBlob(fileApp, file.id, { tier: "edge" }),
       20_000,
@@ -344,8 +356,17 @@ async function waitForFileParts(
   partIds: string[],
   tier: "local" | "edge" = "local",
 ): Promise<void> {
+  await waitForFilePartsRows(db, partIds, tier);
+}
+
+async function waitForFilePartsRows(
+  db: Db,
+  partIds: string[],
+  tier: "local" | "edge" = "local",
+): Promise<Array<{ id: string }>> {
+  const rows: Array<{ id: string }> = [];
   for (const partId of partIds) {
-    await waitForQuery(
+    const [part] = await waitForQuery(
       db,
       fileApp.file_parts.where({ id: partId }),
       (parts) => parts.length === 1,
@@ -353,7 +374,9 @@ async function waitForFileParts(
       15_000,
       tier,
     );
+    rows.push(part);
   }
+  return rows;
 }
 
 async function waitForFileRecord(db: Db, fileId: string): Promise<void> {
@@ -365,6 +388,66 @@ async function waitForFileRecord(db: Db, fileId: string): Promise<void> {
     15_000,
     "local",
   );
+}
+
+async function waitForSubscribedFileParts(
+  db: Db,
+  partIds: string[],
+): Promise<Array<{ id: string }>> {
+  const expected = [...partIds].sort().join("\n");
+  return await new Promise<Array<{ id: string }>>((resolve, reject) => {
+    let lastRows: Array<{ id: string }> = [];
+    let unsubscribe: () => void = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(
+        new Error(
+          `file parts subscription timed out; expected=${expected}; ` +
+            `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
+      );
+    }, 15_000);
+    unsubscribe = ctx.trackSubscription(
+      db.subscribeAll(fileApp.file_parts, (delta) => {
+        lastRows = [...delta.all];
+        const actual = lastRows
+          .map((part) => part.id)
+          .sort()
+          .join("\n");
+        if (actual === expected) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve(lastRows);
+        }
+      }),
+    );
+  });
+}
+
+async function waitForSubscribedFileRecord(db: Db, fileId: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let lastRows: Array<{ id: string }> = [];
+    let unsubscribe: () => void = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(
+        new Error(
+          `file metadata subscription timed out for ${fileId}; ` +
+            `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
+      );
+    }, 15_000);
+    unsubscribe = ctx.trackSubscription(
+      db.subscribeAll(fileApp.files.where({ id: fileId }), (delta) => {
+        lastRows = [...delta.all];
+        if (lastRows.length === 1) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve();
+        }
+      }),
+    );
+  });
 }
 
 async function expectBlobBytes(blob: Blob, expected: Uint8Array): Promise<void> {
