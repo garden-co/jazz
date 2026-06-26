@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import {
   decodeDirectWebSocketFrameBatch,
-  encodeDirectWebSocketAuthPrelude,
+  encodeDirectWebSocketPrelude,
   isDirectWireHello,
 } from "./direct-websocket.js";
 import { DirectWasmRuntime, type DirectTransport } from "./runtime.js";
@@ -45,10 +45,13 @@ describe("DirectWasmRuntime server transport", () => {
     await Promise.resolve();
 
     expect(sockets).toHaveLength(1);
-    expect(sockets[0]!.url).toBe(
-      "ws://127.0.0.1:4200/apps/app-a/ws?identity=01010101010101010101010101010101",
+    expect(sockets[0]!.url).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
+    expect(sockets[0]!.sent[0]).toEqual(
+      encodeDirectWebSocketPrelude(
+        "{}",
+        Uint8Array.from([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
+      ),
     );
-    expect(sockets[0]!.sent[0]).toEqual(encodeDirectWebSocketAuthPrelude("{}"));
     const helloBatch = decodeDirectWebSocketFrameBatch(sockets[0]!.sent[1]!);
     expect(helloBatch).toHaveLength(1);
     expect(isDirectWireHello(helloBatch[0]!)).toBe(true);
