@@ -13,7 +13,7 @@ Trust is the axis:
 - **client** — untrusted; no fate authority; local preview only.
 - **relay** — semi-trusted passthrough/cache; never assigns fates or enforces
   per-user permissions; forwards opaquely under `AuthorId::SYSTEM`.
-- **edge** — operator-trusted; may finally decide *mergeable* fates and enforces
+- **edge** — operator-trusted; may finally decide _mergeable_ fates and enforces
   read/write policy for the identities it terminates.
 - **core** — operator-trusted; the exclusive-transaction authority and global
   ordering point; history-complete.
@@ -33,14 +33,14 @@ the upstream path.
 
 Each capability belongs to the tier that can safely exercise it:
 
-| capability | authority / behavior |
-|---|---|
-| mergeable fate authority | first upstream trusted edge; edge-final for edge-accepted mergeables (`INV-EDGE-8`) |
-| exclusive fate authority | core |
-| read narrowing / write-policy | edge enforces for the identities it terminates |
-| durability tiers offered | `Local`, `Edge`, `Global` |
-| eviction | edge cache eviction (`INV-EDGE-14`, target) |
-| topology | star: clients/edges ↔ core (`INV-EDGE-12`, target) |
+| capability                    | authority / behavior                                                                |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| mergeable fate authority      | first upstream trusted edge; edge-final for edge-accepted mergeables (`INV-EDGE-8`) |
+| exclusive fate authority      | core                                                                                |
+| read narrowing / write-policy | edge enforces for the identities it terminates                                      |
+| durability tiers offered      | `Local`, `Edge`, `Global`                                                           |
+| eviction                      | edge cache eviction (`INV-EDGE-14`, target)                                         |
+| topology                      | star: clients/edges ↔ core (`INV-EDGE-12`, target)                                  |
 
 The four-tier tests exercise the role shapes: relay store-and-forward, edge
 identity termination, and edge fate deferral. Normal committed units outside the
@@ -90,12 +90,12 @@ validation defers until the scope rehydrates.
 
 `TxKind::Exclusive` acceptance is **core-only** — the single serialization point
 (`INV-EDGE-6`, ch. 3). An edge may locally early-reject a provable conflict but
-never *accepts* an exclusive transaction. Fate never regresses: once `Accepted`,
+never _accepts_ an exclusive transaction. Fate never regresses: once `Accepted`,
 a later stale `Pending` update is ignored (`INV-EDGE-7`).
 
 **Scope granularity.** The permission-scope subscription that gates acceptance is
 keyed by `(policy_shape, writer_claim)` — the narrow slice of policy data that the
-write policy reads *for that writer* — not a whole-table scope (`INV-EDGE-17`).
+write policy reads _for that writer_ — not a whole-table scope (`INV-EDGE-17`).
 Because a write policy is itself a jazz query shape (`INV-LOWER-20`), binding it
 to the writer's `claim("sub")` narrows hydration to exactly the rows the policy
 would read for that writer. An edge therefore holds only the policy data for the
@@ -106,10 +106,10 @@ The acceptance gate, the defer/rehydrate bookkeeping, and the eviction pin set
 read the same row — share **one** upstream subscription through sync-level
 work-dedup (ch. 8): the edge registers a covering scope once and fans its settled
 result to every gate entry that needs it (`INV-EDGE-18`). A whole-table scope is
-deliberately *not* offered; it would force an edge to hydrate unbounded unrelated
+deliberately _not_ offered; it would force an edge to hydrate unbounded unrelated
 data and is exactly the pathological cost this tier exists to avoid.
 
-> **Edge-final mergeable fate.** An edge mergeable fate is *final*: when core
+> **Edge-final mergeable fate.** An edge mergeable fate is _final_: when core
 > receives an edge-accepted mergeable, it performs structural admission checks
 > and assigns the global settle position, but does not re-run write-policy
 > authorization or re-judge the merge (`INV-EDGE-8`; `INV-EDGE-5`
@@ -137,7 +137,7 @@ Duplicate merges of the same concurrent frontier are legal because they carry
 identical cells. When independent edge merges diverge, an upstream tier
 reconciles them by folding over the de-duplicated raw head set rather than
 re-merging the merged values, so `Counter` never double-counts a shared ancestor
-(`INV-EDGE-16`; ch. 4, "Merging merges"). Nothing enforces the *absence*
+(`INV-EDGE-16`; ch. 4, "Merging merges"). Nothing enforces the _absence_
 of edge↔edge sync at the transport layer; the star is a deployment contract, not
 a wire check.
 
@@ -154,7 +154,7 @@ an acceptance gate (§9.5), and parked families (`INV-EDGE-14`, `INV-EDGE-15`).
 Refetch of evicted state is a **payload-inventory resubscribe**. The edge
 re-registers the scope and receives only what its payload inventory no longer
 holds (ch. 8). This milestone builds the pin set and the refetch path; an actual
-size/LRU eviction *trigger* is deferred — the pin set without a trigger is safe,
+size/LRU eviction _trigger_ is deferred — the pin set without a trigger is safe,
 a trigger without the pin set is not.
 
 ## Open questions
@@ -179,7 +179,7 @@ a trigger without the pin set is not.
   scope no longer satisfies the gate until it rehydrates; validation defers until
   then) but untested.
 - 🔶 **Eviction trigger** — the pin set and refetch path (§9.8) are built, but the
-  policy that decides *when* to evict cold state (size, LRU, age) is deferred to a
+  policy that decides _when_ to evict cold state (size, LRU, age) is deferred to a
   later milestone.
 - 🔶 **Topology and edge role completion** — the design is a star of clients and
   edges around core (`INV-EDGE-12`, target), with the first upstream trusted edge

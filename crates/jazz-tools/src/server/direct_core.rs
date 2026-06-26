@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use jazz::db::DbIdentity;
+use jazz::db::{CommitUnitTrust, DbIdentity};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use jazz::schema::JazzSchema;
@@ -20,6 +20,7 @@ enum DirectCoreCommand {
     Open {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
         reply: oneshot::Sender<Result<ServerSession, String>>,
     },
     PublishSchema {
@@ -76,10 +77,13 @@ impl DirectCoreServer {
                         DirectCoreCommand::Open {
                             identity,
                             claims,
+                            trust,
                             reply,
                         } => {
                             let result = shell
-                                .accept_subscriber_session_with_claims(identity, claims)
+                                .accept_subscriber_session_with_claims_and_trust(
+                                    identity, claims, trust,
+                                )
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
@@ -126,12 +130,14 @@ impl DirectCoreServer {
         &self,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
     ) -> Result<ServerSession, String> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(DirectCoreCommand::Open {
                 identity,
                 claims,
+                trust,
                 reply,
             })
             .map_err(|_| "direct core thread is not running".to_owned())?;

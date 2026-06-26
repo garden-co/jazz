@@ -12,11 +12,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import type {
-  Db,
-  QueryBuilder,
-  Table,
-} from "./jazz-tools.js";
+import type { Db, QueryBuilder, Table } from "./jazz-tools.js";
 import {
   type JazzClient,
   type JazzClientOptions,
@@ -63,7 +59,8 @@ export function JazzProvider({ client, children }: JazzProviderProps): ReactNode
 
 export function useJazzClient(): JazzClient {
   const client = useContext(JazzClientContext);
-  if (!client) throw new Error("Jazz client is not available. Render under JazzProvider with a client.");
+  if (!client)
+    throw new Error("Jazz client is not available. Render under JazzProvider with a client.");
   return client;
 }
 
@@ -71,7 +68,9 @@ export function useDb(): Db {
   return useJazzClient().db;
 }
 
-export function useTable<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+export function useTable<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+  name: string,
+): Table<Row, Init> {
   const db = useDb();
   return useMemo(() => db.table<Row, Init>(name), [db, name]);
 }
@@ -99,9 +98,5 @@ export function useAll<Row>(
     };
   }, [db, tableOrQuery]);
 
-  return useSyncExternalStore(
-    store.subscribe,
-    store.getSnapshot,
-    store.getSnapshot,
-  );
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
 }

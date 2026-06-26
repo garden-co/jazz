@@ -19,8 +19,8 @@ use crate::node::maintained_subscription_view::{
 };
 use crate::node::{Error, NodeState, PreparedQueryPlan};
 use crate::protocol::{
-    ContentExtent, PeerPayloadInventory, ResultRowEntry, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionRecord,
+    ContentExtent, PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
@@ -33,6 +33,7 @@ const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
 #[derive(Debug)]
 pub struct PeerState {
     role: PeerRole,
+    permission_identity: Option<AuthorId>,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     subscriptions: BTreeMap<SubscriptionKey, PeerSubscriptionState>,
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
@@ -171,6 +172,7 @@ impl Default for PeerState {
     fn default() -> Self {
         Self {
             role: PeerRole::Relay,
+            permission_identity: None,
             shipped_complete_tx_payloads: BTreeSet::new(),
             subscriptions: BTreeMap::new(),
             deferred_edge_fates: BTreeMap::new(),
@@ -209,6 +211,21 @@ impl PeerState {
         }
     }
 
+    /// Construct an edge peer whose wire identity and read-policy identity differ.
+    ///
+    /// Trusted backend websocket links still speak as their concrete peer identity
+    /// for session/resume validation, but served reads must bypass row policies.
+    pub fn edge_client_with_permission_identity(
+        identity: AuthorId,
+        permission_identity: AuthorId,
+    ) -> Self {
+        Self {
+            role: PeerRole::EdgeClient { identity },
+            permission_identity: Some(permission_identity),
+            ..Self::default()
+        }
+    }
+
     /// Construct a peer narrowed to one author identity.
     ///
     /// This is retained as the compatibility spelling for edge-client links.
@@ -221,9 +238,15 @@ impl PeerState {
         self.role
     }
 
+    /// Return the wire/session identity for this peer link.
+    pub fn link_identity(&self) -> AuthorId {
+        self.role.identity()
+    }
+
     /// Return the identity used to evaluate reads on this peer link.
     pub fn identity(&self) -> AuthorId {
-        self.role.identity()
+        self.permission_identity
+            .unwrap_or_else(|| self.role.identity())
     }
 
     #[cfg(test)]
@@ -489,11 +512,6 @@ impl PeerState {
                 subscription,
                 None,
             );
-        }
-        if state.query_subscription.is_some() && !self.full_recompute_oracle_enabled() {
-            return Err(Error::InvalidStoredValue(
-                "live query subscription is not maintained",
-            ));
         }
         if let Some(receiver) = state.query_subscription.as_ref() {
             let mut drained = Vec::new();
@@ -769,6 +787,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         previous_row_result_set: BTreeSet<ResultRowEntry>,
         previous_tx_ids: BTreeSet<TxId>,
+        tier: DurabilityTier,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -778,19 +797,21 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
             .map(|prepared| (&prepared.shape, &prepared.binding, &prepared.plan));
-        let mut update = node.view_update_for_query_binding_with_peer_payload_inventory_and_plan(
-            shape,
-            binding,
-            subscription,
-            self.shipped_complete_tx_payloads.iter().cloned(),
-            [],
-            [],
-            self.identity(),
-            prepared_plan,
-        )?;
+        let mut update = node
+            .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+                shape,
+                binding,
+                subscription,
+                self.shipped_complete_tx_payloads.iter().cloned(),
+                [],
+                [],
+                self.identity(),
+                prepared_plan,
+                tier,
+            )?;
         if !previous_row_result_set.is_empty() {
             let diff_update = node
-                .view_update_for_query_binding_with_peer_payload_inventory_and_plan(
+                .view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
                     shape,
                     binding,
                     subscription,
@@ -799,6 +820,7 @@ impl PeerState {
                     previous_row_result_set,
                     self.identity(),
                     prepared_plan,
+                    tier,
                 )?;
             merge_rehydrate_diff(&mut update, diff_update);
         }
@@ -851,6 +873,20 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.rehydrate_query_with_opts(node, shape, binding, RegisterShapeOptions::default())
+    }
+
+    /// Build a reset-result-set query-binding view update with registration options.
+    pub fn rehydrate_query_with_opts<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -863,12 +899,8 @@ impl PeerState {
             .unwrap_or_default();
         let previous_tx_ids = previous_tx_ids(previous_row_result_set.iter());
         self.forget_subscription_with_node(node, subscription);
-        let (prepared_shape, prepared_binding, plan) = node.prepare_query_binding_for_link(
-            shape,
-            binding,
-            DurabilityTier::Global,
-            self.identity(),
-        )?;
+        let (prepared_shape, prepared_binding, plan) =
+            node.prepare_query_binding_for_link(shape, binding, opts.tier, self.identity())?;
         let cached = CachedPeerQueryPlan {
             shape: prepared_shape,
             binding: prepared_binding,
@@ -877,7 +909,7 @@ impl PeerState {
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
-        if self.full_recompute_oracle_enabled() {
+        if self.full_recompute_oracle_enabled() || opts.tier != DurabilityTier::Global {
             return self.rehydrate_query_full_recompute_path(
                 node,
                 shape,
@@ -885,6 +917,7 @@ impl PeerState {
                 subscription,
                 previous_row_result_set,
                 previous_tx_ids,
+                opts.tier,
             );
         }
         self.maintained_subscription_view_support(node, shape, binding)?;

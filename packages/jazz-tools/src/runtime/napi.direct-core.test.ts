@@ -1,9 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { WebSocket } from "undici";
+import { afterEach, describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
+import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import { directWebSocketUrl } from "./direct-wasm/direct-websocket.js";
 import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
+import { encodeDirectSchema } from "./direct-wasm/runtime.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 const TEST_SCHEMA: WasmSchema = {
@@ -15,7 +19,67 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
+const ALICE_ID = "00000000-0000-4000-8000-0000000000a1";
+const BOB_ID = "00000000-0000-4000-8000-0000000000b2";
+
+const OWNED_TODOS_SCHEMA: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "owner_id", column_type: { type: "Text" }, nullable: false },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    },
+  },
+};
+
 describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
+  let server: LocalJazzServerHandle | null = null;
+  const runtimes: DirectWasmRuntime[] = [];
+  const previousWebSocket = globalThis.WebSocket;
+
+  afterEach(async () => {
+    for (const runtime of runtimes.splice(0)) {
+      runtime.close();
+    }
+    await server?.stop();
+    server = null;
+    globalThis.WebSocket = previousWebSocket;
+  });
+
   it("opens, mutates one row, and queries it through the direct WASM adapter shape", async () => {
     const { NapiDirectDb } = await loadNapiModule();
     const runtime = new DirectWasmRuntime(
@@ -62,6 +126,354 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
+
+  it("applies session ownership policy to local direct NAPI inserts and reads", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const runtime = new DirectWasmRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-policy:node"),
+      deterministicBytes("jazz-napi-direct-core-policy:author"),
+      11,
+      true,
+    );
+    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ user_id: BOB_ID });
+
+    const aliceTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "alice local row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    await runtime.waitForTransaction(aliceTodo.transactionId, "local");
+
+    const aliceRows = await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      aliceSession,
+      "local",
+    );
+    expect(aliceRows).toHaveLength(1);
+    expect(aliceRows).toEqual([
+      expect.objectContaining({
+        id: aliceTodo.id,
+        table: "todos",
+      }),
+    ]);
+    expect((aliceRows as Array<{ values: unknown[] }>)[0]?.values.slice(0, 3)).toEqual([
+      { type: "Text", value: "alice local row" },
+      { type: "Boolean", value: false },
+      { type: "Text", value: ALICE_ID },
+    ]);
+
+    try {
+      const foreignOwnerTodo = runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "alice cannot claim bob" },
+          done: { type: "Boolean", value: false },
+          owner_id: { type: "Text", value: BOB_ID },
+        },
+        aliceSession,
+      );
+      await runtime.waitForTransaction(foreignOwnerTodo.transactionId, "local");
+    } catch (error) {
+      if (!String(error).includes("policy denied INSERT on table todos")) throw error;
+    }
+
+    const aliceRowsAfterForeignOwnerInsert = await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      aliceSession,
+      "local",
+    );
+    expect(aliceRowsAfterForeignOwnerInsert).toHaveLength(1);
+    expect(aliceRowsAfterForeignOwnerInsert).toEqual([
+      expect.objectContaining({
+        id: aliceTodo.id,
+        table: "todos",
+      }),
+    ]);
+
+    const bobTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "bob local row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      bobSession,
+    );
+    await runtime.waitForTransaction(bobTodo.transactionId, "local");
+
+    const aliceRowsAfterBobInsert = await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      aliceSession,
+      "local",
+    );
+    expect(aliceRowsAfterBobInsert).toHaveLength(1);
+    expect(aliceRowsAfterBobInsert).toEqual([
+      expect.objectContaining({
+        id: aliceTodo.id,
+        table: "todos",
+      }),
+    ]);
+    expect(
+      (aliceRowsAfterBobInsert as Array<{ values: unknown[] }>)[0]?.values.slice(0, 3),
+    ).toEqual([
+      { type: "Text", value: "alice local row" },
+      { type: "Boolean", value: false },
+      { type: "Text", value: ALICE_ID },
+    ]);
+  });
+
+  it("isolates two session identities sharing one direct NAPI runtime for owned deletes", async () => {
+    const { NapiDirectDb } = await loadNapiModule();
+    const runtime = new DirectWasmRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-delete-policy:node"),
+      deterministicBytes("jazz-napi-direct-core-delete-policy:author"),
+      12,
+      true,
+    );
+    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ user_id: BOB_ID });
+
+    const aliceTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "alice delete row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    const bobTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "bob delete row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      bobSession,
+    );
+
+    await Promise.all([
+      runtime.waitForTransaction(aliceTodo.transactionId, "local"),
+      runtime.waitForTransaction(bobTodo.transactionId, "local"),
+    ]);
+
+    expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
+    expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
+
+    const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
+    const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
+
+    await Promise.all([
+      runtime.waitForTransaction(aliceDelete.transactionId, "local"),
+      runtime.waitForTransaction(bobDelete.transactionId, "local"),
+    ]);
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), aliceSession)).resolves.toEqual(
+      [],
+    );
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), bobSession)).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("isolates two session identities sharing one upstream direct NAPI runtime for owned deletes", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDirectDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d003";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "direct-napi-owned-delete-admin",
+      schema: encodeDirectSchema(OWNED_TODOS_SCHEMA),
+    });
+
+    const runtime = new DirectWasmRuntime(
+      { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-direct-core-edge-delete-policy:node"),
+      deterministicBytes("jazz-napi-direct-core-edge-delete-policy:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      directWebSocketUrl(server.url, appId, runtime.getDirectOpenPayload().peerIdentity),
+      JSON.stringify({ admin_secret: server.adminSecret }),
+    );
+
+    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ user_id: BOB_ID });
+
+    const aliceTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "alice edge delete row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    const bobTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "bob edge delete row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      bobSession,
+    );
+
+    await Promise.all([
+      waitForPromise(
+        runtime.waitForTransaction(aliceTodo.transactionId, "edge"),
+        "alice insert did not settle at edge",
+      ),
+      waitForPromise(
+        runtime.waitForTransaction(bobTodo.transactionId, "edge"),
+        "bob insert did not settle at edge",
+      ),
+    ]);
+
+    expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
+    expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
+
+    const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
+    const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
+
+    await Promise.all([
+      waitForPromise(
+        runtime.waitForTransaction(aliceDelete.transactionId, "edge"),
+        "alice delete did not settle at edge",
+      ),
+      waitForPromise(
+        runtime.waitForTransaction(bobDelete.transactionId, "edge"),
+        "bob delete did not settle at edge",
+      ),
+    ]);
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "edge"),
+    ).resolves.toEqual([]);
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "edge"),
+    ).resolves.toEqual([]);
+  }, 15_000);
+
+  it("isolates two session identities sharing one persistent upstream direct NAPI runtime for owned deletes", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDirectDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d004";
+    const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-owned-delete-"));
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "direct-napi-persistent-owned-delete-admin",
+      schema: encodeDirectSchema(OWNED_TODOS_SCHEMA),
+    });
+
+    try {
+      const runtime = new DirectWasmRuntime(
+        {
+          openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never,
+          openPersistent: (path, schema, config) =>
+            NapiDirectDb.openPersistent(path, schema, config) as never,
+        },
+        OWNED_TODOS_SCHEMA,
+        deterministicBytes("jazz-napi-direct-core-persistent-edge-delete-policy:node"),
+        deterministicBytes("jazz-napi-direct-core-persistent-edge-delete-policy:author"),
+        14,
+        true,
+        { persistentPath: join(tempDir, "db") },
+      );
+      runtimes.push(runtime);
+      runtime.connect(
+        directWebSocketUrl(server.url, appId, runtime.getDirectOpenPayload().peerIdentity),
+        JSON.stringify({ admin_secret: server.adminSecret }),
+      );
+
+      const aliceSession = JSON.stringify({ user_id: ALICE_ID });
+      const bobSession = JSON.stringify({ user_id: BOB_ID });
+
+      const aliceTodo = runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "alice persistent edge delete row" },
+          done: { type: "Boolean", value: false },
+          owner_id: { type: "Text", value: ALICE_ID },
+        },
+        aliceSession,
+      );
+      const bobTodo = runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "bob persistent edge delete row" },
+          done: { type: "Boolean", value: false },
+          owner_id: { type: "Text", value: BOB_ID },
+        },
+        bobSession,
+      );
+
+      await Promise.all([
+        waitForPromise(
+          runtime.waitForTransaction(aliceTodo.transactionId, "edge"),
+          "alice persistent insert did not settle at edge",
+        ),
+        waitForPromise(
+          runtime.waitForTransaction(bobTodo.transactionId, "edge"),
+          "bob persistent insert did not settle at edge",
+        ),
+      ]);
+
+      expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
+        'Delete failed: WriteError("policy denied DELETE on table todos")',
+      );
+      expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
+        'Delete failed: WriteError("policy denied DELETE on table todos")',
+      );
+
+      const aliceDelete = runtime.delete("todos", aliceTodo.id, aliceSession);
+      const bobDelete = runtime.delete("todos", bobTodo.id, bobSession);
+
+      await Promise.all([
+        waitForPromise(
+          runtime.waitForTransaction(aliceDelete.transactionId, "edge"),
+          "alice persistent delete did not settle at edge",
+        ),
+        waitForPromise(
+          runtime.waitForTransaction(bobDelete.transactionId, "edge"),
+          "bob persistent delete did not settle at edge",
+        ),
+      ]);
+
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "edge"),
+      ).resolves.toEqual([]);
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), bobSession, "edge"),
+      ).resolves.toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("supports direct runtime parity writes, mergeable transactions, and upstream transport", async () => {
     const { NapiDirectDb } = await loadNapiModule();
@@ -154,6 +566,145 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     expect(transport.close()).toBe(false);
   });
 
+  it("propagates an edge-tier query over the direct core/server boundary and returns remote row adds", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDirectDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d001";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "direct-napi-edge-query-admin",
+      schema: encodeDirectSchema(TEST_SCHEMA),
+    });
+
+    const openRuntime = (peer: string, sourceId: number) => {
+      const runtime = new DirectWasmRuntime(
+        { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+        TEST_SCHEMA,
+        deterministicBytes(`jazz-napi-direct-edge:${peer}:node`),
+        deterministicBytes(`jazz-napi-direct-edge:${peer}:author`),
+        sourceId,
+        true,
+      );
+      runtimes.push(runtime);
+      runtime.connect(
+        directWebSocketUrl(server!.url, appId, runtime.getDirectOpenPayload().peerIdentity),
+        JSON.stringify({ admin_secret: server!.adminSecret }),
+      );
+      return runtime;
+    };
+
+    const writer = openRuntime("writer", 31);
+    const reader = openRuntime("reader", 32);
+    const queryJson = JSON.stringify({ table: "todos" });
+
+    expect(await reader.query(queryJson, null, "local")).toEqual([]);
+
+    const inserted = writer.insert("todos", {
+      title: { type: "Text", value: "direct napi propagated edge row" },
+      done: { type: "Boolean", value: false },
+    });
+    await waitForPromise(
+      writer.waitForTransaction(inserted.transactionId, "edge"),
+      "writer insert did not settle at edge",
+    );
+
+    const propagatedRow = await waitFor(async () => {
+      const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+        id: string;
+        table: string;
+        values: unknown[];
+      }>;
+      return rows.find((row) => row.id === inserted.id);
+    }, "reader edge query did not receive the propagated row add");
+
+    expect(propagatedRow).toEqual({
+      id: inserted.id,
+      table: "todos",
+      values: [
+        { type: "Text", value: "direct napi propagated edge row" },
+        { type: "Boolean", value: false },
+      ],
+    });
+  }, 15_000);
+
+  it("propagates an edge-tier query through a persistent direct core server", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDirectDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d002";
+    const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-server-"));
+    server = await startLocalJazzServer({
+      appId,
+      dataDir: tempDir,
+      adminSecret: "direct-napi-persistent-edge-query-admin",
+      schema: encodeDirectSchema(TEST_SCHEMA),
+    });
+
+    const openRuntime = (peer: string, sourceId: number, targetServer: LocalJazzServerHandle) => {
+      const runtime = new DirectWasmRuntime(
+        { openMemory: (schema, config) => NapiDirectDb.openMemory(schema, config) as never },
+        TEST_SCHEMA,
+        deterministicBytes(`jazz-napi-direct-persistent-edge:${peer}:node`),
+        deterministicBytes(`jazz-napi-direct-persistent-edge:${peer}:author`),
+        sourceId,
+        true,
+      );
+      runtimes.push(runtime);
+      runtime.connect(
+        directWebSocketUrl(targetServer.url, appId, runtime.getDirectOpenPayload().peerIdentity),
+        JSON.stringify({ admin_secret: targetServer.adminSecret }),
+      );
+      return runtime;
+    };
+
+    try {
+      const writer = openRuntime("writer", 41, server);
+
+      const inserted = writer.insert("todos", {
+        title: { type: "Text", value: "direct napi persistent propagated edge row" },
+        done: { type: "Boolean", value: false },
+      });
+      await waitForPromise(
+        writer.waitForTransaction(inserted.transactionId, "edge"),
+        "writer insert did not settle at persistent edge",
+      );
+      writer.close();
+      runtimes.splice(runtimes.indexOf(writer), 1);
+
+      await server.stop();
+      server = await startLocalJazzServer({
+        appId,
+        dataDir: tempDir,
+        adminSecret: "direct-napi-persistent-edge-query-admin",
+        schema: encodeDirectSchema(TEST_SCHEMA),
+      });
+
+      const reader = openRuntime("reader", 42, server);
+      const queryJson = JSON.stringify({ table: "todos" });
+      const propagatedRow = await waitFor(async () => {
+        const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+          id: string;
+          table: string;
+          values: unknown[];
+        }>;
+        return rows.find((row) => row.id === inserted.id);
+      }, "reader persistent edge query did not receive the propagated row add after server recovery");
+
+      expect(propagatedRow).toEqual({
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "direct napi persistent propagated edge row" },
+          { type: "Boolean", value: false },
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("reopens a persistent direct DB and reads previously written rows", async () => {
     const { NapiDirectDb } = await loadNapiModule();
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-"));
@@ -232,4 +783,38 @@ function deterministicBytes(seed: string): Uint8Array {
     view.setUint32(round * 4, hash >>> 0, true);
   }
   return bytes;
+}
+
+async function waitFor<T>(
+  read: () => Promise<T | undefined>,
+  message: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const value = await read();
+    if (value !== undefined) return value;
+    await sleep(25);
+  } while (Date.now() < deadline);
+  throw new Error(message);
+}
+
+async function waitForPromise<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }

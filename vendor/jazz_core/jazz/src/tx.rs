@@ -23,6 +23,12 @@ pub struct Transaction {
     pub n_total_writes: u32,
     /// Author that made the transaction.
     pub made_by: AuthorId,
+    /// Optional identity used for write-policy evaluation.
+    ///
+    /// When absent, policy is evaluated as `made_by`. Trusted serving-node
+    /// flows use this to preserve user provenance while validating writes
+    /// under a terminated request/session identity.
+    pub permission_subject: Option<AuthorId>,
     /// Exclusive transaction snapshot, if any.
     pub base_snapshot: Option<Snapshot>,
     /// Exclusive point reads, if any.

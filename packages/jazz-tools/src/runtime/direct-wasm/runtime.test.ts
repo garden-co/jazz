@@ -446,6 +446,7 @@ describe("DirectWasmRuntime server transport", () => {
             readOptions.push(opts);
             return new Uint8Array([0]);
           },
+          propagateQuery: () => undefined,
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -493,6 +494,89 @@ describe("DirectWasmRuntime server transport", () => {
         JSON.stringify({ user_id: null }),
       ),
     ).toThrow("session is missing user_id");
+  });
+
+  it("applies subscription deltas to the full keyed snapshot", async () => {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          prepareQuery: () => ({}),
+          subscribe: () =>
+            new ReadableStream({
+              start(streamController) {
+                controller = streamController;
+              },
+            }),
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const snapshots: string[][] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(
+      handle,
+      (delta: Array<{ row: { values: Array<{ value: string }> } }>) => {
+        snapshots.push(delta.map((entry) => entry.row.values[0]!.value));
+      },
+    );
+
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRows([
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          title: "first",
+        },
+        {
+          table: "todos",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+          title: "second",
+        },
+      ]),
+    });
+    await Promise.resolve();
+
+    controller!.enqueue({
+      type: "delta",
+      delta: encodeSubscriptionDelta({
+        added: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000003"),
+            title: "third",
+          },
+        ],
+        updated: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "second updated",
+          },
+        ],
+        removed: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+          },
+        ],
+      }),
+    });
+    await Promise.resolve();
+
+    expect(snapshots).toEqual([
+      ["first", "second"],
+      ["second updated", "third"],
+    ]);
   });
 
   it("fails fast instead of dropping unsupported id comparisons", async () => {
@@ -584,6 +668,7 @@ function directRuntimeWithEmptyDb(): DirectWasmRuntime {
     {
       openMemory: () => ({
         all: () => new Uint8Array([0]),
+        propagateQuery: () => undefined,
         prepareQuery: () => ({}),
         subscribe: () => new ReadableStream(),
         tick: () => undefined,
@@ -727,18 +812,48 @@ function encodeDirectWireError(code: number, retry: number, message: string): Ui
 }
 
 function encodeRows(rows: Array<{ table: string; rowId: Uint8Array; title: string }>): Uint8Array {
-  const descriptor = [{ name: "title", valueType: { tag: 6 } }];
   const writer = new PostcardWriter();
-  writer.vec((batch) => {
-    batch.string("todos");
+  writeRowBatches(writer, rows);
+  return writer.finish();
+}
+
+function writeRowBatches(
+  writer: PostcardWriter,
+  rows: Array<{ table: string; rowId: Uint8Array; title: string }>,
+): void {
+  const rowsByTable = new Map<string, Array<{ rowId: Uint8Array; title: string }>>();
+  for (const row of rows) {
+    const tableRows = rowsByTable.get(row.table) ?? [];
+    tableRows.push(row);
+    rowsByTable.set(row.table, tableRows);
+  }
+  const descriptor = [{ name: "title", valueType: { tag: 6 } }];
+  writer.vec((batch, batchIndex) => {
+    const [table, tableRows] = Array.from(rowsByTable.entries())[batchIndex]!;
+    batch.string(table);
     writeDescriptor(batch, descriptor);
     batch.vec((row, index) => {
-      const source = rows[index]!;
+      const source = tableRows[index]!;
       row.bytes(source.rowId);
       row.bool(false);
       row.bytes(createRecord(descriptor, [new TextEncoder().encode(source.title)]));
-    }, rows.length);
-  }, 1);
+    }, tableRows.length);
+  }, rowsByTable.size);
+}
+
+function encodeSubscriptionDelta(delta: {
+  added: Array<{ table: string; rowId: Uint8Array; title: string }>;
+  updated: Array<{ table: string; rowId: Uint8Array; title: string }>;
+  removed: Array<{ table: string; rowId: Uint8Array }>;
+}): Uint8Array {
+  const writer = new PostcardWriter();
+  writeRowBatches(writer, delta.added);
+  writeRowBatches(writer, delta.updated);
+  writer.vec((removed, index) => {
+    const source = delta.removed[index]!;
+    removed.string(source.table);
+    removed.bytes(source.rowId);
+  }, delta.removed.length);
   return writer.finish();
 }
 

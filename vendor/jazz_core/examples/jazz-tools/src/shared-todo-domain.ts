@@ -40,8 +40,17 @@ export type SharedTodoShareWithTodoView = {
 export function sharedTodosSchema(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((table, index) => {
-    if (index === 0) writeTable(table, "todos", todoDescriptor(), [], writeTodoReadPolicy, writeTodoUpdatePolicy);
-    if (index === 1) writeTable(table, "todo_shares", todoShareDescriptor(), [["todo", "todos"]], undefined, undefined);
+    if (index === 0)
+      writeTable(table, "todos", todoDescriptor(), [], writeTodoReadPolicy, writeTodoUpdatePolicy);
+    if (index === 1)
+      writeTable(
+        table,
+        "todo_shares",
+        todoShareDescriptor(),
+        [["todo", "todos"]],
+        undefined,
+        undefined,
+      );
   }, 2);
   writer.none();
   writer.none();
@@ -76,11 +85,16 @@ export function encodedTodoShareCells(share: TodoShareInput): Uint8Array {
   ]);
 }
 
-export function encodedTodoSharePatch(patch: Partial<Pick<TodoShareInput, "role" | "canEdit">>): Uint8Array {
+export function encodedTodoSharePatch(
+  patch: Partial<Pick<TodoShareInput, "role" | "canEdit">>,
+): Uint8Array {
   const entries = todoShareDescriptor()
     .map((field) => ({ field, key: sharePatchKey(field.name) }))
-    .filter((entry): entry is { field: DescriptorField; key: keyof Pick<TodoShareInput, "role" | "canEdit"> } =>
-      entry.key !== undefined && entry.key in patch
+    .filter(
+      (
+        entry,
+      ): entry is { field: DescriptorField; key: keyof Pick<TodoShareInput, "role" | "canEdit"> } =>
+        entry.key !== undefined && entry.key in patch,
     );
   const values = entries.map(({ field, key }) => {
     const value = patch[key];
@@ -88,26 +102,41 @@ export function encodedTodoSharePatch(patch: Partial<Pick<TodoShareInput, "role"
     if (typeof value === "string") return utf8(value);
     throw new Error(`missing share patch value for ${field.name}`);
   });
-  return encodedCells(entries.map((entry) => entry.field), values);
+  return encodedCells(
+    entries.map((entry) => entry.field),
+    values,
+  );
 }
 
 export function sharedTodoViews(batches: AbiRowBatch[]): SharedTodoView[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    rowId: row.rowId,
-    title: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "title")),
-    done: decodeRecordBool(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "done")),
-    owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      rowId: row.rowId,
+      title: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "title")),
+      done: decodeRecordBool(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "done")),
+      owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
+    })),
+  );
 }
 
 export function todoShareViews(batches: AbiRowBatch[]): TodoShareView[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    rowId: row.rowId,
-    todo: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "todo")),
-    user: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "user")),
-    role: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "role")) as TodoShareView["role"],
-    canEdit: decodeRecordBool(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "can_edit")),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      rowId: row.rowId,
+      todo: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "todo")),
+      user: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "user")),
+      role: decodeRecordString(
+        batch.descriptor,
+        row.raw,
+        fieldIndex(batch.descriptor, "role"),
+      ) as TodoShareView["role"],
+      canEdit: decodeRecordBool(
+        batch.descriptor,
+        row.raw,
+        fieldIndex(batch.descriptor, "can_edit"),
+      ),
+    })),
+  );
 }
 
 export function formatSharedTodos(todos: SharedTodoView[]): string {
@@ -131,7 +160,9 @@ function todoShareDescriptor(): DescriptorField[] {
   ];
 }
 
-function sharePatchKey(fieldName: string | undefined): keyof Pick<TodoShareInput, "role" | "canEdit"> | undefined {
+function sharePatchKey(
+  fieldName: string | undefined,
+): keyof Pick<TodoShareInput, "role" | "canEdit"> | undefined {
   if (fieldName === "role") return "role";
   if (fieldName === "can_edit") return "canEdit";
   return undefined;
@@ -190,10 +221,13 @@ function writeTodoShareJoin(writer: PostcardWriter, requireCanEdit: boolean): vo
   writer.string("todo_shares");
   writer.string("todo");
   writer.none();
-  writer.vec((filter, index) => {
-    if (index === 0) writeShareUserClaimFilter(filter);
-    if (index === 1) writeShareCanEditFilter(filter);
-  }, requireCanEdit ? 2 : 1);
+  writer.vec(
+    (filter, index) => {
+      if (index === 0) writeShareUserClaimFilter(filter);
+      if (index === 1) writeShareCanEditFilter(filter);
+    },
+    requireCanEdit ? 2 : 1,
+  );
 }
 
 function writeShareUserClaimFilter(writer: PostcardWriter): void {

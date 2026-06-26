@@ -17,13 +17,13 @@ semantic scan.
 The lowering boundary keeps jazz's data model on a single storage and query
 substrate. jazz lowers storage, current-row maintenance, and query/sync
 evaluation onto groove, then adds distribution, history, and authorization
-*above* that substrate; it defines no independent storage or query engine for
+_above_ that substrate; it defines no independent storage or query engine for
 those concerns. A node opens its `groove::db::Database` from a lowered `groove`
 schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
 
 There is one deliberate exception: **large-value content bytes** do not lower to
-groove's record/IVM machinery. Op-log *metadata* lowers normally (it rides
+groove's record/IVM machinery. Op-log _metadata_ lowers normally (it rides
 commit units as ordinary cells), but the content bytes live in the raw
 `jazz_content` store below the table/IVM layer, reached through groove's raw
 column-family handle (ch. 12). The boundary is precise: anything queryable lowers
@@ -42,7 +42,7 @@ Wire identities remain UUIDs. Lowered storage may intern those identities into
 node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
 aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
 
-*Further invariants.* `INV-LOWER-2`, `INV-LOWER-4` — content lowers to
+_Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content lowers to
 `jazz_{table}_history` and deletion to `jazz_{table}_register`, each PK
 `(row_uuid, tx_time, tx_node_id)`, never mixing user cells and `_deletion`.
 `INV-LOWER-17` — `text`/`blob` lower their cell type to nullable groove `Bytes`.
@@ -89,7 +89,7 @@ prepared-shape policy lowering is complete, but the design target is the same
 policy-composed core.
 
 Identity and execution are separate concerns: aggregation and non-maintained
-`order_by` are part of a shape's *semantic identity* (canonicalized into the
+`order_by` are part of a shape's _semantic identity_ (canonicalized into the
 `ShapeId`, ch. 6), but their ordinary read execution is node-level
 post-processing applied after row materialization, not pushed into groove
 lowering. Maintained finite ordered windows are the exception: they lower to
@@ -106,8 +106,8 @@ as the stable tie field; `offset` is part of the retained window. Unordered
 `limit > 1` and unordered nonzero `offset` remain unsupported until they either
 gain explicit order semantics or a separate maintained lowering.
 
-*Further invariants.* `INV-LOWER-13` — aggregation, ordinary read ordering,
-general pagination, and projection are applied by the node *after* row
+_Further invariants._ `INV-LOWER-13` — aggregation, ordinary read ordering,
+general pagination, and projection are applied by the node _after_ row
 materialization (not required of groove), except maintained unordered `limit(1)`
 offset `0` which lowers through `ArgMinBy` and maintained finite ordered windows
 which lower through `TopBy`. For maintained subscriptions, ch. 16 tracks

@@ -18,8 +18,9 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
 
 use crate::ids::{AuthorId, NodeUuid, RowUuid};
+pub use crate::node::CommitUnitTrust;
 use crate::node::{
-    CommitUnitIngestContext, CommitUnitTrust, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
+    CommitUnitIngestContext, CurrentRow, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlan,
 };
 use crate::peer::PeerState;
@@ -27,7 +28,7 @@ use crate::protocol::{
     BindingDelta, ContentExtent, CurrentWriteSchema, MigrationLens, RegisterShapeOptions,
     SchemaVersion, ShapeAst, SubscriptionKey, SyncMessage,
 };
-use crate::query::{Binding, Query, QueryError, ValidatedQuery};
+use crate::query::{Binding, Query, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -71,7 +72,14 @@ where
 /// [`PeerConnection`], so an inbound sync update can push subscription events
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
-type PendingUpstreamSubscriptions = Rc<RefCell<Vec<(ValidatedQuery, Binding)>>>;
+type PendingUpstreamSubscriptions = Rc<RefCell<Vec<PendingUpstreamSubscription>>>;
+
+#[derive(Clone)]
+struct PendingUpstreamSubscription {
+    shape: ValidatedQuery,
+    binding: Binding,
+    opts: RegisterShapeOptions,
+}
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
 /// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
@@ -423,6 +431,46 @@ where
         self.open_subscription(prepared, opts).await
     }
 
+    /// Ask connected upstreams to cover this query shape.
+    ///
+    /// This is the one-shot query counterpart to subscription registration:
+    /// bindings call it before an edge/global read with full propagation, then
+    /// drive [`Db::tick`] until the resulting rehydrate view update has been
+    /// applied locally.
+    pub fn propagate_query(&self, prepared: &PreparedQuery) {
+        self.node
+            .upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamSubscription {
+                shape: prepared.shape.clone(),
+                binding: prepared.binding.clone(),
+                opts: RegisterShapeOptions::default(),
+            });
+    }
+
+    /// Ask connected upstreams to cover this query shape at `opts`' effective tier.
+    pub fn propagate_query_with_opts(&self, prepared: &PreparedQuery, opts: ReadOpts) {
+        self.node
+            .upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamSubscription {
+                shape: prepared.shape.clone(),
+                binding: prepared.binding.clone(),
+                opts: RegisterShapeOptions {
+                    tier: effective_read_tier(opts),
+                },
+            });
+    }
+
+    /// Return whether a propagated query has received at least one upstream view update.
+    pub fn query_is_covered(&self, prepared: &PreparedQuery) -> bool {
+        let subscription = SubscriptionKey {
+            shape_id: prepared.shape.shape_id(),
+            binding_id: prepared.binding.binding_id(),
+        };
+        self.node.node.borrow().has_settled_result_set(subscription)
+    }
+
     async fn open_subscription(
         &self,
         prepared: &PreparedQuery,
@@ -477,7 +525,11 @@ where
         self.node
             .upstream_subscriptions
             .borrow_mut()
-            .push((prepared.shape.clone(), prepared.binding.clone()));
+            .push(PendingUpstreamSubscription {
+                shape: prepared.shape.clone(),
+                binding: prepared.binding.clone(),
+                opts: RegisterShapeOptions { tier: read_tier },
+            });
         Ok(SubscriptionStream {
             receiver,
             _state: state,
@@ -563,6 +615,46 @@ where
         self.write_mergeable_as_session_subject(made_by, table, row, cells, Vec::new(), None)
     }
 
+    /// Insert a caller-id row while evaluating write policy as `identity`.
+    ///
+    /// This is a trusted serving-node API for terminated backend/request
+    /// sessions. It records provenance as `identity` and evaluates policy as
+    /// the same identity, without changing the Db's own authority.
+    pub fn insert_with_id_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_insert_allows(
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(identity)
+                    .permission_subject(identity)
+                    .cells(cells.clone()),
+            )
+            .map_err(Error::from)?;
+        if !allowed {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied INSERT on table {table}"),
+            ));
+        }
+        self.write_mergeable(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+        )
+    }
+
     /// Return whether an insert with these cells would pass write policy.
     ///
     /// This is a dry-run over the current local preview: it builds the
@@ -640,6 +732,33 @@ where
         )
     }
 
+    /// Update a row while evaluating write policy as `identity`.
+    pub fn update_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if !self.can_update_for_identity(table, row, identity)? {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied UPDATE on table {table}"),
+            ));
+        }
+        let (cells, parent) =
+            self.merge_existing_cells_for_identity(table, row, patch, identity)?;
+        self.write_mergeable(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+        )
+    }
+
     /// Apply explicit edit operations to a text/blob column.
     ///
     /// Insert and delete positions are byte offsets relative to the current
@@ -706,6 +825,24 @@ where
         self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
     }
 
+    /// Upsert a row while evaluating write policy as `identity`.
+    pub fn upsert_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+            let (cells, parent) =
+                self.merge_existing_cells_for_identity(table, row, cells, identity)?;
+            (cells, parent.into_iter().collect())
+        } else {
+            (cells, Vec::new())
+        };
+        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+    }
+
     /// Soft-delete a row locally.
     ///
     /// ```rust
@@ -721,13 +858,14 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn delete(&self, table: &str, row: RowUuid) -> Result<WriteHandle<S>, Error> {
+        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
         self.write_mergeable(
             self.identity.author,
             None,
             table,
             row,
             BTreeMap::new(),
-            Vec::new(),
+            parent.into_iter().collect(),
             Some(DeletionEvent::Deleted),
         )
     }
@@ -741,12 +879,39 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
+        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
         self.write_mergeable_as_session_subject(
             made_by,
             table,
             row,
             BTreeMap::new(),
-            Vec::new(),
+            parent.into_iter().collect(),
+            Some(DeletionEvent::Deleted),
+        )
+    }
+
+    /// Soft-delete a row while evaluating write policy as `identity`.
+    pub fn delete_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        if !self.can_delete_for_identity(table, row, identity)? {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied DELETE on table {table}"),
+            ));
+        }
+        let (_, parent) =
+            self.merge_existing_cells_for_identity(table, row, BTreeMap::new(), identity)?;
+        self.write_mergeable(
+            identity,
+            Some(identity),
+            table,
+            row,
+            BTreeMap::new(),
+            parent.into_iter().collect(),
             Some(DeletionEvent::Deleted),
         )
     }
@@ -781,13 +946,31 @@ where
             .map_err(Into::into)
     }
 
+    /// Attach process-local auth claims for `identity`.
+    pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_session_claims(identity, claims);
+    }
+
     /// Return whether this Db's author can delete the current local row.
     pub fn can_delete(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.can_delete_for_identity(table, row, self.identity.author)
+    }
+
+    /// Return whether `author` can delete the current local row.
+    pub fn can_delete_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorId,
+    ) -> Result<bool, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
-            .dry_run_delete_current_allows(table, row, self.identity.author)
+            .dry_run_delete_current_allows(table, row, author)
             .map_err(Into::into)
     }
 
@@ -895,6 +1078,43 @@ where
         let restore = self.write_mergeable(
             self.identity.author,
             None,
+            table,
+            row,
+            BTreeMap::new(),
+            Vec::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(WriteHandle {
+            node: restore.node,
+            row_uuid: row,
+            tx_id: restore.tx_id,
+            local_tier: data.local_tier.max(restore.local_tier),
+        })
+    }
+
+    /// Restore a row while evaluating write policy as `identity`.
+    pub fn restore_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        let data = self.write_mergeable(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+        )?;
+        let restore = self.write_mergeable(
+            identity,
+            Some(identity),
             table,
             row,
             BTreeMap::new(),
@@ -1036,9 +1256,26 @@ where
     }
 
     fn local_row(&self, table: &str, row: RowUuid) -> Result<Option<CurrentRow>, Error> {
+        self.local_row_for_identity(table, row, self.identity.author)
+    }
+
+    fn local_row_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
         Ok(self
-            .read(&query)?
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_for_link(
+                &query.shape,
+                &query.binding,
+                DurabilityTier::Local,
+                identity,
+            )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
     }
@@ -1049,16 +1286,26 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<(RowCells, Option<TxId>), Error> {
+        self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
+    }
+
+    fn merge_existing_cells_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        identity: AuthorId,
+    ) -> Result<(RowCells, Option<TxId>), Error> {
         let table_schema = self.table_schema(table)?;
         let mut cells = BTreeMap::new();
         let mut parent = None;
-        if let Some(existing) = self.local_row(table, row)? {
+        if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
             for column in &table_schema.columns {
                 if let Some(value) = existing.cell(table_schema, &column.name) {
                     cells.insert(column.name.clone(), value);
                 }
             }
-            parent = self.node.node.borrow().current_row_tx_id(&existing);
+            parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
         }
         cells.extend(patch);
         Ok((cells, parent))
@@ -1095,6 +1342,18 @@ where
     ) -> Rc<RefCell<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims(transport, identity, claims)
+    }
+
+    /// Accept a subscriber connection with explicit auth claims and upload trust mode.
+    pub fn accept_subscriber_with_claims_and_trust(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node
+            .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
     }
 
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
@@ -1182,14 +1441,20 @@ where
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         // Carry any already-registered subscriptions upstream immediately.
-        let pending: Vec<(ValidatedQuery, Binding)> = self
+        let pending: Vec<PendingUpstreamSubscription> = self
             .subscriptions
             .borrow()
             .iter()
             .filter_map(Weak::upgrade)
             .map(|state| {
                 let state = state.borrow();
-                (state.shape.clone(), state.binding.clone())
+                PendingUpstreamSubscription {
+                    shape: state.shape.clone(),
+                    binding: state.binding.clone(),
+                    opts: RegisterShapeOptions {
+                        tier: state.read_tier,
+                    },
+                }
             })
             .collect();
         self.upstream_subscriptions
@@ -1246,7 +1511,8 @@ where
         self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
     }
 
-    fn accept_subscriber_with_claims_and_trust(
+    /// Accept a subscriber connection with explicit auth claims and upload trust mode.
+    pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
@@ -1281,7 +1547,12 @@ where
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor
             .map(|cursor| cursor.peer)
-            .unwrap_or_else(|| PeerState::for_author(identity));
+            .unwrap_or_else(|| match trust {
+                CommitUnitTrust::TrustedBackend => {
+                    PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
+                }
+                CommitUnitTrust::Session => PeerState::for_author(identity),
+            });
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
@@ -1292,6 +1563,7 @@ where
                 outbox: Rc::clone(&self.outbox),
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
+                registered_shape_opts: BTreeMap::new(),
                 served_current_rows: BTreeMap::new(),
             },
             last_resume_bytes: None,
@@ -1588,7 +1860,7 @@ enum ConnectionLink {
     /// up, apply view updates and fates that come back.
     Upstream {
         /// Shapes registered locally but not yet announced upstream.
-        pending: Vec<(ValidatedQuery, Binding)>,
+        pending: Vec<PendingUpstreamSubscription>,
         /// Shapes registered through downstream subscribers.
         upstream_subscriptions: PendingUpstreamSubscriptions,
         /// Subscriptions already announced (dedup across ticks).
@@ -1609,6 +1881,8 @@ enum ConnectionLink {
         upstream_subscriptions: PendingUpstreamSubscriptions,
         /// Subscriptions this subscriber registered, served each tick.
         served: BTreeMap<SubscriptionKey, (ValidatedQuery, Binding)>,
+        /// Options from each subscriber `RegisterShape`, applied to later bindings.
+        registered_shape_opts: BTreeMap<ShapeId, RegisterShapeOptions>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
     },
@@ -1664,7 +1938,7 @@ where
         let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
             return None;
         };
-        let replacement = PeerState::for_author(peer.identity());
+        let replacement = PeerState::for_author(peer.link_identity());
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
         })
@@ -1685,7 +1959,9 @@ where
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let pending_index = 0;
                 while pending_index < pending.len() {
-                    let (shape, binding) = &pending[pending_index];
+                    let pending_subscription = &pending[pending_index];
+                    let shape = &pending_subscription.shape;
+                    let binding = &pending_subscription.binding;
                     let key = SubscriptionKey {
                         shape_id: shape.shape_id(),
                         binding_id: binding.binding_id(),
@@ -1697,7 +1973,7 @@ where
                     if let Err(error) = self.transport.send(SyncMessage::RegisterShape {
                         shape_id: shape.shape_id(),
                         ast: ShapeAst::from_validated(shape),
-                        opts: RegisterShapeOptions::default(),
+                        opts: pending_subscription.opts.clone(),
                     }) {
                         announced.remove(&key);
                         return Err(transport_error(error));
@@ -1749,10 +2025,25 @@ where
                 outbox,
                 upstream_subscriptions,
                 served,
+                registered_shape_opts,
                 served_current_rows,
             } => {
                 while let Some(message) = self.transport.try_recv() {
                     match message {
+                        SyncMessage::RegisterShape {
+                            shape_id,
+                            opts,
+                            ast,
+                        } => {
+                            registered_shape_opts.insert(shape_id, opts);
+                            self.node.borrow_mut().apply_sync_message(
+                                SyncMessage::RegisterShape {
+                                    shape_id,
+                                    ast,
+                                    opts: RegisterShapeOptions::default(),
+                                },
+                            )?;
+                        }
                         SyncMessage::BindingDelta(delta) => {
                             let shape_id = delta.shape_id;
                             let adds = delta.adds.clone();
@@ -1772,7 +2063,13 @@ where
                                 let binding = shape.bind(value_map)?;
                                 let update = {
                                     let mut node = self.node.borrow_mut();
-                                    peer.rehydrate_query(&mut node, &shape, &binding)?
+                                    let opts = registered_shape_opts
+                                        .get(&shape_id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    peer.rehydrate_query_with_opts(
+                                        &mut node, &shape, &binding, opts,
+                                    )?
                                 };
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
                                 send_with_content_extents(
@@ -1788,9 +2085,16 @@ where
                                     },
                                     (shape.clone(), binding.clone()),
                                 );
-                                upstream_subscriptions
-                                    .borrow_mut()
-                                    .push((shape.clone(), binding));
+                                upstream_subscriptions.borrow_mut().push(
+                                    PendingUpstreamSubscription {
+                                        shape: shape.clone(),
+                                        binding,
+                                        opts: registered_shape_opts
+                                            .get(&shape_id)
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                    },
+                                );
                             }
                         }
                         other => {
@@ -2643,6 +2947,10 @@ where
         let state = self.write_state()?;
         match state.fate {
             Fate::Rejected(reason) => Err(write_rejected(reason)),
+            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("write has not been accepted at requested tier {tier:?}"),
+            )),
             Fate::Pending | Fate::Accepted if state.durability < tier => Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("write has not reached requested tier {tier:?}"),

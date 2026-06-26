@@ -21,7 +21,7 @@ Lte, Contains, IsNull}` over `Operand`s. Relationship traversal is expressed by
 `order_by`, `aggregate`, `limit`, and `offset`. Every form listed here is part
 of the `Query` contract; a form not yet implemented is marked at its definition,
 and there is no out-of-band gate list. `order_by`/`aggregate`/general
-`limit`/`offset` are applied by the node *after* row materialization for
+`limit`/`offset` are applied by the node _after_ row materialization for
 ordinary reads, rather than pushed into groove lowering (ch. 14,
 `INV-LOWER-13`). Maintained subscription exceptions are unordered `limit(1)`
 with offset `0`, which lowers through groove `ArgMinBy` over `row_uuid`, and
@@ -35,7 +35,7 @@ normalizes the AST, infers `params`, records the `schema_version` used for
 validation, emits canonical bytes, and derives a `ShapeId`
 (`Query::validate(&JazzSchema)` returns this as a `ValidatedQuery`).
 
-Shape identity binds the query *and* the schema:
+Shape identity binds the query _and_ the schema:
 `ShapeId = Uuid::new_v5(QUERY_NAMESPACE, canonical_query_bytes ‖
 schema.version_id())`. The same AST validated against a different schema version
 therefore has a different shape (`INV-QUERY-1`).
@@ -58,7 +58,7 @@ validation. Its identity is content-addressed independently of the shape:
 with values encoded in parameter-name order. Binding rejects missing, unknown,
 or type-mismatched params (`INV-QUERY-3`).
 
-Claims are a separate input channel. `Operand::Claim` is *not*
+Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: recognized claims (`sub`, `team`, `isAdmin`) are
 injected server-side from the subscriber's identity by policy composition
 (ch. 7), and an unknown claim is a validation error. Recognition is not
@@ -122,7 +122,7 @@ registration drops when its binding count hits zero, and re-registration is
 cheap and idempotent. Whether a fully-unreferenced prepared graph is also dropped
 is a groove-side question; see groove `INV-SHAPE-16`, which retains it.
 
-*Further invariants.* `INV-QUERY-16` — same-drain result churn folds by net
+_Further invariants._ `INV-QUERY-16` — same-drain result churn folds by net
 outcome (enter-then-leave sends no add; leave-then-reenter replaces; same-tx
 retract/assert nets no update). `INV-QUERY-4` — shape registration rejects an
 AST whose id doesn't match `shape_id` and parks an unknown schema version until

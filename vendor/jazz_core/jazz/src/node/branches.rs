@@ -238,6 +238,7 @@ where
             kind: TxKind::Mergeable,
             n_total_writes: 1,
             made_by: commit.made_by,
+            permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -473,11 +474,7 @@ where
             return Ok(true);
         };
         if version.deletion().is_some() {
-            let Some(row) = self
-                .branch_current_rows(&table.name, branch)?
-                .into_iter()
-                .find(|row| row.row_uuid() == version.row_uuid())
-            else {
+            let Some(row) = self.branch_delete_subject_row(branch, table, version)? else {
                 return Ok(false);
             };
             return self.branch_policy_allows(
@@ -509,6 +506,35 @@ where
                     .and_then(|idx| version.cell_at(idx))
             },
         )
+    }
+
+    fn branch_delete_subject_row(
+        &mut self,
+        branch: &BranchRecord,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Result<Option<CurrentRow>, Error> {
+        if let Some(row) = self
+            .branch_current_rows(&table.name, branch)?
+            .into_iter()
+            .find(|row| row.row_uuid() == version.row_uuid())
+        {
+            return Ok(Some(row));
+        }
+
+        for parent in version.parents() {
+            for parent_version in self.query_versions_for_tx(parent)? {
+                if parent_version.table() != table.name
+                    || parent_version.row_uuid() != version.row_uuid()
+                    || parent_version.layer() != VersionLayer::Content
+                {
+                    continue;
+                }
+                return current_row_from_version_projection(table, &parent_version).map(Some);
+            }
+        }
+
+        Ok(None)
     }
 
     fn branch_policy_allows(
@@ -763,6 +789,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by: AuthorId::SYSTEM,
+            permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,

@@ -207,6 +207,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
+            permission_subject: None,
             base_snapshot: Some(open_tx.base_snapshot),
             row_read_set: Some(open_tx.row_reads),
             absent_read_set: Some(open_tx.absent_reads),

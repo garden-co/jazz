@@ -148,6 +148,31 @@ where
         identity: AuthorId,
         prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
     ) -> Result<SyncMessage, Error> {
+        self.view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+            shape,
+            binding,
+            subscription,
+            peer_complete_tx_payloads,
+            previous_result_set,
+            previous_row_result_set,
+            identity,
+            prepared_plan,
+            DurabilityTier::Global,
+        )
+    }
+
+    pub(crate) fn view_update_for_query_binding_with_peer_payload_inventory_and_plan_at_tier(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        subscription: SubscriptionKey,
+        peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
+        previous_result_set: impl IntoIterator<Item = TxId>,
+        previous_row_result_set: impl IntoIterator<Item = ResultRowEntry>,
+        identity: AuthorId,
+        prepared_plan: Option<(&ValidatedQuery, &Binding, &PreparedQueryPlan)>,
+        tier: DurabilityTier,
+    ) -> Result<SyncMessage, Error> {
         let table_name = shape.query().table.clone();
         let peer_complete_tx_payloads = peer_complete_tx_payloads
             .into_iter()
@@ -162,20 +187,22 @@ where
             self.query_rows_with_prepared_plan_for_identity(
                 effective_shape,
                 effective_binding,
-                DurabilityTier::Global,
+                tier,
                 Some(plan),
                 identity,
             )?
         } else {
-            self.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)?
+            self.query_rows_for_link(shape, binding, tier, identity)?
         };
         let mut current_row_result_set = BTreeSet::new();
         let result_table = groove::Intern::new(table_name.clone());
         for row in rows {
             if let Some((time, alias)) = row.projected_tx_alias() {
-                let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-                    "query output tx node alias must exist",
-                ))?;
+                let node = self
+                    .resolve_node_alias(alias)?
+                    .ok_or(Error::InvalidStoredValue(
+                        "query output tx node alias must exist",
+                    ))?;
                 current_row_result_set.insert((
                     result_table,
                     row.row_uuid(),
@@ -397,9 +424,11 @@ where
         let table = self.table(&table_name)?.clone();
         let row = decode_current_row(&table, record)?;
         if let Some((time, alias)) = row.projected_tx_alias() {
-            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-                "query output tx node alias must exist",
-            ))?;
+            let node = self
+                .resolve_node_alias(alias)?
+                .ok_or(Error::InvalidStoredValue(
+                    "query output tx node alias must exist",
+                ))?;
             Ok((
                 groove::Intern::new(table_name),
                 row.row_uuid(),
@@ -418,7 +447,7 @@ where
     /// against currently-visible state would name the wrong version (or none)
     /// for a row that just changed or vanished.
     pub(crate) fn query_output_entry_from_retraction(
-        &self,
+        &mut self,
         shape: &ValidatedQuery,
         record: groove::records::BorrowedRecord<'_>,
     ) -> Result<ResultRowEntry, Error> {
@@ -428,9 +457,11 @@ where
         let (time, alias) = row.projected_tx_alias().ok_or(Error::InvalidStoredValue(
             "query retraction record must project its tx",
         ))?;
-        let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-            "query output tx node alias must exist",
-        ))?;
+        let node = self
+            .resolve_node_alias(alias)?
+            .ok_or(Error::InvalidStoredValue(
+                "query output tx node alias must exist",
+            ))?;
         Ok((
             groove::Intern::new(table_name),
             row.row_uuid(),
@@ -1658,6 +1689,7 @@ where
             kind,
             n_total_writes,
             made_by,
+            permission_subject,
             base_snapshot,
             user_metadata_json,
             source_branch,
@@ -1668,6 +1700,7 @@ where
             kind,
             n_total_writes,
             made_by,
+            permission_subject,
             base_snapshot,
             row_read_set: None,
             absent_read_set: None,
@@ -1704,6 +1737,7 @@ where
             kind,
             n_total_writes,
             made_by,
+            permission_subject,
             base_snapshot,
             user_metadata_json,
             source_branch,
@@ -1714,6 +1748,7 @@ where
             kind,
             n_total_writes,
             made_by,
+            permission_subject,
             base_snapshot,
             row_read_set: None,
             absent_read_set: None,

@@ -252,6 +252,14 @@ export type QueryOptions = QueryExecutionOptions;
 type DbRuntimeOperationContext = {
   session?: Session;
   attribution?: string;
+  readSession?: Session;
+};
+
+const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
+const SYSTEM_READ_SESSION: Session = {
+  user_id: SYSTEM_AUTHOR_ID,
+  claims: {},
+  authMode: "external",
 };
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
@@ -2635,7 +2643,11 @@ export class Db {
     const rows = shouldQueryDurableWorker
       ? await this.workerBridge!.queryLocalRows(wasmQuery, context?.session)
       : context || usesRelationTraversal
-        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
+        ? await client.query(
+            wasmQuery,
+            runtimeQueryOptions,
+            context?.readSession ?? context?.session,
+          )
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -2801,7 +2813,12 @@ export class Db {
 
     const startSubscription = () => {
       if (unsubscribed) return;
-      subId = client.subscribe(wasmQuery, handleDelta, queryOptions, context?.session ?? session);
+      subId = client.subscribe(
+        wasmQuery,
+        handleDelta,
+        queryOptions,
+        context?.readSession ?? context?.session ?? session,
+      );
       traceId = this.registerActiveQuerySubscriptionTrace(
         wasmQuery,
         builtQuery.table,
@@ -3057,6 +3074,8 @@ class ClientBackedDb extends Db {
     return {
       session: this.session,
       attribution: this.attribution,
+      readSession:
+        this.session ?? (this.attribution !== undefined ? SYSTEM_READ_SESSION : undefined),
     };
   }
 

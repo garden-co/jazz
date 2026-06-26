@@ -30,10 +30,18 @@ const todos = db.table<{ id: string; title: string; done: boolean; owner?: strin
 const liveTodos = db.subscribe(todos, (rows) => {
   console.log("live todos", rows.length);
 });
-const created = db.insert(todos, { title: "Ship alpha", done: false }, { id: "11111111-1111-1111-1111-111111111111" });
+const created = db.insert(
+  todos,
+  { title: "Ship alpha", done: false },
+  { id: "11111111-1111-1111-1111-111111111111" },
+);
 await created.wait({ tier: "local" });
 db.update(todos, created.id, { done: true }, { updatedAt: new Date() });
-db.upsert(todos, { title: "Patch or create", done: false }, { id: created.id, updatedAt: new Date() });
+db.upsert(
+  todos,
+  { title: "Patch or create", done: false },
+  { id: created.id, updatedAt: new Date() },
+);
 db.all(todos);
 await db.delete(todos, created.id, { updatedAt: new Date() }).wait();
 await db.restore(todos, created.id, { title: "Restored alpha", done: false }).wait();

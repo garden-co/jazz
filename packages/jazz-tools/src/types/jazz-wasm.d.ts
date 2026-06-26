@@ -56,7 +56,19 @@ declare module "jazz-wasm" {
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): boolean;
     insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    insertWithIdEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
     updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite;
+    updateEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
     canUpdateEncodedForIdentity(
       table: string,
       rowId: Uint8Array,
@@ -64,8 +76,21 @@ declare module "jazz-wasm" {
       author: Uint8Array,
     ): boolean;
     upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    upsertEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
     delete(table: string, rowId: Uint8Array): WasmWrite;
+    deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): WasmWrite;
     restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    restoreEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
     tick(): void;
     connectUpstream(): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;

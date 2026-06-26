@@ -30,7 +30,7 @@ Historical read handles are cheap values, not resources. A past-state watch has
 no subscription semantics in this model, because the result at a historical cut
 is constant.
 
-*Further invariants.* `INV-BRANCH-5` — a history-complete node at a sufficient
+_Further invariants._ `INV-BRANCH-5` — a history-complete node at a sufficient
 watermark answers `at(position).read(...)` locally at exactly that position.
 
 ## 11.2 Snapshot-base branches
@@ -54,7 +54,7 @@ partitions (ch. 10) are orthogonal to branch identity.
 
 Creating a branch records metadata only. It is O(1)-style and never copies base
 rows into the overlay (`INV-BRANCH-11`). Branch creation is itself a
-**mergeable write that works offline**: an offline creator branches at *its own*
+**mergeable write that works offline**: an offline creator branches at _its own_
 settled watermark, honestly "the base as this client saw it".
 
 ## 11.3 Branch reads
@@ -90,7 +90,7 @@ Exclusive branch writes are not part of the branch write model:
 (`INV-BRANCH-13`). A write to a non-open or unknown branch fails rather than
 creating an implicit branch (`INV-BRANCH-14`).
 
-*Further invariants.* `INV-BRANCH-10` — branch metadata (including the frozen
+_Further invariants._ `INV-BRANCH-10` — branch metadata (including the frozen
 `base_global` cut) is durably recoverable across reopen. `INV-BRANCH-12` —
 overlay partitions are created lazily on first branch write, not at branch
 creation.
@@ -137,9 +137,9 @@ merge-back and discard have graduated:
   same merge oracle as S8). Pick (a) or (b) before pinning a contract.
 - 🔶 **Branch-of-branch depth** (target). A branch whose `parent` is itself a branch
   is unbounded by construction. Implications: (i) **reads** resolve overlay-first up
-  the *chain* of bases, so read cost is O(depth) base-cut resolutions — measure
+  the _chain_ of bases, so read cost is O(depth) base-cut resolutions — measure
   before bounding; (ii) **base freezing under a mutable parent** — a child's base is
-  the parent branch's overlay+base *at the creation cut*, but the parent overlay
+  the parent branch's overlay+base _at the creation cut_, but the parent overlay
   keeps growing, so the child needs a stable cut over a branch view (the same
   machinery as composing `at()` inside an overlay; see below);
   (iii) **merge-back** becomes multi-level (child→parent-branch→…→main), each hop a

@@ -80,7 +80,6 @@ export async function readSubscriptionDelta(
   return next.value;
 }
 
-
 export function tableSchema(tableName: string, descriptor: DescriptorField[]): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((table) => {
@@ -102,7 +101,12 @@ export function tableSchema(tableName: string, descriptor: DescriptorField[]): U
   return writer.finish();
 }
 
-export function openConfig(node: Uint8Array, author: Uint8Array, sourceId?: number, historyComplete = false): Uint8Array {
+export function openConfig(
+  node: Uint8Array,
+  author: Uint8Array,
+  sourceId?: number,
+  historyComplete = false,
+): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
   writer.bytes(author);
@@ -147,7 +151,12 @@ export function queryWhereBool(table: string, column: string, value: boolean): U
   return writer.finish();
 }
 
-export function queryWhereStringContains(table: string, column: string, value: string, limit?: number): Uint8Array {
+export function queryWhereStringContains(
+  table: string,
+  column: string,
+  value: string,
+  limit?: number,
+): Uint8Array {
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
   }
@@ -218,7 +227,12 @@ export class PostcardWriter {
   }
 
   u32Le(value: number): void {
-    this.chunks.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+    this.chunks.push(
+      value & 0xff,
+      (value >>> 8) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 24) & 0xff,
+    );
   }
 
   bool(value: boolean): void {
@@ -325,9 +339,14 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return new Uint8Array(value);
   }
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    return new Uint8Array(
+      value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
+    );
   }
-  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  if (
+    Array.isArray(value) &&
+    value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+  ) {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);

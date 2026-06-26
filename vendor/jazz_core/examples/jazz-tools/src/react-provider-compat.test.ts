@@ -128,7 +128,10 @@ class ObservableMemoryDb implements Db {
   unsubscribeCount = 0;
   private readonly subscribersByTable = new Map<string, Set<(rows: unknown[]) => void>>();
   private snapshotVersion = 0;
-  private cachedRowsByTable = new Map<string, { version: number; rows: Record<string, unknown>[] }>();
+  private cachedRowsByTable = new Map<
+    string,
+    { version: number; rows: Record<string, unknown>[] }
+  >();
 
   constructor(private readonly rowsByTable: Record<string, Array<Record<string, unknown>>>) {}
 
@@ -146,7 +149,9 @@ class ObservableMemoryDb implements Db {
     throw new Error("transactions are not implemented by this test fixture");
   }
 
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> {
     this.rowsByTable[name] ??= [];
     return {
       _table: name,
@@ -161,7 +166,10 @@ class ObservableMemoryDb implements Db {
     row: Init & Partial<Pick<Row, "id">>,
     options: InsertOptions<Row> = {},
   ): WriteResult<Row> & Row {
-    const next = { id: options.id ?? row.id ?? `row-${this.rowsByTable[table._table].length + 1}`, ...row };
+    const next = {
+      id: options.id ?? row.id ?? `row-${this.rowsByTable[table._table].length + 1}`,
+      ...row,
+    };
     this.rowsByTable[table._table].push(next as Record<string, unknown>);
     this.notify();
     return makeMemoryWriteResult(next as unknown as Row);
@@ -220,7 +228,9 @@ class ObservableMemoryDb implements Db {
     return makeMemoryWriteResult(restored as unknown as Row);
   }
 
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): Row[] {
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+  ): Row[] {
     const cached = this.cachedRowsByTable.get(tableOrQuery._table);
     if (cached?.version === this.snapshotVersion) return cached.rows as Row[];
 
@@ -229,7 +239,9 @@ class ObservableMemoryDb implements Db {
     return rows as Row[];
   }
 
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): Row | null {
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+  ): Row | null {
     return this.all(tableOrQuery)[0] ?? null;
   }
 
@@ -244,7 +256,8 @@ class ObservableMemoryDb implements Db {
     tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
     callback: (rows: Row[]) => void,
   ): Subscription<Row> {
-    const subscribers = this.subscribersByTable.get(tableOrQuery._table) ?? new Set<(rows: unknown[]) => void>();
+    const subscribers =
+      this.subscribersByTable.get(tableOrQuery._table) ?? new Set<(rows: unknown[]) => void>();
     this.subscribersByTable.set(tableOrQuery._table, subscribers);
     subscribers.add(callback as (rows: unknown[]) => void);
     callback(this.all(tableOrQuery));
@@ -267,7 +280,9 @@ class ObservableMemoryDb implements Db {
 
   updateAuthToken(): void {}
 
-  emit<Row extends { id: string | Uint8Array }>(tableOrQuery: Table<Row, unknown> | QueryBuilder<Row>): void {
+  emit<Row extends { id: string | Uint8Array }>(
+    tableOrQuery: Table<Row, unknown> | QueryBuilder<Row>,
+  ): void {
     this.snapshotVersion += 1;
     const rows = this.all(tableOrQuery);
     for (const callback of this.subscribersByTable.get(tableOrQuery._table) ?? []) {
@@ -305,8 +320,10 @@ function makeClient(db: Db): JazzClient {
 
 function makeMemoryWriteResult<Value extends object>(value: Value): WriteResult<Value> & Value;
 function makeMemoryWriteResult(value: void): WriteResult<void>;
-function makeMemoryWriteResult<Value>(value: Value): WriteResult<Value> | (WriteResult<Value> & object) {
-  const target = value && typeof value === "object" ? value as object : {};
+function makeMemoryWriteResult<Value>(
+  value: Value,
+): WriteResult<Value> | (WriteResult<Value> & object) {
+  const target = value && typeof value === "object" ? (value as object) : {};
   Object.defineProperties(target, {
     value: {
       value,

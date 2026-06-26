@@ -16,7 +16,7 @@ appendices (A–E) cover implementation
 discipline, benchmarks, performance, testing, and the glossary. Invariant →
 test/impl mapping is in [`SPEC/INVARIANTS.md`](SPEC/INVARIANTS.md).
 
-*Building an app?* Read ch. 1, then ch. 13 (the `Db` API).
+_Building an app?_ Read ch. 1, then ch. 13 (the `Db` API).
 
 Runnable facade examples live under [`examples/`](examples/):
 
@@ -26,7 +26,7 @@ cargo run -p jazz --example transactions
 cargo run -p jazz --example permissions
 ```
 
-Operational and in-flight material now lives *inside* the spec, in each chapter's
+Operational and in-flight material now lives _inside_ the spec, in each chapter's
 clearly-marked `In flight` section after its normative content (benchmark
 specifics in [appendix B](SPEC/B_benchmarks.md), the performance backlog in
 [appendix C](SPEC/C_performance.md), large-value design detail in

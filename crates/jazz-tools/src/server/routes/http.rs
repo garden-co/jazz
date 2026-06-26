@@ -817,34 +817,68 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    match state.catalogue.known_schema(&state.runtime, &schema_hash) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "target schema catalogue not found for hash {}",
-                    schema_hash
-                ))),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to read known schemas: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    }
+    let mut schema_with_permissions =
+        match state.catalogue.known_schema(&state.runtime, &schema_hash) {
+            Ok(Some(schema)) => schema,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse::not_found(format!(
+                        "target schema catalogue not found for hash {}",
+                        schema_hash
+                    ))),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::internal(format!(
+                        "failed to read known schemas: {err}"
+                    ))),
+                )
+                    .into_response();
+            }
+        };
 
     let permissions = request
         .permissions
         .into_iter()
         .map(|(table_name, policies)| (TableName::new(table_name), policies))
-        .collect();
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for (table_name, policies) in &permissions {
+        let Some(table) = schema_with_permissions.get_mut(table_name) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "permissions reference unknown table {}",
+                    table_name.as_str()
+                ))),
+            )
+                .into_response();
+        };
+        table.policies = policies.clone();
+    }
+
+    let direct_schema =
+        match state.direct_core().is_some() || state.direct_core_storage_config.is_some() {
+            true => {
+                match crate::server::direct_schema::convert_alpha_schema(&schema_with_permissions) {
+                    Ok(schema) => Some(schema),
+                    Err(err) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::bad_request(format!(
+                                "permissions schema is not supported by direct core: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            false => None,
+        };
 
     match state.catalogue.publish_permissions_bundle(
         &state.runtime,
@@ -854,6 +888,32 @@ pub(super) async fn publish_permissions_handler(
     ) {
         Ok(_) => match state.catalogue.current_permissions_head(&state.runtime) {
             Ok(head) => {
+                if let Some(schema) = direct_schema {
+                    let direct_core = match state.direct_core() {
+                        Some(direct_core) => direct_core,
+                        None => match state.start_direct_core(schema.clone()) {
+                            Ok(direct_core) => direct_core,
+                            Err(err) => {
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(ErrorResponse::internal(format!(
+                                        "failed to start direct core: {err}"
+                                    ))),
+                                )
+                                    .into_response();
+                            }
+                        },
+                    };
+                    if let Err(err) = direct_core.publish_schema(schema).await {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse::internal(format!(
+                                "failed to publish permissions schema to direct core: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                }
                 let head = head.map(permissions_head_view);
                 (StatusCode::CREATED, Json(PermissionsHeadResponse { head })).into_response()
             }

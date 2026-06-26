@@ -1,6 +1,6 @@
 # jazz — Specification · Appendix A. Implementation discipline
 
-*Non-normative (guidance).* This appendix records the engineering disciplines
+_Non-normative (guidance)._ This appendix records the engineering disciplines
 that keep the implementation aligned with the specification. The `INV-DISC-*`
 entries are audit anchors for code structure and tests, not
 application-visible semantic law. Application semantics live in the numbered
@@ -60,8 +60,8 @@ recomputed, and upstream state lives on the transaction record (`INV-DISC-6`).
 
 Correctness tests are anchored by an independent truth model. The brute-force
 `Oracle` is complete-history and groove-independent, and tests compare behavior
-against it (`INV-DISC-7`). Distribution hazards are *first-class seeded-test
-actions*, not afterthoughts: the M3 harness duplicates upstream/fate/view
+against it (`INV-DISC-7`). Distribution hazards are _first-class seeded-test
+actions_, not afterthoughts: the M3 harness duplicates upstream/fate/view
 messages, delivers children before parents, restarts readers and core, emits
 rehydrates, and asserts quiescent drains (`INV-DISC-8`). Parked work is
 observable via `SyncMetrics` (`parked_orphans`, `…_resolved`,
@@ -69,7 +69,7 @@ catalogue/incomplete variants) and must drain at quiescence (`INV-DISC-9`);
 relatedly, a snapshot read asserts the relevant pending queues are drained
 first. **Harness action caps are assertions too:** a cap on restarts,
 rehydrates, parking, or drain work defines how much of that hazard class a seed
-exercises. Initializing a counter *at* its cap silently disables coverage and is
+exercises. Initializing a counter _at_ its cap silently disables coverage and is
 a test bug, not a valid simplification. Recovery rebuilds node state (aliases,
 catalogue/branch metadata, HLC/global-seq, pending edges, rejected headers) from
 storage, never from transport/session state (`INV-DISC-10`).
@@ -84,7 +84,7 @@ implementation artifacts, and tests assert them; for example,
 payload bundles per link (`INV-DISC-11`). The sync and validation benchmarks
 report deterministic counters plus timing ratios as discipline gates
 (`INV-DISC-12`, appendix B), and they should never quote dirty-tree numbers as
-results. Metrics are *not* one unified struct: they are split across
+results. Metrics are _not_ one unified struct: they are split across
 `SyncMetrics`, `PeerMetrics`, and benchmark-computed values.
 
 ## A.8 Structural discipline
@@ -117,7 +117,7 @@ Durable style rules:
 ## Open questions
 
 - 🔶 **Canonical step API.** Should the discipline require the literal `step(&mut
-  NodeState, Event) -> Vec<OutboxMessage>` dispatcher (`Event`/`OutboxMessage`
+NodeState, Event) -> Vec<OutboxMessage>` dispatcher (`Event`/`OutboxMessage`
   exist) or keep the weaker "reducible to deterministic events/methods" rule
   implemented by direct deterministic methods?
 - 🔶 **Seed env vars.** Tests use `JAZZ_SEED` / `JAZZ_SEED_COUNT` /

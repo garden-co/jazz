@@ -34,6 +34,61 @@ fn write_policy_rejection_cleans_up_client() {
             .is_empty()
     );
 }
+
+#[test]
+fn session_owner_string_uuid_write_policy_accepts_matching_author() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner_id", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::shape(
+        Query::from("todos").filter(eq(col("owner_id"), claim("user_id"))),
+    ))]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let row_uuid = row(0x51);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .made_by(author)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("owned".to_owned())),
+                    ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                ])),
+        )
+        .unwrap();
+
+    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    assert_eq!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: Some(DurabilityTier::Global),
+        }
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<Vec<_>>(),
+        vec![(
+            row_uuid,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("owned".to_owned())),
+                ("owner_id".to_owned(), Value::String(author.0.to_string())),
+            ]),
+        )]
+    );
+}
+
 #[test]
 fn owner_only_delete_requires_current_owner() {
     let schema = owner_policy_schema();
@@ -162,7 +217,10 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate {
         version_bundles,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+            },
         result_row_adds,
         result_row_removes,
         ..
@@ -483,8 +541,18 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         1,
         "identities with the same shape and policy should share one prepared graph"
     );
-    assert_eq!(invited_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
-    assert_eq!(spy_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        invited_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
+    assert_eq!(
+        spy_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
 
     let invite_tx = core
         .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 12).cells(
@@ -522,7 +590,12 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     );
     assert!(result_row_removes.is_empty());
     assert_eq!(invited_link.metrics.view_updates_out, 2);
-    assert_eq!(invited_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        invited_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
 
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
@@ -535,7 +608,12 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     ));
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
-    assert_eq!(spy_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        spy_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
 
     let revoke_tx = core
         .commit_mergeable(
@@ -573,8 +651,18 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         invited_link.subscription_result_sets(subscription),
         Some(BTreeSet::new())
     );
-    assert_eq!(invited_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
-    assert_eq!(spy_link.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        invited_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
+    assert_eq!(
+        spy_link
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
 }
 #[test]
 fn system_identity_read_policy_sees_everything() {
@@ -922,10 +1010,20 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     (adds, removes)
 }
 
-fn canonical_view_update_payload(update: &SyncMessage) -> (Vec<String>, Vec<TxId>, Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
+fn canonical_view_update_payload(
+    update: &SyncMessage,
+) -> (
+    Vec<String>,
+    Vec<TxId>,
+    Vec<ResultRowEntry>,
+    Vec<ResultRowEntry>,
+) {
     let SyncMessage::ViewUpdate {
         version_bundles,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+            },
         ..
     } = update
     else {
@@ -1028,8 +1126,18 @@ fn maintained_subscription_view_multi_segment_inner_include_matches_full_recompu
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
         .unwrap();
-    assert_eq!(maintained_peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
-    assert_eq!(maintained_peer.maintained_subscription_view_metrics().hits_out, 1);
+    assert_eq!(
+        maintained_peer
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
+    assert_eq!(
+        maintained_peer
+            .maintained_subscription_view_metrics()
+            .hits_out,
+        1
+    );
 
     let (result_adds, result_removes) = canonical_view_update_rows(&maintained);
     assert!(result_removes.is_empty());
@@ -1085,11 +1193,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     };
     assert_eq!(
         result_row_adds.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([(
-            "roots".to_owned().into(),
-            row(0xd2),
-            update_tx
-        )])
+        BTreeSet::from([("roots".to_owned().into(), row(0xd2), update_tx)])
     );
 }
 
@@ -1203,8 +1307,18 @@ fn maintained_subscription_view_multi_segment_holes_include_matches_full_recompu
         canonical_view_update_rows(&maintained),
         canonical_view_update_rows(&full_recompute)
     );
-    assert_eq!(maintained_peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
-    assert_eq!(maintained_peer.maintained_subscription_view_metrics().hits_out, 1);
+    assert_eq!(
+        maintained_peer
+            .maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
+    assert_eq!(
+        maintained_peer
+            .maintained_subscription_view_metrics()
+            .hits_out,
+        1
+    );
 
     assert_view_update_only_references_rows(
         &maintained,
@@ -1584,7 +1698,9 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
         &binding,
         AuthorId::SYSTEM,
     );
-    assert_maintained_view_cold_snapshot_seed_matches_one_shot(&mut core, &shape, &binding, author_a);
+    assert_maintained_view_cold_snapshot_seed_matches_one_shot(
+        &mut core, &shape, &binding, author_a,
+    );
 }
 
 #[test]
@@ -1673,7 +1789,8 @@ fn maintained_view_allows_join_policy_slice() {
 }
 
 #[test]
-fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute() {
+fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
+ {
     let schema = JazzSchema::new([
         TableSchema::new(
             "sharedTodos",
@@ -1727,8 +1844,15 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
 
     let mut peer = PeerState::for_author(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    assert_eq!(canonical_view_update_rows(&initial), (Vec::new(), Vec::new()));
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        canonical_view_update_rows(&initial),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 1);
 
     let visible_member_tx = accept_global(
@@ -1752,7 +1876,11 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         )
     );
     assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 
     let hidden_again_tx = accept_global(
@@ -1775,8 +1903,17 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
             ],
         )
     );
-    assert_retraction_without_replacement_leak(&revoke, member_row, visible_member_tx, hidden_again_tx);
-    assert_eq!(peer.maintained_subscription_view_metrics().full_recomputes_out, 0);
+    assert_retraction_without_replacement_leak(
+        &revoke,
+        member_row,
+        visible_member_tx,
+        hidden_again_tx,
+    );
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .full_recomputes_out,
+        0
+    );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }
 

@@ -59,18 +59,18 @@ is then evaluated inside that branch's overlay-first view (ch. 11,
 `INV-BRANCH-15`).
 
 Authorization deliberately separates authorship from permission identity.
-`made_by` is the *author* attribution and is not necessarily the *permission*
+`made_by` is the _author_ attribution and is not necessarily the _permission_
 identity: a trusted backend (ch. 9, ch. 13) may authenticate as itself while
 attributing a mutation to a user. That **attribution-only** case stores user
 authorship while evaluating policy against the backend identity. Four identities
 are worth keeping distinct:
 
-| identity | what it is | used for |
-|---|---|---|
-| `made_by` (author) | who a mutation is *attributed* to (`Transaction.made_by`) | provenance (`$createdBy`); *not* necessarily the permission subject |
-| authenticated identity (`AuthorId`) | who a connection authenticated as | the subject read/write policies are evaluated against |
-| attribution-only | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13) |
-| `AuthorId::SYSTEM` | the system identity | bypasses all policies; relay links carry it (§7.3) |
+| identity                            | what it is                                                   | used for                                                            |
+| ----------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `made_by` (author)                  | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
+| authenticated identity (`AuthorId`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
+| attribution-only                    | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
+| `AuthorId::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
 authenticated identity`. This prevents a client from forging another user's
@@ -86,7 +86,7 @@ result-row add/remove, version bundle, rehydrate output, or query update
 narrow; an edge-client link narrows under its terminated `AuthorId`
 (`INV-RLS-11`, ch. 9).
 
-The security boundary is *upstream emission*, not local storage. Read-policy
+The security boundary is _upstream emission_, not local storage. Read-policy
 revocation removes rows from **future** settled result sets but does **not**
 redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
 node does not re-filter its own local reads or subscriptions by policy. The spec
@@ -110,7 +110,7 @@ Join policies extend that same identity-bound evaluation across relationships. A
 join policy passes when a matching global-current row in the joined table reaches
 the protected row and its filters hold under the same identity (`INV-RLS-9`).
 
-*Further invariants.* `INV-RLS-8` — a deletion-register version is readable to a
+_Further invariants._ `INV-RLS-8` — a deletion-register version is readable to a
 non-system identity only when the row has a global content winner that satisfies
 the read policy for that identity. `INV-RLS-16` — a large-value content extent is
 visible to an identity only when referenced by a version whose content row passes
@@ -159,8 +159,8 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
   future policy for cache lifetime, not a source of permission truth here.
 - ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
-  columns cannot express *can-insert* or richer probes; a dry-run is policy
-  evaluation *without ingest* — the write-validation machinery applied
+  columns cannot express _can-insert_ or richer probes; a dry-run is policy
+  evaluation _without ingest_ — the write-validation machinery applied
   hypothetically, with local-preview semantics. The facade methods (`can_insert`,
   `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
   (`INV-API-28`).

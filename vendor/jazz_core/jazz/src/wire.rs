@@ -377,6 +377,7 @@ mod tests {
                     kind: TxKind::Mergeable,
                     n_total_writes: 0,
                     made_by: AuthorId::from_bytes([0x55; 16]),
+                    permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
                     absent_read_set: None,

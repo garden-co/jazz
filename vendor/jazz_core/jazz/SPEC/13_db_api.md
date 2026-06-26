@@ -142,11 +142,11 @@ include match semantics, not to broader traversed/failed-path payload material.
 
 Which `tier` to choose:
 
-| `ReadOpts.tier` | use it for | sees |
-|---|---|---|
-| `Local` (default) | optimistic UI, read-your-writes | local currency, including your own pending committed writes |
-| `Global` | confirmed server-accepted state | only globally-accepted versions |
-| `Edge` | edge-accepted state (between local and global) | versions an edge has finally judged (`Fate::Accepted` at `DurabilityTier::Edge`), excluding purely-local pending writes (ch. 5, ch. 9) |
+| `ReadOpts.tier`   | use it for                                     | sees                                                                                                                                   |
+| ----------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `Local` (default) | optimistic UI, read-your-writes                | local currency, including your own pending committed writes                                                                            |
+| `Global`          | confirmed server-accepted state                | only globally-accepted versions                                                                                                        |
+| `Edge`            | edge-accepted state (between local and global) | versions an edge has finally judged (`Fate::Accepted` at `DurabilityTier::Edge`), excluding purely-local pending writes (ch. 5, ch. 9) |
 
 Freshness is expressed by the requested tier. A `Local` read includes the
 client's own optimistic writes immediately. A `Global` read shows accepted state
@@ -201,7 +201,7 @@ Trusted backends can perform core-only attributed writes: the backend sets
 backend's authenticated identity. Clients may attribute writes only to themselves
 (`INV-API-29`, ch. 7).
 
-*Further invariants.* `INV-API-10` — `upsert` merges over current cells when the
+_Further invariants._ `INV-API-10` — `upsert` merges over current cells when the
 row exists locally, else writes the supplied cells. `INV-API-11` — `delete`
 lowers to a mergeable `DeletionEvent::Deleted`. `INV-API-12` — `restore` rejects
 empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
@@ -261,14 +261,14 @@ not impose the actor model.
 
 Facade errors carry an `ErrorCode` plus a message:
 
-| `ErrorCode` | raised when |
-|---|---|
-| `Schema` | schema/table/column validation failed (e.g. `restore` with empty data) |
-| `Query` | query validation or binding failed |
+| `ErrorCode`     | raised when                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| `Schema`        | schema/table/column validation failed (e.g. `restore` with empty data)                     |
+| `Query`         | query validation or binding failed                                                         |
 | `WriteRejected` | the authority rejected the write's fate — surfaced by `wait` and the `on_write_error` hook |
-| `NotObserved` | the requested durability tier is not yet locally observed |
-| `Storage` | the storage backend failed |
-| `Protocol` | a local node / protocol operation failed |
+| `NotObserved`   | the requested durability tier is not yet locally observed                                  |
+| `Storage`       | the storage backend failed                                                                 |
+| `Protocol`      | a local node / protocol operation failed                                                   |
 
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
 `mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
@@ -326,28 +326,28 @@ settled.
 
 ### 13.7.1 Binding Responsibilities
 
-| responsibility | binding contract |
-|---|---|
-| object ownership | wrap real Rust core objects directly in idiomatic host classes/resources |
-| row-record decoder | decode descriptor/raw `Record` rows and optionally compile descriptor-specialized accessors |
+| responsibility        | binding contract                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| object ownership      | wrap real Rust core objects directly in idiomatic host classes/resources                                  |
+| row-record decoder    | decode descriptor/raw `Record` rows and optionally compile descriptor-specialized accessors               |
 | encoded writes/probes | send descriptor/raw `Record` patches for hot-path row input where map-shaped payloads would copy too much |
-| subscriptions | bridge Rust subscription streams into host callbacks/streams without a global event queue |
-| transport byte queues | move encoded `WireFrame` bytes through host sockets/workers without inventing an app-level sync API |
-| errors | translate core `Error`/`WireError` into host-native exceptions or rejected promises |
+| subscriptions         | bridge Rust subscription streams into host callbacks/streams without a global event queue                 |
+| transport byte queues | move encoded `WireFrame` bytes through host sockets/workers without inventing an app-level sync API       |
+| errors                | translate core `Error`/`WireError` into host-native exceptions or rejected promises                       |
 
 ### 13.7.2 Binding Payloads
 
 Binding payloads use core types directly:
 
-| core payload | purpose |
-|---|---|
-| `DbConfig`, `DbIdentity` | open/config payloads, with storage constructed by the binding |
-| row-record envelopes | future descriptor/raw row input and output payloads, to be shaped by the direct WASM binding |
-| `ReadOpts` | read option payloads |
-| subscription stream chunks | host stream events over `Db::subscribe`, encoded only where needed |
-| `TxKind` | transaction kind |
-| `WriteState` | write fate/durability payload |
-| `Error`, `ErrorCode`, `WireError`, `WireErrorCode`, `WireRetry` | structured local and wire errors |
+| core payload                                                    | purpose                                                                                      |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `DbConfig`, `DbIdentity`                                        | open/config payloads, with storage constructed by the binding                                |
+| row-record envelopes                                            | future descriptor/raw row input and output payloads, to be shaped by the direct WASM binding |
+| `ReadOpts`                                                      | read option payloads                                                                         |
+| subscription stream chunks                                      | host stream events over `Db::subscribe`, encoded only where needed                           |
+| `TxKind`                                                        | transaction kind                                                                             |
+| `WriteState`                                                    | write fate/durability payload                                                                |
+| `Error`, `ErrorCode`, `WireError`, `WireErrorCode`, `WireRetry` | structured local and wire errors                                                             |
 
 `WriteState` is not a parallel binding shape. Rejection detail is represented by
 the core `Fate::Rejected(RejectionReason)` variant, preserving
@@ -388,15 +388,15 @@ Error {
 
 Initial `ErrorCode` values are:
 
-| code | maps from / raised when |
-|---|---|
-| `Schema` | schema/table/column validation failure |
-| `Query` | query validation or binding failure |
-| `WriteRejected` | authority rejected a write fate |
-| `NotObserved` | requested durability/tier not locally observed |
-| `Storage` | storage backend failure or unavailable backend |
-| `Protocol` | local node/protocol invariant failure |
-| `Backpressure` | bounded queue or transport cannot accept more bytes |
+| code            | maps from / raised when                             |
+| --------------- | --------------------------------------------------- |
+| `Schema`        | schema/table/column validation failure              |
+| `Query`         | query validation or binding failure                 |
+| `WriteRejected` | authority rejected a write fate                     |
+| `NotObserved`   | requested durability/tier not locally observed      |
+| `Storage`       | storage backend failure or unavailable backend      |
+| `Protocol`      | local node/protocol invariant failure               |
+| `Backpressure`  | bounded queue or transport cannot accept more bytes |
 
 Wire transport errors use `WireError { code: WireErrorCode, retry: WireRetry,
 message }`.
@@ -408,31 +408,31 @@ partial or designed with known gaps; `N` intentionally absent from that layer;
 `Shell` means the server shell exposes operational wrapping around `Node`, not
 the client `Db` facade.
 
-| capability | Rust `Db` | TypeScript `Db` | WASM ABI | NAPI ABI | browser-worker | server-shell |
-|---|---:|---:|---:|---:|---:|---:|
-| open/close client db | Y | Y | Y | Y | Y | N |
-| storage open/config | P | Y | Y | Y | Y | Shell |
-| query builder objects | P | Y | N | N | N | N |
-| prepare validated query | Y | Y | Y | Y | Y | Shell |
-| local reads: `read`/`one` | Y | Y | Y | Y | Y | Shell |
-| tiered reads: `all(ReadOpts)` | P | Y | Y | Y | Y | Shell |
-| Rust facade watches | P | N | N | N | N | N |
-| subscription streams | P | Y | Y | Y | Y | Shell |
-| stream row changes/resets | P | P | P | P | P | Shell |
-| mergeable writes | Y | Y | Y | Y | Y | Shell |
-| exclusive transactions | Y | Y | Y | Y | Y | Shell |
-| write wait/state | Y | Y | Y | Y | Y | Shell |
-| dry-run permission probes | Y | Y | Y | Y | Y | Shell |
-| byte wire transport | Y | N | Y | Y | Y | Shell |
-| semantic `SyncMessage` transport | Y | N | N | N | N | Shell-internal |
-| auth/session admission | P | Y | P | P | P | Shell |
-| branch/time-travel facade | P | P | P | P | P | Shell |
-| lens/catalogue facade | P | P | P | P | P | Shell |
-| large-value read/edit handles | P | P | P | P | P | Shell |
-| structured errors/events | P | Y | Y | Y | Y | Shell |
-| durability tier waits | Y | Y | Y | Y | Y | Shell |
-| worker/thread proxying | N | Y | N | N | Y | Shell |
-| health/metrics/shutdown | N | N | N | N | P | Shell |
+| capability                       | Rust `Db` | TypeScript `Db` | WASM ABI | NAPI ABI | browser-worker |   server-shell |
+| -------------------------------- | --------: | --------------: | -------: | -------: | -------------: | -------------: |
+| open/close client db             |         Y |               Y |        Y |        Y |              Y |              N |
+| storage open/config              |         P |               Y |        Y |        Y |              Y |          Shell |
+| query builder objects            |         P |               Y |        N |        N |              N |              N |
+| prepare validated query          |         Y |               Y |        Y |        Y |              Y |          Shell |
+| local reads: `read`/`one`        |         Y |               Y |        Y |        Y |              Y |          Shell |
+| tiered reads: `all(ReadOpts)`    |         P |               Y |        Y |        Y |              Y |          Shell |
+| Rust facade watches              |         P |               N |        N |        N |              N |              N |
+| subscription streams             |         P |               Y |        Y |        Y |              Y |          Shell |
+| stream row changes/resets        |         P |               P |        P |        P |              P |          Shell |
+| mergeable writes                 |         Y |               Y |        Y |        Y |              Y |          Shell |
+| exclusive transactions           |         Y |               Y |        Y |        Y |              Y |          Shell |
+| write wait/state                 |         Y |               Y |        Y |        Y |              Y |          Shell |
+| dry-run permission probes        |         Y |               Y |        Y |        Y |              Y |          Shell |
+| byte wire transport              |         Y |               N |        Y |        Y |              Y |          Shell |
+| semantic `SyncMessage` transport |         Y |               N |        N |        N |              N | Shell-internal |
+| auth/session admission           |         P |               Y |        P |        P |              P |          Shell |
+| branch/time-travel facade        |         P |               P |        P |        P |              P |          Shell |
+| lens/catalogue facade            |         P |               P |        P |        P |              P |          Shell |
+| large-value read/edit handles    |         P |               P |        P |        P |              P |          Shell |
+| structured errors/events         |         P |               Y |        Y |        Y |              Y |          Shell |
+| durability tier waits            |         Y |               Y |        Y |        Y |              Y |          Shell |
+| worker/thread proxying           |         N |               Y |        N |        N |              Y |          Shell |
+| health/metrics/shutdown          |         N |               N |        N |        N |              P |          Shell |
 
 The parity target is behavioral: TypeScript should expose the same product
 surface on WASM and NAPI, while lower layers expose only the handle/byte ABI
@@ -470,8 +470,8 @@ These are designed but not landed:
   state immediately and is woken by `tick`. Reads otherwise do not perform an
   implicit network wait: a `Local` read shows optimistic writes immediately, and a
   `Global` read shows only locally-observed accepted state, which may be empty
-  until sync has been ticked. The product contract also distinguishes *undefined*
-  (never settled) from *empty* (settled, empty) — i.e. whether the subscriber has
+  until sync has been ticked. The product contract also distinguishes _undefined_
+  (never settled) from _empty_ (settled, empty) — i.e. whether the subscriber has
   a settled subscription result set for the binding (ch. 6), surfaced as a
   queryable `settled()` bit on the handle before the first gate. Neither the
   gating nor `settled()` is implemented yet.

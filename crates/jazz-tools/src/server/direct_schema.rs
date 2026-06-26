@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use jazz::groove::records::EnumSchema;
+use jazz::groove::records::{EnumSchema, Value as GrooveValue};
 use jazz::groove::schema::ColumnType as GrooveColumnType;
+use jazz::query::{Operand, Predicate, Query};
 use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
 };
 
+use crate::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Schema, TableName, TablePolicies,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Schema, TableName, Value,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,13 +52,6 @@ fn convert_table(
     name: &TableName,
     table: &crate::query_manager::types::TableSchema,
 ) -> Result<CoreTableSchema, DirectSchemaConversionError> {
-    if table.policies != TablePolicies::default() {
-        return Err(err(
-            format!("$.{}", name.as_str()),
-            "table policies are not supported by direct fixed-schema conversion yet",
-        ));
-    }
-
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
@@ -90,6 +85,12 @@ fn convert_table(
         })
         .unwrap_or_default();
     converted.merge_strategies = merge_strategies;
+    converted.read_policy = convert_optional_policy(
+        name,
+        "policies.select.using",
+        table.policies.select.using.as_ref(),
+    )?;
+    converted.write_policy = convert_optional_policy(name, "policies.write", write_policy(table))?;
     Ok(converted)
 }
 
@@ -174,6 +175,127 @@ fn convert_merge_strategy(
     }
 }
 
+fn write_policy(table: &crate::query_manager::types::TableSchema) -> Option<&PolicyExpr> {
+    table
+        .policies
+        .insert
+        .with_check
+        .as_ref()
+        .or(table.policies.update.with_check.as_ref())
+        .or(table.policies.update.using.as_ref())
+        .or(table.policies.delete.using.as_ref())
+}
+
+fn convert_optional_policy(
+    table: &TableName,
+    path: &str,
+    expr: Option<&PolicyExpr>,
+) -> Result<Option<Query>, DirectSchemaConversionError> {
+    expr.map(|expr| convert_policy(table, path, expr))
+        .transpose()
+}
+
+fn convert_policy(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<Query, DirectSchemaConversionError> {
+    Ok(Query::from(table.as_str()).filter(convert_policy_predicate(table, path, expr)?))
+}
+
+fn convert_policy_predicate(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<Predicate, DirectSchemaConversionError> {
+    match expr {
+        PolicyExpr::True => Ok(Predicate::All(Vec::new())),
+        PolicyExpr::False => Ok(Predicate::Any(Vec::new())),
+        PolicyExpr::And(exprs) => exprs
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| {
+                convert_policy_predicate(table, &format!("{path}.And[{index}]"), expr)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Predicate::All),
+        PolicyExpr::Or(exprs) => exprs
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| {
+                convert_policy_predicate(table, &format!("{path}.Or[{index}]"), expr)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Predicate::Any),
+        PolicyExpr::Not(expr) => Ok(Predicate::Not(Box::new(convert_policy_predicate(
+            table,
+            &format!("{path}.Not"),
+            expr,
+        )?))),
+        PolicyExpr::Cmp { column, op, value } => {
+            let left = Operand::Column(column.clone());
+            let right = convert_policy_operand(table, path, value)?;
+            Ok(match op {
+                CmpOp::Eq => Predicate::Eq(left, right),
+                CmpOp::Ne => Predicate::Ne(left, right),
+                CmpOp::Lt => Predicate::Lt(left, right),
+                CmpOp::Le => Predicate::Lte(left, right),
+                CmpOp::Gt => Predicate::Gt(left, right),
+                CmpOp::Ge => Predicate::Gte(left, right),
+            })
+        }
+        PolicyExpr::IsNull { column } => Ok(Predicate::IsNull(Operand::Column(column.clone()))),
+        PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
+            Operand::Column(column.clone()),
+        )))),
+        other => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("direct fixed-schema policies do not support {other:?} yet"),
+        )),
+    }
+}
+
+fn convert_policy_operand(
+    table: &TableName,
+    path: &str,
+    value: &PolicyValue,
+) -> Result<Operand, DirectSchemaConversionError> {
+    match value {
+        PolicyValue::SessionRef(path_segments)
+            if path_segments.as_slice() == [String::from("user_id")] =>
+        {
+            Ok(Operand::Claim("user_id".to_owned()))
+        }
+        PolicyValue::SessionRef(path_segments) => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!(
+                "direct fixed-schema policies only support session.user_id references, got session.{}",
+                path_segments.join(".")
+            ),
+        )),
+        PolicyValue::Literal(value) => Ok(Operand::Literal(convert_policy_literal(
+            table, path, value,
+        )?)),
+    }
+}
+
+fn convert_policy_literal(
+    table: &TableName,
+    path: &str,
+    value: &Value,
+) -> Result<GrooveValue, DirectSchemaConversionError> {
+    match value {
+        Value::Null => Ok(GrooveValue::Nullable(None)),
+        Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
+        Value::Text(value) => Ok(GrooveValue::String(value.clone())),
+        Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
+        other => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            format!("direct fixed-schema policies do not support {other:?} literals yet"),
+        )),
+    }
+}
+
 fn err(path: impl Into<String>, message: impl Into<String>) -> DirectSchemaConversionError {
     DirectSchemaConversionError::new(path, message)
 }
@@ -181,9 +303,14 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> DirectSchemaConve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::ObjectId;
+    use crate::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, TableSchemaBuilder,
+        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, TablePolicies,
+        TableSchemaBuilder,
     };
+    use jazz::query::{Operand, Predicate};
+    use uuid::Uuid;
 
     #[test]
     fn converts_supported_columns_references_and_indexes() {
@@ -224,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_signed_integer_defaults_and_policies() {
+    fn rejects_unsupported_signed_integer_and_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column("count", ColumnType::Integer))
             .build();
@@ -258,17 +385,103 @@ mod tests {
         .into_iter()
         .collect();
         assert!(convert_alpha_schema(&default_schema).is_err());
+    }
 
-        let policy_schema = SchemaBuilder::new()
+    #[test]
+    fn converts_supported_table_policies_to_core_read_and_write_queries() {
+        let owner_id = ObjectId::from_uuid(Uuid::nil());
+        let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
+                    .column("owner_id", ColumnType::Text)
+                    .column("token_id", ColumnType::Uuid)
+                    .column("archived", ColumnType::Boolean)
+                    .nullable_column("deleted_at", ColumnType::Text)
                     .policies(
                         TablePolicies::new()
-                            .with_select(crate::query_manager::policy::PolicyExpr::True),
+                            .with_select(PolicyExpr::And(vec![
+                                PolicyExpr::Cmp {
+                                    column: "owner_id".to_owned(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                },
+                                PolicyExpr::Not(Box::new(PolicyExpr::Cmp {
+                                    column: "archived".to_owned(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(false.into()),
+                                })),
+                                PolicyExpr::Or(vec![
+                                    PolicyExpr::IsNull {
+                                        column: "deleted_at".to_owned(),
+                                    },
+                                    PolicyExpr::IsNotNull {
+                                        column: "deleted_at".to_owned(),
+                                    },
+                                ]),
+                            ]))
+                            .with_insert(PolicyExpr::Cmp {
+                                column: "token_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::Literal(Value::Uuid(owner_id)),
+                            }),
                     ),
             )
             .build();
-        assert!(convert_alpha_schema(&policy_schema).is_err());
+
+        let converted = convert_alpha_schema(&schema).unwrap();
+        let todos = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
+
+        assert_eq!(todos.read_policy.as_ref().unwrap().table, "todos");
+        assert_eq!(
+            todos.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::All(vec![
+                Predicate::Eq(
+                    Operand::Column("owner_id".to_owned()),
+                    Operand::Claim("user_id".to_owned()),
+                ),
+                Predicate::Not(Box::new(Predicate::Eq(
+                    Operand::Column("archived".to_owned()),
+                    Operand::Literal(GrooveValue::Bool(false)),
+                ))),
+                Predicate::Any(vec![
+                    Predicate::IsNull(Operand::Column("deleted_at".to_owned())),
+                    Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
+                        "deleted_at".to_owned(),
+                    )))),
+                ]),
+            ])]
+        );
+        assert_eq!(todos.write_policy.as_ref().unwrap().table, "todos");
+        assert_eq!(
+            todos.write_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("token_id".to_owned()),
+                Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+            )]
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_policy_subset() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Contains {
+                        column: "title".to_owned(),
+                        value: PolicyValue::Literal("x".into()),
+                    })),
+            )
+            .build();
+
+        let error = convert_alpha_schema(&schema).unwrap_err();
+        assert!(error.to_string().starts_with(
+            "$.todos.policies.select.using: direct fixed-schema policies do not support Contains"
+        ));
     }
 }

@@ -2682,6 +2682,47 @@ fn session_upload_uses_connection_identity_for_write_policy() {
 }
 
 #[test]
+fn session_delete_uses_current_row_for_owner_write_policy() {
+    let schema = owner_write_schema();
+    let session_author = AuthorId::from_bytes([0xc1; 16]);
+    let other_author = AuthorId::from_bytes([0xd1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, session_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    let write = client
+        .insert("todos", cells("owned", false, session_author))
+        .unwrap();
+    let row = write.row_uuid();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    block_on(write.wait(DurabilityTier::Global)).unwrap();
+
+    let bad_delete = match client.delete_for_identity(other_author, "todos", row) {
+        Ok(_) => panic!("foreign owner delete should be rejected locally"),
+        Err(error) => error,
+    };
+    assert_eq!(bad_delete.code, ErrorCode::WriteRejected);
+
+    let delete = client
+        .delete_for_identity(session_author, "todos", row)
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(
+        block_on(delete.wait(DurabilityTier::Global)).unwrap(),
+        delete.mergeable_tx_id()
+    );
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+#[test]
 fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let schema = owner_write_schema();
     let backend_author = AuthorId::from_bytes([0xb0; 16]);
@@ -2727,6 +2768,49 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row(0xf2));
+}
+
+#[test]
+fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
+    let schema = owner_write_schema();
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend = open_db(0xb0, backend_author, &schema);
+
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = backend.connect_upstream(backend_transport);
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let insert = backend
+        .insert_with_id_for_identity(
+            attributed_user,
+            "todos",
+            row(0xf3),
+            cells("attributed", false, attributed_user),
+        )
+        .unwrap();
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+    block_on(insert.wait(DurabilityTier::Global)).unwrap();
+
+    let delete = backend
+        .delete_for_identity(attributed_user, "todos", row(0xf3))
+        .unwrap();
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+
+    assert_eq!(
+        block_on(delete.wait(DurabilityTier::Global)).unwrap(),
+        delete.mergeable_tx_id()
+    );
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
 }
 
 #[test]

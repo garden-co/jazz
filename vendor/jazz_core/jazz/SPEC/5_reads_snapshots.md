@@ -54,7 +54,7 @@ a snapshot when its stored `global_seq <= global_base`, or it is owned by
 Opening an exclusive transaction captures `owner = self`,
 `global_base = the contiguous applied global watermark` (not merely the highest
 seen seq), `local_base = the current TxTime`, and empty `dots` (`INV-READ-1`).
-Using the *contiguous* watermark for `global_base` is what makes the snapshot a
+Using the _contiguous_ watermark for `global_base` is what makes the snapshot a
 clean prefix: gapped global seqs are excluded until their gaps fill.
 
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
@@ -80,7 +80,7 @@ Every transactional read is recorded for that validation. A point read records a
 `RowRead` when the row is present in the snapshot-visible view, or an
 `AbsentRead` otherwise; a query records a `PredicateRead` (ch. 3).
 
-*Further invariants.* `INV-READ-4` — reads overlay the transaction's own pending
+_Further invariants._ `INV-READ-4` — reads overlay the transaction's own pending
 writes on the covered base view. `INV-READ-5` — `tx_read` records a `RowRead`
 for a present snapshot-visible row, an `AbsentRead` otherwise. `INV-READ-6` —
 `tx_current_rows`/`tx_query` record a `PredicateRead` carrying the inline shape;

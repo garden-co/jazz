@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -8,7 +8,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, PeerConnection, PreparedQuery, Propagation, ReadOpts,
     RowCells, SeededRowIdSource, SubscriptionEvent, WireTransportAdapter, WriteHandle, block_on,
 };
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor};
+use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -318,6 +318,32 @@ impl WasmDbInner {
         }
     }
 
+    fn insert_with_id_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    db.insert_with_id_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    db.insert_with_id_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
+            }
+        }
+    }
+
     fn update(&self, table: &str, row_id: RowUuid, patch: RowCells) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => {
@@ -326,6 +352,32 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => {
                 wasm_write_browser(db.update(table, row_id, patch).map_err(to_js_error)?)
+            }
+        }
+    }
+
+    fn update_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row_id: RowUuid,
+        patch: RowCells,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    db.update_for_identity(identity, table, row_id, patch)
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    db.update_for_identity(identity, table, row_id, patch)
+                        .map_err(to_js_error)?,
+                )
             }
         }
     }
@@ -342,11 +394,62 @@ impl WasmDbInner {
         }
     }
 
+    fn upsert_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    db.upsert_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    db.upsert_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
+            }
+        }
+    }
+
     fn delete(&self, table: &str, row_id: RowUuid) -> Result<WasmWrite, JsValue> {
         match self {
             Self::Memory(db) => wasm_write_memory(db.delete(table, row_id).map_err(to_js_error)?),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(db.delete(table, row_id).map_err(to_js_error)?),
+        }
+    }
+
+    fn delete_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row_id: RowUuid,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    db.delete_for_identity(identity, table, row_id)
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    db.delete_for_identity(identity, table, row_id)
+                        .map_err(to_js_error)?,
+                )
+            }
         }
     }
 
@@ -358,6 +461,32 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => {
                 wasm_write_browser(db.restore(table, row_id, cells).map_err(to_js_error)?)
+            }
+        }
+    }
+
+    fn restore_for_identity(
+        &self,
+        identity: AuthorId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_memory(
+                    db.restore_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                set_identity_claims(db, identity);
+                wasm_write_browser(
+                    db.restore_for_identity(identity, table, row_id, cells)
+                        .map_err(to_js_error)?,
+                )
             }
         }
     }
@@ -519,6 +648,21 @@ impl WasmDb {
         self.inner.insert_with_id(&table, row_id, cells)
     }
 
+    #[wasm_bindgen(js_name = insertWithIdEncodedForIdentity)]
+    pub fn insert_with_id_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner
+            .insert_with_id_for_identity(author, &table, row_id, cells)
+    }
+
     #[wasm_bindgen(js_name = updateEncoded)]
     pub fn update_encoded(
         &self,
@@ -529,6 +673,21 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
         self.inner.update(&table, row_id, patch)
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedForIdentity)]
+    pub fn update_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner
+            .update_for_identity(author, &table, row_id, patch)
     }
 
     #[wasm_bindgen(js_name = canUpdateEncodedForIdentity)]
@@ -564,10 +723,37 @@ impl WasmDb {
         self.inner.upsert(&table, row_id, cells)
     }
 
+    #[wasm_bindgen(js_name = upsertEncodedForIdentity)]
+    pub fn upsert_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner
+            .upsert_for_identity(author, &table, row_id, cells)
+    }
+
     #[wasm_bindgen(js_name = delete)]
     pub fn delete(&self, table: String, row_id: Vec<u8>) -> Result<WasmWrite, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         self.inner.delete(&table, row_id)
+    }
+
+    #[wasm_bindgen(js_name = deleteForIdentity)]
+    pub fn delete_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner.delete_for_identity(author, &table, row_id)
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -580,6 +766,21 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         self.inner.restore(&table, row_id, cells)
+    }
+
+    #[wasm_bindgen(js_name = restoreEncodedForIdentity)]
+    pub fn restore_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        self.inner
+            .restore_for_identity(author, &table, row_id, cells)
     }
 
     #[wasm_bindgen(js_name = tick)]
@@ -911,6 +1112,21 @@ fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {
         .try_into()
         .map_err(|_| JsValue::from_str("author id must be 16 bytes"))?;
     Ok(AuthorId::from_bytes(bytes))
+}
+
+fn set_identity_claims<S>(db: &Db<S>, author: AuthorId)
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let subject = author.0.to_string();
+    db.set_identity_claims(
+        author,
+        BTreeMap::from([
+            ("subject".to_owned(), Value::String(subject.clone())),
+            ("sub".to_owned(), Value::String(subject.clone())),
+            ("user_id".to_owned(), Value::String(subject)),
+        ]),
+    );
 }
 
 fn wasm_write_memory(write: WriteHandle<MemoryStorage>) -> Result<WasmWrite, JsValue> {

@@ -20,6 +20,6 @@ recursion, and correctness/scope. Appendix A is the implementation map, appendix
 the benchmark methodology, and [`SPEC/INVARIANTS.md`](SPEC/INVARIANTS.md) maps each
 invariant to its enforcing test and impl.
 
-Operational and in-flight material lives *inside* the spec: benchmark commands,
+Operational and in-flight material lives _inside_ the spec: benchmark commands,
 knobs, workflow, and retained results are in
 [appendix B's `In flight` section](SPEC/B_benchmarks.md).

@@ -28,18 +28,18 @@ progress.
 
 **Chapter map**
 
-| # | chapter | one line |
-|---|---|---|
-| 1 | Introduction | this file: what groove is, conventions |
-| 2 | Data & storage model | weighted record sets, records, keys, the `OrderedKvStorage` interface |
-| 3 | Queries & operators | the query graph, filter/join/project/aggregate |
-| 4 | Incremental maintenance | the tick: deltas → arrangements → outputs |
-| 5 | Prepared shapes & bindings-as-data | the work-sharing core |
-| 6 | Recursion & fixpoint | a fixpoint inside every commit |
-| 7 | Correctness, determinism & scope | the oracle property, deliberate limits |
-| A | *guidance:* implementation map | where to read the code |
-| B | *guidance:* benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings |
-| — | *registry:* `INVARIANTS.md` | out-of-band: every `INV-` id → test + impl |
+| #   | chapter                                              | one line                                                              |
+| --- | ---------------------------------------------------- | --------------------------------------------------------------------- |
+| 1   | Introduction                                         | this file: what groove is, conventions                                |
+| 2   | Data & storage model                                 | weighted record sets, records, keys, the `OrderedKvStorage` interface |
+| 3   | Queries & operators                                  | the query graph, filter/join/project/aggregate                        |
+| 4   | Incremental maintenance                              | the tick: deltas → arrangements → outputs                             |
+| 5   | Prepared shapes & bindings-as-data                   | the work-sharing core                                                 |
+| 6   | Recursion & fixpoint                                 | a fixpoint inside every commit                                        |
+| 7   | Correctness, determinism & scope                     | the oracle property, deliberate limits                                |
+| A   | _guidance:_ implementation map                       | where to read the code                                                |
+| B   | _guidance:_ benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings                          |
+| —   | _registry:_ `INVARIANTS.md`                          | out-of-band: every `INV-` id → test + impl                            |
 
 ## 1.2 Conventions
 
@@ -52,15 +52,15 @@ prose is explanatory.
 (`INV-<AREA>-<n>`, for example `INV-TICK-1`) are the anchors that connect the
 normative text, implementation, and tests. Important invariants are stated
 where the relevant behavior is specified, as ordinary prose with the id in
-parentheses. Finer or edge-case invariants are collected in a short *Further
-invariants* block at the end of each subsection.
+parentheses. Finer or edge-case invariants are collected in a short _Further
+invariants_ block at the end of each subsection.
 
 **Every invariant has a status and a coverage.** These are orthogonal axes:
 
 - **Status** — its design standing: `now` (in force in the current
   implementation; the contract — the default), `target` (a committed design,
   not yet in force), `open` (the design itself is unsettled — see the chapter's
-  *Open questions*), or `prov` (true in the implementation but not a hard
+  _Open questions_), or `prov` (true in the implementation but not a hard
   requirement; a conformant engine may differ).
 - **Coverage** — whether an enforcing test exists: `✓` or `untested`.
 
@@ -73,17 +73,17 @@ the out-of-band registry (`SPEC/INVARIANTS.md`).
 Terms are defined where they are introduced. The load-bearing terms used
 throughout the specification are:
 
-- **weighted record set** *(a Z-set, in DBSP terms)* — a multiset of **records**
+- **weighted record set** _(a Z-set, in DBSP terms)_ — a multiset of **records**
   with integer weights (`+n` present, `-n` removed). This is the single data
   type that flows on every edge of a query graph.
 - **delta** — the weighted change to a weighted record set produced by one commit.
-- **arrangement** *(a term of art from incremental view maintenance —
-  the heaviest piece of jargon here)* — the engine's equivalent of a **database
+- **arrangement** _(a term of art from incremental view maintenance —
+  the heaviest piece of jargon here)_ — the engine's equivalent of a **database
   index that keeps itself up to date**. An arrangement is a maintained, indexed
   copy of a weighted record set, shared across the query graph, so a join or
   aggregate reads its inputs from the index and updates from changes instead of
   rescanning from scratch (ch. 4).
-- **prepared shape** — a parameterized query graph whose bindings are *data*
+- **prepared shape** — a parameterized query graph whose bindings are _data_
   flowing through a maintained `BindingSource` weighted record set (ch. 5).
 - **tick** — one synchronous propagation of a delta batch through the graph to
   every affected subscription (ch. 4).

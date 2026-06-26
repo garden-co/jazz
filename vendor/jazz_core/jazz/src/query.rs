@@ -1271,6 +1271,7 @@ fn operand_type(
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
     match name {
         "sub" => Ok(Some(ColumnType::Uuid)),
+        "user_id" => Ok(None),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
         _ => Err(QueryError::UnknownParam(format!("claim:{name}"))),

@@ -6,6 +6,7 @@
 
 - 6284805: The browser broker SharedWorker is now shipped as self-contained, bundled ESM. It was previously unbundled with bare `../runtime/*.js` imports, and because its `new SharedWorker(...)` call is indirected past bundler worker-detection, Turbopack, webpack and Vite copied it verbatim and its imports 404'd on load — crashing every Jazz app under `next dev` / `next build` and `vite build` with "Browser broker SharedWorker failed to start". (`vite dev` masked it.) Fixing it in the package build covers all frameworks.
   </content>
+- Breaking change: `WorkerBridge` and `WorkerBridgeOptions` are no longer exported from the public `jazz-tools` runtime or package-root API surface. Dedicated-worker bridge orchestration remains internal to the runtime.
 - 97751b0: Make `db.one(...)` execute with a root query limit of one instead of fetching every matching row and discarding all but the first.
 - a9c0cf4: Fix `deleteClientStorage()` hanging forever when called on a persistent browser Db before any table or query has been used.
 - 57d2eb6: Add a `merge("g-set")` strategy for non-nullable array columns. Concurrent writes converge to the grow-only union of every replica's elements, deduplicated and sorted into a canonical, byte-identical order, so an element written by one replica is never dropped by a concurrent write that never saw it.

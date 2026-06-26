@@ -3,7 +3,7 @@
 This chapter defines the logical shape of jazz data: the schema model, the
 identities that name durable objects, the layout of rows and row versions, and
 the lowering from application schema to groove storage. It is limited to
-*identity and shape*. Transaction semantics (ch. 3), history and merging
+_identity and shape_. Transaction semantics (ch. 3), history and merging
 (ch. 4), reads (ch. 5), authorization (ch. 7), sync (ch. 8), schema evolution
 (ch. 10), branches (ch. 11), and large-value op-logs (ch. 12) all build on the
 names defined here, but their behavior is specified in those chapters.
@@ -12,7 +12,7 @@ names defined here, but their behavior is specified in those chapters.
 
 Sync behavior is determined by what kind of state a stored column represents.
 Every stored column belongs to exactly one of three classes, and that class
-*mechanically* determines how the value is shipped and who may write it. The
+_mechanically_ determines how the value is shipped and who may write it. The
 sync protocol (ch. 8) derives behavior from these classes rather than
 special-casing individual columns:
 
@@ -28,8 +28,8 @@ The load-bearing consequence is that only replicated-immutable columns are ever
 shipped as row payload (`INV-CLASS-1`). Fate is shipped as fate messages, and
 node-local derived state is never shipped.
 
-These three classes cover stored *columns*. A `text`/`blob` column cell is an
-ordinary replicated-immutable column (§2.3). Its large *content bytes* are not a
+These three classes cover stored _columns_. A `text`/`blob` column cell is an
+ordinary replicated-immutable column (§2.3). Its large _content bytes_ are not a
 fourth column class; they are an out-of-band **auxiliary content payload**,
 carried on a separate content channel and stored in the raw `jazz_content`
 store. Chapter 12 owns that content channel and defines the term "auxiliary
@@ -74,7 +74,7 @@ content bytes. The default merge strategy is column last-writer-wins by HLC
 non-nullable integer column (`U8`/`U16`/`U32`/`U64`) and never on a large-value
 column (`INV-DATA-9`, `INV-DATA-10`).
 
-*Further invariants.* `INV-DATA-11` — a merge-strategy declaration names an
+_Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
 schema. `INV-DATA-13` — `text`/`blob` columns lower to nullable groove `Bytes`
 cells.
@@ -91,7 +91,7 @@ strategy, references, and read/write policy. Changing any of those inputs yields
 a new `SchemaVersionId`. This content-addressing is what lets multiple schema
 versions coexist (ch. 10).
 
-*Further invariants.* `INV-DATA-7`, `INV-DATA-8` — `SchemaVersionId` changes when
+_Further invariants._ `INV-DATA-7`, `INV-DATA-8` — `SchemaVersionId` changes when
 a column's merge strategy changes, and when a column switches among `Bytes` /
 `Text` / `Blob`.
 
@@ -101,15 +101,15 @@ Rows have stable identity across history. A `RowUuid` names the logical row and
 is shared by every historical version of that row. A **row version** is
 identified by the row, the writing transaction, and the layer; versions form a
 DAG through `parents` (ch. 4 specifies domination and merging). A stored version
-belongs to exactly one layer (`INV-DATA-17`): *content* versions live in
-`jazz_{table}_history` and carry the user cells; *deletion-register* versions
+belongs to exactly one layer (`INV-DATA-17`): _content_ versions live in
+`jazz_{table}_history` and carry the user cells; _deletion-register_ versions
 live in `jazz_{table}_register` and carry a non-null `_deletion` and no user
 cells.
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
 `_deletion`, and nullable `user_{col}` cells. Receiver-local currency and
-authority-state columns are excluded (`INV-DATA-16`). Mixed-version *sync* is
+authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
 ## 2.6 Storage lowering
@@ -141,22 +141,22 @@ from those tables on recovery.
 
 **Lowered tables.** `lower_to_groove()` produces:
 
-- *metadata* — `jazz_nodes`, `jazz_schema_versions`, `jazz_catalogue`,
+- _metadata_ — `jazz_nodes`, `jazz_schema_versions`, `jazz_catalogue`,
   `jazz_catalogue_pointer`, `jazz_partitions`, and the branch-scaffolding
   `jazz_branches` / `jazz_branch_partitions` (behavior in ch. 11);
-- *transaction/audit* — `jazz_transactions` keyed `(time, node_id)`,
+- _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
-- *per application table* — `jazz_{table}_history` and `jazz_{table}_register`,
+- _per application table_ — `jazz_{table}_history` and `jazz_{table}_register`,
   each PK `(row_uuid, tx_time, tx_node_id)` with index `by_tx(tx_time,
-  tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
+tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
   `user_{col}`, register adds a non-null `_deletion` (`INV-DATA-14`,
   `INV-DATA-15`). Per-layer `…_global_current` winner tables are keyed by
   `row_uuid`; the content table carries all user columns and indexes only
   references plus explicitly indexed columns (`INV-DATA-18`);
-- *change stream* — the append-only `jazz_global_changes`, keyed
+- _change stream_ — the append-only `jazz_global_changes`, keyed
   `(table_name, row_uuid, layer, global_seq)` with index
   `by_global_seq(global_seq, table_name, row_uuid, layer)` (`INV-DATA-19`);
-- *content* — the raw ordered KV store `jazz_content` (ch. 12).
+- _content_ — the raw ordered KV store `jazz_content` (ch. 12).
 
 ## Open questions
 

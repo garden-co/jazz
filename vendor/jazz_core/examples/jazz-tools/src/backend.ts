@@ -1,19 +1,18 @@
-import {
-  createDb,
-  type Db,
-  type DbOptions,
-  type SchemaDefinition,
-} from "./jazz-tools.js";
+import { createDb, type Db, type DbOptions, type SchemaDefinition } from "./jazz-tools.js";
 
 type AppWithSchema = {
   readonly _schema: SchemaDefinition;
 };
 
-export type JazzBackendDriver = "memory" | "local" | "persistent" | {
-  readonly kind?: "memory" | "local" | "persistent" | string;
-  readonly type?: "memory" | "local" | "persistent" | string;
-  readonly name?: string;
-};
+export type JazzBackendDriver =
+  | "memory"
+  | "local"
+  | "persistent"
+  | {
+      readonly kind?: "memory" | "local" | "persistent" | string;
+      readonly type?: "memory" | "local" | "persistent" | string;
+      readonly name?: string;
+    };
 
 export type JazzContextOptions = Omit<DbOptions, "schema"> & {
   readonly app?: AppWithSchema;
@@ -77,7 +76,7 @@ function assertSupportedDriver(driver: JazzBackendDriver | undefined): void {
   if (driverKind == null || driverKind === "memory" || driverKind === "local") return;
   throw new Error(
     `createJazzContext driver "${driverKind}" is not supported by this current jazz-tools/WasmDb slice. ` +
-      "Use driver: \"memory\" or \"local\"; persistent backend storage is not exposed honestly yet.",
+      'Use driver: "memory" or "local"; persistent backend storage is not exposed honestly yet.',
   );
 }
 

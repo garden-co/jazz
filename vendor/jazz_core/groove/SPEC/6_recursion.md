@@ -1,7 +1,7 @@
 # groove — Specification · 6. Recursion & fixpoint
 
 groove evaluates recursive (transitive-closure-style) queries by running a
-bounded fixpoint *inside* a single tick. This chapter defines the recursive
+bounded fixpoint _inside_ a single tick. This chapter defines the recursive
 operator, its monotone set semantics, and the recompute fallback for
 retractions. It builds directly on the tick and arrangement machinery of
 chapter 4.
@@ -52,14 +52,14 @@ in the accumulated set. That accepted set becomes the frontier bound to
 `recursive.frontier`; the step graph is then evaluated against that frontier,
 newly discovered facts are accepted, and the process repeats until the accepted
 frontier is empty (`INV-REC-6`). In a from-scratch recompute (§6.3), the
-fixpoint runs over the *full* seed output. In positive-incremental maintenance,
+fixpoint runs over the _full_ seed output. In positive-incremental maintenance,
 it runs over the seed's delta for that tick and again accepts only facts not
 already in `accumulated`. Cyclic input converges because each iteration is
 deduplicated against the accumulated set. As a safety bound, evaluation stops
 with `RecursiveIterationLimit { node, max_iters }` when the frontier is still
 non-empty after `max_iters` iterations (`INV-REC-7`).
 
-*Further invariants.* `INV-REC-5` — positive-only recursive evaluation rejects a
+_Further invariants._ `INV-REC-5` — positive-only recursive evaluation rejects a
 non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone
 change is handled by recompute (§6.3), not by propagating negative frontiers
 through the loop.
@@ -90,7 +90,7 @@ already-shared recursive node returns the full current accumulated result and
 does not consume or suppress future tick deltas for existing subscribers
 (`INV-REC-11`).
 
-*Further invariants.* `INV-REC-12` — recursive recompute does not persist
+_Further invariants._ `INV-REC-12` — recursive recompute does not persist
 per-context child operator state in the runtime state maps after it completes.
 
 ## Open questions

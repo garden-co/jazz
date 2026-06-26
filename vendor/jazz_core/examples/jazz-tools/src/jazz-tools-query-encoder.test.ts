@@ -22,18 +22,13 @@ const app = defineApp({
 test("encodes simple forward includes into Rust query bytes", () => {
   const query = app.todos.include("owner");
 
-  assert.deepEqual([...encodeBuiltQueryForTest(query._build(), app._schema)], [
-    5, 116, 111, 100, 111, 115,
-    0,
-    0,
-    0,
-    1, 8, 111, 119, 110, 101, 114, 95, 105, 100, 0, 0,
-    0,
-    0,
-    0,
-    0,
-    0,
-  ]);
+  assert.deepEqual(
+    [...encodeBuiltQueryForTest(query._build(), app._schema)],
+    [
+      5, 116, 111, 100, 111, 115, 0, 0, 0, 1, 8, 111, 119, 110, 101, 114, 95, 105, 100, 0, 0, 0, 0,
+      0, 0, 0,
+    ],
+  );
 });
 
 test("keeps table-root fallback for plain table-shaped builders", () => {
@@ -80,10 +75,13 @@ test("subscribe simple forward include callbacks rows inserted after subscribe",
     db.insert(app.todos, { title: "Second live relation", owner_id: second.id });
 
     rows.sort((left, right) => String(left.title).localeCompare(String(right.title)));
-    assert.deepEqual(rows.map((row) => [row.title, (row.owner as { name?: string } | null)?.name]), [
-      ["First live relation", "Ada"],
-      ["Second live relation", "Grace"],
-    ]);
+    assert.deepEqual(
+      rows.map((row) => [row.title, (row.owner as { name?: string } | null)?.name]),
+      [
+        ["First live relation", "Ada"],
+        ["Second live relation", "Grace"],
+      ],
+    );
   } finally {
     subscription.unsubscribe();
     await (db as { close?: () => Promise<void> }).close?.();

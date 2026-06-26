@@ -2,7 +2,10 @@ import type {
   ColumnDescriptor,
   ColumnType,
   InsertValues,
+  PolicyExpr,
+  PolicyValue,
   SubscriptionWireDelta,
+  TablePolicies,
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
@@ -24,6 +27,7 @@ import {
   readAbiRowBatch,
   readAbiSubscriptionDelta,
   type AbiRowBatch,
+  type AbiRemovedRow,
   type DirectQueryLiteral,
   type DirectQueryPredicate,
   type DescriptorField,
@@ -40,13 +44,40 @@ type WasmDbConstructor = {
 type DirectWasmDb = {
   all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  propagateQuery?(query: DirectPreparedQuery, opts: unknown): void;
+  queryIsCovered?(query: DirectPreparedQuery): boolean;
   prepareQuery(query: Uint8Array): DirectPreparedQuery;
-  subscribe(query: DirectPreparedQuery, opts: unknown): ReadableStream<unknown>;
+  subscribe?(query: DirectPreparedQuery, opts: unknown): ReadableStream<unknown>;
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  insertWithIdEncodedForIdentity(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+  ): DirectWrite;
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  restoreEncodedForIdentity(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+  ): DirectWrite;
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): DirectWrite;
+  updateEncodedForIdentity(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+  ): DirectWrite;
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): DirectWrite;
+  upsertEncodedForIdentity(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+  ): DirectWrite;
   delete(table: string, rowId: Uint8Array): DirectWrite;
+  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): DirectWrite;
   mergeableTx(): DirectTx;
   connectUpstream(): DirectTransport;
   tick(): void;
@@ -58,7 +89,7 @@ type DirectPreparedQuery = object;
 type DirectWrite = {
   payload: Uint8Array;
   wait(tier: string): void;
-  writeState(): unknown;
+  writeState?(): unknown;
 };
 
 type DirectTx = {
@@ -109,6 +140,7 @@ type RowState = {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
 
 function openPersistentDirectDb(
   Runtime: WasmDbConstructor,
@@ -201,14 +233,20 @@ export class DirectWasmRuntime implements Runtime {
   ): DirectInsertResult {
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
     const cells = encodeCellsForRow(this.table(table), values);
+    const writeIdentity = identityFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext);
     if (tx) {
+      assertNoSessionWriteInTx(writeIdentity);
       tx.tx.insertWithIdEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "");
     }
-    const write = this.db.insertWithIdEncoded(table, rowId, cells);
-    return this.finishInsert(table, rowId, write);
+    const write = directWriteOrThrow("Insert", () =>
+      writeIdentity
+        ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity)
+        : this.db.insertWithIdEncoded(table, rowId, cells),
+    );
+    return this.finishInsert(table, rowId, write, writeIdentity);
   }
 
   restore(
@@ -219,13 +257,20 @@ export class DirectWasmRuntime implements Runtime {
   ): DirectInsertResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
+    const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext);
     if (tx) {
+      assertNoSessionWriteInTx(writeIdentity);
       tx.tx.restoreEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "");
     }
-    return this.finishInsert(table, rowId, this.db.restoreEncoded(table, rowId, cells));
+    const write = directWriteOrThrow("Insert", () =>
+      writeIdentity
+        ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity)
+        : this.db.restoreEncoded(table, rowId, cells),
+    );
+    return this.finishInsert(table, rowId, write, writeIdentity);
   }
 
   update(
@@ -236,13 +281,20 @@ export class DirectWasmRuntime implements Runtime {
   ): DirectMutationResult {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
+    const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext);
     if (tx) {
+      assertNoSessionWriteInTx(writeIdentity);
       tx.tx.updateEncoded(table, rowId, patch);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    return this.finishMutation(this.db.updateEncoded(table, rowId, patch));
+    const write = directWriteOrThrow("Update", () =>
+      writeIdentity
+        ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity)
+        : this.db.updateEncoded(table, rowId, patch),
+    );
+    return this.finishMutation(write);
   }
 
   upsert(
@@ -253,25 +305,39 @@ export class DirectWasmRuntime implements Runtime {
   ): DirectMutationResult {
     const rowId = parseUuid(objectId);
     const cells = encodeCellsForRow(this.table(table), values);
+    const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext);
     if (tx) {
+      assertNoSessionWriteInTx(writeIdentity);
       tx.tx.upsertEncoded(table, rowId, cells);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    return this.finishMutation(this.db.upsertEncoded(table, rowId, cells));
+    const write = directWriteOrThrow("Insert", () =>
+      writeIdentity
+        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity)
+        : this.db.upsertEncoded(table, rowId, cells),
+    );
+    return this.finishMutation(write);
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult {
     this.table(table);
     const rowId = parseUuid(objectId);
+    const writeIdentity = identityFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext);
     if (tx) {
+      assertNoSessionWriteInTx(writeIdentity);
       tx.tx.delete(table, rowId);
       tx.writes.push({ table, rowId });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
-    return this.finishMutation(this.db.delete(table, rowId));
+    const write = directWriteOrThrow("Delete", () =>
+      writeIdentity
+        ? this.db.deleteForIdentity(table, rowId, writeIdentity)
+        : this.db.delete(table, rowId),
+    );
+    return this.finishMutation(write);
   }
 
   onMutationError(_callback: (event: MutationErrorEvent) => void): void {
@@ -303,13 +369,13 @@ export class DirectWasmRuntime implements Runtime {
     if (!write) return;
     for (;;) {
       try {
+        this.pumpServerTransport();
         write.wait(tier);
         return;
       } catch (error) {
         const rejected = rejectedWaitError(transactionId, error);
         if (rejected) throw rejected;
         if (!isNotObservedWaitError(error)) throw error;
-        this.db.tick();
         this.pumpSubscriptions();
         await sleep(10);
       }
@@ -334,6 +400,7 @@ export class DirectWasmRuntime implements Runtime {
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
     const opts = readOptions(tier, queryIncludesDeleted(queryJson));
+    await this.propagateQueryIfNeeded(tier, optionsJson, query);
     const rows = session
       ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
       : this.db.all(query, opts);
@@ -348,6 +415,9 @@ export class DirectWasmRuntime implements Runtime {
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
     void readSession(sessionJson);
+    if (!this.db.subscribe) {
+      throw new Error("Direct WasmDb runtime does not support subscriptions");
+    }
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
     const reader = this.db.subscribe(query, readOptions(tier)).getReader();
@@ -436,11 +506,16 @@ export class DirectWasmRuntime implements Runtime {
     return this.schemaHash;
   }
 
-  private finishInsert(table: string, rowId: Uint8Array, write: DirectWrite): DirectInsertResult {
+  private finishInsert(
+    table: string,
+    rowId: Uint8Array,
+    write: DirectWrite,
+    identity?: Uint8Array,
+  ): DirectInsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
     this.notifySyncNeeded();
-    return this.resultForRow(table, rowId, transactionId);
+    return this.resultForRow(table, rowId, transactionId, identity);
   }
 
   private finishMutation(write: DirectWrite): DirectMutationResult {
@@ -454,14 +529,18 @@ export class DirectWasmRuntime implements Runtime {
     table: string,
     rowId: Uint8Array,
     transactionId: string,
+    identity?: Uint8Array,
   ): DirectInsertResult {
-    const row = this.readRow(table, rowId);
+    const row = this.readRow(table, rowId, identity);
     return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
   }
 
-  private readRow(table: string, rowId: Uint8Array): RowState | undefined {
+  private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     const query = this.prepareQuery(JSON.stringify({ table }));
-    return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema).find(
+    const rows = identity
+      ? this.db.allForIdentity(query, identity, readOptions())
+      : this.db.all(query, readOptions());
+    return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
   }
@@ -477,7 +556,29 @@ export class DirectWasmRuntime implements Runtime {
     return query;
   }
 
-  private table(table: string): { columns: ColumnDescriptor[] } {
+  private async propagateQueryIfNeeded(
+    tier: string | null | undefined,
+    optionsJson: string | null | undefined,
+    query: DirectPreparedQuery,
+  ): Promise<void> {
+    if (tier == null || tier === "local") return;
+    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
+    if (options.propagation != null && options.propagation !== "full") return;
+    if (!this.db.propagateQuery) return;
+    this.db.propagateQuery(query, readOptions(tier));
+    await this.waitForQueryCoverage(query);
+  }
+
+  private async waitForQueryCoverage(query: DirectPreparedQuery): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      this.pumpServerTransport();
+      if (this.db.queryIsCovered?.(query)) return;
+      await sleep(10);
+    }
+    this.scheduleServerPump();
+  }
+
+  private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
     const definition = this.schema[table];
     if (!definition) throw new Error(`unknown table ${table}`);
     return definition;
@@ -522,13 +623,8 @@ export class DirectWasmRuntime implements Runtime {
           );
           subscription.callback?.(nativeDeltaFromRows(subscription.rows));
         } else {
-          subscription.rows = filterRows(
-            rowsFromBatches(chunk.delta.added, this.schema).concat(
-              rowsFromBatches(chunk.delta.updated, this.schema),
-            ),
-            subscription.filters,
-            this.schema,
-          );
+          subscription.rows = applySubscriptionDelta(subscription.rows, chunk.delta, this.schema);
+          subscription.rows = filterRows(subscription.rows, subscription.filters, this.schema);
           subscription.callback?.(nativeDeltaFromRows(subscription.rows));
         }
       }
@@ -615,6 +711,36 @@ function txIdFromContext(writeContext?: string | null): string | undefined {
   }
 }
 
+function identityFromWriteContext(writeContext?: string | null): Uint8Array | undefined {
+  if (!writeContext) return undefined;
+  try {
+    const parsed = JSON.parse(writeContext) as {
+      user_id?: unknown;
+      attribution?: unknown;
+      session?: { user_id?: unknown };
+    };
+    const userId =
+      typeof parsed.user_id === "string"
+        ? parsed.user_id
+        : typeof parsed.session?.user_id === "string"
+          ? parsed.session.user_id
+          : parsed.attribution === SYSTEM_AUTHOR_ID
+            ? SYSTEM_AUTHOR_ID
+            : undefined;
+    return userId ? parseUuid(userId) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function assertNoSessionWriteInTx(writeIdentity: Uint8Array | undefined): void {
+  if (!writeIdentity) return;
+  throw new Error(
+    "Direct WasmDb runtime cannot perform session-scoped transaction writes: " +
+      "the direct core mergeable transaction API has no identity-aware staging methods.",
+  );
+}
+
 function readOptions(tier?: string | null, includeDeleted = false): unknown {
   return includeDeleted
     ? { tier: tier ?? "local", include_deleted: true }
@@ -675,6 +801,19 @@ function rejectedWaitError(
     code: rejectionCode(message),
     reason: rejectionReason(message),
   };
+}
+
+function directWriteOrThrow<T>(operation: "Insert" | "Update" | "Delete", write: () => T): T {
+  try {
+    return write();
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message.includes("WriteRejected")) {
+      const reason = rejectionReason(message);
+      throw new Error(`${operation} failed: WriteError("${reason}")`);
+    }
+    throw error;
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -948,8 +1087,8 @@ export function encodeDirectSchema(schema: WasmSchema): Uint8Array {
         table.string(column.references);
       }
     }
-    table.none();
-    table.none();
+    writePolicy(table, tableName, definition.policies?.select?.using);
+    writePolicy(table, tableName, writePolicyExpr(definition.policies));
     table.set(0);
     table.map(0);
   }, tables.length);
@@ -958,15 +1097,164 @@ export function encodeDirectSchema(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
+function writePolicy(writer: PostcardWriter, table: string, expr: PolicyExpr | undefined): void {
+  if (!expr) {
+    writer.none();
+    return;
+  }
+
+  writer.some((query) => {
+    writePolicyQuery(query, table, expr);
+  });
+}
+
+function writePolicyQuery(writer: PostcardWriter, table: string, expr: PolicyExpr): void {
+  writer.string(table);
+  writer.vec((filter) => writePolicyPredicate(filter, expr), 1);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  writer.none();
+  writer.vec(() => undefined, 0);
+  writer.none();
+  writer.none();
+  writer.u64(0);
+}
+
+function writePolicyPredicate(writer: PostcardWriter, expr: PolicyExpr): void {
+  switch (expr.type) {
+    case "True":
+      writer.u64(0); // Predicate::All
+      writer.vec(() => undefined, 0);
+      return;
+    case "False":
+      writer.u64(1); // Predicate::Any
+      writer.vec(() => undefined, 0);
+      return;
+    case "And":
+      writer.u64(0); // Predicate::All
+      writer.vec(
+        (child, index) => writePolicyPredicate(child, expr.exprs[index]!),
+        expr.exprs.length,
+      );
+      return;
+    case "Or":
+      writer.u64(1); // Predicate::Any
+      writer.vec(
+        (child, index) => writePolicyPredicate(child, expr.exprs[index]!),
+        expr.exprs.length,
+      );
+      return;
+    case "Not":
+      writer.u64(2); // Predicate::Not
+      writePolicyPredicate(writer, expr.expr);
+      return;
+    case "Cmp":
+      writer.u64(policyPredicateOpTag(expr.op));
+      writer.u64(0); // Operand::Column
+      writer.string(expr.column);
+      writePolicyOperand(writer, expr.value);
+      return;
+    case "IsNull":
+      writer.u64(11); // Predicate::IsNull
+      writer.u64(0); // Operand::Column
+      writer.string(expr.column);
+      return;
+    case "IsNotNull":
+      writer.u64(2); // Predicate::Not
+      writer.u64(11); // Predicate::IsNull
+      writer.u64(0); // Operand::Column
+      writer.string(expr.column);
+      return;
+    default:
+      throw new Error(`Direct schema policies do not support ${expr.type} yet.`);
+  }
+}
+
+function writePolicyOperand(writer: PostcardWriter, value: PolicyValue): void {
+  if (value.type === "SessionRef") {
+    if (value.path.length !== 1 || value.path[0] !== "user_id") {
+      throw new Error(
+        `Direct schema policies only support session.user_id references, got ${value.path.join(".")}.`,
+      );
+    }
+    writer.u64(2); // Operand::Claim
+    writer.string("user_id");
+    return;
+  }
+
+  writer.u64(3); // Operand::Literal
+  writePolicyLiteral(writer, value.value);
+}
+
+function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
+  switch (value.type) {
+    case "Null":
+      writer.u64(12); // groove::records::Value::Nullable
+      writer.none();
+      return;
+    case "Boolean":
+      writer.u64(5); // groove::records::Value::Bool
+      writer.bool(value.value);
+      return;
+    case "Text":
+      writer.u64(6); // groove::records::Value::String
+      writer.string(value.value);
+      return;
+    case "Uuid":
+      writer.u64(8); // groove::records::Value::Uuid
+      writer.bytes(uuidBytes(value.value));
+      return;
+    default:
+      throw new Error(`Direct schema policies do not support ${value.type} literals yet.`);
+  }
+}
+
+function policyPredicateOpTag(op: "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge"): number {
+  switch (op) {
+    case "Eq":
+      return 3;
+    case "Ne":
+      return 4;
+    case "Gt":
+      return 6;
+    case "Ge":
+      return 7;
+    case "Lt":
+      return 8;
+    case "Le":
+      return 9;
+  }
+}
+
+function writePolicyExpr(policies: TablePolicies | undefined): PolicyExpr | undefined {
+  return (
+    policies?.insert?.with_check ??
+    policies?.update?.with_check ??
+    policies?.update?.using ??
+    policies?.delete?.using
+  );
+}
+
+function uuidBytes(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
+  const bytes = new Uint8Array(16);
+  for (let index = 0; index < 16; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
 function encodeCellsForRow(
-  definition: { columns: ColumnDescriptor[] },
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
 ): Uint8Array {
   return encodeCells(definition.columns, (column) => row[column.name], true);
 }
 
 function encodeCellsForPatch(
-  definition: { columns: ColumnDescriptor[] },
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   patch: Record<string, Value>,
 ): Uint8Array {
   const columns = definition.columns.filter((column) => Object.hasOwn(patch, column.name));
@@ -1000,7 +1288,7 @@ function encodeValue(
 ): Uint8Array {
   const resolved = value ?? column.default;
   if (!resolved || resolved.type === "Null") {
-    if (column.nullable) return encodeNullValue(column.column_type);
+    if (column.nullable) return encodeNullValue(columnValueType(column));
     if (column.column_type.type === "Array") {
       return encodeNonNullValue(column.column_type, { type: "Array", value: [] });
     }
@@ -1063,8 +1351,7 @@ function u32Le(value: number): Uint8Array {
   return bytes;
 }
 
-function encodeNullValue(type: ColumnType): Uint8Array {
-  const valueType = columnTypeToValueType(type);
+function encodeNullValue(valueType: ValueType): Uint8Array {
   const width = fixedValueSize(valueType);
   return width == null ? Uint8Array.of(0) : new Uint8Array(width + 1);
 }
@@ -1138,6 +1425,27 @@ function rowsFromBatches(batches: AbiRowBatch[], schema: WasmSchema): RowState[]
         ),
     })),
   );
+}
+
+function applySubscriptionDelta(
+  currentRows: RowState[],
+  delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] },
+  schema: WasmSchema,
+): RowState[] {
+  const rowsByKey = new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
+  for (const removed of delta.removed) {
+    rowsByKey.delete(rowKey(removed.table, formatUuid(removed.rowId)));
+  }
+  for (const row of rowsFromBatches(delta.added, schema).concat(
+    rowsFromBatches(delta.updated, schema),
+  )) {
+    rowsByKey.set(rowKey(row.table, row.id), row);
+  }
+  return Array.from(rowsByKey.values());
+}
+
+function rowKey(table: string, id: string): string {
+  return `${table}\0${id}`;
 }
 
 function decodeField(
@@ -1222,11 +1530,12 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
   return values;
 }
 
-function normalizeSubscriptionChunk(
-  chunk: unknown,
-):
+function normalizeSubscriptionChunk(chunk: unknown):
   | { type: "snapshot"; rows: AbiRowBatch[] }
-  | { type: "delta"; delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: unknown[] } } {
+  | {
+      type: "delta";
+      delta: { added: AbiRowBatch[]; updated: AbiRowBatch[]; removed: AbiRemovedRow[] };
+    } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
   const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown };
   if (record.type === "snapshot" || record.type === "Snapshot") {

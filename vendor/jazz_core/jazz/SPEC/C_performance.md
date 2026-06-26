@@ -1,10 +1,10 @@
 # jazz — Specification · Appendix C. Performance
 
-*Non-normative (guidance).* This appendix defines the discipline for making
+_Non-normative (guidance)._ This appendix defines the discipline for making
 performance claims, the properties that keep steady-state work bounded, and the
 optimization levers that matter most. `INV-PERF-*` are measurement-discipline
-anchors. Detailed scenario specs live in appendix B; this appendix is about *how
-to reason about the numbers* and what to optimize.
+anchors. Detailed scenario specs live in appendix B; this appendix is about _how
+to reason about the numbers_ and what to optimize.
 
 ## C.1 Discipline
 
@@ -53,7 +53,7 @@ global-current tables (receipt: `benches/cold_subscription.rs`).
 The main performance levers are the places where repeated work still scales with
 the table, the shape, or a per-call derivation instead of the actual change.
 
-- **S4 post-accept propagation.** Report it as *two* measurements: settlement
+- **S4 post-accept propagation.** Report it as _two_ measurements: settlement
   throughput and propagation-inclusive throughput. Per-commit fan-out is
   intended to be O(delta), not O(table). The relay whole-table full recompute case has
   been fixed (degenerate system whole-table views stay incremental);
@@ -75,7 +75,7 @@ mistaken for a slow settlement path. The S4 "throughput regression" was a
 measurement conflation: retained baselines included per-commit peer refresh (~23
 tx/s) while refresh-suppressed engine throughput was much higher; the real issue
 is propagation fan-out, not settlement. Gates (`[needs: column-delta]`, `[needs:
-text-merge]`, `[needs: payload-inventory]`) stay *visibly* gated, never silently
+text-merge]`, `[needs: payload-inventory]`) stay _visibly_ gated, never silently
 counted as measured.
 
 ## Open questions
@@ -96,10 +96,9 @@ counted as measured.
 
 ## In flight & measured receipts (non-normative)
 
-*C.1–C.5 above are the durable performance discipline. The following is the live
+_C.1–C.5 above are the durable performance discipline. The following is the live
 performance backlog with measured receipts, profile shares, and accepted
-residuals, from the former `PERF.md`.*
-
+residuals, from the former `PERF.md`._
 
 Measured optimization opportunities, each with evidence and expected scope.
 Convention: nothing lands here without a profile or bench line behind it;
@@ -120,6 +119,7 @@ ORDERS/ORDER_LINES size). Refresh-suppressed engine throughput:
 faster, the wall number measures propagation.
 
 Two work items:
+
 1. **Bench split (honesty)**: S4 reports settlement throughput and
    propagation-inclusive throughput as separate lines; the conflated
    number retires.

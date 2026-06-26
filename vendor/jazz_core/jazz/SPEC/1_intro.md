@@ -28,34 +28,34 @@ first. Non-normative material follows in clearly marked trailing sections:
 specifics, measured findings, or slice plans. A chapter carries an `## In
 flight` section only while it has such material; several chapters have none.
 Guidance appendices are entirely non-normative. This is the single placement
-rule for the system: as work settles, it moves *upward* — in-flight detail into
+rule for the system: as work settles, it moves _upward_ — in-flight detail into
 the normative body, and open questions into resolved prose. A chapter is "done"
 when it has no `## In flight` section left. Nothing about the system lives
 outside the spec.
 
 **Chapter map**
 
-| # | chapter | one line |
-|---|---|---|
-| 1 | Introduction | this file: what jazz is, principles, conventions |
-| 2 | Data model & identity | tables, columns, schema, rows, the id types |
-| 3 | Transactions & durability | mergeable/exclusive, fates, durability tiers, commit units |
-| 4 | History, domination & merging | argmax history, column-LWW, current state |
-| 5 | Reads & snapshots | current, point-in-time, visibility |
-| 6 | Queries | shapes, bindings, content-addressing, matched include paths, query-driven sync |
-| 7 | Authorization (RLS) | policies as shapes; read/write; claim-binding |
-| 8 | Sync protocol | the peer layer: view updates, commit units, fates, subscriptions |
-| 9 | Topology & the edge tier | client/relay/edge/core trust ladder; edge authority & cache |
-| 10 | Schema evolution: lenses & migrations | multi-schema coexistence |
-| 11 | Time-travel & branches | settled-history reads; snapshot-base branches |
-| 12 | Large values | `text`/`blob` columns and the op-log |
-| 13 | The high-level `Db` API | the runtime-typed surface, subscriptions, sync/serve, identity/auth |
-| 14 | Lowering to groove | how every jazz concept maps onto groove |
-| 15 | Sharding | exploratory; mostly open questions |
-| 16 | Maintained subscription views | target serving architecture for query-driven sync |
-| 17 | Integrability roadmap | TS/WASM/NAPI, server shell, protocol, storage, topology |
-| A–E | *guidance:* implementation discipline · benchmarks · performance · testing · glossary |
-| — | *registry:* `INVARIANTS.md` | out-of-band: every `INV-` id → test + impl |
+| #   | chapter                                                                               | one line                                                                       |
+| --- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1   | Introduction                                                                          | this file: what jazz is, principles, conventions                               |
+| 2   | Data model & identity                                                                 | tables, columns, schema, rows, the id types                                    |
+| 3   | Transactions & durability                                                             | mergeable/exclusive, fates, durability tiers, commit units                     |
+| 4   | History, domination & merging                                                         | argmax history, column-LWW, current state                                      |
+| 5   | Reads & snapshots                                                                     | current, point-in-time, visibility                                             |
+| 6   | Queries                                                                               | shapes, bindings, content-addressing, matched include paths, query-driven sync |
+| 7   | Authorization (RLS)                                                                   | policies as shapes; read/write; claim-binding                                  |
+| 8   | Sync protocol                                                                         | the peer layer: view updates, commit units, fates, subscriptions               |
+| 9   | Topology & the edge tier                                                              | client/relay/edge/core trust ladder; edge authority & cache                    |
+| 10  | Schema evolution: lenses & migrations                                                 | multi-schema coexistence                                                       |
+| 11  | Time-travel & branches                                                                | settled-history reads; snapshot-base branches                                  |
+| 12  | Large values                                                                          | `text`/`blob` columns and the op-log                                           |
+| 13  | The high-level `Db` API                                                               | the runtime-typed surface, subscriptions, sync/serve, identity/auth            |
+| 14  | Lowering to groove                                                                    | how every jazz concept maps onto groove                                        |
+| 15  | Sharding                                                                              | exploratory; mostly open questions                                             |
+| 16  | Maintained subscription views                                                         | target serving architecture for query-driven sync                              |
+| 17  | Integrability roadmap                                                                 | TS/WASM/NAPI, server shell, protocol, storage, topology                        |
+| A–E | _guidance:_ implementation discipline · benchmarks · performance · testing · glossary |
+| —   | _registry:_ `INVARIANTS.md`                                                           | out-of-band: every `INV-` id → test + impl                                     |
 
 **If you are not reading front to back:** to build an app on jazz, read ch. 1
 and then **ch. 13 (the `Db` API)**. The API chapter appears late in the
@@ -76,15 +76,15 @@ mechanism is specified. They are normative intent, not mechanism.
    Schemas become groove schemas, mutations become groove batches, queries and
    sync views become groove subscriptions, and RLS policies become groove
    prepared shapes (ch. 14). The one deliberate exception is large-value content
-   *bytes*, which live in a raw content store below the table/IVM layer (ch. 12,
-   ch. 14); their op *metadata* still lowers normally.
+   _bytes_, which live in a raw content store below the table/IVM layer (ch. 12,
+   ch. 14); their op _metadata_ still lowers normally.
 2. **One sync protocol; tiers are roles, not code.** Distribution is expressed
    through roles in a single protocol. Every hop (UI ↔ worker, worker ↔ edge,
    edge ↔ core) speaks that protocol; tiers differ only in role flags (fate
    authority, durability guarantee, eviction). Inserting a tier is a deployment
    change, not a protocol change (ch. 8–9).
 3. **Transactions are atomic upstream units.** A transaction is assembled locally
-   in an `open` state and syncs upstream *only at commit*, as one idempotent
+   in an `open` state and syncs upstream _only at commit_, as one idempotent
    `CommitUnit`; the core holds no open-transaction state (ch. 3). Downstream
    subscription delivery is view-atomic, not transport-atomic: a `ViewUpdate` may
    carry only the subset of an exclusive transaction needed by the maintained
@@ -95,9 +95,9 @@ mechanism is specified. They are normative intent, not mechanism.
    subsets. No protocol step may assume a downstream node has complete history
    (ch. 4).
 5. **Every column has a declared class.** Sync and ingest behavior derive
-   mechanically from the column's class: *replicated-immutable* (the only thing
-   shipped), *upstream-decided mutable state* (fate/global_seq, written by the
-   authority), or *node-local derived state* (currency, global-current; never
+   mechanically from the column's class: _replicated-immutable_ (the only thing
+   shipped), _upstream-decided mutable state_ (fate/global*seq, written by the
+   authority), or \_node-local derived state* (currency, global-current; never
    shipped) (ch. 2–3).
 
 ## 1.3 Conventions
@@ -116,7 +116,7 @@ it spells things.
 a stable id `INV-<AREA>-<n>` (e.g. `INV-TX-1`). Load-bearing invariants are
 stated in the section where the topic is discussed, as ordinary prose with the
 id in parentheses. Finer or edge-case invariants are collected in a short
-*Further invariants* block at the end of the subsection they belong to, close to
+_Further invariants_ block at the end of the subsection they belong to, close to
 their context but easy to skip.
 
 **Every invariant has a status and a coverage.** These are two orthogonal axes:
@@ -124,7 +124,7 @@ their context but easy to skip.
 - **Status** — the invariant's standing in the design and implementation:
   `now` (in force in the implementation and the default contract state),
   `target` (a committed design point, not yet in force), `open` (the design
-  itself is unsettled — see the chapter's *Open questions*), or `prov` (true in
+  itself is unsettled — see the chapter's _Open questions_), or `prov` (true in
   the implementation but not a hard requirement; a conformant implementation may
   differ).
 - **Coverage** — whether an enforcing test exists: `✓` or `untested`.
@@ -138,9 +138,9 @@ The id is the anchor; the full mapping of every id to its status, coverage,
 enforcing test, and implementation lives in one out-of-band registry
 (`SPEC/INVARIANTS.md`), never in the chapters. A registry row reads, e.g.:
 
-| id | invariant | enforced by (test) | impl | status | coverage |
-|---|---|---|---|---|---|
-| `INV-EDGE-8` | edge mergeable fates are final; core never re-judges | `jazz::tests::four_tier::edge_accepted_mergeable_is_final_at_core_after_policy_revocation` | `node/ingest.rs::NodeState::finalize_edge_accepted_mergeable_commit_unit_once`; `peer.rs::ingest_edge_mergeable_commit_unit` | now | ✓ |
+| id           | invariant                                            | enforced by (test)                                                                         | impl                                                                                                                         | status | coverage |
+| ------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ------ | -------- |
+| `INV-EDGE-8` | edge mergeable fates are final; core never re-judges | `jazz::tests::four_tier::edge_accepted_mergeable_is_final_at_core_after_policy_revocation` | `node/ingest.rs::NodeState::finalize_edge_accepted_mergeable_commit_unit_once`; `peer.rs::ingest_edge_mergeable_commit_unit` | now    | ✓        |
 
 The rule is simple: every id used in a chapter has a registry row; every `now`
 invariant trends toward coverage `✓`; and an untested `now` is visible debt.
@@ -155,7 +155,7 @@ Jazz's local-row rule.
 **Open questions are localized.** Each chapter ends with an `## Open questions`
 section holding only that chapter's unresolved decisions, each tagged `🔶`.
 There is no central TODO; an open edge lives beside the thing it qualifies. A
-`🔶` bullet flags an open *work item*, which may be an undecided design, an
+`🔶` bullet flags an open _work item_, which may be an undecided design, an
 unbuilt `target`, or simply a missing test for a `now` invariant. That work-item
 marker is distinct from the design-status axis above: an invariant id appearing
 under `🔶` with no status tag is still `now` (the open work is its coverage or

@@ -61,16 +61,16 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message | direction | payload |
-|---|---|---|
-| `CommitUnit` | up | `{ tx: Transaction, versions: Vec<VersionRecord> }` |
-| `FateUpdate` | down | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }` |
-| `RegisterShape` | up | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }` |
-| `BindingDelta` | up | `{ shape_id, adds: Vec<(BindingId, Vec<Value>)>, removes: Vec<BindingId> }` |
-| `ViewUpdate` | down | `{ subscription: SubscriptionKey, reset_result_set: bool, version_bundles: Vec<VersionBundle>, peer_payload_inventory: PeerPayloadInventory, result_row_adds/removes: Vec<ResultRowEntry> }` |
-| `Rehydrate` | up (request) | `{ subscription: SubscriptionKey }` |
-| `FetchContentExtent` / `ContentExtents` | bulk lane | `{ row, extent }` / `{ extents: Vec<ContentExtent> }` |
-| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10 |
+| message                                                                    | direction      | payload                                                                                                                                                                                      |
+| -------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CommitUnit`                                                               | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                                                                          |
+| `FateUpdate`                                                               | down           | `{ tx_id, fate, global_seq: Option<GlobalSeq>, durability: Option<DurabilityTier> }`                                                                                                         |
+| `RegisterShape`                                                            | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                                                                                    |
+| `BindingDelta`                                                             | up             | `{ shape_id, adds: Vec<(BindingId, Vec<Value>)>, removes: Vec<BindingId> }`                                                                                                                  |
+| `ViewUpdate`                                                               | down           | `{ subscription: SubscriptionKey, reset_result_set: bool, version_bundles: Vec<VersionBundle>, peer_payload_inventory: PeerPayloadInventory, result_row_adds/removes: Vec<ResultRowEntry> }` |
+| `Rehydrate`                                                                | up (request)   | `{ subscription: SubscriptionKey }`                                                                                                                                                          |
+| `FetchContentExtent` / `ContentExtents`                                    | bulk lane      | `{ row, extent }` / `{ extents: Vec<ContentExtent> }`                                                                                                                                        |
+| `PublishSchema` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                                                                                       |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
 fate, global_seq, durability }`: a settled **view payload bundle** with the fate
@@ -100,7 +100,7 @@ Downstream fate messages tell peers how an already-submitted transaction has
 settled. A verdict travels as
 `SyncMessage::FateUpdate { tx_id, fate, global_seq, durability }`.
 
-The `durability` field is an optional *claim*. A receiver raises observed
+The `durability` field is an optional _claim_. A receiver raises observed
 durability monotonically only when the message carries `Some(_)`; `None` leaves
 the observed durability unchanged. A receiver also never moves `global_seq`
 backward (`INV-SYNC-5`). When an authority accepts a commit, it assigns a
@@ -140,7 +140,7 @@ payloads received in bundles, transaction existence/metadata (`Transaction` by
 exclusive completeness. The last one is a visibility rule for a particular view,
 not a reusable tx-level reference.
 
-*Further invariants.* `INV-SYNC-17` — a result add carries enough
+_Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
 rehydrate for the same `(shape_id, binding_id)` (ch. 6).
@@ -193,7 +193,7 @@ before it can decide a write's fate. It therefore must defer fate assignment
 until the relevant **permission-scope subscription** has settled; until then it
 stores the unit as pending relay history and defers (`INV-SYNC-18`).
 
-A permission-scope subscription is an *upstream* subscription opened by the edge
+A permission-scope subscription is an _upstream_ subscription opened by the edge
 against core for the policy data required by its acceptance gate. It is keyed by
 `(policy_shape, writer_claim)` (ch. 9 §9.5): the write policy's query shape bound
 to the writer's `claim("sub")`. This hydrates only the policy rows that writer's
@@ -204,7 +204,7 @@ Many writers' policies read overlapping data, so permission scopes are
 scopes resolve to a single upstream subscription whose settled result fans out to
 every acceptance gate that needs it. The edge reference-counts gate dependents so
 the upstream subscription is dropped only when the last dependent goes away
-(`INV-SYNC-22`). A broader *covering* scope can satisfy a narrower one when the
+(`INV-SYNC-22`). A broader _covering_ scope can satisfy a narrower one when the
 covering relation says it does. This is the same per-peer payload dedup machinery
 (§8.4) applied to the edge's own upstream reads. The full edge-tier semantics —
 staleness horizon, rehydration, eviction — are chapter 9.
@@ -218,7 +218,7 @@ the peer is refused (`INV-SYNC-19`, ch. 12). Catalogue messages
 (`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
 this protocol lane; their semantics are chapter 10.
 
-*Further invariants.* `INV-SYNC-21` — wire `TxId` and row-version payloads use
+_Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
 
 ## Open questions

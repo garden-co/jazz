@@ -1578,9 +1578,12 @@ where
                 if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
                     return Ok(false);
                 }
-                context.identity
+                match context.trust {
+                    CommitUnitTrust::Session => context.identity,
+                    CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                }
             }
-            None => tx.made_by,
+            None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
             if !self.version_satisfies_write_policy(version, permission_subject) {
@@ -1595,8 +1598,10 @@ where
         version: &VersionRecord,
         author: AuthorId,
     ) -> bool {
-        self.write_policy_allows_version_record(version, author)
-            .unwrap_or(false)
+        match self.write_policy_allows_version_record(version, author) {
+            Ok(allowed) => allowed,
+            Err(_) => false,
+        }
     }
 
     pub(super) fn cascade_root_for_versions(&mut self, versions: &[VersionRecord]) -> Option<TxId> {

@@ -1,6 +1,6 @@
 # groove — Specification · Appendix B. Benchmarks
 
-*Non-normative (guidance).* How groove is measured, and how to read the numbers.
+_Non-normative (guidance)._ How groove is measured, and how to read the numbers.
 Retained timings are developer-laptop, directional data — never read a p50 here
 as a promise.
 
@@ -90,10 +90,10 @@ keeps laptop cost down while preserving a comparison target.
 
 ## In flight & operational detail (non-normative)
 
-*B.1–B.6 above are the durable methodology. The following is the operational
+_B.1–B.6 above are the durable methodology. The following is the operational
 detail — commands, knobs, the headline/ACL driver workflow, and retained
 results — from the former groove README benchmarks section. Where it conflicts
-with B.1–B.6, B.1–B.6 win.*
+with B.1–B.6, B.1–B.6 win._
 
 The scenario harness is custom because the interesting workloads are stateful:
 each commit changes the database and the next commit builds on it.
@@ -197,11 +197,11 @@ prepare/bind headline social-feed engine. Files that include both
 counter-equality cross-check. Developer-laptop social-feed medians:
 
 | subscriptions | groove_prepared_sql p50 / p95 | sqlite_indexed p50 / p95 | delivered rows | groove graph nodes / arrangements |
-| ---: | ---: | ---: | ---: | ---: |
-| 10 | 28us / 45us | 90us / 506us | 749 | 9 / 4 |
-| 100 | 78us / 256us | 793us / 4.8ms | 6,035 | 9 / 4 |
-| 1,000 | 516us / 2.1ms | 13.5ms / 49.8ms | 52,144 | 9 / 4 |
-| 10,000 | 5.8ms / 25.4ms | 312ms / 735ms | 509,258 | 9 / 4 |
+| ------------: | ----------------------------: | -----------------------: | -------------: | --------------------------------: |
+|            10 |                   28us / 45us |             90us / 506us |            749 |                             9 / 4 |
+|           100 |                  78us / 256us |            793us / 4.8ms |          6,035 |                             9 / 4 |
+|         1,000 |                 516us / 2.1ms |          13.5ms / 49.8ms |         52,144 |                             9 / 4 |
+|        10,000 |                5.8ms / 25.4ms |            312ms / 735ms |        509,258 |                             9 / 4 |
 
 The retained ACL prepared-shape baseline keeps one prepared recursive graph for
 all subscribed principals:
