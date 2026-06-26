@@ -70,10 +70,6 @@
       "types": "./dist/dev/next.d.ts",
       "default": "./dist/dev/next.js"
     },
-    "./dev/next-inspector-script": {
-      "types": "./dist/dev/next-inspector-script.d.ts",
-      "default": "./dist/dev/next-inspector-script.js"
-    },
     "./dev/vite": {
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"

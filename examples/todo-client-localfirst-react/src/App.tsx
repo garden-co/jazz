@@ -2,7 +2,6 @@ import * as React from "react";
 import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
-import { app } from "../schema.js";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
@@ -36,11 +35,7 @@ export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(secret, config);
 
   return (
-    <JazzProvider
-      config={resolvedConfig}
-      wasmSchema={app.wasmSchema}
-      fallback={fallback ?? <p>Loading...</p>}
-    >
+    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>

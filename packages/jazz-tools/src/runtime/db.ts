@@ -1782,6 +1782,12 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   let resolvedConfig = { ...config };
+
+  // Enable subscription tracing in dev by default so the inspector's Live Query
+  // works without any app config. Cheap, dev-only, and overridable explicitly.
+  if (resolvedConfig.devMode === undefined && process.env.NODE_ENV === "development") {
+    resolvedConfig.devMode = true;
+  }
   await runtimeModule.load(config);
 
   // Local-first auth: resolve seed and mint a JWT

@@ -546,7 +546,9 @@ function resolveDb(input: Db | { db: Db }): Db {
 
 export async function attachDevTools(
   clientOrDb: Promise<{ db: Db }> | { db: Db } | Db,
-  wasmSchema: WasmSchema,
+  // Optional: when omitted, the inspector resolves the schema from the live
+  // runtime at announce time (resolveBridgeSchema → runtime.getSchema()).
+  wasmSchema?: WasmSchema,
 ): Promise<DevToolsAttachment> {
   const resolved = await Promise.resolve(clientOrDb as Promise<{ db: Db }> | { db: Db } | Db);
   const db = resolveDb(resolved as Db | { db: Db });

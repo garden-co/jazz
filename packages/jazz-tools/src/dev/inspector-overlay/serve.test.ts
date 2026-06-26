@@ -22,13 +22,6 @@ function fakeRes() {
 }
 
 describe("overlay serve middleware", () => {
-  it("serves the bundled loader.js", async () => {
-    const handler = createOverlayHandler({ appRoot: process.cwd() });
-    const r = fakeRes();
-    expect(await handler({ url: "/__jazz/loader.js" }, r.res as never)).toBe(true);
-    expect(r.headers["Content-Type"]).toContain("javascript");
-    expect(r.state.body.length).toBeGreaterThan(0);
-  });
   it("ignores unrelated urls", async () => {
     const handler = createOverlayHandler({ appRoot: process.cwd() });
     expect(await handler({ url: "/index.html" }, fakeRes().res as never)).toBe(false);

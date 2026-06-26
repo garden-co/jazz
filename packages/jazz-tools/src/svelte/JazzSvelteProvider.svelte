@@ -4,7 +4,6 @@ Pass a pre-created client or a promise that resolves to one.
 -->
 <script lang="ts">
 	import type { Db } from '../runtime/db.js';
-	import type { WasmSchema } from '../index.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
 	import { markDevToolsAttached } from '../dev-tools/auto-attach.js';
@@ -14,10 +13,9 @@ Pass a pre-created client or a promise that resolves to one.
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
 		autoAttachDevTools?: boolean;
-		wasmSchema?: WasmSchema;
 	}
 
-	let { client, children, fallback, autoAttachDevTools = true, wasmSchema }: Props = $props();
+	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
@@ -54,13 +52,11 @@ Pass a pre-created client or a promise that resolves to one.
 				if (
 					process.env.NODE_ENV !== 'production' &&
 					autoAttachDevTools &&
-					wasmSchema &&
 					markDevToolsAttached(resolved.db as object)
 				) {
 					const db = resolved.db;
-					const schema = wasmSchema;
-					void import('../dev-tools/dev-tools.js').then(({ attachDevTools }) =>
-						attachDevTools({ db }, schema),
+					void import('../dev/inspector-overlay/loader.js').then(({ startInspectorOverlay }) =>
+						startInspectorOverlay(db as object),
 					);
 				}
 			})

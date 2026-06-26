@@ -1,7 +1,6 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import type { WasmSchema } from "../index.js";
 import { markDevToolsAttached } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
@@ -28,14 +27,17 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-function DevToolsAutoAttach({ wasmSchema }: { wasmSchema?: WasmSchema }) {
+// Dev-only: mount the inspector overlay + attach the bridge for this db. The
+// overlay code is a lazily-loaded, side-effect-free chunk that is absent from
+// production bundles (gated below) and only starts when this effect runs.
+function DevToolsAutoAttach() {
   const { db } = useCoreJazzClient() as JazzClientContextValue;
   useEffect(() => {
-    if (!wasmSchema || !markDevToolsAttached(db as object)) return;
-    void import("../dev-tools/dev-tools.js").then(({ attachDevTools }) =>
-      attachDevTools({ db }, wasmSchema),
+    if (!markDevToolsAttached(db as object)) return;
+    void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
+      startInspectorOverlay(db as object),
     );
-  }, [db, wasmSchema]);
+  }, [db]);
   return null;
 }
 
@@ -44,8 +46,8 @@ export type JazzProviderProps = {
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
+  /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
-  wasmSchema?: WasmSchema;
 };
 
 export function JazzProvider({
@@ -54,24 +56,16 @@ export function JazzProvider({
   children,
   onJWTExpired,
   autoAttachDevTools,
-  wasmSchema,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  // Enable devMode at client creation so the inspector's Live Query view can see
-  // subscriptions the app creates on mount. devMode gates subscription tracing;
-  // turning it on later (when attachDevTools runs) misses those first subscriptions.
-  const effectiveConfig = useMemo(
-    () => (shouldAutoAttach ? { ...config, devMode: true } : config),
-    [config, shouldAutoAttach],
-  );
   return (
     <CoreJazzProvider
-      config={effectiveConfig}
+      config={config}
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
     >
-      {shouldAutoAttach ? <DevToolsAutoAttach wasmSchema={wasmSchema} /> : null}
+      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>
   );
