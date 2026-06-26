@@ -36,8 +36,26 @@ fn schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn owner_write_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("folder", ColumnType::Uuid),
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("content", ColumnType::String),
+            ColumnSchema::new("author", ColumnType::Uuid),
+            ColumnSchema::new("created_at", ColumnType::U64),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::owner_only("documents", "author"))])
+}
+
 fn open_db(seed: u64) -> DirectDb {
-    let schema = schema();
+    open_db_with_schema(seed, schema())
+}
+
+fn open_db_with_schema(seed: u64, schema: JazzSchema) -> DirectDb {
     let column_families = schema.column_families();
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -189,9 +207,43 @@ fn direct_subscribed_write(c: &mut Criterion) {
     group.finish();
 }
 
+fn direct_owner_policy_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("direct_core/owner_policy_insert");
+
+    for initial_rows in [1_000usize] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("documents", initial_rows),
+            &initial_rows,
+            |b, &initial_rows| {
+                let db = open_db_with_schema(4, owner_write_schema());
+                seed_documents(&db, initial_rows);
+                let mut next = initial_rows;
+
+                b.iter(|| {
+                    next += 1;
+                    let candidate = cells(next);
+                    assert!(
+                        db.can_insert("documents", candidate.clone())
+                            .expect("owner policy dry run should succeed")
+                    );
+                    let write = db
+                        .insert("documents", candidate)
+                        .expect("owner policy insert should succeed");
+                    block_on(write.wait(DurabilityTier::Local))
+                        .expect("owner policy insert should be local");
+                    write.row_uuid()
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = direct_insert, direct_update_and_read, direct_subscribed_write
+    targets = direct_insert, direct_update_and_read, direct_subscribed_write, direct_owner_policy_insert
 }
 criterion_main!(benches);
