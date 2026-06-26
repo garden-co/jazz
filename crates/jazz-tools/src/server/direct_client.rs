@@ -15,7 +15,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::schema_manager::AppId;
-use crate::transport_manager::AuthConfig;
+use crate::transport_auth::AuthConfig;
 
 const DIRECT_CLIENT_SUPPORTED_FEATURES: u64 =
     FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
@@ -187,6 +187,12 @@ async fn receive_server_hello(
     }
     let frame = decode_frame(&encoded[0]).map_err(DirectCoreWebSocketClientError::DecodeFrame)?;
     let WireFrame::Hello(hello) = frame else {
+        if let WireFrame::Error(error) = frame {
+            return Err(DirectCoreWebSocketClientError::ServerRejected(format!(
+                "{:?}: {}",
+                error.code, error.message
+            )));
+        }
         return Err(DirectCoreWebSocketClientError::UnexpectedHandshakeMessage);
     };
     if hello.role != WirePeerRole::Core {

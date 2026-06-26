@@ -146,7 +146,7 @@ fn direct_ws_live_admissions_for(key: DirectWsAdmissionKey) -> usize {
 #[derive(serde::Deserialize)]
 struct DirectWsPrelude {
     peer_identity: String,
-    auth: crate::transport_manager::AuthConfig,
+    auth: crate::transport_auth::AuthConfig,
 }
 
 async fn direct_ws_admission(
@@ -953,7 +953,7 @@ mod tests {
         let forged_peer = AuthorId::from_bytes([0x52; 16]);
         let prelude = DirectWsPrelude {
             peer_identity: hex::encode(forged_peer.as_bytes()),
-            auth: crate::transport_manager::AuthConfig {
+            auth: crate::transport_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": uuid::Uuid::from_bytes(*authenticated.as_bytes()).to_string(),
@@ -985,7 +985,7 @@ mod tests {
         let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
         let prelude = DirectWsPrelude {
             peer_identity: hex::encode(identity.as_bytes()),
-            auth: crate::transport_manager::AuthConfig {
+            auth: crate::transport_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": user_id,
@@ -1053,7 +1053,7 @@ mod tests {
             format!("http://{addr}"),
             state.app_id,
             AuthorId::from_bytes([0x41; 16]),
-            crate::transport_manager::AuthConfig {
+            crate::transport_auth::AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 ..Default::default()
             },

@@ -28,6 +28,7 @@ pub mod wire_types;
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;
 
+pub mod transport_auth;
 pub mod transport_manager;
 pub mod transport_protocol;
 #[cfg(feature = "transport-websocket")]
