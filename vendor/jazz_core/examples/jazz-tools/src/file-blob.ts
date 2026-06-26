@@ -10,7 +10,10 @@ import {
   type Table,
 } from "./jazz-tools.js";
 
-export type FileBlobTable<Row extends BinaryLargeValueRow = BinaryLargeValueRow> = Table<Row, unknown>;
+export type FileBlobTable<Row extends BinaryLargeValueRow = BinaryLargeValueRow> = Table<
+  Row,
+  unknown
+>;
 
 export type AlphaFileBlobHelpers<Row extends BinaryLargeValueRow = BinaryLargeValueRow> = {
   readonly table: FileBlobTable<Row>;

@@ -73,9 +73,15 @@ test("top-level alpha-ish file helpers default to the files table", async () => 
     blob: new Blob([bytes]),
   });
 
-  assert.deepEqual(readFiles<StoredFile>(db).map((file) => file.id), [secondFileId]);
+  assert.deepEqual(
+    readFiles<StoredFile>(db).map((file) => file.id),
+    [secondFileId],
+  );
   assert.deepEqual(readFileBytes<StoredFile>(db, secondFileId), bytes);
-  assert.deepEqual(new Uint8Array(await (await loadFileAsBlob<StoredFile>(db, secondFileId)).arrayBuffer()), bytes);
+  assert.deepEqual(
+    new Uint8Array(await (await loadFileAsBlob<StoredFile>(db, secondFileId)).arrayBuffer()),
+    bytes,
+  );
 });
 
 test("binaryLargeValueTable documents no file_parts convention", () => {
@@ -100,7 +106,9 @@ class MemoryDb implements Db {
     throw new Error("transactions are not implemented by this test fixture");
   }
 
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> {
     this.rows[name] ??= [];
     return {
       _table: name,
@@ -124,7 +132,10 @@ class MemoryDb implements Db {
     row: Init & Partial<Pick<Row, "id">>,
     options: InsertOptions<Row> = {},
   ): WriteResult<Row> & Row {
-    const next = { id: options.id ?? row.id ?? `row-${this.rows[table._table].length + 1}`, ...row };
+    const next = {
+      id: options.id ?? row.id ?? `row-${this.rows[table._table].length + 1}`,
+      ...row,
+    };
     this.rows[table._table].push(next as Record<string, unknown>);
     return makeMemoryWriteResult(next as unknown as Row);
   }
@@ -178,21 +189,28 @@ class MemoryDb implements Db {
     _options: WriteTimestampOptions = {},
   ): WriteResult<Row> & Row {
     const rows = this.rows[table._table];
-    if (rows.some((existing) => existing.id === id)) throw new Error(`Restore failed: row not deleted: ${String(id)}`);
+    if (rows.some((existing) => existing.id === id))
+      throw new Error(`Restore failed: row not deleted: ${String(id)}`);
     const restored = { id, ...row };
     rows.push(restored as Record<string, unknown>);
     return makeMemoryWriteResult(restored as unknown as Row);
   }
 
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string }): Row[] {
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
+  ): Row[] {
     return [...this.rows[tableOrQuery._table]] as Row[];
   }
 
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string }): Row | null {
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
+  ): Row | null {
     return this.all(tableOrQuery)[0] ?? null;
   }
 
-  allForIdentity<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string }): Row[] {
+  allForIdentity<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
+  ): Row[] {
     return this.all(tableOrQuery);
   }
 
@@ -224,8 +242,10 @@ function unsupportedQueryMethod<Row>(): QueryBuilder<Row> {
 
 function makeMemoryWriteResult<Value extends object>(value: Value): WriteResult<Value> & Value;
 function makeMemoryWriteResult(value: void): WriteResult<void>;
-function makeMemoryWriteResult<Value>(value: Value): WriteResult<Value> | (WriteResult<Value> & object) {
-  const target = value && typeof value === "object" ? value as object : {};
+function makeMemoryWriteResult<Value>(
+  value: Value,
+): WriteResult<Value> | (WriteResult<Value> & object) {
+  const target = value && typeof value === "object" ? (value as object) : {};
   Object.defineProperties(target, {
     value: { value, enumerable: false },
     handle: { value: null, enumerable: false },

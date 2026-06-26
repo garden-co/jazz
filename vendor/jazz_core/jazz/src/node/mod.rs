@@ -828,6 +828,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
+            permission_subject: commits[0].permission_subject,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -966,6 +967,7 @@ where
             kind: TxKind::Mergeable,
             n_total_writes: 1,
             made_by: edit.made_by,
+            permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -2038,9 +2040,9 @@ where
             .map(|stored| stored.to_record())
     }
 
-    pub(crate) fn current_row_tx_id(&self, row: &CurrentRow) -> Option<TxId> {
+    pub(crate) fn current_row_tx_id(&mut self, row: &CurrentRow) -> Option<TxId> {
         let (time, alias) = row.projected_tx_alias()?;
-        Some(TxId::new(time, self.node_for_alias(alias)?))
+        Some(TxId::new(time, self.resolve_node_alias(alias).ok()??))
     }
 
     /// Return locally-originated rejected transactions retained for retry.
@@ -2566,6 +2568,28 @@ where
             .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
     }
 
+    pub(super) fn resolve_node_alias(
+        &mut self,
+        alias: NodeAlias,
+    ) -> Result<Option<NodeUuid>, Error> {
+        if let Some(node) = self.node_for_alias(alias) {
+            return Ok(Some(node));
+        }
+        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+            let record = raw.record();
+            if NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?) != alias {
+                continue;
+            }
+            let node = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
+            self.node_aliases.insert(node, alias);
+            if node == self.node_uuid {
+                self.self_node_alias = Some(alias);
+            }
+            return Ok(Some(node));
+        }
+        Ok(None)
+    }
+
     pub(super) fn version_tx_id(&self, version: &VersionRow) -> Result<TxId, Error> {
         let node =
             self.node_for_alias(version.tx_node_alias())
@@ -2854,10 +2878,12 @@ impl CurrentRow {
             return None;
         }
         let borrowed = self.record.borrowed();
-        Some((
-            TxTime(borrowed.get_u64(stamp_idx).ok()?),
-            NodeAlias(borrowed.get_u64(alias_idx).ok()?),
-        ))
+        let time = borrowed.get_u64(stamp_idx).ok()?;
+        let alias = borrowed.get_u64(alias_idx).ok()?;
+        if time == 0 && alias == 0 {
+            return None;
+        }
+        Some((TxTime(time), NodeAlias(alias)))
     }
 
     #[cfg(test)]

@@ -369,6 +369,9 @@ where
                 )?,
                 n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
                 made_by: AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
+                permission_subject: record
+                    .get_nullable_uuid(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
+                    .map(AuthorId),
                 base_snapshot: None,
                 row_read_set: None,
                 absent_read_set: None,

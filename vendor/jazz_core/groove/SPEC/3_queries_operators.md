@@ -2,9 +2,9 @@
 
 Queries in groove describe incremental views. They implement a subset of SQL
 semantics, but the durable contract is not an execution plan in the traditional
-database sense. A query becomes a graph of *operators* that defines how weighted
-row changes move through the view. This chapter specifies the *what* of
-evaluation; chapter 4 specifies the *how* (the tick, arrangements, propagation).
+database sense. A query becomes a graph of _operators_ that defines how weighted
+row changes move through the view. This chapter specifies the _what_ of
+evaluation; chapter 4 specifies the _how_ (the tick, arrangements, propagation).
 
 ## 3.1 Queries become graphs that weighted deltas flow through
 
@@ -40,7 +40,7 @@ weighted-delta flow as every downstream operator.
 - **Frontier source** (`FrontierSourceOp`) — provides the recursion entry point;
   ch. 6.
 
-*Further invariants.* `INV-QUERY-19` — a `BindingSourceOp` appears only inside a
+_Further invariants._ `INV-QUERY-19` — a `BindingSourceOp` appears only inside a
 prepared shape (ch. 5); a plain, non-prepared query — a parameterless subscription
 or one-shot read, still the common case — never evaluates one.
 
@@ -67,7 +67,7 @@ combined with `UNION ALL`. An input that is empty for a tick, such as a frontier
 source with no bound deltas (ch. 6), contributes no rows and is exempt from the
 shape match.
 
-*Further invariants.* `INV-QUERY-5` — `MapProject` copies only configured fields
+_Further invariants._ `INV-QUERY-5` — `MapProject` copies only configured fields
 and preserves the input weight. `INV-QUERY-6` — `UnwrapNullable` preserves the
 original delta weight.
 
@@ -76,8 +76,8 @@ original delta weight.
 Joins combine or suppress rows by key. groove executes the **inner equi-join**
 and the **anti-join**.
 
-An inner equi-join (`JoinOp`) emits records whose fields are ordered as *left
-fields followed by right fields*. The left and right key vectors must have equal
+An inner equi-join (`JoinOp`) emits records whose fields are ordered as _left
+fields followed by right fields_. The left and right key vectors must have equal
 length, and matching keys follow the product rule: the emitted record weight is
 `left_weight × right_weight`. A change arriving on either side is matched against
 the maintained contents of the opposite side (`INV-QUERY-9`). When both sides
@@ -90,8 +90,8 @@ To see the double-count concretely, take key `k` with existing left row `L1`
 (weight +1) and existing right row `R1` (+1); the pre-tick join holds `L1·R1`.
 In one tick we insert `L2` (left Δ +1) and `R2` (right Δ +1) under `k`. The
 correct output delta is the three new pairs `L1·R2`, `L2·R1`, `L2·R2`, each +1.
-Applying each side's delta against the *maintained opposite side after this
-tick* gives left Δ × right-after = `L2·R1`, `L2·R2` and right Δ × left-after =
+Applying each side's delta against the _maintained opposite side after this
+tick_ gives left Δ × right-after = `L2·R1`, `L2·R2` and right Δ × left-after =
 `L1·R2`, `L2·R2` — so `L2·R2` (the left-Δ × right-Δ cross term) lands twice. The
 join must subtract exactly one copy of that cross term to recover the correct +1.
 
@@ -100,7 +100,7 @@ the total right-side multiplicity for that row's key is zero (`INV-QUERY-12`),
 and it emits a change only when a left row changes or the right count crosses
 zero.
 
-*Further invariants.* `INV-QUERY-8` — an inner join requires equal-length
+_Further invariants._ `INV-QUERY-8` — an inner join requires equal-length
 left/right key vectors. `INV-QUERY-11` — shared join arrangements apply a given
 logical-time delta at most once per arrangement key/scope (ch. 4).
 `INV-QUERY-13` — anti-join changes only when the right count crosses zero.
@@ -129,7 +129,7 @@ primitive for unordered `limit(1)`: an empty group with `row_uuid` as the
 comparison key yields the stable least-`row_uuid` row from the visible result
 set.
 
-*Further invariants.* `INV-QUERY-21` — `ArgMaxBy`/`ArgMinBy` suppress
+_Further invariants._ `INV-QUERY-21` — `ArgMaxBy`/`ArgMinBy` suppress
 non-winner and net-zero group deltas.
 
 ## 3.6 `TopBy` (maintained ordered windows)
@@ -241,7 +241,7 @@ comparison between a column and a constant: `status = 'active'`, `age >= 18`,
 join key), arithmetic, and function calls in predicates do not. `AND`/`OR`
 compositions of lowerable predicates are lowerable.
 
-*Further invariants.* `INV-QUERY-4` — SQL predicate lowering rejects
+_Further invariants._ `INV-QUERY-4` — SQL predicate lowering rejects
 unsupported/ill-typed predicates rather than approximating them.
 `INV-QUERY-18` — SQL inner joins lower only equality predicates, with `AND`
 forming multi-column join keys.

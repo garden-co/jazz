@@ -311,6 +311,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
                 made_by: AuthorId::SYSTEM,
+                permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
                 absent_read_set: None,

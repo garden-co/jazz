@@ -30,7 +30,7 @@ is not visible to ordinary reads or subscriptions. Open writes become part of
 the sync system only at commit (`INV-TX-1`).
 
 Commit is the boundary that turns the work into a syncable object. Both
-transaction kinds sync *only at commit*, as one idempotent
+transaction kinds sync _only at commit_, as one idempotent
 `SyncMessage::CommitUnit { tx, versions }`; the authority answers with
 `SyncMessage::FateUpdate { tx_id, fate, global_seq, durability }` (ch. 8).
 Nothing partial travels upstream, and the core holds no open-transaction state.
@@ -70,7 +70,7 @@ maintain the per-layer global-current tables and change stream (`INV-TX-21`, ch.
 committed local transaction that has not reached an upstream tier can be lost if
 local storage is destroyed (`INV-TX-12`).
 
-*Further invariants.* `INV-TX-10` — applying a fate update never moves
+_Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_seq` backward and raises `durability` only monotonically.
 
 ## 3.4 Mergeable transactions
@@ -93,12 +93,12 @@ against a fixed `Snapshot { owner, global_base, local_base, dots }`. In that
 snapshot, `global_base` is the **contiguous applied global watermark**, not
 merely the maximum observed sequence (`INV-TX-13`). `local_base` and `dots`
 bound which local, not-yet-global transactions the snapshot also includes.
-Together these values define the snapshot's *coverage*: the exact set of
+Together these values define the snapshot's _coverage_: the exact set of
 versions it can see. The full snapshot model is ch. 5.
 
 Serializable validation depends on knowing which reads influenced the result,
-so an exclusive transaction records the read set it relied on. A *shape* is a
-content-addressed query graph, and a *binding* is its concrete parameter values
+so an exclusive transaction records the read set it relied on. A _shape_ is a
+content-addressed query graph, and a _binding_ is its concrete parameter values
 (ch. 6); a `PredicateRead` records both so validation can re-run the exact query.
 While the transaction is open, a point read records either
 `RowRead { table, row_uuid, version }` or `AbsentRead`, and a predicate read
@@ -146,7 +146,7 @@ recorded reads against current global state:
   must equal the single recorded parent (or absence when none was recorded)
   (`INV-TX-20`).
 
-*Further invariants.* `INV-TX-19` — predicate validation is sensitive to
+_Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
 

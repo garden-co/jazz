@@ -33,7 +33,7 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -50,7 +50,9 @@ use jazz::db::{
     WireTransportAdapter as DirectWireTransportAdapter, WriteHandle as DirectWriteHandle,
     block_on as direct_block_on,
 };
-use jazz::groove::records::{BorrowedRecord as DirectBorrowedRecord, RecordDescriptor};
+use jazz::groove::records::{
+    BorrowedRecord as DirectBorrowedRecord, RecordDescriptor, Value as DirectValue,
+};
 use jazz::groove::storage::{
     MemoryStorage as DirectMemoryStorage, OrderedKvStorage as DirectOrderedKvStorage,
     ReopenableStorage as DirectReopenableStorage, RocksDbStorage as DirectRocksDbStorage,
@@ -58,7 +60,7 @@ use jazz::groove::storage::{
 use jazz::ids::{AuthorId as DirectAuthorId, NodeUuid as DirectNodeUuid, RowUuid as DirectRowUuid};
 use jazz::query::Query as DirectQuery;
 use jazz::schema::JazzSchema;
-use jazz::tx::{DurabilityTier as DirectDurabilityTier, TxId as DirectTxId};
+use jazz::tx::{DurabilityTier as DirectDurabilityTier, Fate as DirectFate, TxId as DirectTxId};
 use jazz::wire::{TransportError as DirectTransportError, WireTransport as DirectWireTransport};
 use jazz_tools::binding_support::{
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
@@ -655,9 +657,11 @@ impl NapiDirectDb {
             .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
         let rows = match db {
             DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
                 direct_block_on(db.all_for_identity(&query.inner, opts, author))
             }
             DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
                 direct_block_on(db.all_for_identity(&query.inner, opts, author))
             }
         }
@@ -665,6 +669,36 @@ impl NapiDirectDb {
         encode_direct_rows(&rows)
             .map(Uint8Array::new)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "propagateQuery")]
+    pub fn propagate_query(
+        &self,
+        query: &NapiDirectPreparedQuery,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<()> {
+        let opts = direct_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => db.propagate_query_with_opts(&query.inner, opts),
+            DirectNapiDb::Persistent(db) => db.propagate_query_with_opts(&query.inner, opts),
+        }
+        Ok(())
+    }
+
+    #[napi(js_name = "queryIsCovered")]
+    pub fn query_is_covered(&self, query: &NapiDirectPreparedQuery) -> napi::Result<bool> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        Ok(match db {
+            DirectNapiDb::Memory(db) => db.query_is_covered(&query.inner),
+            DirectNapiDb::Persistent(db) => db.query_is_covered(&query.inner),
+        })
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -689,6 +723,39 @@ impl NapiDirectDb {
                 db.insert_with_id(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
+        }
+    }
+
+    #[napi(js_name = "insertWithIdEncodedForIdentity")]
+    pub fn insert_with_id_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let author = direct_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_memory(
+                    db.insert_with_id_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_persistent(
+                    db.insert_with_id_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
         }
     }
 
@@ -717,6 +784,39 @@ impl NapiDirectDb {
         }
     }
 
+    #[napi(js_name = "updateEncodedForIdentity")]
+    pub fn update_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_direct_cells(&patch)?;
+        let author = direct_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_memory(
+                    db.update_for_identity(author, &table, row_id, patch)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_persistent(
+                    db.update_for_identity(author, &table, row_id, patch)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+        }
+    }
+
     #[napi(js_name = "upsertEncoded")]
     pub fn upsert_encoded(
         &self,
@@ -739,6 +839,39 @@ impl NapiDirectDb {
                 db.upsert(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
+        }
+    }
+
+    #[napi(js_name = "upsertEncodedForIdentity")]
+    pub fn upsert_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let author = direct_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_memory(
+                    db.upsert_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_persistent(
+                    db.upsert_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
         }
     }
 
@@ -765,6 +898,37 @@ impl NapiDirectDb {
         }
     }
 
+    #[napi(js_name = "deleteForIdentity")]
+    pub fn delete_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let author = direct_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_memory(
+                    db.delete_for_identity(author, &table, row_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_persistent(
+                    db.delete_for_identity(author, &table, row_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+        }
+    }
+
     #[napi(js_name = "restoreEncoded")]
     pub fn restore_encoded(
         &self,
@@ -787,6 +951,39 @@ impl NapiDirectDb {
                 db.restore(&table, row_id, cells)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncodedForIdentity")]
+    pub fn restore_encoded_for_identity(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<NapiDirectWrite> {
+        let row_id = direct_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_direct_cells(&cells)?;
+        let author = direct_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("direct DB is closed"))?;
+        match db {
+            DirectNapiDb::Memory(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_memory(
+                    db.restore_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
+            DirectNapiDb::Persistent(db) => {
+                direct_set_identity_claims(db, author);
+                direct_write_persistent(
+                    db.restore_for_identity(author, &table, row_id, cells)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                )
+            }
         }
     }
 
@@ -938,6 +1135,21 @@ fn direct_write_persistent(
     })
 }
 
+fn direct_set_identity_claims<S>(db: &DirectDb<S>, author: DirectAuthorId)
+where
+    S: DirectOrderedKvStorage + DirectReopenableStorage + 'static,
+{
+    let subject = author.0.to_string();
+    db.set_identity_claims(
+        author,
+        BTreeMap::from([
+            ("subject".to_owned(), DirectValue::String(subject.clone())),
+            ("sub".to_owned(), DirectValue::String(subject.clone())),
+            ("user_id".to_owned(), DirectValue::String(subject)),
+        ]),
+    );
+}
+
 fn direct_tx_write(
     tx_id: DirectTxId,
     inner: Option<DirectNapiWrite>,
@@ -983,6 +1195,19 @@ where
     let state = db
         .write_state(tx_id)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    match state.fate {
+        DirectFate::Rejected(reason) => {
+            return Err(napi::Error::from_reason(format!(
+                "transaction was rejected: {reason:?}"
+            )));
+        }
+        DirectFate::Pending if tier >= DirectDurabilityTier::Edge => {
+            return Err(napi::Error::from_reason(format!(
+                "transaction has not been accepted at requested tier {tier:?}"
+            )));
+        }
+        DirectFate::Pending | DirectFate::Accepted => {}
+    }
     if state.durability >= tier {
         return Ok(());
     }

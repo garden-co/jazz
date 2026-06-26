@@ -9,7 +9,10 @@ export type LocalFirstJwtOptions = {
   now?: Date | number;
 };
 
-export type LocalFirstJwtSigner = (signingInput: Uint8Array, privateKeyDer: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+export type LocalFirstJwtSigner = (
+  signingInput: Uint8Array,
+  privateKeyDer: Uint8Array,
+) => Uint8Array | Promise<Uint8Array>;
 
 export function localFirstJwtPayload(options: LocalFirstJwtOptions): Record<string, unknown> {
   const nowSeconds = secondsSinceEpoch(options.now ?? Date.now());
@@ -36,10 +39,15 @@ export function makeJwtFromSignature(signingInput: string, signature: Uint8Array
   return `${signingInput}.${encodeBase64Url(signature)}`;
 }
 
-export function makeEd25519JwtSync(payload: Record<string, unknown>, privateKeyDer: Uint8Array, sign: LocalFirstJwtSigner): string {
+export function makeEd25519JwtSync(
+  payload: Record<string, unknown>,
+  privateKeyDer: Uint8Array,
+  sign: LocalFirstJwtSigner,
+): string {
   const signingInput = localFirstJwtSigningInput(payload);
   const signature = sign(new TextEncoder().encode(signingInput), privateKeyDer);
-  if (signature instanceof Promise) throw new Error("Local-first JWT sync signer returned a Promise");
+  if (signature instanceof Promise)
+    throw new Error("Local-first JWT sync signer returned a Promise");
   return makeJwtFromSignature(signingInput, signature);
 }
 
@@ -53,12 +61,26 @@ export async function makeEd25519JwtAsync(
   return makeJwtFromSignature(signingInput, signature);
 }
 
-export function createLocalFirstJwtWithSigner(options: LocalFirstJwtOptions, sign: LocalFirstJwtSigner): string {
-  return makeEd25519JwtSync(localFirstJwtPayload(options), localFirstPrivateKeyDer(options.appId, options.secret), sign);
+export function createLocalFirstJwtWithSigner(
+  options: LocalFirstJwtOptions,
+  sign: LocalFirstJwtSigner,
+): string {
+  return makeEd25519JwtSync(
+    localFirstJwtPayload(options),
+    localFirstPrivateKeyDer(options.appId, options.secret),
+    sign,
+  );
 }
 
-export function createLocalFirstJwtWithSignerAsync(options: LocalFirstJwtOptions, sign: LocalFirstJwtSigner): Promise<string> {
-  return makeEd25519JwtAsync(localFirstJwtPayload(options), localFirstPrivateKeyDer(options.appId, options.secret), sign);
+export function createLocalFirstJwtWithSignerAsync(
+  options: LocalFirstJwtOptions,
+  sign: LocalFirstJwtSigner,
+): Promise<string> {
+  return makeEd25519JwtAsync(
+    localFirstJwtPayload(options),
+    localFirstPrivateKeyDer(options.appId, options.secret),
+    sign,
+  );
 }
 
 export function encodeBase64UrlUtf8(value: string): string {
@@ -111,8 +133,7 @@ function maybeBuffer(): BufferConstructor | undefined {
 
 function ed25519Pkcs8SeedPrefix(): Uint8Array {
   return new Uint8Array([
-    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
-    0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
   ]);
 }
 

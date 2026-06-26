@@ -125,9 +125,10 @@ where
         let Some(policy) = table.write_policy.clone() else {
             return Ok(true);
         };
-        if version.deletion().is_some() {
-            let Some(current) = self.policy_current_row(&table, version.row_uuid())? else {
-                return Ok(false);
+        if version.deletion() == Some(DeletionEvent::Deleted) {
+            let current = match self.policy_delete_subject_row(&table, version)? {
+                Some(current) => current,
+                None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
             };
             return self.policy_allows_current_row(&table, &policy, &current, author);
         }
@@ -361,6 +362,11 @@ where
             return Ok((table, cells));
         }
 
+        let target_table = self.table_in_schema(table, target)?;
+        if policy_tables_are_directly_compatible(_source_table, &target_table) {
+            return Ok((target_table, cells));
+        }
+
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
     }
 
@@ -369,14 +375,69 @@ where
         table: &TableSchema,
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
-        Ok(self
-            .current_rows_for_schema(
-                &table.name,
-                self.catalogue.current_schema_version_id,
-                DurabilityTier::Global,
-            )?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid))
+        for tier in [
+            DurabilityTier::Global,
+            DurabilityTier::Edge,
+            DurabilityTier::Local,
+        ] {
+            if let Some(row) = self
+                .current_rows_for_schema(
+                    &table.name,
+                    self.catalogue.current_schema_version_id,
+                    tier,
+                )?
+                .into_iter()
+                .find(|row| row.row_uuid() == row_uuid)
+            {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+
+    fn policy_delete_subject_row(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Result<Option<CurrentRow>, Error> {
+        for parent in version.parents() {
+            for parent_version in self.query_versions_for_tx(parent)? {
+                if parent_version.table() != table.name
+                    || parent_version.row_uuid() != version.row_uuid()
+                    || parent_version.layer() != VersionLayer::Content
+                {
+                    continue;
+                }
+                let (projected_table, cells) =
+                    match self.policy_projection_for_version_row(&parent_version) {
+                        Ok(projected) => projected,
+                        Err(Error::InvalidCatalogueUpdate("lens chain is unknown")) => {
+                            let source_schema = self
+                                .schema_version_for_alias(parent_version.schema_version_alias())
+                                .ok_or(Error::InvalidStoredValue(
+                                    "history schema version alias must exist",
+                                ))?;
+                            let source_table =
+                                self.table_in_schema(parent_version.table(), source_schema)?;
+                            if !policy_tables_are_directly_compatible(&source_table, table) {
+                                return Err(Error::InvalidCatalogueUpdate("lens chain is unknown"));
+                            }
+                            (table.clone(), parent_version.cells(&source_table)?)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                if projected_table.name != table.name {
+                    continue;
+                }
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            }
+        }
+
+        if let Some(current) = self.policy_current_row(table, version.row_uuid())? {
+            return Ok(Some(current));
+        }
+
+        Ok(None)
     }
 
     fn policy_allows_current_row(
@@ -511,15 +572,16 @@ where
             crate::query::Predicate::Ne(left, right) => (left, right, false),
             _ => unreachable!("handled above"),
         };
-        let Some(left) = self.policy_operand_value(table, left, identity, &mut *column_value)
+        let Some(left_value) = self.policy_operand_value(table, left, identity, &mut *column_value)
         else {
             return Ok(false);
         };
-        let Some(right) = self.policy_operand_value(table, right, identity, &mut *column_value)
+        let Some(right_value) =
+            self.policy_operand_value(table, right, identity, &mut *column_value)
         else {
             return Ok(false);
         };
-        Ok((left == right) == equal)
+        Ok(policy_values_equal(&left_value, &right_value) == equal)
     }
 
     pub(super) fn policy_operand_value(
@@ -532,6 +594,9 @@ where
         match operand {
             crate::query::Operand::Column(column) => column_value(column),
             crate::query::Operand::Claim(name) if name == "sub" => Some(Value::Uuid(identity.0)),
+            crate::query::Operand::Claim(name) if name == "user_id" => {
+                Some(Value::String(identity.0.to_string()))
+            }
             crate::query::Operand::Claim(name) => self
                 .session_claims
                 .get(&identity)
@@ -916,6 +981,28 @@ where
             .expect("tx versions memo populated")
             .clone())
     }
+}
+
+fn policy_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Uuid(left), Value::String(right)) => uuid::Uuid::parse_str(right) == Ok(*left),
+        (Value::String(left), Value::Uuid(right)) => uuid::Uuid::parse_str(left) == Ok(*right),
+        _ => left == right,
+    }
+}
+
+fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSchema) -> bool {
+    source.name == target.name
+        && source.columns.len() == target.columns.len()
+        && source
+            .columns
+            .iter()
+            .zip(target.columns.iter())
+            .all(|(source, target)| {
+                source.name == target.name
+                    && source.column_type == target.column_type
+                    && source.large_value == target.large_value
+            })
 }
 
 pub(super) fn policy_value_key(value: &Value) -> Option<Vec<u8>> {

@@ -1,7 +1,4 @@
-import {
-  authSecretStore,
-  type AuthSecretStore,
-} from "./auth-secret-store.js";
+import { authSecretStore, type AuthSecretStore } from "./auth-secret-store.js";
 import {
   createDb,
   type AuthState,
@@ -45,8 +42,12 @@ export type LiveRows<Row> = {
 export type JazzHookHelpers = {
   useJazzClient(): JazzClient;
   useDb(): Db;
-  useTable<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init>;
-  useAll<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): LiveRows<Row>;
+  useTable<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init>;
+  useAll<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+  ): LiveRows<Row>;
 };
 
 export async function createJazzClient(options: JazzClientOptions): Promise<JazzClient> {
@@ -70,7 +71,9 @@ export async function createJazzClient(options: JazzClientOptions): Promise<Jazz
   };
 }
 
-export function JazzProvider<Children = unknown>(props: JazzProviderProps<Children>): Children | JazzClient {
+export function JazzProvider<Children = unknown>(
+  props: JazzProviderProps<Children>,
+): Children | JazzClient {
   if (!props.client) {
     if (typeof props.children === "function") {
       throw new Error("JazzProvider client is not available for function children.");
@@ -103,13 +106,15 @@ export function createUseDb(source: JazzClientSource): () => Db {
 }
 
 export function createUseTable(source: JazzClientSource): JazzHookHelpers["useTable"] {
-  return <Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> => (
-    resolveJazzClient(source).db.table<Row, Init>(name)
-  );
+  return <Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> => resolveJazzClient(source).db.table<Row, Init>(name);
 }
 
 export function createUseAll(source: JazzClientSource): JazzHookHelpers["useAll"] {
-  return <Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>): LiveRows<Row> => {
+  return <Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
+  ): LiveRows<Row> => {
     const db = resolveJazzClient(source).db;
     let current: Row[] = [];
     const subscription = db.subscribe(tableOrQuery, (rows) => {
@@ -132,12 +137,14 @@ export function createUseAll(source: JazzClientSource): JazzHookHelpers["useAll"
 
 function resolveJazzClient(source: JazzClientSource): JazzClient {
   const client = typeof source === "function" ? source() : source;
-  if (!client) throw new Error("Jazz client is not available. Pass a client or provider-backed getter.");
+  if (!client)
+    throw new Error("Jazz client is not available. Pass a client or provider-backed getter.");
   return client;
 }
 
 function resolveLocalFirstSecret(options: JazzClientOptions): string | undefined {
-  if (options.secret || options.jwtToken || hasCookieSession(options.cookieSession)) return options.secret;
+  if (options.secret || options.jwtToken || hasCookieSession(options.cookieSession))
+    return options.secret;
   return (options.authSecretStore ?? authSecretStore).getOrCreateSecret(options.appId);
 }
 

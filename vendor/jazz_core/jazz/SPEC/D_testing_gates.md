@@ -1,6 +1,6 @@
 # jazz — Specification · Appendix D. Testing & gates
 
-*Non-normative (guidance).* This appendix defines the verification tiers, the
+_Non-normative (guidance)._ This appendix defines the verification tiers, the
 local gate stack, and the simulation-first testing discipline used to keep the
 system reproducible under review. `INV-TEST-*` entries are process anchors.
 Benchmark scenario detail lives in appendix B; this appendix links to that

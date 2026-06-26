@@ -231,6 +231,10 @@ where
         Ok(())
     }
 
+    pub(crate) fn has_settled_result_set(&self, subscription: SubscriptionKey) -> bool {
+        self.query.settled_result_sets.contains_key(&subscription)
+    }
+
     /// Evaluate a validated query shape against this node's local knowledge.
     ///
     /// Phase B step 2 returns output-relation rows only. Provenance-closure
@@ -323,7 +327,7 @@ where
             self.finish_query_rows(query, &mut rows)?;
             return Ok(rows);
         }
-        if tier == DurabilityTier::Global
+        if matches!(tier, DurabilityTier::Edge | DurabilityTier::Global)
             && shape.query().reachable.is_empty()
             && !self.uses_partitioned_or_schema_projected_read(shape)
         {
@@ -335,7 +339,7 @@ where
                 return self.query_rows_from_result_set(shape, subscription);
             }
         }
-        if self.uses_partitioned_or_schema_projected_read(shape) {
+        if tier != DurabilityTier::Global || self.uses_partitioned_or_schema_projected_read(shape) {
             return self.query_rows_from_projected_current_source(shape, binding, tier, identity);
         }
         let lowered_include_modes =
@@ -4084,7 +4088,7 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if name != "sub" && name != "isAdmin" && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if name != "sub" && name != "user_id" && name != "isAdmin" && !claims.is_some_and(|claims| claims.contains_key(name)))
 }
 
 fn insert_claim_bindings(
@@ -4096,6 +4100,10 @@ fn insert_claim_bindings(
     let sub = claim_param_name("sub");
     if params.contains_key(&sub) {
         values.insert(sub.clone(), Value::Uuid(identity.0));
+    }
+    let user_id = claim_param_name("user_id");
+    if params.contains_key(&user_id) {
+        values.insert(user_id.clone(), Value::String(identity.0.to_string()));
     }
     let is_admin = claim_param_name("isAdmin");
     if params.contains_key(&is_admin) {
@@ -4110,7 +4118,8 @@ fn insert_claim_bindings(
     if let Some(claims) = claims {
         for (name, value) in claims {
             let param = claim_param_name(name);
-            if params.contains_key(&param) && param != sub && param != is_admin {
+            if params.contains_key(&param) && param != sub && param != user_id && param != is_admin
+            {
                 values.insert(param, value.clone());
             }
         }

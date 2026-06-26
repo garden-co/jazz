@@ -58,7 +58,7 @@ len:2}])` applies the ops in order against the materialized parent, each `pos` a
 sequence is the caller's responsibility (whether `text` gains Unicode-position
 semantics is open, §12.1).
 
-*Further invariants.* `INV-LVAL-10` — an explicit edit rejects an empty op batch
+_Further invariants._ `INV-LVAL-10` — an explicit edit rejects an empty op batch
 and must target a `text`/`blob` column. `INV-LVAL-13` — materialization follows
 a single primary-parent chain; for a multi-parent merge version, the primary
 parent is the highest-sort-key parent.
@@ -110,7 +110,7 @@ authorized by row context and membership: the serving node refuses an extent
 whose `Extent.row` mismatches the request or that is not visible to the peer
 (`INV-LVAL-15`, ch. 7, ch. 8).
 
-*Further invariants.* `INV-LVAL-7` — re-ingesting an extent with identical bytes
+_Further invariants._ `INV-LVAL-7` — re-ingesting an extent with identical bytes
 is idempotent; conflicting bytes for the same extent are rejected. `INV-LVAL-8` —
 an extent read fails closed if any requested byte range is missing or gapped.
 
@@ -162,7 +162,7 @@ query-planner predicates (`INV-LVAL-17`).
 - 🔶 **Ops as a native groove column type.** The op-log uses a custom byte
   encoding for its ops (§12.2–12.6). If groove supported variable-width members
   inside a tuple — reusing groove's record encoding (groove §2.7) within the tuple
-  — an op could be a *true groove column type* rather than a jazz-private encoding,
+  — an op could be a _true groove column type_ rather than a jazz-private encoding,
   folding op storage (and potentially op merge) into the normal record/column path
   instead of a parallel mechanism. Blocked on the enabling groove feature
   (variable-width tuple members; groove ch. 2 open questions).
@@ -171,12 +171,11 @@ query-planner predicates (`INV-LVAL-17`).
 
 ## In flight & detailed design (non-normative)
 
-*The §12.1–12.6 contract above is normative. The following is the full
+_The §12.1–12.6 contract above is normative. The following is the full
 large-value working design — op-log detail, derived structures, worked example,
 bundles, truncation/GC, config, counters, benchmark predictions, measured
 findings, and slice sequencing — retained from the former `LARGE_VALUES.md`. It
-settles upward into the normative body as decisions land.*
-
+settles upward into the normative body as decisions land._
 
 Design for storing, syncing, and serving large and frequently-edited column
 values — collaborative documents, durable streams, files — without userland
@@ -206,10 +205,10 @@ use the edit API. Both produce identical history.
 
 ## Column types
 
-| type | semantics | storage | merge | queryable |
-|---|---|---|---|---|
-| `string`, `bytes` | replace | verbatim in the history row | whole-value HLC-LWW | filter/join ✓ |
-| `text`, `blob` | edit | op log (this document) | authority op-merge; `[needs: text-merge]` rich-text merge remains gated | not filterable (planner rejects) |
+| type              | semantics | storage                     | merge                                                                   | queryable                        |
+| ----------------- | --------- | --------------------------- | ----------------------------------------------------------------------- | -------------------------------- |
+| `string`, `bytes` | replace   | verbatim in the history row | whole-value HLC-LWW                                                     | filter/join ✓                    |
+| `text`, `blob`    | edit      | op log (this document)      | authority op-merge; `[needs: text-merge]` rich-text merge remains gated | not filterable (planner rejects) |
 
 The choice is schema-level semantics, not a size threshold: a 5-character
 `text` field and a 2GB `blob` use the same representation, so there is no
@@ -255,7 +254,7 @@ Content = Literal | Ref(extent)         // extent-only; ops never speak hashes
   unit for content (class 4, below). Informally this stream is called the
   writer's **run**. Streams are append-only, so **every committed prefix is
   immutable by construction** — no sealing ceremony exists or is needed.
-- **Ref content**: an insert's content may *reference* existing content
+- **Ref content**: an insert's content may _reference_ existing content
   instead of new bytes — `Ref(extent)`, always extent-shaped. This is what
   makes reverts, in-document paste, and file replace-with-overlap cost one
   op instead of re-storing content. When the dump path detects known content
@@ -304,30 +303,30 @@ codec:
 Row-level machinery creates **merge versions** for concurrent mergeable
 heads. For op-log columns, merge versions are **zero-content**: they carry
 no ops — synthesizing ops no writer made would violate the thesis — and
-their content state is *defined, not stored*, as a deterministic function
+their content state is _defined, not stored_, as a deterministic function
 of the DAG behind them. What a merge version does carry is its **exact
 merge-strategy version**, a tiny class-1 tag from an append-only registry:
 `lww` (state = the max-`(time, node)` parent's state, matching the column
 table's semantics), `replay-v1` for `text-merge` (eg-walker replay since the
 LCA), `replay-v2` if the algorithm is ever refined.
 Pinning the exact strategy per merge keeps history semantically immutable:
-shipping a new strategy changes only what *new* merges record; historical
+shipping a new strategy changes only what _new_ merges record; historical
 states, time-travel reads, and checkpoint contents never rewrite.
 
 Replication is unaffected: **all versions keep shipping** — loser-branch
 versions are class-1 history like any other; zero-content merges reduce
-stored/shipped *merge* payload, never the history itself.
+stored/shipped _merge_ payload, never the history itself.
 
 **Effective chain**: materialization replays from the nearest checkpoint
 along the chain that, at each merge version, continues through the path
 its recorded strategy designates — under `lww`, the winning parent only;
-loser-branch ops remain immutable in their streams but are *inert* until
+loser-branch ops remain immutable in their streams but are _inert_ until
 a `replay-*` merge consumes them. A writer editing on top of a merge
 records positions relative to the merge's defined state (well-defined:
 the strategy is deterministic). Merge-of-merges recurses cleanly — an
 inner merge's state is itself defined.
 
-**Checkpoint affinity**: merge versions are the *ideal* checkpoint-cache
+**Checkpoint affinity**: merge versions are the _ideal_ checkpoint-cache
 sites — they are exactly where the effective chain (re)converges, so one
 checkpoint there serves every descendant of all merged branches; and in
 under `replay-*` strategies they are precisely the states that are expensive to
@@ -373,7 +372,7 @@ entries
 chunk_hash → [ Extent, ... ]      // one chunk: 1+ extents, any writers
 ```
 
-Chunks and streams are *independent partitions of the same bytes* — chunks
+Chunks and streams are _independent partitions of the same bytes_ — chunks
 cut by content, streams by authorship — and the index is the join between
 them. A chunk's extents may interleave multiple writers' streams. No bytes
 are copied: **canonicalization is indexing, not rewriting.**
@@ -435,15 +434,15 @@ Dave reverts to v7's content via dump: chunker emits h1,h2 — both already
 
 ### Column-taxonomy class 4: content payload
 
-Op *metadata* is class-1 version payload (tiny, ships with the commit unit).
+Op _metadata_ is class-1 version payload (tiny, ships with the commit unit).
 Class 4 is the **generic lane for immutable, content-addressed payloads that
-accompany but are not row versions** — content *bytes*, checkpoint descriptors,
+accompany but are not row versions** — content _bytes_, checkpoint descriptors,
 and chunk-index data alike: never argmax'd, never in result-set material,
 never queried, fetched on demand on the content channel (below). This is the
 one mechanism for "stuff auxiliary to the versions we sync"; anything new of
 that shape rides it rather than inventing a side protocol.
 
-Content *bytes* are the primary case: replicated-immutable, peer-deduplicated,
+Content _bytes_ are the primary case: replicated-immutable, peer-deduplicated,
 shipped at most once per peer:
 
 - **eagerly** on the sync channel for subscribed rows when small (≤ inline
@@ -480,10 +479,10 @@ form is simply absent. The serving node:
 1. **row RLS check** — the same prepared-shape probe that authorized syncing
    the row, typically hot because the client just received the row;
 2. **membership check** — the requested chunk/extent must belong to the
-   row's value (its tree/index) — *load-bearing*: without it, any one
+   row's value (its tree/index) — _load-bearing_: without it, any one
    readable row is a skeleton key for arbitrary content. Consequence: a
    serving node must hold the row's **op log** to answer this; serving
-   nodes may evict content *bytes* (refetch-by-name) but never the ops;
+   nodes may evict content _bytes_ (refetch-by-name) but never the ops;
 3. resolve to bytes: local store, else bundle (below).
 
 Revocation therefore acts at fetch granularity with zero token machinery.
@@ -498,7 +497,7 @@ ingestion is keyed by extent — re-delivery is a no-op.
 
 ## Relationship to groove (the carve-out)
 
-This is the first feature to *amend* the "everything lowers to groove"
+This is the first feature to _amend_ the "everything lowers to groove"
 principle rather than extend it, and the amendment is deliberate. The
 **op log is class-1 version payload and lowers normally**: ops ride
 commit units, live in history rows, and flow through groove's deltas
@@ -552,14 +551,14 @@ with:
 - a **sentinel**: a checkpoint promoted to class 1 — an authored snapshot op
   carrying the value at the horizon, either as literal content (everything
   before becomes deletable) or as refs into a **pinned-extent list**;
-- the pinned-extent list: computed *once, at core* by walking surviving ops
+- the pinned-extent list: computed _once, at core_ by walking surviving ops
   and checkpoints for refs into the truncated range (the same-value ref
   scope rule is what keeps this mark phase local to one op log).
 
 Downstream nodes obey mechanically. Then:
 
 - **chunk index**: entries over deleted extents are dropped; re-deriving
-  over surviving content reproduces the *same hashes* on new extents (CDC
+  over surviving content reproduces the _same hashes_ on new extents (CDC
   names content, not location) — so per-peer dedup state stays valid and no
   cross-node invalidation exists;
 - **bundle GC** (WiscKey/Badger value-log style): manifests track live
@@ -567,8 +566,8 @@ Downstream nodes obey mechanically. Then:
   ranged GET, PUT, **flip manifest entries in one groove batch, then delete
   the old object after a grace period** (in-flight reads); a periodic
   list-and-compare sweep collects orphans from crashes between phases.
-  Extent *names* never change during compaction — only the manifest — so
-  nothing ripples. Edges may simply *drop* low-occupancy bundles and refetch
+  Extent _names_ never change during compaction — only the manifest — so
+  nothing ripples. Edges may simply _drop_ low-occupancy bundles and refetch
   from core (eviction as degenerate compaction); only core must rewrite.
   **No compactor exists until truncation ships** — without truncation,
   nothing dies.
@@ -583,16 +582,16 @@ They share no machinery.
 
 ## Configuration
 
-| knob | default (initial) | notes |
-|---|---|---|
-| inline ship threshold | 1 KB | content ≤ this rides the commit unit |
-| chunker (text) | FastCDC, ~2 KB avg | pinned per column type; efficiency contract |
-| chunker (blob) | FastCDC, ~64 KB avg | |
-| checkpoint density | every N=1024 ops or at critical versions | replay bound |
-| dump-dedup probe | chunk-index lookup | covers reverts/pastes |
-| bundle target size | 64 MB | |
-| bundle GC threshold | < 40% live | |
-| bundle delete grace | 2× max fetch timeout | |
+| knob                  | default (initial)                        | notes                                       |
+| --------------------- | ---------------------------------------- | ------------------------------------------- |
+| inline ship threshold | 1 KB                                     | content ≤ this rides the commit unit        |
+| chunker (text)        | FastCDC, ~2 KB avg                       | pinned per column type; efficiency contract |
+| chunker (blob)        | FastCDC, ~64 KB avg                      |                                             |
+| checkpoint density    | every N=1024 ops or at critical versions | replay bound                                |
+| dump-dedup probe      | chunk-index lookup                       | covers reverts/pastes                       |
+| bundle target size    | 64 MB                                    |                                             |
+| bundle GC threshold   | < 40% live                               |                                             |
+| bundle delete grace   | 2× max fetch timeout                     |                                             |
 
 ## Counters (deterministic; benchmark gates)
 
@@ -627,9 +626,10 @@ depth).
 A column-delta prototype (text op-log + anchor/replace) was measured
 against the String baseline on the three S6 sequential traces across
 four axes. **Verdict: column-delta wins nothing for keystroke text —
-PARKED.** It remains the right design for large *single* values (big
+PARKED.** It remains the right design for large _single_ values (big
 blobs, low-frequency large dumps); it is irrelevant to the
 keystroke-text workload. Evidence:
+
 - **Storage (on-disk):** String == Text to <0.05 bytes/edit at every
   batch size. RocksDB LSM compression already absorbs the redundant
   full-document copies (logical text bytes/edit: String 4.3, Text 2.4
@@ -641,7 +641,7 @@ keystroke-text workload. Evidence:
   metadata" dominates; the value term is negligible at these doc sizes.
 - **Wire:** String ≈ Text (5.1 vs 5.15 bytes/edit at batch=256);
   metadata-dominated, op-log envelope adds a hair. Delta may pay on the
-  wire at *large* doc sizes (untested — needs the full 100KB trace).
+  wire at _large_ doc sizes (untested — needs the full 100KB trace).
 - **Steady-state memory: prediction 6 HOLDS** — flat 71→72 KB from 1k
   to 18k history depth; the client does not retain history. Text ~equal.
 - **NEW finding — cold-load PEAK memory is O(history depth):** 19.7MB
@@ -661,9 +661,9 @@ op-log (eg-walker). column-delta sits behind all of these.
 
 ## Implementation slices (sequencing, 2026-06-13)
 
-1. *(done)* `text`/`blob` column kinds → opaque groove `Bytes`, whole-value
+1. _(done)_ `text`/`blob` column kinds → opaque groove `Bytes`, whole-value
    LWW (no op-log yet).
-2. *(in progress)* groove **raw column-family** passthrough — KV storage below
+2. _(in progress)_ groove **raw column-family** passthrough — KV storage below
    the table/IVM layer, for content/extents/checkpoints.
 3. jazz **content store** — per-`(writer, row, column)` append-only byte
    streams + extents over the raw CF.
@@ -687,7 +687,7 @@ since LCA).
 - Merge/effective-chain handling is covered by `Merges and the effective chain`.
 - Checkpoint placement is an opportunistic, format-independent heuristic
   (decided 2026-06-13). We do not adopt eg-walker's strict critical-version cut
-  discipline. Checkpoints are derived class-3 state, so *where* we cut is a
+  discipline. Checkpoints are derived class-3 state, so _where_ we cut is a
   performance knob, never a correctness or format constraint; it can change
   anytime without touching storage format or replay correctness.
 - The groove boundary is covered by `Relationship to groove`.
@@ -697,8 +697,8 @@ since LCA).
 
 ## In-flight TODOs (not yet decided)
 
-1. *(decided 2026-06-13 — settled boundary = globally-accepted, pending
-   hot-write validation.)* The chunk index's determinism anchors to the
+1. _(decided 2026-06-13 — settled boundary = globally-accepted, pending
+   hot-write validation.)_ The chunk index's determinism anchors to the
    **globally-accepted** boundary (a clean settled cut). Open caveat to
    validate empirically: globally-accepted may be **too eager under hot
    concurrent writes** (index churn as the accepted frontier advances

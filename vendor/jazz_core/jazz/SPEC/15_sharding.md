@@ -7,7 +7,7 @@ implemented shard behavior (`INV-SHARD-1`).
 
 ## 15.1 "Partition" is already taken
 
-The term *partition* already has a precise meaning in jazz: it names a physical,
+The term _partition_ already has a precise meaning in jazz: it names a physical,
 per-logical-table / per-schema-version groove storage table used by migration
 lenses (ch. 10) and branch overlays (ch. 11). Those storage partitions are
 registered in `jazz_partitions` / `jazz_branch_partitions` and are durable across
@@ -17,7 +17,7 @@ Shard ownership needs a separate concept. A shard ownership key identifies where
 data is placed for authority and routing; it is not the same thing as an
 existing storage partition. For that reason, this chapter always distinguishes
 **schema-version storage partition** from **shard ownership partition** and does
-not use the bare word *partition* for shard placement. The existing partition
+not use the bare word _partition_ for shard placement. The existing partition
 machinery is useful analogy and support, but it is not itself shard placement
 (its invariants live in ch. 10 / ch. 11).
 
@@ -45,7 +45,7 @@ probable shape is:
   permission closures and query assembly; edges subscribe to every shard-core a
   downstream shape touches.
 - **Rebalancing is a handoff.** Because history is append-only and self-contained
-  *per partition*, moving a partition between shard-cores is "ship its history,
+  _per partition_, moving a partition between shard-cores is "ship its history,
   flip ownership in the catalogue" — no in-place state surgery. Ownership must not
   flip before the new owner can serve it, and in-flight work must drain.
 

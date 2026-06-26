@@ -15,6 +15,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use jazz::db::CommitUnitTrust;
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::AuthorId;
 use jazz::wire::{
@@ -29,6 +30,8 @@ const DIRECT_WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const DIRECT_WS_SUPPORTED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
 const DIRECT_WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const DIRECT_WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+const DIRECT_WS_MAX_FRAME_BYTES: usize = 1 << 20;
+const DIRECT_WS_MAX_MESSAGE_BYTES: usize = DIRECT_WS_MAX_FRAME_BYTES;
 
 static DIRECT_WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 static DIRECT_WS_ADMISSIONS: OnceLock<std::sync::Mutex<DirectWsAdmissionRegistry>> =
@@ -55,13 +58,16 @@ pub(super) async fn direct_ws_handler(
             .into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_direct_ws_connection(socket, state, headers))
+    ws.max_frame_size(DIRECT_WS_MAX_FRAME_BYTES)
+        .max_message_size(DIRECT_WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_direct_ws_connection(socket, state, headers))
 }
 
 #[derive(Clone, Debug)]
 struct DirectWsAdmission {
     identity: AuthorId,
     claims: BTreeMap<String, CoreValue>,
+    trust: CommitUnitTrust,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -157,6 +163,7 @@ async fn direct_ws_admission(
         return Ok(DirectWsAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
+            trust: CommitUnitTrust::TrustedBackend,
         });
     }
 
@@ -192,6 +199,7 @@ async fn direct_ws_admission(
         return Ok(DirectWsAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
+            trust: CommitUnitTrust::TrustedBackend,
         });
     }
 
@@ -221,6 +229,7 @@ async fn direct_ws_admission(
     Ok(DirectWsAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
+        trust: CommitUnitTrust::Session,
     })
 }
 
@@ -233,6 +242,14 @@ fn session_claims(
     };
     json.insert(
         "subject".to_owned(),
+        serde_json::Value::String(session.user_id.clone()),
+    );
+    json.insert(
+        "sub".to_owned(),
+        serde_json::Value::String(session.user_id.clone()),
+    );
+    json.insert(
+        "user_id".to_owned(),
         serde_json::Value::String(session.user_id),
     );
     json.insert(
@@ -320,15 +337,27 @@ fn validate_direct_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
+    let host = direct_ws_cookie_origin_host(headers)
         .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
 
     if direct_ws_origin_matches_host(origin, host) {
         return Ok(());
     }
     Err("cookie websocket auth Origin does not match Host".to_owned())
+}
+
+fn direct_ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("X-Forwarded-Host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
@@ -338,16 +367,15 @@ fn direct_ws_origin_matches_host(origin: &str, host: &str) -> bool {
     let Some(origin_host) = origin.host_str() else {
         return false;
     };
-    let Ok(request_authority) = direct_ws_parse_authority(host) else {
-        return false;
-    };
-
     let origin_port = origin
         .port_or_known_default()
         .unwrap_or_else(|| match origin.scheme() {
             "https" | "wss" => 443,
             _ => 80,
         });
+    let Ok(request_authority) = direct_ws_parse_authority(host, origin_port) else {
+        return false;
+    };
     if origin_host.eq_ignore_ascii_case(&request_authority.host)
         && origin_port == request_authority.port
     {
@@ -362,10 +390,10 @@ struct DirectWsAuthority {
     port: u16,
 }
 
-fn direct_ws_parse_authority(authority: &str) -> Result<DirectWsAuthority, ()> {
+fn direct_ws_parse_authority(authority: &str, default_port: u16) -> Result<DirectWsAuthority, ()> {
     let parsed = reqwest::Url::parse(&format!("ws://{authority}")).map_err(|_| ())?;
     let host = parsed.host_str().ok_or(())?.to_owned();
-    let port = parsed.port_or_known_default().ok_or(())?;
+    let port = parsed.port().unwrap_or(default_port);
     Ok(DirectWsAuthority { host, port })
 }
 
@@ -529,7 +557,10 @@ async fn handle_direct_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match direct_core.open(admission.identity, admission.claims).await {
+    let session = match direct_core
+        .open(admission.identity, admission.claims, admission.trust)
+        .await
+    {
         Ok(session) => session,
         Err(error) => {
             send_direct_wire_error(
@@ -798,6 +829,38 @@ mod tests {
     }
 
     #[test]
+    fn direct_ws_cookie_origin_uses_forwarded_host_before_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://app.example".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
+        headers.insert("X-Forwarded-Host", "app.example".parse().unwrap());
+
+        assert!(validate_direct_ws_cookie_origin(&headers).is_ok());
+
+        headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
+        assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+    }
+
+    #[test]
+    fn direct_ws_cookie_origin_uses_first_forwarded_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://app.example".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
+        headers.insert(
+            "X-Forwarded-Host",
+            "app.example, proxy.local".parse().unwrap(),
+        );
+
+        assert!(validate_direct_ws_cookie_origin(&headers).is_ok());
+    }
+
+    #[test]
     fn direct_ws_cookie_origin_rejects_missing_or_cross_origin() {
         assert!(!direct_ws_origin_matches_host(
             "https://evil.example",
@@ -813,6 +876,12 @@ mod tests {
             "https://evil.example".parse().unwrap(),
         );
         assert!(validate_direct_ws_cookie_origin(&headers).is_err());
+    }
+
+    #[test]
+    fn direct_ws_limits_match_alpha_frame_hardening() {
+        assert_eq!(DIRECT_WS_MAX_FRAME_BYTES, 1 << 20);
+        assert_eq!(DIRECT_WS_MAX_MESSAGE_BYTES, DIRECT_WS_MAX_FRAME_BYTES);
     }
 
     async fn make_direct_ws_test_state() -> Arc<ServerState> {

@@ -33,8 +33,16 @@ export function chatSchema(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((table, index) => {
     if (index === 0) writeTable(table, "rooms", roomDescriptor(), [], undefined);
-    if (index === 1) writeTable(table, "room_members", roomMemberDescriptor(), [["room", "rooms"]], undefined);
-    if (index === 2) writeTable(table, "messages", messageDescriptor(), [["room", "rooms"]], writeMessageReadPolicy);
+    if (index === 1)
+      writeTable(table, "room_members", roomMemberDescriptor(), [["room", "rooms"]], undefined);
+    if (index === 2)
+      writeTable(
+        table,
+        "messages",
+        messageDescriptor(),
+        [["room", "rooms"]],
+        writeMessageReadPolicy,
+      );
   }, 3);
   writer.none();
   writer.none();
@@ -54,12 +62,14 @@ export function encodedMessageCells(message: MessageInput): Uint8Array {
 }
 
 export function messageViews(batches: AbiRowBatch[]): MessageView[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    rowId: row.rowId,
-    room: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "room")),
-    text: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "text")),
-    sender: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "sender")),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      rowId: row.rowId,
+      room: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "room")),
+      text: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "text")),
+      sender: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "sender")),
+    })),
+  );
 }
 
 export function formatMessages(messages: MessageView[]): string {
@@ -67,9 +77,7 @@ export function formatMessages(messages: MessageView[]): string {
 }
 
 function roomDescriptor(): DescriptorField[] {
-  return [
-    { name: "name", valueType: { tag: 6 } },
-  ];
+  return [{ name: "name", valueType: { tag: 6 } }];
 }
 
 function roomMemberDescriptor(): DescriptorField[] {

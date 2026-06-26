@@ -183,12 +183,13 @@ groove::define_record! {
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
         10 => source_branch: Option<BranchId>,
-        11 => fate: FateTag,
-        12 => global_seq: Option<GlobalSeq>,
-        13 => rejection_reason: Option<RejectionReasonTag>,
-        14 => cascade_root: Option<Value>,
-        15 => reason_detail: Option<String>,
-        16 => durability: DurabilityTier,
+        11 => permission_subject: Option<AuthorId>,
+        12 => fate: FateTag,
+        13 => global_seq: Option<GlobalSeq>,
+        14 => rejection_reason: Option<RejectionReasonTag>,
+        15 => cascade_root: Option<Value>,
+        16 => reason_detail: Option<String>,
+        17 => durability: DurabilityTier,
     }
 }
 
@@ -876,6 +877,7 @@ pub(super) fn transaction_values(
                 .map(|value| Box::new(Value::String(value))),
         ),
         Value::Nullable(tx.source_branch.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_seq.map(|seq| Box::new(Value::U64(seq.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),

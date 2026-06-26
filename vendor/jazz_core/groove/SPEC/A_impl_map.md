@@ -1,6 +1,6 @@
 # groove — Specification · Appendix A. Implementation map
 
-*Non-normative (guidance).* This appendix maps the normative chapters to the
+_Non-normative (guidance)._ This appendix maps the normative chapters to the
 implementation. It is a navigation aid, not a source of contract language: when
 the question is what the system guarantees, the normative chapters control; when
 the question is where an implementation concern lives, the source tree controls.
@@ -15,14 +15,14 @@ matches `src/lib.rs`, and chapters 2–4 use the same spine.
 
 ## A.2 Module layering
 
-| module | owns | chapter |
-|---|---|---|
-| `records` | encoded row layout, `RecordDescriptor`, logical vs physical order | 2 |
-| `schema` | declarations; `ColumnType` → `ValueType` | 2 |
-| `storage` | the byte-oriented `OrderedKvStorage` interface (`memory`, `rocksdb`) | 2 |
-| `queries` | SQL-ish AST (syntax only; broader than what lowers) | 3 |
-| `ivm` | `planner` / `graph` / `op_types` / `runtime` | 3–6 |
-| `db` | ties schema + storage + commits + subscriptions + query APIs | 1–7 |
+| module    | owns                                                                 | chapter |
+| --------- | -------------------------------------------------------------------- | ------- |
+| `records` | encoded row layout, `RecordDescriptor`, logical vs physical order    | 2       |
+| `schema`  | declarations; `ColumnType` → `ValueType`                             | 2       |
+| `storage` | the byte-oriented `OrderedKvStorage` interface (`memory`, `rocksdb`) | 2       |
+| `queries` | SQL-ish AST (syntax only; broader than what lowers)                  | 3       |
+| `ivm`     | `planner` / `graph` / `op_types` / `runtime`                         | 3–6     |
+| `db`      | ties schema + storage + commits + subscriptions + query APIs         | 1–7     |
 
 ## A.3 The runtime
 

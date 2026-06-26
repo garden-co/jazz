@@ -1,11 +1,5 @@
-import {
-  Buffer,
-} from "node:buffer";
-import {
-  createPrivateKey,
-  createPublicKey,
-  sign as signBytes,
-} from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createPrivateKey, createPublicKey, sign as signBytes } from "node:crypto";
 import {
   createLocalFirstJwtWithSigner,
   localFirstPrivateKeyDer,

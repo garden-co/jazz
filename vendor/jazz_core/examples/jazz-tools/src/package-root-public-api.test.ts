@@ -39,7 +39,11 @@ test("package root exports newest direct WasmDb public APIs", async () => {
   const todos = db.table<Todo, Omit<Todo, "id">>("todos");
   const readOptions: ReadOptions = { includeDeleted: true };
 
-  const inserted = db.insert(todos, { title: "Import by package name", done: false }, { id: "todo-1" });
+  const inserted = db.insert(
+    todos,
+    { title: "Import by package name", done: false },
+    { id: "todo-1" },
+  );
   assert.equal(inserted.handle?.kind, "insert");
   assert.equal(await inserted.wait({ tier: "local" }), inserted);
 
@@ -47,7 +51,10 @@ test("package root exports newest direct WasmDb public APIs", async () => {
   const deletedRows = db.all(todos, readOptions);
   assert.equal(deletedRows.length, 1);
 
-  const restored = db.restore(todos, "todo-1", { title: "Restored from package root", done: false });
+  const restored = db.restore(todos, "todo-1", {
+    title: "Restored from package root",
+    done: false,
+  });
   assert.equal(restored.handle?.kind, "restore");
   assert.equal(isDeleted(restored), false);
 });
@@ -61,13 +68,16 @@ test("package root createDb import runs a real direct-WasmDb subscription flow",
 
   try {
     await waitForSnapshots(snapshots, 1);
-    db.insert(app.todos as Table<Todo, Omit<Todo, "id">>, { title: "Package runtime flow", done: false });
+    db.insert(app.todos as Table<Todo, Omit<Todo, "id">>, {
+      title: "Package runtime flow",
+      done: false,
+    });
 
     await waitForSnapshots(snapshots, 2);
-    assert.deepEqual(snapshots.map((rows) => rows.map((row) => row.title)), [
-      [],
-      ["Package runtime flow"],
-    ]);
+    assert.deepEqual(
+      snapshots.map((rows) => rows.map((row) => row.title)),
+      [[], ["Package runtime flow"]],
+    );
   } finally {
     subscription.unsubscribe();
     await (db as { close?: () => Promise<void> }).close?.();
@@ -108,7 +118,9 @@ class PackageRootFixtureDb implements Db {
     throw new Error("transactions are not implemented by this test fixture");
   }
 
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> {
     return {
       _table: name,
       _schema: {},
@@ -122,7 +134,10 @@ class PackageRootFixtureDb implements Db {
     row: Init & Partial<Pick<Row, "id">>,
     options: InsertOptions<Row> = {},
   ): WriteResult<Row> & Row {
-    const next = { ...row, id: options.id ?? row.id ?? `todo-${this.#rows.length + 1}` } as unknown as StoredTodo;
+    const next = {
+      ...row,
+      id: options.id ?? row.id ?? `todo-${this.#rows.length + 1}`,
+    } as unknown as StoredTodo;
     this.#rows.push(next);
     return writeObjectResult(next as unknown as Row, { kind: "insert" });
   }
@@ -175,7 +190,9 @@ class PackageRootFixtureDb implements Db {
     _tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | QueryBuilder<Row>,
     options: ReadOptions = {},
   ): Row[] {
-    const rows = options.includeDeleted ? this.#rows : this.#rows.filter((row) => row.__deleted !== true);
+    const rows = options.includeDeleted
+      ? this.#rows
+      : this.#rows.filter((row) => row.__deleted !== true);
     return [...rows] as Row[];
   }
 
@@ -238,10 +255,7 @@ function writeObjectResult<Value extends object>(
   return result as WriteResult<Value> & Value;
 }
 
-function writeResult<Value>(
-  value: Value,
-  handle: PackageRootWriteHandle,
-): WriteResult<Value> {
+function writeResult<Value>(value: Value, handle: PackageRootWriteHandle): WriteResult<Value> {
   return {
     value,
     handle: handle as never,

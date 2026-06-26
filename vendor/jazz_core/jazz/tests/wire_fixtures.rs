@@ -114,6 +114,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     kind: TxKind::Mergeable,
                     n_total_writes: 0,
                     made_by: author,
+                    permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
                     absent_read_set: None,

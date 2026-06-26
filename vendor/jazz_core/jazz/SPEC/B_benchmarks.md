@@ -1,6 +1,6 @@
 # jazz — Specification · Appendix B. Benchmarks
 
-*Non-normative (guidance).* The vision-level, end-to-end benchmark suite that
+_Non-normative (guidance)._ The vision-level, end-to-end benchmark suite that
 measures product claims (complementing per-milestone micro-benchmarks).
 `INV-BENCH-*` ids are auditability anchors, not conformance law. Retained timings
 are directional; only anchored headline artifacts become claims.
@@ -13,7 +13,7 @@ query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
 (exclusive, TPC-C-derived) · **S5** durable streams · **S6** collaborative text ·
 **S7** migration lenses · **S8** branching · **S9** durable execution. Every
-*implemented* harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
+_implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
 
 ## B.2 Methodology
@@ -48,7 +48,7 @@ double-advances.
 ## B.4 Honesty rules (the meta-learnings)
 
 - **Measure the generality tax, don't hide it.** S5/S6 model append streams and
-  text as *full-value rewrites* (`content: bytes`), not hand-modeled app logs or
+  text as _full-value rewrites_ (`content: bytes`), not hand-modeled app logs or
   CRDT structures — that's the point, and it motivates `[needs: column-delta]`.
 - **Pair storage ratios with read latency.** S2 and S6 forbid reporting a
   compressed-history byte ratio alone, because O(history) replay can win bytes and
@@ -86,24 +86,23 @@ ceiling-or-reference and deterministic-counter equality.
 
 ## In flight & operational detail (non-normative)
 
-*B.1–B.6 above are the durable benchmark methodology. The following is the full
+_B.1–B.6 above are the durable benchmark methodology. The following is the full
 operational detail — per-scenario fixtures, axes, metrics, gates, systems-tier
 mapping, and retained-run rules — from the former `BENCHMARKS.md`. It settles
-upward as scenarios stabilize.*
-
+upward as scenarios stabilize._
 
 This is the vision-level benchmark suite: it measures jazz's four product
 claims end to end, one scenario per claim. It complements (does not replace)
 the per-milestone benchmarks that gate individual features.
 
-| # | scenario | product claim under test | headline artifact |
-|---|---|---|---|
-| 1 | SaaS app | query-driven partial sync scales with *relevance*, not data | cold-load bytes vs. naive baseline; core cost vs. subscriber count |
-| 2 | Canvas | realtime mergeable collaboration converges fast and cheap | cross-participant p95 at tier `none` vs. link-latency floor; history bytes vs. zstd-JSON event log *paired with* time-travel read latency |
-| 3 | Permissions | recursive RLS over partial replicas is correct and fast | revocation-to-disappearance p95 at scale |
-| 4 | Order processing | jazz is competitive as a classical serializable database | max sustained scale factor; exclusive-counters vs. mergeable-counters variant |
-| 5 | Durable stream | append-heavy streams with tail/resume are trivial on jazz | history+metadata bytes per appended token vs. log-file floor; append→tail p99 |
-| 6 | Collaborative text | jazz competes with CRDT libraries on real editing traces | storage ratio vs. durable CRDTs *paired with* cold-load and time-travel latency |
+| #   | scenario           | product claim under test                                    | headline artifact                                                                                                                         |
+| --- | ------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | SaaS app           | query-driven partial sync scales with _relevance_, not data | cold-load bytes vs. naive baseline; core cost vs. subscriber count                                                                        |
+| 2   | Canvas             | realtime mergeable collaboration converges fast and cheap   | cross-participant p95 at tier `none` vs. link-latency floor; history bytes vs. zstd-JSON event log _paired with_ time-travel read latency |
+| 3   | Permissions        | recursive RLS over partial replicas is correct and fast     | revocation-to-disappearance p95 at scale                                                                                                  |
+| 4   | Order processing   | jazz is competitive as a classical serializable database    | max sustained scale factor; exclusive-counters vs. mergeable-counters variant                                                             |
+| 5   | Durable stream     | append-heavy streams with tail/resume are trivial on jazz   | history+metadata bytes per appended token vs. log-file floor; append→tail p99                                                             |
+| 6   | Collaborative text | jazz competes with CRDT libraries on real editing traces    | storage ratio vs. durable CRDTs _paired with_ cold-load and time-travel latency                                                           |
 
 A micro tier (scenario 0) covers the primitive costs underneath all of them.
 
@@ -120,7 +119,7 @@ S8 is intentionally excluded from this audit.
 the full `client↔edge↔core` path through the `Db` facade with full client `Db`s
 (tracks E6a/E6b), emitting `edge_mergeable_acceptance` and
 `edge_permission_scope_hydration` phases. The per-row notes below predate that
-conversion and describe *phase* coverage, not topology.
+conversion and describe _phase_ coverage, not topology.
 
 **Latest default-size run (2026-06-15, git `6ff5f2e`).** Canary (smoke) then
 default sizes. Clean at default: groove (`micro`, `scenario`), jazz (`sync`,
@@ -160,15 +159,16 @@ that canary path; `JAZZ_BENCH_PHASES=default` keeps the main stream/log/sqlite
 summary path.
 
 **Scaling signals — mostly bench artifacts, not an engine cliff (investigated
-2026-06-15).** Initial default-run numbers *looked* superlinear (S9 aggregate
+2026-06-15).** Initial default-run numbers _looked_ superlinear (S9 aggregate
 92→13 transitions/s with "history metadata" 9 KB→121 KB/step; S6 text replay
 33 edits/s at 2000 commits) but investigation showed these are largely measurement
 and harness problems, not engine O(n²):
-- **S9** — `history_metadata_bytes_per_step` is a *misleading metric*: it divides
+
+- **S9** — `history_metadata_bytes_per_step` is a _misleading metric_: it divides
   the whole RocksDB directory by committed transitions, but the run pre-seeds
   `instances` rows proportional to ladder size before the timed loop, so the ratio
   inflates with scale. Settle/commit throughput stays roughly flat (568→530/s);
-  the *aggregate* collapse is the bench running full dashboard + tailer correctness
+  the _aggregate_ collapse is the bench running full dashboard + tailer correctness
   scans after every transition and cold-resume rehydrating all instances/steps/
   events. Fix (bench): split fixture bytes from transition-history bytes and
   compute per-step from bytes added after seeding; report aggregate-with-assertions
@@ -195,83 +195,83 @@ phase requires live updates; **HARNESS** means no benchmark code for the phase;
 `INV-PERF-2`; **BASELINE** means a required external floor/reference is not
 wired.
 
-| scenario | phase | runnable honestly today? | gap kind |
-|---|---|---|---|
-| S0 micro | HLC time/receive/compare and `TxTimeSortKey` | Partial | HARNESS: `jazz-sim/benches/micro.rs` emits primitive JSONL via `emit_hist`, but no isolated HLC or `TxTimeSortKey` primitive was found; `jazz/benches/sync.rs` only exercises them inside four-tier sync. |
-| S0 micro | domination over N heads | Yes | `jazz-sim/benches/micro.rs` has a domination primitive over head counts; useful older primitives also exist in `groove/benches/micro.rs`. |
-| S0 micro | deletion-register resolution | Yes | `jazz-sim/benches/micro.rs` has a deletion-resolution primitive over mixed events. |
-| S0 micro | version ingest rate | Yes | `jazz-sim/benches/micro.rs` emits version-ingest rate and bytes; `jazz/benches/sync.rs` is broader sync-path evidence. |
-| S0 micro | commit-unit encode/decode, 1/10/100 rows | Yes | `jazz-sim/benches/micro.rs` has commit-unit size rows-per-unit cases and `commit_unit_bytes`. |
-| S0 micro | read-set capture overhead | Yes | `jazz-sim/benches/micro.rs` emits read-set capture samples; `jazz/benches/validation.rs` exercises the exclusive validation path. |
-| S0 micro | validation by row vs predicate read-set entry | Yes | `jazz-sim/benches/micro.rs` splits row and predicate validation; `jazz/benches/validation.rs` has broader exclusive validation histograms and a hand-rolled `BaselineModel`. |
-| S1 SaaS | cold load | Yes | `jazz-sim/benches/s1_saas.rs` emits cold/warm summary with `cold_bytes`, `cold_bytes_floor`, `naive_refetch_ceiling_bytes`, result rows, closure rows, and oracle equality checks. |
-| S1 SaaS | warm local read | Yes | `jazz-sim/benches/s1_saas.rs` emits `warm_local_*` and `warm_settled_*`; current query paths are validated against the S1 oracle. |
-| S1 SaaS | reconnect | Partial | FEATURE: `jazz-sim/benches/s1_saas.rs` emits `phase: reconnect` and bytes/floor, but the spec's delta-resubscribe variant remains `[needs: payload-inventory]`; the current path is full rehydrate. |
-| S1 SaaS | subscriber sweep | Partial | HARNESS: `jazz-sim/benches/s1_saas.rs` emits `phase: subscriber_sweep`, notification bytes, bundles/refs, adds/removes, now uses full client `Db`s through an edge (track E6b); the full 10/100/1k/10k client retained sweep matrix is still pending. |
-| S1 SaaS | distinct-shape sweep | No | HARNESS: no distinct-shape phase emission was found in `jazz-sim/benches/s1_saas.rs`; groove has predecessor shape-sharing signals in `groove/benches/scenario.rs`, not the S1 fixture. |
-| S1 SaaS | query churn | No | HARNESS: the search-as-you-type binding/shape churn phase is specified but no emitted phase or harness code was found. |
-| S1 SaaS | high-fan-out hydration | Yes | `jazz-sim/benches/s1_saas.rs` emits `phase: high_fan_out_hydration`, bytes/floor, mid-hydration fate counters, maintained subscription view incremental/full-recompute/full-diff counters, and a harness-deterministic legacy-named `membership_history_scan_fallbacks` zero check; the latter is not claimed as a live serving counter. |
-| S1 SaaS | ordered/page queries | Partial | FEATURE: query support exists in `jazz/src/query.rs` and node evaluation (`jazz/src/node/query_eval.rs`), but no S1 ordered-page phase is emitted and live IVM maintenance of order/limit has not been demonstrated by the phase. |
-| S1 SaaS | aggregate milestone page | Partial | FEATURE: aggregate query capability must be proven incrementally maintained for live subscriptions before the phase can be honest; no aggregate S1 phase is emitted. |
-| S2 canvas | live collaboration | Yes | `jazz-sim/benches/s2_canvas.rs` emits `phase: live` for deterministic/threaded runs, coalescing, latency histograms via `hdrhistogram`, bytes/floor, merge counters, core tick, and spy/non-invite correctness. |
-| S2 canvas | loading: current state only | Yes | `jazz-sim/benches/s2_canvas.rs` has `phase: db_surface_live` and current-row checks; `jazz/benches/cold_subscription.rs` is a focused current-row cold-load receipt. |
-| S2 canvas | loading: current + full history | Partial | HARNESS: the history-complete node path is used for historical reads, but no separate current+full-history load metric was found. |
-| S2 canvas | historical state at 25/50/75% | Yes | `jazz-sim/benches/s2_canvas.rs` emits `phase: historical_load` with cut percent/global seq and prefix-replay correctness. |
-| S2 canvas | history-depth current-row reads | Partial | HARNESS: `jazz/benches/cold_subscription.rs` covers history-depth current-row subscription, but the S2 JSONL phase does not yet pair those depth-latency lines with the storage-ratio artifact. |
-| S2 canvas | failure injection | Yes | `jazz-sim/benches/s2_canvas.rs` emits `phase: failure`, recovery-to-convergence, final rows, spy rows, and convergence checks. |
-| S2 canvas | history storage ratio vs zstd JSON event log | No | BASELINE: the spec-required zstd JSON event-log anchors are not emitted by `s2_canvas.rs`; only wire bytes/floor and history rows are present. |
-| S2 canvas | edge topology (client↔edge↔core) | Yes | `s2_canvas.rs` routes Db client → edge Node → core Node (track E6b) and emits `edge_mergeable_acceptance` + `edge_permission_scope_hydration`. |
-| S3 permissions | cold load by persona | Yes | `jazz-sim/benches/s3_permissions.rs` emits `phase: cold` for simple/admin personas with bytes/floor, including Db-surface variants. |
-| S3 permissions | grant latency | Yes | `jazz-sim/benches/s3_permissions.rs` emits `phase: grant` with grant latency and oracle visibility checks. |
-| S3 permissions | revocation | Yes | `jazz-sim/benches/s3_permissions.rs` emits `phase: revocation` across configured revoke sizes with visibility convergence and recompute counters. |
-| S3 permissions | forbidden writes | Yes | `jazz-sim/benches/s3_permissions.rs` emits `phase: forbidden_writes` and gates forbidden deliveries at zero, matching `INV-BENCH-6` / `INV-PERF-2`. |
-| S3 permissions | reconnect | No | HARNESS: no reconnect phase emission was found in `s3_permissions.rs`; S1 has reconnect machinery but S3 permission-filtered catch-up remains unwired. |
-| S3 permissions | edge profile and permission-subscription hydration | Yes | `s3_permissions.rs` routes client↔edge↔core (track E6a) with narrow `(policy_shape, writer_claim)` scope hydration + dedup; emits edge acceptance + scope-hydration phases. |
-| S3 permissions | block-tree fixture variant | Yes | `jazz-sim/benches/s3_permissions.rs` emits `phase: block_tree_variant`, `joint_cold_hydration_headline`, and `headline_progress` with bytes/floor and visibility checks. |
-| S4 order processing | scale-out | Yes | `jazz-sim/benches/s4_order_processing.rs` emits scale/SLO phases, p50/p95 settlement, warehouse/throughput fields, and same-schedule SQLite replay assertions. |
-| S4 order processing | contention | Yes | `jazz-sim/benches/s4_order_processing.rs` emits contention modes, abort/retry information, and hot-payment counter notes. |
-| S4 order processing | mergeable-counter strategy variant | Yes | `jazz-sim/benches/s4_order_processing.rs` emits the counter-strategy side-by-side variant. |
-| S4 order processing | settlement vs propagation split | Partial | HARNESS: appendix C requires reporting settlement throughput and propagation-inclusive throughput separately; `s4_order_processing.rs` has settlement-centric fields, while the propagation-inclusive split remains incomplete for retained claims. |
-| S4 order processing | SQLite same-schedule reference | Yes | `s4_order_processing.rs` uses `rusqlite`, `run_sqlite_reference`, and `assert_sqlite_replay_matches`; this is a real SQLite reference, unlike `jazz/benches/validation.rs`'s `BaselineModel`. |
-| S5 durable stream | append workload, batching, run length, stream-count axis | Yes | `jazz-sim/benches/s5_durable_stream.rs` emits the main stream summary with token batching, stream count, appends/sec, history bytes, sync bytes, and storage bytes/token. |
-| S5 durable stream | live tailers | Yes | `s5_durable_stream.rs` measures append-to-tail latency and synced bytes per token per tailer. |
-| S5 durable stream | resumers | Partial | FEATURE: the bench measures process-local cursor catch-up bytes/time against fresh/full snapshot bytes and emits `phase: "process_local_resume"` with `full_rehydrate_bytes`, `resume_bytes`, `resume_ratio`, and `resume_status`; process-local resume may not be smaller in tiny fixtures, and the portable delta-resubscribe variant remains `[needs: payload-inventory]`. |
-| S5 durable stream | Db-surface remote tail/resume | Partial | HARNESS: `s5_durable_stream.rs` emits `phase: db_surface_live`, but it is a live Db-surface summary, not the full remote tail/resume/resumer matrix. |
-| S5 durable stream | log-file floor | Yes | `s5_durable_stream.rs` has `run_log_floor` and emits log floor bytes/token and elapsed time. |
-| S5 durable stream | SQLite WAL baseline | Yes | `s5_durable_stream.rs` uses `rusqlite` in `run_sqlite_baseline` and emits SQLite bytes/token and elapsed time. |
-| S5 durable stream | prefix-monotone oracle | Yes | `s5_durable_stream.rs` asserts tailer/resumer content convergence and prefix monotonicity for the generated stream, matching `INV-BENCH-8`. |
-| S5 durable stream | column-delta efficiency target | Partial | FEATURE: the scenario intentionally rewrites full bytes values; no structural column-delta path was found in `jazz/src/node/content_store.rs` or the sync benches, so bytes/token are baseline numbers only. |
-| S5 durable stream | evicted-prefix resumer | No | FEATURE: the `[needs: eviction]` phase is specified but not implemented. |
-| S6 text | trace replay | Yes | `jazz-sim/benches/s6_text_traces.rs` emits `phase: trace_replay` plus `db_surface_trace_replay`, throughput, echo latency, history bytes/edit, zstd anchors, and final/prefix correctness. |
-| S6 text | live observation | Yes | `s6_text_traces.rs` emits `phase: live_observation` with observer p95, synced bytes, and link floor. |
-| S6 text | cold load: current only | Yes | `s6_text_traces.rs` emits `phase: cold_load` current-only latency and current bytes. |
-| S6 text | cold load: full history | Partial | FEATURE: `s6_text_traces.rs` marks full-history load as gated until a history subscription load path exists. |
-| S6 text | point-in-time reads | Yes | `s6_text_traces.rs` emits `phase: point_in_time_read` for cut percentages with direct-prefix replay correctness. |
-| S6 text | storage | Yes | `s6_text_traces.rs` reports history/metadata bytes per edit and zstd final-doc / JSON-op-log anchors. |
-| S6 text | CRDT adversary comparisons | Partial | BASELINE: `s6_text_traces.rs` has in-process adversary comparison fields and Automerge/diamond-style paths, but these are local/library baselines, not the full pinned eg-walker/dmonad external-result matrix for every trace. |
-| S6 text | memory | Partial | ORACLE: the bench reports `peak_memory_proxy_bytes` as peak document characters/bytes, not process peak RSS; useful but not the spec's memory metric. |
-| S6 text | concurrent merge | No | FEATURE: current text semantics remain whole-value HLC-LWW; the concurrent merge phase is gated by `[needs: text-merge]` despite `jazz/src/node/text_oplog.rs` existing. |
-| S6 text | column-delta efficiency target | Partial | FEATURE: full text values are rewritten per edit; no structural column-delta maintenance was found, so storage/wire ratios are baseline numbers only. |
-| S7 migrations | mixed-version steady state | Partial | HARNESS: `jazz-sim/benches/s7_migrations.rs` is a smoke-style executable over a schema chain and `MigrationLens` with JSONL phase output, but still has no retained reporting matrix. |
-| S7 migrations | lens-tax measurement | No | HARNESS: no native vs 1-hop/3-hop latency, write translation, or sync-byte overhead output was found. |
-| S7 migrations | rollout wave | No | HARNESS: no mid-stream population migration phase or latency/recompute metrics were found. |
-| S7 migrations | late offline client | Partial | ORACLE: `s7_migrations.rs` exercises an offline v1 client reconnecting into the chain and emits smoke-sized JSONL phase fields, but the retained counter contract is still incomplete. |
-| S9 durable execution | instance-count ladder | Yes | `jazz-sim/benches/s9_durable_execution.rs` emits `phase: scale_ladder`, instances, steps, SLO fields, transition/sec, dashboard/tail/resume latencies, and store bytes. |
-| S9 durable execution | injected race rejection | Yes | `s9_durable_execution.rs` emits attempts, rejects, injected races, double-advance rejects, double advances, and gates no-double-advance correctness. |
-| S9 durable execution | dashboard/per-instance tailers | Yes | `s9_durable_execution.rs` measures dashboard p95, tail p95, sync bytes, and asserts dashboard/tailer oracle state. |
-| S9 durable execution | crash/resume | Partial | HARNESS: the bench measures cold resume/reattach and bytes; explicit crash injection/restart of workers is not a separate phase. |
-| S9 durable execution | SQLite transition baseline | Yes | `s9_durable_execution.rs` uses `rusqlite`, `run_sqlite_reference`, and same-schedule replay checks. |
-| S9 durable execution | S5 log-file floor | Yes | `s9_durable_execution.rs` has `run_log_floor` and emits log floor bytes/step and elapsed time. |
-| S9 durable execution | payload-inventory resume | Partial | FEATURE: resume is full rehydrate; delta-resubscribe remains `[needs: payload-inventory]`. |
+| scenario             | phase                                                    | runnable honestly today? | gap kind                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------- | -------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S0 micro             | HLC time/receive/compare and `TxTimeSortKey`             | Partial                  | HARNESS: `jazz-sim/benches/micro.rs` emits primitive JSONL via `emit_hist`, but no isolated HLC or `TxTimeSortKey` primitive was found; `jazz/benches/sync.rs` only exercises them inside four-tier sync.                                                                                                                                                                     |
+| S0 micro             | domination over N heads                                  | Yes                      | `jazz-sim/benches/micro.rs` has a domination primitive over head counts; useful older primitives also exist in `groove/benches/micro.rs`.                                                                                                                                                                                                                                     |
+| S0 micro             | deletion-register resolution                             | Yes                      | `jazz-sim/benches/micro.rs` has a deletion-resolution primitive over mixed events.                                                                                                                                                                                                                                                                                            |
+| S0 micro             | version ingest rate                                      | Yes                      | `jazz-sim/benches/micro.rs` emits version-ingest rate and bytes; `jazz/benches/sync.rs` is broader sync-path evidence.                                                                                                                                                                                                                                                        |
+| S0 micro             | commit-unit encode/decode, 1/10/100 rows                 | Yes                      | `jazz-sim/benches/micro.rs` has commit-unit size rows-per-unit cases and `commit_unit_bytes`.                                                                                                                                                                                                                                                                                 |
+| S0 micro             | read-set capture overhead                                | Yes                      | `jazz-sim/benches/micro.rs` emits read-set capture samples; `jazz/benches/validation.rs` exercises the exclusive validation path.                                                                                                                                                                                                                                             |
+| S0 micro             | validation by row vs predicate read-set entry            | Yes                      | `jazz-sim/benches/micro.rs` splits row and predicate validation; `jazz/benches/validation.rs` has broader exclusive validation histograms and a hand-rolled `BaselineModel`.                                                                                                                                                                                                  |
+| S1 SaaS              | cold load                                                | Yes                      | `jazz-sim/benches/s1_saas.rs` emits cold/warm summary with `cold_bytes`, `cold_bytes_floor`, `naive_refetch_ceiling_bytes`, result rows, closure rows, and oracle equality checks.                                                                                                                                                                                            |
+| S1 SaaS              | warm local read                                          | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `warm_local_*` and `warm_settled_*`; current query paths are validated against the S1 oracle.                                                                                                                                                                                                                                             |
+| S1 SaaS              | reconnect                                                | Partial                  | FEATURE: `jazz-sim/benches/s1_saas.rs` emits `phase: reconnect` and bytes/floor, but the spec's delta-resubscribe variant remains `[needs: payload-inventory]`; the current path is full rehydrate.                                                                                                                                                                           |
+| S1 SaaS              | subscriber sweep                                         | Partial                  | HARNESS: `jazz-sim/benches/s1_saas.rs` emits `phase: subscriber_sweep`, notification bytes, bundles/refs, adds/removes, now uses full client `Db`s through an edge (track E6b); the full 10/100/1k/10k client retained sweep matrix is still pending.                                                                                                                         |
+| S1 SaaS              | distinct-shape sweep                                     | No                       | HARNESS: no distinct-shape phase emission was found in `jazz-sim/benches/s1_saas.rs`; groove has predecessor shape-sharing signals in `groove/benches/scenario.rs`, not the S1 fixture.                                                                                                                                                                                       |
+| S1 SaaS              | query churn                                              | No                       | HARNESS: the search-as-you-type binding/shape churn phase is specified but no emitted phase or harness code was found.                                                                                                                                                                                                                                                        |
+| S1 SaaS              | high-fan-out hydration                                   | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `phase: high_fan_out_hydration`, bytes/floor, mid-hydration fate counters, maintained subscription view incremental/full-recompute/full-diff counters, and a harness-deterministic legacy-named `membership_history_scan_fallbacks` zero check; the latter is not claimed as a live serving counter.                                      |
+| S1 SaaS              | ordered/page queries                                     | Partial                  | FEATURE: query support exists in `jazz/src/query.rs` and node evaluation (`jazz/src/node/query_eval.rs`), but no S1 ordered-page phase is emitted and live IVM maintenance of order/limit has not been demonstrated by the phase.                                                                                                                                             |
+| S1 SaaS              | aggregate milestone page                                 | Partial                  | FEATURE: aggregate query capability must be proven incrementally maintained for live subscriptions before the phase can be honest; no aggregate S1 phase is emitted.                                                                                                                                                                                                          |
+| S2 canvas            | live collaboration                                       | Yes                      | `jazz-sim/benches/s2_canvas.rs` emits `phase: live` for deterministic/threaded runs, coalescing, latency histograms via `hdrhistogram`, bytes/floor, merge counters, core tick, and spy/non-invite correctness.                                                                                                                                                               |
+| S2 canvas            | loading: current state only                              | Yes                      | `jazz-sim/benches/s2_canvas.rs` has `phase: db_surface_live` and current-row checks; `jazz/benches/cold_subscription.rs` is a focused current-row cold-load receipt.                                                                                                                                                                                                          |
+| S2 canvas            | loading: current + full history                          | Partial                  | HARNESS: the history-complete node path is used for historical reads, but no separate current+full-history load metric was found.                                                                                                                                                                                                                                             |
+| S2 canvas            | historical state at 25/50/75%                            | Yes                      | `jazz-sim/benches/s2_canvas.rs` emits `phase: historical_load` with cut percent/global seq and prefix-replay correctness.                                                                                                                                                                                                                                                     |
+| S2 canvas            | history-depth current-row reads                          | Partial                  | HARNESS: `jazz/benches/cold_subscription.rs` covers history-depth current-row subscription, but the S2 JSONL phase does not yet pair those depth-latency lines with the storage-ratio artifact.                                                                                                                                                                               |
+| S2 canvas            | failure injection                                        | Yes                      | `jazz-sim/benches/s2_canvas.rs` emits `phase: failure`, recovery-to-convergence, final rows, spy rows, and convergence checks.                                                                                                                                                                                                                                                |
+| S2 canvas            | history storage ratio vs zstd JSON event log             | No                       | BASELINE: the spec-required zstd JSON event-log anchors are not emitted by `s2_canvas.rs`; only wire bytes/floor and history rows are present.                                                                                                                                                                                                                                |
+| S2 canvas            | edge topology (client↔edge↔core)                         | Yes                      | `s2_canvas.rs` routes Db client → edge Node → core Node (track E6b) and emits `edge_mergeable_acceptance` + `edge_permission_scope_hydration`.                                                                                                                                                                                                                                |
+| S3 permissions       | cold load by persona                                     | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: cold` for simple/admin personas with bytes/floor, including Db-surface variants.                                                                                                                                                                                                                                           |
+| S3 permissions       | grant latency                                            | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: grant` with grant latency and oracle visibility checks.                                                                                                                                                                                                                                                                    |
+| S3 permissions       | revocation                                               | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: revocation` across configured revoke sizes with visibility convergence and recompute counters.                                                                                                                                                                                                                             |
+| S3 permissions       | forbidden writes                                         | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: forbidden_writes` and gates forbidden deliveries at zero, matching `INV-BENCH-6` / `INV-PERF-2`.                                                                                                                                                                                                                           |
+| S3 permissions       | reconnect                                                | No                       | HARNESS: no reconnect phase emission was found in `s3_permissions.rs`; S1 has reconnect machinery but S3 permission-filtered catch-up remains unwired.                                                                                                                                                                                                                        |
+| S3 permissions       | edge profile and permission-subscription hydration       | Yes                      | `s3_permissions.rs` routes client↔edge↔core (track E6a) with narrow `(policy_shape, writer_claim)` scope hydration + dedup; emits edge acceptance + scope-hydration phases.                                                                                                                                                                                                   |
+| S3 permissions       | block-tree fixture variant                               | Yes                      | `jazz-sim/benches/s3_permissions.rs` emits `phase: block_tree_variant`, `joint_cold_hydration_headline`, and `headline_progress` with bytes/floor and visibility checks.                                                                                                                                                                                                      |
+| S4 order processing  | scale-out                                                | Yes                      | `jazz-sim/benches/s4_order_processing.rs` emits scale/SLO phases, p50/p95 settlement, warehouse/throughput fields, and same-schedule SQLite replay assertions.                                                                                                                                                                                                                |
+| S4 order processing  | contention                                               | Yes                      | `jazz-sim/benches/s4_order_processing.rs` emits contention modes, abort/retry information, and hot-payment counter notes.                                                                                                                                                                                                                                                     |
+| S4 order processing  | mergeable-counter strategy variant                       | Yes                      | `jazz-sim/benches/s4_order_processing.rs` emits the counter-strategy side-by-side variant.                                                                                                                                                                                                                                                                                    |
+| S4 order processing  | settlement vs propagation split                          | Partial                  | HARNESS: appendix C requires reporting settlement throughput and propagation-inclusive throughput separately; `s4_order_processing.rs` has settlement-centric fields, while the propagation-inclusive split remains incomplete for retained claims.                                                                                                                           |
+| S4 order processing  | SQLite same-schedule reference                           | Yes                      | `s4_order_processing.rs` uses `rusqlite`, `run_sqlite_reference`, and `assert_sqlite_replay_matches`; this is a real SQLite reference, unlike `jazz/benches/validation.rs`'s `BaselineModel`.                                                                                                                                                                                 |
+| S5 durable stream    | append workload, batching, run length, stream-count axis | Yes                      | `jazz-sim/benches/s5_durable_stream.rs` emits the main stream summary with token batching, stream count, appends/sec, history bytes, sync bytes, and storage bytes/token.                                                                                                                                                                                                     |
+| S5 durable stream    | live tailers                                             | Yes                      | `s5_durable_stream.rs` measures append-to-tail latency and synced bytes per token per tailer.                                                                                                                                                                                                                                                                                 |
+| S5 durable stream    | resumers                                                 | Partial                  | FEATURE: the bench measures process-local cursor catch-up bytes/time against fresh/full snapshot bytes and emits `phase: "process_local_resume"` with `full_rehydrate_bytes`, `resume_bytes`, `resume_ratio`, and `resume_status`; process-local resume may not be smaller in tiny fixtures, and the portable delta-resubscribe variant remains `[needs: payload-inventory]`. |
+| S5 durable stream    | Db-surface remote tail/resume                            | Partial                  | HARNESS: `s5_durable_stream.rs` emits `phase: db_surface_live`, but it is a live Db-surface summary, not the full remote tail/resume/resumer matrix.                                                                                                                                                                                                                          |
+| S5 durable stream    | log-file floor                                           | Yes                      | `s5_durable_stream.rs` has `run_log_floor` and emits log floor bytes/token and elapsed time.                                                                                                                                                                                                                                                                                  |
+| S5 durable stream    | SQLite WAL baseline                                      | Yes                      | `s5_durable_stream.rs` uses `rusqlite` in `run_sqlite_baseline` and emits SQLite bytes/token and elapsed time.                                                                                                                                                                                                                                                                |
+| S5 durable stream    | prefix-monotone oracle                                   | Yes                      | `s5_durable_stream.rs` asserts tailer/resumer content convergence and prefix monotonicity for the generated stream, matching `INV-BENCH-8`.                                                                                                                                                                                                                                   |
+| S5 durable stream    | column-delta efficiency target                           | Partial                  | FEATURE: the scenario intentionally rewrites full bytes values; no structural column-delta path was found in `jazz/src/node/content_store.rs` or the sync benches, so bytes/token are baseline numbers only.                                                                                                                                                                  |
+| S5 durable stream    | evicted-prefix resumer                                   | No                       | FEATURE: the `[needs: eviction]` phase is specified but not implemented.                                                                                                                                                                                                                                                                                                      |
+| S6 text              | trace replay                                             | Yes                      | `jazz-sim/benches/s6_text_traces.rs` emits `phase: trace_replay` plus `db_surface_trace_replay`, throughput, echo latency, history bytes/edit, zstd anchors, and final/prefix correctness.                                                                                                                                                                                    |
+| S6 text              | live observation                                         | Yes                      | `s6_text_traces.rs` emits `phase: live_observation` with observer p95, synced bytes, and link floor.                                                                                                                                                                                                                                                                          |
+| S6 text              | cold load: current only                                  | Yes                      | `s6_text_traces.rs` emits `phase: cold_load` current-only latency and current bytes.                                                                                                                                                                                                                                                                                          |
+| S6 text              | cold load: full history                                  | Partial                  | FEATURE: `s6_text_traces.rs` marks full-history load as gated until a history subscription load path exists.                                                                                                                                                                                                                                                                  |
+| S6 text              | point-in-time reads                                      | Yes                      | `s6_text_traces.rs` emits `phase: point_in_time_read` for cut percentages with direct-prefix replay correctness.                                                                                                                                                                                                                                                              |
+| S6 text              | storage                                                  | Yes                      | `s6_text_traces.rs` reports history/metadata bytes per edit and zstd final-doc / JSON-op-log anchors.                                                                                                                                                                                                                                                                         |
+| S6 text              | CRDT adversary comparisons                               | Partial                  | BASELINE: `s6_text_traces.rs` has in-process adversary comparison fields and Automerge/diamond-style paths, but these are local/library baselines, not the full pinned eg-walker/dmonad external-result matrix for every trace.                                                                                                                                               |
+| S6 text              | memory                                                   | Partial                  | ORACLE: the bench reports `peak_memory_proxy_bytes` as peak document characters/bytes, not process peak RSS; useful but not the spec's memory metric.                                                                                                                                                                                                                         |
+| S6 text              | concurrent merge                                         | No                       | FEATURE: current text semantics remain whole-value HLC-LWW; the concurrent merge phase is gated by `[needs: text-merge]` despite `jazz/src/node/text_oplog.rs` existing.                                                                                                                                                                                                      |
+| S6 text              | column-delta efficiency target                           | Partial                  | FEATURE: full text values are rewritten per edit; no structural column-delta maintenance was found, so storage/wire ratios are baseline numbers only.                                                                                                                                                                                                                         |
+| S7 migrations        | mixed-version steady state                               | Partial                  | HARNESS: `jazz-sim/benches/s7_migrations.rs` is a smoke-style executable over a schema chain and `MigrationLens` with JSONL phase output, but still has no retained reporting matrix.                                                                                                                                                                                         |
+| S7 migrations        | lens-tax measurement                                     | No                       | HARNESS: no native vs 1-hop/3-hop latency, write translation, or sync-byte overhead output was found.                                                                                                                                                                                                                                                                         |
+| S7 migrations        | rollout wave                                             | No                       | HARNESS: no mid-stream population migration phase or latency/recompute metrics were found.                                                                                                                                                                                                                                                                                    |
+| S7 migrations        | late offline client                                      | Partial                  | ORACLE: `s7_migrations.rs` exercises an offline v1 client reconnecting into the chain and emits smoke-sized JSONL phase fields, but the retained counter contract is still incomplete.                                                                                                                                                                                        |
+| S9 durable execution | instance-count ladder                                    | Yes                      | `jazz-sim/benches/s9_durable_execution.rs` emits `phase: scale_ladder`, instances, steps, SLO fields, transition/sec, dashboard/tail/resume latencies, and store bytes.                                                                                                                                                                                                       |
+| S9 durable execution | injected race rejection                                  | Yes                      | `s9_durable_execution.rs` emits attempts, rejects, injected races, double-advance rejects, double advances, and gates no-double-advance correctness.                                                                                                                                                                                                                          |
+| S9 durable execution | dashboard/per-instance tailers                           | Yes                      | `s9_durable_execution.rs` measures dashboard p95, tail p95, sync bytes, and asserts dashboard/tailer oracle state.                                                                                                                                                                                                                                                            |
+| S9 durable execution | crash/resume                                             | Partial                  | HARNESS: the bench measures cold resume/reattach and bytes; explicit crash injection/restart of workers is not a separate phase.                                                                                                                                                                                                                                              |
+| S9 durable execution | SQLite transition baseline                               | Yes                      | `s9_durable_execution.rs` uses `rusqlite`, `run_sqlite_reference`, and same-schedule replay checks.                                                                                                                                                                                                                                                                           |
+| S9 durable execution | S5 log-file floor                                        | Yes                      | `s9_durable_execution.rs` has `run_log_floor` and emits log floor bytes/step and elapsed time.                                                                                                                                                                                                                                                                                |
+| S9 durable execution | payload-inventory resume                                 | Partial                  | FEATURE: resume is full rehydrate; delta-resubscribe remains `[needs: payload-inventory]`.                                                                                                                                                                                                                                                                                    |
 
 Landed capabilities were retired from the gate list; git history is the record.
 
-| gate | status | evidence |
-|---|---|---|
+| gate                         | status | evidence                                                                                                                                                                                                                           |
+| ---------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[needs: payload-inventory]` | FUTURE | Reconnect/resume delta-resubscribe from peer payload inventory is still not the measured path in S1/S5/S9; steady-state complete-tx payload dedup (`PeerState.shipped_complete_tx_payloads`, appendix C) is a different mechanism. |
-| `[needs: column-delta]` | FUTURE | S5/S6 intentionally rewrite full `bytes`/text column values; no structural column-delta encoding path was found in `jazz/src/node/content_store.rs` or the scenario benches. |
-| `[needs: text-merge]` | FUTURE | `jazz/src/node/text_oplog.rs` exists, but current S6 scenario semantics are still whole-value HLC-LWW; no rich-text three-way merge strategy is wired into the phase. |
-| `[needs: eviction]` | FUTURE | S5's evicted-prefix resumer phase is specified but no eviction/resume benchmark path was found. |
+| `[needs: column-delta]`      | FUTURE | S5/S6 intentionally rewrite full `bytes`/text column values; no structural column-delta encoding path was found in `jazz/src/node/content_store.rs` or the scenario benches.                                                       |
+| `[needs: text-merge]`        | FUTURE | `jazz/src/node/text_oplog.rs` exists, but current S6 scenario semantics are still whole-value HLC-LWW; no rich-text three-way merge strategy is wired into the phase.                                                              |
+| `[needs: eviction]`          | FUTURE | S5's evicted-prefix resumer phase is specified but no eviction/resume benchmark path was found.                                                                                                                                    |
 
 ### Existing infrastructure inventory
 
@@ -367,9 +367,9 @@ in previous experiments (groove's benchmark history is the case law).
 
 **One workload definition, two drivers.** Every scenario is defined as a
 seeded workload over simulation-first nodes and uses deterministic simulation
-testing (DST) for reproducible correctness runs. *Deterministic* mode executes
+testing (DST) for reproducible correctness runs. _Deterministic_ mode executes
 all correctness checks (oracle comparisons are exact, repeatable, and
-zero-noise); *threaded* mode produces timing numbers.
+zero-noise); _threaded_ mode produces timing numbers.
 A scenario implementation that can only run on one driver is incomplete.
 
 **Declared network model.** Settlement latency is dominated by link latency,
@@ -389,18 +389,18 @@ systems get the equivalent setting.
 **Floors, ceilings, and baselines.** Every metric is reported against an
 anchor so it is interpretable across hardware:
 
-- *latency floor*: a raw message echo through the same simulated links —
+- _latency floor_: a raw message echo through the same simulated links —
   what is physically possible;
   (Measured note, 2026-06-11: the threaded driver adds ~1ms sleep-scheduling
   overhead over the configured profile on macOS — echo p50 3.0ms vs a 2.0ms
   configured RTT. The echo scenario measures this per run; when canvas-class
   sub-ms floors start to matter, either spin-wait the final stretch before
   delivery deadlines or report echo overhead as a third anchor line.)
-- *bytes floor*: the entropy of the actual change stream (sum of encoded
+- _bytes floor_: the entropy of the actual change stream (sum of encoded
   payload bytes that genuinely changed) — what a perfect protocol would ship;
-- *naive ceiling* (per scenario): broadcast-everything (canvas),
+- _naive ceiling_ (per scenario): broadcast-everything (canvas),
   refetch-on-change (SaaS);
-- *reference implementation* where stated (SQLite for scenario 4).
+- _reference implementation_ where stated (SQLite for scenario 4).
 
 **Metrics regime** (inherited from groove): deterministic counters — rows,
 versions, bytes synced, versions shipped vs. referenced, merges created,
@@ -439,8 +439,8 @@ the one applications run.
 
 ## 0. Micro tier
 
-*Motivation: every scenario cost decomposes into a handful of primitives;
-when a scenario regresses, this tier localizes it.*
+_Motivation: every scenario cost decomposes into a handful of primitives;
+when a scenario regresses, this tier localizes it._
 
 Hand-rolled harness (groove `micro.rs` style), reporting ns percentiles and
 bytes:
@@ -458,10 +458,10 @@ bytes:
 
 ## 1. SaaS app (Linear-style task tracking)
 
-*Motivation: the core partial-sync claim — a client syncs what its queries
+_Motivation: the core partial-sync claim — a client syncs what its queries
 need, not the workspace; the server's cost grows with affected subscribers,
 not with subscriber count. This is groove's headline curve, lifted to the
-full protocol.*
+full protocol._
 
 ### Schema
 
@@ -488,7 +488,7 @@ issues: {
 issueTags: { issue: ref(issues), tag: ref(tags) }
 ```
 
-Note: "updated time" is *derived* — it is the `made_at` of a row's current
+Note: "updated time" is _derived_ — it is the `made_at` of a row's current
 version; no column needed.
 
 ### Fixture (seeded, Zipf-skewed activity)
@@ -511,7 +511,7 @@ Zipf-distributed.
   cost and notification fanout. Must stay flat-ish per the binding-set
   aggregation design (register the shape once per peer, ship binding deltas); this is the protocol-level version of groove's headline curve.
 - **distinct-shape sweep** `[base]`: the orthogonal axis — 10 / 100 / 1k
-  *different* shapes live on one core (vary filters/joins structurally).
+  _different_ shapes live on one core (vary filters/joins structurally).
   Stresses graph hash-consing and arrangement sharing directly, where the
   same-shape sweep stresses binding aggregation. Competing systems degrade
   on exactly one of these two axes; jazz must stay flat-ish on both.
@@ -563,9 +563,9 @@ client converges to identical state as a never-disconnected client.
 
 ## 2. Realtime canvas
 
-*Motivation: mergeable transactions under super-realtime concurrent writes —
+_Motivation: mergeable transactions under super-realtime concurrent writes —
 convergence, merge behavior, history growth, and the cost of passive
-observers. Also the suite's failure-injection home.*
+observers. Also the suite's failure-injection home._
 
 ### Schema
 
@@ -591,7 +591,7 @@ broadcast).
   coalescing — 600 raw commits/sec vs. ~300 batched at core is a
   product-relevant tradeoff, reported side by side.
 
-Metrics: input-to-receipt latency p50/p95/p99 at every *other* participant,
+Metrics: input-to-receipt latency p50/p95/p99 at every _other_ participant,
 **at settled tier `none`**, vs. the peer-latency floor · **merge versions
 created per second** (and merges-of-merges) — the design predicts merges are
 the exception; this is the scenario built to check that prediction · bytes
@@ -607,7 +607,7 @@ the history-compaction headline: today's uncompacted multiple is the
 baseline that future compaction must beat. **Rule: the ratio is only ever
 reported paired with the phase-2 time-travel/history-depth read latencies** —
 a compressed blob with O(history) replay reads would win the ratio and lose
-the product; the pair is the claim ("compact history *and* fast time-travel
+the product; the pair is the claim ("compact history _and_ fast time-travel
 lookup"), so the pair is the artifact.
 
 ### Phase 2 — loading `[base except where tagged]`
@@ -636,7 +636,7 @@ prefix · non-invited spy client receives nothing.
 
 ## 3. Offline-first app with complex permissions
 
-*Motivation: recursive RLS (team nesting × access edges) over partial
+_Motivation: recursive RLS (team nesting × access edges) over partial
 replicas — correctness of permission-filtered sync and, above all, the **cost
 of permission evaluation in the common path**. That cost is measured two ways,
 which are the primary signals: (1) **cold load** — evaluating a persona's whole
@@ -647,7 +647,7 @@ RLS). Permission **changes** (grant/revocation) are deliberately **secondary**:
 the design assumes they are rare relative to reads and writes, so the
 revocation path is retained as a recursive-retraction correctness-and-cost
 check (the known recompute cliff), not as the headline. Both fixtures below —
-the org fixture and the block-tree variant — are equally important.*
+the org fixture and the block-tree variant — are equally important._
 
 ### Schema
 
@@ -667,8 +667,8 @@ resourceAccess:      { resource: ref(resources), team: ref(teams),
 20 orgs · 100 teams/org, team→team nesting up to 5 deep · 40,000
 resources/org · 10 resourceAccess edges per resource. Permission rule:
 recursive path via resourceAccess × teamTeamMembership; `isAdmin`/
-`onlyAdmins`/`adminsOnly` filters as in the schema. Two personas: *simple
-user* (~2,000 visible resources) and *admin user* (all 40,000, via explicit
+`onlyAdmins`/`adminsOnly` filters as in the schema. Two personas: _simple
+user_ (~2,000 visible resources) and _admin user_ (all 40,000, via explicit
 resourceAccess evidence).
 
 **Block-tree fixture variant `[base]`** — the document-workspace shape:
@@ -690,10 +690,10 @@ policy-composed-graph design claims they aren't.
 
 ### Phases
 
-1. **Cold load** `[base]` — *primary*: full org-visible data for simple vs.
+1. **Cold load** `[base]` — _primary_: full org-visible data for simple vs.
    admin user. Measures permission evaluation over a persona's whole visible
    set at hydration.
-2. **New-write-to-reader** `[base]` — *primary*: under realistic concurrent
+2. **New-write-to-reader** `[base]` — _primary_: under realistic concurrent
    load (permitted writers committing mergeable at tier `none`; many connected
    readers, **each an independent subscriber**, not a shared broadcast),
    measure per-write-to-reader latency (reader-observe − `tx.made_at`, with the
@@ -701,11 +701,11 @@ policy-composed-graph design claims they aren't.
    (writes/sec accepted, updates delivered/sec) as reader count scales — i.e.
    **how many readers the system can serve under live permission filtering**.
    Same concurrent actor topology as S2, plus RLS.
-3. **Grant latency** `[base]` — *secondary*: warm client; add a resource / a
+3. **Grant latency** `[base]` — _secondary_: warm client; add a resource / a
    resourceAccess edge / a teamTeamMembership that makes resources visible —
    p50/p95/p99 from commit to appearance at the client, at settled tiers `none`
    and `global`.
-4. **Revocation** `[base]` — *secondary (permission changes are assumed rare)*:
+4. **Revocation** `[base]` — _secondary (permission changes are assumed rare)_:
    remove a teamTeamMembership or resourceAccess edge that makes 1 / 100 / 2,000
    resources invisible to a warm client. Measure commit-to-disappearance p50/p95
    at the client, and core (later edge) CPU during the recursive recompute.
@@ -713,7 +713,7 @@ policy-composed-graph design claims they aren't.
    recompute cliff) and the standing baseline for incremental retraction work —
    not as a headline number, since changes are rare relative to reads/writes.
 5. **Forbidden writes** `[base]`: a write to a resource the client cannot see
-   is committed elsewhere. This is a *non-event* at the client — measured as
+   is committed elsewhere. This is a _non-event_ at the client — measured as
    a deterministic counter, not a latency: a harness-side spy asserts **zero
    forbidden rows/deltas delivered within K ticks** (any nonzero count is a
    security failure and fails the run outright).
@@ -744,12 +744,12 @@ subscriptions are settled.
 
 ## 4. Globally consistent order processing (TPC-C derived)
 
-*Motivation: jazz used deliberately against its grain — no partial
+_Motivation: jazz used deliberately against its grain — no partial
 replication, no offline, all writes `exclusive`, clients wait for `global`
 settlement. Tests whether commit-time validation (two-point predicate
 evaluation over prepared shapes) makes jazz competitive as a classical
 serializable database — and surfaces the OCC hot-row problem on purpose, so
-the mergeable-counters answer to it can be measured rather than asserted.*
+the mergeable-counters answer to it can be measured rather than asserted._
 
 ### Schema
 
@@ -778,7 +778,7 @@ except terminology: "local store size", not "SQLite size".
   `district.nextOrderNumber`; decrement stock; insert order + lines.
 - **payment**: update customer balance/counters; update district and
   warehouse revenue counters; insert payment row.
-- **delivery**: read the district's undelivered-orders *predicate* into the
+- **delivery**: read the district's undelivered-orders _predicate_ into the
   read-set and select the oldest **client-side** (no ORDER BY needed — the
   predicate read makes the choice phantom-safe under validation); mark order
   and lines delivered; update customer balance.
@@ -822,7 +822,7 @@ produces identical final state.
 
 ## 5. Durable stream (LLM-agent append log)
 
-*Motivation: agents appending tokens to durable streams, with listeners
+_Motivation: agents appending tokens to durable streams, with listeners
 tailing live or resuming from their last known point, is a workload entire
 startups are built around. The jazz thesis under test is **brainless
 dumping**: the application writes the full stream state into one column on
@@ -834,7 +834,7 @@ storage problems that thesis implies: **redundancy between row versions of a
 large, mostly-shared column value**, and **the per-version metadata overhead
 itself** (at 100 tokens/s, transaction/version metadata can dwarf the
 payload). Today's numbers are the baseline `[needs: column-delta]` must
-beat.*
+beat._
 
 ### Schema
 
@@ -859,7 +859,7 @@ column write.
   joining at seeded points with an existing payload inventory — `[base]` resumes
   by rehydration, `[needs: payload-inventory]` re-measures with delta resubscribe;
 - **stream-count axis**: 1 / 100 / 10k concurrent streams (agents at scale) —
-  per-commit core cost must track *affected* streams; shape registration
+  per-commit core cost must track _affected_ streams; shape registration
   with binding-set aggregation is the mechanism under test, as in scenario
   1's subscriber sweep.
 
@@ -868,12 +868,12 @@ column write.
 - **floor**: an fsync-disciplined append-only log file with length-prefixed,
   zstd-framed records, tail via in-process notification — the minimal
   purpose-built durable stream (what stream startups' core loop is). This
-  measures jazz's *generality tax* directly.
+  measures jazz's _generality tax_ directly.
 - **pragmatic baseline**: a SQLite WAL table (one row per event, `(stream,
-  seq)` pk) with a notify/poll tailer.
+seq)` pk) with a notify/poll tailer.
 - **storage anchors**: zstd (levels 3 and 19) of the concatenated payloads —
   the bytes floor for any encoding.
-- external systems (Kafka/Redpanda/NATS JetStream) are deliberately *not* in
+- external systems (Kafka/Redpanda/NATS JetStream) are deliberately _not_ in
   the suite: operationally heavy, different durability envelopes; revisit
   only if a marketing claim ever needs them.
 
@@ -901,19 +901,20 @@ full-replay state, byte-exact · a late resumer over an evicted prefix
 
 ## 6. Collaborative text editing (real editing trace)
 
-*Motivation: large documents in a text column, edited as linear runs at
+_Motivation: large documents in a text column, edited as linear runs at
 random positions — the same value-versioning pressure as scenario 5 but with
 mid-value edits instead of appends. This is the arena where jazz competes
-directly with CRDT libraries, on their own canonical benchmark.*
+directly with CRDT libraries, on their own canonical benchmark._
 
 ### The trace
 
 The [automerge-perf editing trace](https://github.com/automerge/automerge-perf):
 Martin Kleppmann's keystroke-by-keystroke recording of writing the LaTeX
-source of *“A Conflict-Free Replicated JSON Datatype”* (Kleppmann &
+source of _“A Conflict-Free Replicated JSON Datatype”_ (Kleppmann &
 Beresford) — **182,315 single-character insertions and 77,463 deletions
 (259,778 edit operations)** producing a ~100KB final document; CC-BY-4.0;
 the standard benchmark for Automerge, Yjs, diamond-types, Loro, et al.
+
 ### Trace catalog (eg-walker superset)
 
 We adopt the [eg-walker evaluation set](https://arxiv.org/abs/2409.14252)
@@ -922,18 +923,18 @@ results (stored size, load time, replay/merge time, memory) become free
 side-by-side baselines — organized by their taxonomy and extended with
 jazz-specific traces in each group:
 
-| label | trace | character | gate |
-|---|---|---|---|
-| S1 | *automerge-paper* (Kleppmann LaTeX; 2 authors taking turns) | sequential, keystroke | `[base]` |
-| S2 | *seph-blog1* (8,800-word blog post, 1 author) | sequential, keystroke | `[base]` |
-| S3 | *egwalker* (the eg-walker paper's own source, 2 authors) | sequential, keystroke | `[base]` |
-| W1 | Wikipedia revision history of one large page (pinned page + revision range + content hash; CC-BY-SA) | sequential, multi-author, **full-state revisions with reverts** — the brainless-dump model in the wild | `[base]` |
-| C1 | *friendsforever* (2 users realtime, 1s simulated latency, ~26k edits) | concurrent, fine-grained | ingest/storage `[base]`; merged-content assertions `[needs: text-merge]` |
-| C2 | *clownschool* (2 users realtime, 0.5s latency, 5,380 txns, timestamps) | concurrent, fine-grained | as C1 |
-| A1 | `src/node.cc` from Node.js (git-derived) | async divergence, **human merge resolutions recorded** | DAG replay with recorded merges `[base]`; jazz-generated merges `[needs: text-merge]` |
-| A2 | `Makefile` from git.git (git-derived) | as A1 | as A1 |
-| A3 | repo-corpus variant: every file of a busy repo over a commit range | async, thousands of text rows merged concurrently | as A1 |
-| X1 | synthetic contention generator (seeded; K = 2–32 authors, Zipf edit positions, per-author offline windows from seconds to hours) | **contention as a dial** — the axis no recorded trace provides; offline divergence is jazz's home turf | ingest `[base]`; merge `[needs: text-merge]` |
+| label | trace                                                                                                                            | character                                                                                              | gate                                                                                  |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| S1    | _automerge-paper_ (Kleppmann LaTeX; 2 authors taking turns)                                                                      | sequential, keystroke                                                                                  | `[base]`                                                                              |
+| S2    | _seph-blog1_ (8,800-word blog post, 1 author)                                                                                    | sequential, keystroke                                                                                  | `[base]`                                                                              |
+| S3    | _egwalker_ (the eg-walker paper's own source, 2 authors)                                                                         | sequential, keystroke                                                                                  | `[base]`                                                                              |
+| W1    | Wikipedia revision history of one large page (pinned page + revision range + content hash; CC-BY-SA)                             | sequential, multi-author, **full-state revisions with reverts** — the brainless-dump model in the wild | `[base]`                                                                              |
+| C1    | _friendsforever_ (2 users realtime, 1s simulated latency, ~26k edits)                                                            | concurrent, fine-grained                                                                               | ingest/storage `[base]`; merged-content assertions `[needs: text-merge]`              |
+| C2    | _clownschool_ (2 users realtime, 0.5s latency, 5,380 txns, timestamps)                                                           | concurrent, fine-grained                                                                               | as C1                                                                                 |
+| A1    | `src/node.cc` from Node.js (git-derived)                                                                                         | async divergence, **human merge resolutions recorded**                                                 | DAG replay with recorded merges `[base]`; jazz-generated merges `[needs: text-merge]` |
+| A2    | `Makefile` from git.git (git-derived)                                                                                            | as A1                                                                                                  | as A1                                                                                 |
+| A3    | repo-corpus variant: every file of a busy repo over a commit range                                                               | async, thousands of text rows merged concurrently                                                      | as A1                                                                                 |
+| X1    | synthetic contention generator (seeded; K = 2–32 authors, Zipf edit positions, per-author offline windows from seconds to hours) | **contention as a dial** — the axis no recorded trace provides; offline divergence is jazz's home turf | ingest `[base]`; merge `[needs: text-merge]`                                          |
 
 Methodology adopted with the traces:
 
@@ -954,7 +955,7 @@ The [dmonad/crdt-benchmarks](https://github.com/dmonad/crdt-benchmarks)
 suite remains in use for cross-library comparability where shapes overlap.
 
 **Semantic honesty up front**: jazz today merges text columns by whole-value
-HLC-LWW — concurrent edits to one document *replace*, they do not interleave.
+HLC-LWW — concurrent edits to one document _replace_, they do not interleave.
 Character-level concurrent merging is `[needs: text-merge]`: a rich-text
 column merge strategy doing **three-way merges**, with the common ancestor
 supplied by the version DAG (`parents` gives it directly — this is the
@@ -981,19 +982,19 @@ the systems where humans did that work by hand.
 3. **Cold load** `[base]`: fresh client loads the finished document — current
    state only vs. with full history; historical
    states at 25/50/75% of the trace. The canvas pairing rule applies: any
-   storage claim is reported *with* these latencies.
+   storage claim is reported _with_ these latencies.
 4. **Storage** `[base]`: total store size and **history+metadata bytes per
    edit** after full replay, against the anchors below.
 5. **Concurrent merge** `[needs: text-merge]`: replay the concurrent traces
    below; the converged document must match the three-way strategy's
    documented semantics (compared against CRDT-library output on the same
-   trace as a *semantic*, not byte, comparison — the strategies legitimately
+   trace as a _semantic_, not byte, comparison — the strategies legitimately
    differ).
 
 ### Adversarial comparisons
 
 Two explicitly-labeled tiers, because most CRDT libraries are in-memory and
-jazz is durable — the label *is* the fairness mechanism:
+jazz is durable — the label _is_ the fairness mechanism:
 
 - **in-memory CRDT floor** (non-durable): diamond-types, Yjs, Loro replaying
   the same trace — CPU/latency/memory floor;
@@ -1024,11 +1025,11 @@ spec, identical on every node.
 
 ## 7. Parallel schema evolution (migration lenses)
 
-*Motivation: the no-stop-the-world migration claim — clients on different
+_Motivation: the no-stop-the-world migration claim — clients on different
 schema versions read and write concurrently through bidirectional
 translation lenses, nothing on disk is rewritten, and offline clients
 that predate a schema change still sync in. The cost under test is the
-**lens tax**: translated reads and writes vs native ones.*
+**lens tax**: translated reads and writes vs native ones._
 
 ### Setup
 
@@ -1064,10 +1065,10 @@ The native single-version run is the floor; the naive alternative
 
 ## 8. Branching `[needs: scenario harness]`
 
-*Motivation: branches as a first-class database feature — isolated
+_Motivation: branches as a first-class database feature — isolated
 parallel lines of work over a shared base (sandboxing, drafts, staging,
 agent experimentation) with snapshot-base semantics, cheap creation, and
-storage shared with the base.*
+storage shared with the base._
 
 ### Workload (agent-sandbox shape)
 
@@ -1097,7 +1098,7 @@ equivalent direct-on-main write sequence under the same merge strategies
 
 ## 9. Durable execution backend
 
-*Motivation: workflow/durable-execution engines need exactly the pair
+_Motivation: workflow/durable-execution engines need exactly the pair
 jazz claims to unify — append-heavy per-instance step logs with live
 tailing, and serializable per-instance state transitions — at high
 concurrent-instance counts with natural partitioning. The incumbent
@@ -1106,7 +1107,7 @@ but the application code carries the consistency burden. The claim
 under test: jazz matches the scalability while the application writes
 ordinary rows and transactions. Mostly reuses S4 (exclusive validation,
 scale-out ladder) and S5 (append streams, tailers) machinery under a
-workflow-shaped fixture.*
+workflow-shaped fixture._
 
 ### Schema
 
@@ -1184,14 +1185,14 @@ tier under `benchmarks/systems/` with deliberately different rules:
 
 Scenario mapping (the claim each cell tests):
 
-| cell | systems | shared claim / expected differentiator |
-|---|---|---|
-| S1 partial sync | **Zero** (closest cousin: query-driven sync + IVM), InstantDB, Electric shapes, Convex subscriptions | cold-load bytes/time, subscriber + distinct-shape sweeps, query churn |
-| S2 realtime | all four | input-to-receipt latency; their convergence is server-ordered LWW without history — envelope label carries the asymmetry |
-| S3 permissions | InstantDB perms, Electric shape where-clauses, Zero query auth | **revocation-to-disappearance vs their resubscribe/invalidation storm** — likely the suite's most differentiating chart |
-| S4 serializable | **Convex only** (the others do not claim serializable transactions) | OCC vs OCC at the same guarantee — a fairer "same product" reference than local SQLite |
-| S5/S6 | none | not their product; CRDT libraries remain the right adversaries |
-| S9 durable execution | stateful-compute platforms (actor/durable-object model) | ephemeral compute attaching to shared state: cold-attach latency, cross-instance coordination via exclusive txs vs single-threaded state islands, fan-out without pre-chunking the app. v1 is jazz-side metrics + architecture contrast (the incumbent platforms need their own cloud to run honestly) |
+| cell                 | systems                                                                                              | shared claim / expected differentiator                                                                                                                                                                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| S1 partial sync      | **Zero** (closest cousin: query-driven sync + IVM), InstantDB, Electric shapes, Convex subscriptions | cold-load bytes/time, subscriber + distinct-shape sweeps, query churn                                                                                                                                                                                                                                  |
+| S2 realtime          | all four                                                                                             | input-to-receipt latency; their convergence is server-ordered LWW without history — envelope label carries the asymmetry                                                                                                                                                                               |
+| S3 permissions       | InstantDB perms, Electric shape where-clauses, Zero query auth                                       | **revocation-to-disappearance vs their resubscribe/invalidation storm** — likely the suite's most differentiating chart                                                                                                                                                                                |
+| S4 serializable      | **Convex only** (the others do not claim serializable transactions)                                  | OCC vs OCC at the same guarantee — a fairer "same product" reference than local SQLite                                                                                                                                                                                                                 |
+| S5/S6                | none                                                                                                 | not their product; CRDT libraries remain the right adversaries                                                                                                                                                                                                                                         |
+| S9 durable execution | stateful-compute platforms (actor/durable-object model)                                              | ephemeral compute attaching to shared state: cold-attach latency, cross-instance coordination via exclusive txs vs single-threaded state islands, fan-out without pre-chunking the app. v1 is jazz-side metrics + architecture contrast (the incumbent platforms need their own cloud to run honestly) |
 
 Additional workload this tier motivates (also useful standalone):
 **optimistic-write depth on reconnect** — N offline local writes against

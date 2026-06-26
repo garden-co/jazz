@@ -1,19 +1,19 @@
 # groove — Specification · 5. Prepared shapes & bindings-as-data
 
-A prepared shape is a parameterized query whose parameters are *data flowing
-through the graph*, not literals baked into graph identity. This is groove's
+A prepared shape is a parameterized query whose parameters are _data flowing
+through the graph_, not literals baked into graph identity. This is groove's
 work-sharing mechanism: thousands of bound instances of one shape share a single
 maintained graph and its arrangements (ch. 4). This chapter defines the shape
 APIs, the binding lifecycle, and output routing.
 
 The vocabulary is easy to conflate, so fix it first:
 
-| term | what it is |
-|---|---|
-| **prepared shape** (`PreparedShapeId`) | the parameterized graph itself, registered once and shared by all of its bindings |
-| **binding source name** (`binding_source_shape`) | the stable string that names the `BindingSource` weighted record set *inside* that graph — a name, not the shape id |
-| **binding** (`BindingKey`) | one concrete parameter tuple bound against the shape |
-| **bound subscription** | a subscriber attached to one binding; many subscribers can share a binding (it is reference-counted) |
+| term                                             | what it is                                                                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| **prepared shape** (`PreparedShapeId`)           | the parameterized graph itself, registered once and shared by all of its bindings                                   |
+| **binding source name** (`binding_source_shape`) | the stable string that names the `BindingSource` weighted record set _inside_ that graph — a name, not the shape id |
+| **binding** (`BindingKey`)                       | one concrete parameter tuple bound against the shape                                                                |
+| **bound subscription**                           | a subscriber attached to one binding; many subscribers can share a binding (it is reference-counted)                |
 
 For a shape `posts WHERE author_id = $author`, the binding source name might be
 `"by_author"`; `author_id = "u7"` is a binding; and two UI panes both watching
@@ -40,7 +40,7 @@ such graphs (`INV-SHAPE-1`).
 Shape identity is structural. Graphs are hash-consed by `NodeDescriptor`
 (ch. 3), so identical prepares share the same nodes and arrangements. Sharing is
 defined for structurally identical graphs; the status of one binding source name
-shared by two *different* graphs is the open question recorded below.
+shared by two _different_ graphs is the open question recorded below.
 
 ## 5.2 The APIs
 
@@ -48,7 +48,7 @@ Prepared shapes can be registered either from an already-built graph or from a
 parameterized query. At the graph level,
 `Database::prepare(graph, binding_source_shape, binding_descriptor,
 output_key_fields)` registers a retained `PreparedShapeId`. The
-`binding_source_shape` argument is the binding source *name* (§5.1), not the
+`binding_source_shape` argument is the binding source _name_ (§5.1), not the
 shape id. A caller then uses `Database::bind_shape(id, &[Value])` to create a
 `Subscription` for one concrete parameter tuple.
 
@@ -60,7 +60,7 @@ missing, duplicate, or unknown names, and passes values in prepared-parameter
 order (`INV-SHAPE-14`). The supplied values must conform to the shape's
 `binding_descriptor`; otherwise binding fails before hydration (`INV-SHAPE-15`).
 
-*Further invariants.* `INV-SHAPE-2` — `prepare_query` rejects parameter-free
+_Further invariants._ `INV-SHAPE-2` — `prepare_query` rejects parameter-free
 queries and lowers only equality `column = parameter` predicates into binding
 joins. `INV-SHAPE-3` — a prepared-query output includes every binding key column
 not already projected, rejecting output-name collisions with parameter names.
@@ -82,7 +82,7 @@ reference counts determine when that set changes:
 - Binding an already-active key injects nothing and serves the new subscriber
   from the per-key materialized snapshot (`INV-SHAPE-7`).
 - Unsubscribing decrements the refcount and injects a `-1` binding delta only
-  when the *last* reference is removed (`INV-SHAPE-10`).
+  when the _last_ reference is removed (`INV-SHAPE-10`).
 
 Shared bindings also require a strict retraction order. Retractions discovered
 through dropped receivers during notification are queued, then drained before
@@ -97,9 +97,9 @@ must be routed back to the binding that owns it. Each shape output row is
 projected through `output_key_fields` into a `BindingKey`; that key's
 materialized multiset is updated, and the delta is sent only to subscribers
 registered for that key (`INV-SHAPE-8`). A shape commit tick therefore delivers
-to each bound subscriber exactly the changes to *its* parameterized result.
+to each bound subscriber exactly the changes to _its_ parameterized result.
 
-*Further invariants.* `INV-SHAPE-9` — the per-key materialized snapshot is a
+_Further invariants._ `INV-SHAPE-9` — the per-key materialized snapshot is a
 weighted multiset; a delta bringing a record to weight zero removes it.
 `INV-SHAPE-17` — a normal-mode `BindingSource` tick emits only `BindingDelta`s
 whose `shape` matches the source and whose descriptor matches the node output.
@@ -127,8 +127,8 @@ the API does not define shape drop.
 ## Open questions
 
 - 🔶 **Same-name binding sources across distinct shapes.** The README calls
-  sharing one `binding_source_shape` string across *identical* graphs a sharp
-  edge, but a regression test exercises two *different* sibling shapes sharing one
+  sharing one `binding_source_shape` string across _identical_ graphs a sharp
+  edge, but a regression test exercises two _different_ sibling shapes sharing one
   source. Decide whether distinct shapes sharing a source name is supported or
   forbidden.
 - 🔶 **`prepare`-time binding-source validation.** `prepare` does not clearly

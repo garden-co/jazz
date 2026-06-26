@@ -17,8 +17,8 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor, RowCells,
-    SeededRowIdSource, WireTransportAdapter,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor,
+    RowCells, SeededRowIdSource, WireTransportAdapter,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -277,6 +277,24 @@ impl ShellDb {
         }
     }
 
+    fn accept_subscriber_with_claims_and_trust(
+        &self,
+        transport: Box<dyn jazz::db::Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> ShellPeerConnection {
+        match self {
+            Self::Memory(db) => ShellPeerConnection::Memory(
+                db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
+            ),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => ShellPeerConnection::Rocks(
+                db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
+            ),
+        }
+    }
+
     fn detach_connection(&self, connection: &ShellPeerConnection) -> bool {
         match (self, connection) {
             (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
@@ -463,6 +481,20 @@ impl InMemoryServerShell {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) -> ShellResult<ServerSession> {
+        self.accept_subscriber_session_with_claims_and_trust(
+            identity,
+            claims,
+            CommitUnitTrust::Session,
+        )
+    }
+
+    /// Accept one subscriber byte session under the supplied identity, claims, and trust mode.
+    pub fn accept_subscriber_session_with_claims_and_trust(
+        &mut self,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> ShellResult<ServerSession> {
         if self.is_draining() {
             self.metrics.rejected_sessions += 1;
             return Err(ShellError::SessionRejected {
@@ -470,11 +502,11 @@ impl InMemoryServerShell {
             });
         }
         let transport = SharedWireTransport::default();
-        let connection = self.db.accept_subscriber_with_claims(
+        let connection = self.db.accept_subscriber_with_claims_and_trust(
             Box::new(WireTransportAdapter::current(transport.clone())),
             identity,
             claims,
-            None,
+            trust,
         );
         let session_id = self.sessions.len();
         self.sessions.push(Some(ServerSessionState {

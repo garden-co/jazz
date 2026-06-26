@@ -29,10 +29,19 @@ test("createJazzContext exposes db and asBackend over the same memory DB", async
     const created = context.db().insert(todos, { title: "Ship backend slice", done: false });
 
     assert.equal(created.title, "Ship backend slice");
-    assert.deepEqual(context.db().all(todos).map((todo) => todo.title), ["Ship backend slice"]);
+    assert.deepEqual(
+      context
+        .db()
+        .all(todos)
+        .map((todo) => todo.title),
+      ["Ship backend slice"],
+    );
 
     const backendRows = context.asBackend().db.all(todos);
-    assert.deepEqual(backendRows.map((todo) => todo.done), [false]);
+    assert.deepEqual(
+      backendRows.map((todo) => todo.done),
+      [false],
+    );
   } finally {
     await context.shutdown();
   }

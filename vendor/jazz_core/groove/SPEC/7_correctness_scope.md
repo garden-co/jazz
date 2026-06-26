@@ -1,7 +1,7 @@
 # groove — Specification · 7. Correctness, determinism & scope
 
 This chapter defines what "correct" means for groove, what the system
-deliberately does *not* promise, and where the correctness contract ends. It is
+deliberately does _not_ promise, and where the correctness contract ends. It is
 the boundary defended by the oracle tests and the reference point for reviewing
 the system's semantic obligations.
 
@@ -65,13 +65,13 @@ Evaluation uses ordered state throughout (`BTreeMap`s in the reference
 implementation, with no ambient-hash iteration order), `F64` values are never
 NaN (ch. 2), and the benchmark harness exposes deterministic counters as hard
 regression signals alongside the oracle. The correctness contract itself is
-*multiset* equality — the consolidated sum of §7.1, independent of delivery
+_multiset_ equality — the consolidated sum of §7.1, independent of delivery
 order.
 
 With identical inputs, the reference implementation replays to the same deltas
 in the same order; this is a reference-implementation property, not part of the
 contract. As a result, a divergence from the naive recompute is always a real
-bug, never noise. Cross-operator delivery *order* is reproducible but not itself
+bug, never noise. Cross-operator delivery _order_ is reproducible but not itself
 a normative guarantee — depend on the consolidated result, not on the order
 deltas arrive in.
 

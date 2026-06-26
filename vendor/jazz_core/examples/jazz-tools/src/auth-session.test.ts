@@ -80,7 +80,10 @@ test("local-first JWT payload uses the expected issuer", async () => {
 
   assert.equal(state.session?.claims.issuer, LOCAL_FIRST_JWT_ISSUER);
   assert.equal(state.session?.claims.audience, "auth-app");
-  assert.equal(parseJwtPayload(makeJwt({ sub: state.session?.user_id }))?.sub, state.session?.user_id);
+  assert.equal(
+    parseJwtPayload(makeJwt({ sub: state.session?.user_id }))?.sub,
+    state.session?.user_id,
+  );
 });
 
 test("local-first proof is an EdDSA JWT signed by the derived secret key", () => {

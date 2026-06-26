@@ -1,11 +1,12 @@
-import { NapiRuntime } from "jazz-napi";
+import { NapiDirectDb } from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, type RequestLike } from "../runtime/client.js";
+import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
+import { DirectWasmRuntime } from "../runtime/direct-wasm/runtime.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
   resolveSchemaSource,
@@ -59,6 +60,24 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
+type FlushableRuntime = Runtime & { flush?: () => void };
+
+const SYSTEM_AUTHOR_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
+}
+
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
@@ -82,8 +101,9 @@ function assertValidBackendConfig(config: BackendContextConfig): void {
 export class JazzContext {
   private readonly config: ResolvedBackendContextConfig;
   private readonly defaultSchemaInput?: BackendSchemaInput;
+  private readonly nodeIdentityScope: string;
   private initializedSchemaJson?: string;
-  private runtime?: NapiRuntime;
+  private runtime?: FlushableRuntime;
   private clientInstance?: JazzClient;
 
   constructor(config: BackendContextConfig) {
@@ -93,6 +113,10 @@ export class JazzContext {
       allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
     };
     this.defaultSchemaInput = config.app;
+    this.nodeIdentityScope =
+      config.driver.type === "persistent"
+        ? config.driver.dataPath
+        : `memory:${Date.now()}:${Math.random()}`;
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
@@ -115,24 +139,21 @@ export class JazzContext {
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
 
-    if (this.config.driver.type === "persistent") {
-      this.runtime = new NapiRuntime(
-        schemaJson,
-        this.config.appId,
-        this.config.env ?? "dev",
-        this.config.userBranch ?? "main",
-        this.config.driver.dataPath,
-        nodeTier,
-      );
-    } else {
-      this.runtime = NapiRuntime.inMemory(
-        schemaJson,
-        this.config.appId,
-        this.config.env ?? "dev",
-        this.config.userBranch ?? "main",
-        nodeTier,
-      );
-    }
+    const env = this.config.env ?? "dev";
+    const userBranch = this.config.userBranch ?? "main";
+    this.runtime = new DirectWasmRuntime(
+      NapiDirectDb,
+      schema,
+      deterministicBytes(
+        `${this.config.appId}:${env}:${userBranch}:${this.nodeIdentityScope}:node`,
+      ),
+      deterministicBytes(`${this.config.appId}:${env}:${userBranch}:author`),
+      1,
+      true,
+      this.config.driver.type === "persistent"
+        ? { persistentPath: this.config.driver.dataPath }
+        : undefined,
+    );
 
     const context: AppContext = {
       appId: this.config.appId,
@@ -226,7 +247,7 @@ export class JazzContext {
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
   asBackend(source?: BackendSchemaInput): Db {
-    return this.wrapDb(this.getClient(source).asBackend(), undefined, undefined, true);
+    return this.wrapDb(this.getClient(source).asBackend(), undefined, SYSTEM_AUTHOR_ID, true);
   }
 
   /**
@@ -305,7 +326,7 @@ export class JazzContext {
    * Flush the underlying runtime if initialized.
    */
   flush(): void {
-    this.runtime?.flush();
+    this.runtime?.flush?.();
   }
 
   /**

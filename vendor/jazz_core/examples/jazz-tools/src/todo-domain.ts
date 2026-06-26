@@ -36,8 +36,24 @@ export type FileView = FileInput & {
 export function todosSchema(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((table, index) => {
-    if (index === 0) writeTable(table, "todos", todoWriteDescriptor(), [], writeTodosOwnerOnlyPolicy, writeTodosOwnerOnlyPolicy);
-    if (index === 1) writeTable(table, "files", fileWriteDescriptor(), [], writeFilesOwnerOnlyPolicy, writeFilesOwnerOnlyPolicy);
+    if (index === 0)
+      writeTable(
+        table,
+        "todos",
+        todoWriteDescriptor(),
+        [],
+        writeTodosOwnerOnlyPolicy,
+        writeTodosOwnerOnlyPolicy,
+      );
+    if (index === 1)
+      writeTable(
+        table,
+        "files",
+        fileWriteDescriptor(),
+        [],
+        writeFilesOwnerOnlyPolicy,
+        writeFilesOwnerOnlyPolicy,
+      );
   }, 2);
   writer.none();
   writer.none();
@@ -75,23 +91,31 @@ export function encodedFileCells(file: FileInput): Uint8Array {
 }
 
 export function todoViews(batches: AbiRowBatch[]): TodoView[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    rowId: row.rowId,
-    title: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "title")),
-    done: decodeRecordBool(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "done")),
-    owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      rowId: row.rowId,
+      title: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "title")),
+      done: decodeRecordBool(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "done")),
+      owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
+    })),
+  );
 }
 
 export function fileViews(batches: AbiRowBatch[]): FileView[] {
-  return batches.flatMap((batch) => batch.rows.map((row) => ({
-    rowId: row.rowId,
-    name: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "name")),
-    mimeType: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "mime_type")),
-    data: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "data")),
-    size: decodeRecordU64(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "size")),
-    owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
-  })));
+  return batches.flatMap((batch) =>
+    batch.rows.map((row) => ({
+      rowId: row.rowId,
+      name: decodeRecordString(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "name")),
+      mimeType: decodeRecordString(
+        batch.descriptor,
+        row.raw,
+        fieldIndex(batch.descriptor, "mime_type"),
+      ),
+      data: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "data")),
+      size: decodeRecordU64(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "size")),
+      owner: decodeRecordBytes(batch.descriptor, row.raw, fieldIndex(batch.descriptor, "owner")),
+    })),
+  );
 }
 
 export function formatTodos(todos: TodoView[]): string {
@@ -200,9 +224,16 @@ function u64Le(value: number): Uint8Array {
   return bytes;
 }
 
-function decodeRecordU64(descriptor: DescriptorField[], raw: Uint8Array, logicalIndex: number): number {
+function decodeRecordU64(
+  descriptor: DescriptorField[],
+  raw: Uint8Array,
+  logicalIndex: number,
+): number {
   const bytes = decodeRecordBytes(descriptor, raw, logicalIndex);
   if (bytes.length !== 8) throw new Error(`invalid u64 size ${bytes.length}`);
-  const value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+  const value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(
+    0,
+    true,
+  );
   return Number(value);
 }

@@ -35,7 +35,7 @@ writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
 (`INV-STORAGE-4`).
 
-*Further invariants.* `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
+_Further invariants._ `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
 with the given byte prefix, in order, including prefixes with no finite upper
 bound. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families. The shared storage conformance tests
@@ -81,7 +81,7 @@ set of valid key types are specified in §2.8.
 `ForeignKey` and `PrimaryKey.generated` are **reserved metadata** in the schema.
 They are carried as schema annotations for validation and planning.
 
-*Further invariants.* `INV-STORAGE-16` — an insert rejects an already-present
+_Further invariants._ `INV-STORAGE-16` — an insert rejects an already-present
 primary key, including one introduced by an earlier op in the same batch
 (`Error::DuplicatePrimaryKey`).
 
@@ -119,7 +119,7 @@ logical order and rejects arrays as keys (`INV-STORAGE-25`). An index scan
 decodes each entry's `"value"` as primary-key bytes and fetches the
 corresponding base record.
 
-*Further invariants.* `INV-STORAGE-22` — a non-unique index key appends a `0xff`
+_Further invariants._ `INV-STORAGE-22` — a non-unique index key appends a `0xff`
 separator + the encoded primary key; a unique index omits that suffix.
 `INV-STORAGE-23` — a unique index rejects a positive delta for a key already
 bound to a different record. `INV-STORAGE-24` — an index scan resolves the
@@ -151,7 +151,7 @@ rollback is attempted (`INV-OK-14`).
 This section defines the exact byte encodings referenced by §2.2–2.3.
 
 **Record layout.** Fixed-width fields come first, followed by a `u32` offset
-table that gives the *end* position of every variable-width field except the
+table that gives the _end_ position of every variable-width field except the
 last, followed by the variable payloads. For
 `[id: u64, active: bool, name: string, blob: bytes]`:
 
@@ -209,7 +209,7 @@ second, and so on. Valid key types are the integer widths, `Bool`, `String`,
   implementation currently carries them but does not enforce them.
 - 🔶 **Variable-width tuple members.** Fixed-width tuple members recurse today,
   but a tuple member may not itself be variable-width (`INV-STORAGE-9`, §2.7).
-  Allowing variable-width members — by reusing the record encoding (§2.7) *inside*
+  Allowing variable-width members — by reusing the record encoding (§2.7) _inside_
   a tuple — would let consumers represent structured, variable-length values as a
   native column type instead of a custom encoding. The motivating consumer is
   jazz's large-value op-log, whose ops could then be a true groove column rather

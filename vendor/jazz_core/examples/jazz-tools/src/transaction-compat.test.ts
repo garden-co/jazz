@@ -46,24 +46,33 @@ test("public transactions stage writes and expose commit/rollback", async () => 
   const findNote = (id: string) => db.all(notes).find((note) => note.id === id) ?? null;
 
   const result = db.transaction((tx) => {
-    const inserted = tx.insert(notes, { title: "Inserted", body: "inside tx", done: false }, { id: ids.staged });
+    const inserted = tx.insert(
+      notes,
+      { title: "Inserted", body: "inside tx", done: false },
+      { id: ids.staged },
+    );
     assert.equal(inserted.id, ids.staged);
     assert.equal(findNote(ids.staged), null, "staged rows are not visible through Db reads yet");
 
     tx.update(notes, ids.seed, { body: "after", done: true });
     tx.delete(notes, ids.deleted);
     tx.restore(notes, ids.restored, { title: "Restored", body: "back", done: true });
-    tx.upsert(notes, { title: "Upsert created", body: "new", done: false }, { id: ids.upsertCreated });
+    tx.upsert(
+      notes,
+      { title: "Upsert created", body: "new", done: false },
+      { id: ids.upsertCreated },
+    );
     return "committed";
   });
 
   assert.equal(result, "committed");
-  assert.deepEqual(db.all(notes).map((note) => note.id).sort(), [
-    ids.restored,
-    ids.seed,
-    ids.staged,
-    ids.upsertCreated,
-  ].sort());
+  assert.deepEqual(
+    db
+      .all(notes)
+      .map((note) => note.id)
+      .sort(),
+    [ids.restored, ids.seed, ids.staged, ids.upsertCreated].sort(),
+  );
   assert.equal(findNote(ids.seed)?.body, "after");
   assert.equal(findNote(ids.deleted), null);
   assert.equal(findNote(ids.restored)?.title, "Restored");
@@ -74,7 +83,11 @@ test("public transactions stage writes and expose commit/rollback", async () => 
   assert.equal(findNote(ids.rolledBack), null);
 
   const committed = db.beginTransaction();
-  committed.upsert(notes, { id: ids.staged, title: "Inserted", body: "upsert updated", done: true }, { id: ids.staged });
+  committed.upsert(
+    notes,
+    { id: ids.staged, title: "Inserted", body: "upsert updated", done: true },
+    { id: ids.staged },
+  );
   const write = committed.commit();
   assert.equal(write.value, undefined);
   assert.notEqual(write.handle, null);
@@ -84,7 +97,10 @@ test("public transactions stage writes and expose commit/rollback", async () => 
 });
 
 test("exclusive transactions are explicitly unsupported by the direct facade", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-exclusive-unsupported" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-exclusive-unsupported",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   assert.throws(
@@ -95,24 +111,27 @@ test("exclusive transactions are explicitly unsupported by the direct facade", a
 });
 
 test("mergeable transaction reads are unsupported for staged updates", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-mergeable-update-read-error" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-mergeable-update-read-error",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   db.insert(notes, { id: ids.seed, title: "Seed", body: "before", done: false });
   const tx = db.beginTransaction();
   tx.update(notes, ids.seed, { body: "after", done: true });
 
-  assert.throws(
-    () => tx.one(notes),
-    /mergeable transaction reads are not supported/,
-  );
+  assert.throws(() => tx.one(notes), /mergeable transaction reads are not supported/);
   assert.equal(db.one(notes)?.body, "before");
 
   tx.rollback();
 });
 
 test("transactions commit insert then update on the same row as one materialized row", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-insert-update-same-row" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-insert-update-same-row",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   const tx = db.beginTransaction();
@@ -129,7 +148,10 @@ test("transactions commit insert then update on the same row as one materialized
 });
 
 test("transactions commit update then delete on the same row as deletion", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-update-delete-same-row" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-update-delete-same-row",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   db.insert(notes, { id: ids.updateThenDelete, title: "Seed", body: "before", done: false });
@@ -142,7 +164,10 @@ test("transactions commit update then delete on the same row as deletion", async
 });
 
 test("mergeable transactions commit restore then update on the same row as restored update", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-restore-update-same-row" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-restore-update-same-row",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   db.insert(notes, { id: ids.restoreThenUpdate, title: "Seed", body: "deleted", done: false });
@@ -162,60 +187,104 @@ test("mergeable transactions commit restore then update on the same row as resto
 });
 
 test("rollback drops coalesced staged same-row changes", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-rollback-coalesced-same-row" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-rollback-coalesced-same-row",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   db.insert(notes, { id: ids.rollbackCoalesced, title: "Seed", body: "before", done: false });
-  db.insert(notes, { id: ids.rollbackCoalescedRestore, title: "Deleted", body: "before", done: false });
+  db.insert(notes, {
+    id: ids.rollbackCoalescedRestore,
+    title: "Deleted",
+    body: "before",
+    done: false,
+  });
   db.delete(notes, ids.rollbackCoalescedRestore);
 
   const tx = db.beginTransaction();
   tx.update(notes, ids.rollbackCoalesced, { body: "updated" });
   tx.delete(notes, ids.rollbackCoalesced);
-  tx.restore(notes, ids.rollbackCoalescedRestore, { title: "Restored", body: "restored", done: false });
+  tx.restore(notes, ids.rollbackCoalescedRestore, {
+    title: "Restored",
+    body: "restored",
+    done: false,
+  });
   tx.update(notes, ids.rollbackCoalescedRestore, { done: true });
 
   tx.rollback();
 
-  assert.deepEqual(db.all(notes), [{
-    id: ids.rollbackCoalesced,
-    title: "Seed",
-    body: "before",
-    done: false,
-  }]);
-});
-
-test("transactions coalesce repeated same-row upserts", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-upsert-same-row-sequences" });
-  const notes = db.table<Note, Omit<Note, "id">>("notes");
-
-  db.insert(notes, { id: ids.upsertSequenceExisting, title: "Existing", body: "before", done: false });
-  const tx = db.beginTransaction();
-
-  tx.upsert(notes, { id: ids.upsertSequenceCreated, title: "Created", body: "first", done: false }, { id: ids.upsertSequenceCreated });
-  tx.upsert(notes, { id: ids.upsertSequenceCreated, title: "Created", body: "second", done: true }, { id: ids.upsertSequenceCreated });
-  tx.upsert(notes, { id: ids.upsertSequenceExisting, title: "Existing", body: "patched", done: false }, { id: ids.upsertSequenceExisting });
-  tx.upsert(notes, { id: ids.upsertSequenceExisting, title: "Existing", body: "patched again", done: true }, { id: ids.upsertSequenceExisting });
-
-  await tx.commit().wait({ tier: "local" });
-  assert.deepEqual(db.all(notes).sort((left, right) => left.id.localeCompare(right.id)), [
+  assert.deepEqual(db.all(notes), [
     {
-      id: ids.upsertSequenceCreated,
-      title: "Created",
-      body: "second",
-      done: true,
-    },
-    {
-      id: ids.upsertSequenceExisting,
-      title: "Existing",
-      body: "patched again",
-      done: true,
+      id: ids.rollbackCoalesced,
+      title: "Seed",
+      body: "before",
+      done: false,
     },
   ]);
 });
 
+test("transactions coalesce repeated same-row upserts", async () => {
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-upsert-same-row-sequences",
+  });
+  const notes = db.table<Note, Omit<Note, "id">>("notes");
+
+  db.insert(notes, {
+    id: ids.upsertSequenceExisting,
+    title: "Existing",
+    body: "before",
+    done: false,
+  });
+  const tx = db.beginTransaction();
+
+  tx.upsert(
+    notes,
+    { id: ids.upsertSequenceCreated, title: "Created", body: "first", done: false },
+    { id: ids.upsertSequenceCreated },
+  );
+  tx.upsert(
+    notes,
+    { id: ids.upsertSequenceCreated, title: "Created", body: "second", done: true },
+    { id: ids.upsertSequenceCreated },
+  );
+  tx.upsert(
+    notes,
+    { id: ids.upsertSequenceExisting, title: "Existing", body: "patched", done: false },
+    { id: ids.upsertSequenceExisting },
+  );
+  tx.upsert(
+    notes,
+    { id: ids.upsertSequenceExisting, title: "Existing", body: "patched again", done: true },
+    { id: ids.upsertSequenceExisting },
+  );
+
+  await tx.commit().wait({ tier: "local" });
+  assert.deepEqual(
+    db.all(notes).sort((left, right) => left.id.localeCompare(right.id)),
+    [
+      {
+        id: ids.upsertSequenceCreated,
+        title: "Created",
+        body: "second",
+        done: true,
+      },
+      {
+        id: ids.upsertSequenceExisting,
+        title: "Existing",
+        body: "patched again",
+        done: true,
+      },
+    ],
+  );
+});
+
 test("transaction callback commits returned values and rolls back thrown callbacks", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-callback-commit-rollback" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-callback-commit-rollback",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   const result = db.transaction((tx) => {
@@ -226,10 +295,11 @@ test("transaction callback commits returned values and rolls back thrown callbac
   assert.equal(db.one(notes)?.title, "Committed");
 
   assert.throws(
-    () => db.transaction((tx) => {
-      tx.update(notes, ids.callbackRollback, { body: "rolled back", done: true });
-      throw new Error("stop");
-    }),
+    () =>
+      db.transaction((tx) => {
+        tx.update(notes, ids.callbackRollback, { body: "rolled back", done: true });
+        throw new Error("stop");
+      }),
     /stop/,
   );
 
@@ -246,7 +316,12 @@ test("async transaction callbacks commit after resolution and roll back rejectio
   const notes = db.table<Note, Omit<Note, "id">>("notes");
 
   const result = await db.transaction(async (tx) => {
-    tx.insert(notes, { id: ids.callbackRollback, title: "Async committed", body: "yes", done: false });
+    tx.insert(notes, {
+      id: ids.callbackRollback,
+      title: "Async committed",
+      body: "yes",
+      done: false,
+    });
     await Promise.resolve();
     return { committed: true };
   });
@@ -254,11 +329,12 @@ test("async transaction callbacks commit after resolution and roll back rejectio
   assert.equal(db.one(notes)?.title, "Async committed");
 
   await assert.rejects(
-    () => db.transaction(async (tx) => {
-      tx.update(notes, ids.callbackRollback, { body: "rolled back", done: true });
-      await Promise.resolve();
-      throw new Error("async stop");
-    }),
+    () =>
+      db.transaction(async (tx) => {
+        tx.update(notes, ids.callbackRollback, { body: "rolled back", done: true });
+        await Promise.resolve();
+        throw new Error("async stop");
+      }),
     /async stop/,
   );
 
@@ -271,7 +347,10 @@ test("async transaction callbacks commit after resolution and roll back rejectio
 });
 
 test("mergeable transaction reads are unsupported while default remains mergeable", async () => {
-  const db = await createDb({ schema: app._schema, appId: "transaction-compat-mergeable-read-error" });
+  const db = await createDb({
+    schema: app._schema,
+    appId: "transaction-compat-mergeable-read-error",
+  });
   const notes = db.table<Note, Omit<Note, "id">>("notes");
   const tx = db.beginTransaction();
 

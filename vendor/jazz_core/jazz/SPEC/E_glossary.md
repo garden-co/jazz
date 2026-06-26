@@ -1,7 +1,7 @@
 # jazz — Specification · Appendix E. Glossary
 
-*Non-normative (guidance).* This appendix is a dependency-ordered terminology
-index. Each entry gives a compact gloss and points to the chapter that *owns*
+_Non-normative (guidance)._ This appendix is a dependency-ordered terminology
+index. Each entry gives a compact gloss and points to the chapter that _owns_
 the term; this appendix is never the source of truth for behavior. Code spelling
 is authoritative (`DurabilityTier::Global`, not `global`).
 
@@ -37,14 +37,14 @@ beneath it, which has its own specification. jazz is not a second query engine
 ## Transactions (ch. 3)
 
 - **mergeable transaction** (`TxKind::Mergeable`) — an eventually-consistent
-  column-LWW write; the high-level facade spelling is *batch* (ch. 13).
+  column-LWW write; the high-level facade spelling is _batch_ (ch. 13).
 - **exclusive transaction** (`TxKind::Exclusive`) — serializable compare-and-set;
-  the facade spelling is *transaction*. **open exclusive transaction** — its
+  the facade spelling is _transaction_. **open exclusive transaction** — its
   pre-commit local state.
 - **commit unit** — the atomic `CommitUnit { tx, versions }` shipped at commit.
 - **fate** (`Fate::{Pending, Accepted, Rejected}`) — an authority's verdict.
 - **durability tier** (`DurabilityTier::{None, Local, Edge, Global}`) — how far a
-  write has settled. *Fate and durability are separate axes.*
+  write has settled. _Fate and durability are separate axes._
 - **snapshot** (`Snapshot`) · **read sets** (`RowRead`/`AbsentRead`/`PredicateRead`).
 
 ## History & merge (ch. 4)
@@ -55,7 +55,7 @@ beneath it, which has its own specification. jazz is not a second query engine
 - **current row** — visible content winner gated by the deletion register; **local
   current** vs **global current** (`HistoryEntry::is_locally/globally_current`).
 - **deletion register** (`MergeAspect::Deletion`, `DeletionEvent::{Deleted,
-  Restored}`) · **global-current overwrite table** — node-local derived current
+Restored}`) · **global-current overwrite table** — node-local derived current
   state · **merge version** — an upstream-created merge of concurrent heads.
 
 ## Reads & queries (ch. 5–6)
@@ -110,7 +110,7 @@ beneath it, which has its own specification. jazz is not a second query engine
 - 🔶 **Flat index.** Keep this dependency-ordered grouping, or add a flat
   alphabetical index for lookup as well?
 - 🔶 **Facade spelling.** The high-level facade spells mergeable transactions as
-  *batch* and exclusive transactions as *transaction*; the implementation has not
+  _batch_ and exclusive transactions as _transaction_; the implementation has not
   yet landed those facade spellings.
 - 🔶 **Edge fate authority.** An edge is the mergeable fate authority; the
   implementation path currently uses the core for mergeable fate authority.

@@ -59,7 +59,7 @@ The base schema uses the base table. Non-base versions live in suffixed tables
 tables, those partition tables are created or reopened before any write or read
 scan uses them (`INV-LENS-9`).
 
-*Further invariants.* `INV-LENS-8` — durable catalogue schemas, lenses, the
+_Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, and per-version partitions survive node restart
 (recovered in a catalogue stage before the groove database is constructed).
 
@@ -120,7 +120,7 @@ schema materializations (`INV-LENS-14`).
 **Worked example.** A row is first written under schema `v1`, landing in the
 `v1` table with `schema_version = v1`. An admin flips the current-write pointer
 to `v2`, which creates the `v2` partition tables (`INV-LENS-9`). From then on,
-*new* writes land in the `v2` partition, including an old client's
+_new_ writes land in the `v2` partition, including an old client's
 `v1`-authored commit, which is forward-translated into the `v2` partition at
 ingest if a forward lens path exists (`INV-LENS-11`). The original `v1` row is
 **not** moved: old partitions stop receiving new rows once the pointer moves but

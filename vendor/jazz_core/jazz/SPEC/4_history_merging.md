@@ -32,7 +32,7 @@ content version is the head with the greatest `(time, node)` sort key
 (`INV-HIST-2`) — **argmax by HLC, not by arrival order**. Any two nodes that know
 the same versions therefore compute the same winner regardless of delivery order.
 
-The rule is scoped to the node's *known* history. Downstream nodes may hold
+The rule is scoped to the node's _known_ history. Downstream nodes may hold
 shallow or partial history and must not assume completeness (ch. 1, principle
 4). The precise statement is: at most one content-current winner exists per
 `(row_uuid, layer)` among the node's known non-rejected versions; the visible row
@@ -86,7 +86,7 @@ The N-way fold processes large-value heads in causal sort-key order and carries
 the folded accumulator's greatest causal origin, so same-position inserts
 converge independently of delivery order (`INV-HIST-15`).
 
-*Further invariants.* `INV-HIST-7` — a merge version's transaction time is
+_Further invariants._ `INV-HIST-7` — a merge version's transaction time is
 strictly after the maximum made-at time of the observed heads. `INV-HIST-15` —
 merge-strategy output is deterministic and grouping-insensitive over the
 head/parent set, with no wall-clock or node-local state in merged values (partial
@@ -97,7 +97,7 @@ same row. If those nodes observed different frontiers, one merge may include a
 concurrent head the other has not yet seen. Such divergent merges reconcile by
 the same rule that defines every merge: a merge value is the deterministic fold
 over the **de-duplicated raw head set**, never a fold of already-merged values. A
-merge version is therefore a *cache* over its sorted raw parent set, not an
+merge version is therefore a _cache_ over its sorted raw parent set, not an
 opaque value that is itself re-merged.
 
 To combine two merge versions, an authority folds over the union of their raw
@@ -105,7 +105,7 @@ parent-closures, de-duplicated by version identity. LWW takes the argmax raw hea
 with the parent-union fallback; `Counter` sums each raw version's delta keyed by
 its `TxId`, so a shared ancestor is counted exactly once and never
 double-counted; large-value op-merge applies the raw ops de-duplicated by op
-identity. Consequently, duplicate merges over the *same* frontier carry
+identity. Consequently, duplicate merges over the _same_ frontier carry
 identical cells, with the deterministic `(time, node)` tie-break picking one.
 Merges over divergent frontiers converge to exactly what a single merger over
 the union would have produced (`INV-HIST-16`). Reconciliation re-folds the
@@ -119,7 +119,7 @@ not rewrite its content history. Deletion events live in their own register laye
 (`VersionLayer::Deletion`) carrying `DeletionEvent::{Deleted, Restored}`, and a
 version belongs to exactly one layer (ch. 2). A current `Deleted` event hides the
 content-current row; a later current `Restored` event reveals it again; content
-writes never touch the register (`INV-HIST-11`). A row's *visible* current state
+writes never touch the register (`INV-HIST-11`). A row's _visible_ current state
 is therefore the content-current winner (§4.2) gated by the register-current
 event.
 
@@ -138,7 +138,7 @@ rows and values returned. Local visibility layers optimistic writes over those
 tables as described in §4.2; it does not rehydrate the global baseline from the
 history/register DAG.
 
-*Further invariants.* `INV-HIST-13` — re-ingesting the same commit unit with its
+_Further invariants._ `INV-HIST-13` — re-ingesting the same commit unit with its
 version rows in a different order is idempotent and conflict-free. `INV-HIST-14` —
 rejected transactions never appear as accepted history and never participate in
 currentness or domination.

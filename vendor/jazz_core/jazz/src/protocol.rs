@@ -467,8 +467,24 @@ impl ShapeAst {
 }
 
 /// Shape registration options.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RegisterShapeOptions {}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RegisterShapeOptions {
+    /// Durability tier the subscriber wants this shape served at.
+    #[serde(default = "default_register_shape_tier")]
+    pub tier: DurabilityTier,
+}
+
+impl Default for RegisterShapeOptions {
+    fn default() -> Self {
+        Self {
+            tier: default_register_shape_tier(),
+        }
+    }
+}
+
+fn default_register_shape_tier() -> DurabilityTier {
+    DurabilityTier::Global
+}
 
 /// Binding additions/removals for one registered shape.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]

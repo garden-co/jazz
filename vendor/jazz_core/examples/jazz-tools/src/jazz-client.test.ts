@@ -2,7 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAuthSecretStore, type AuthSecretStorage } from "./auth-secret-store.js";
 import { createJazzClient, createJazzHooks, JazzProvider, type JazzClient } from "./jazz-client.js";
-import { defineApp, schema, type AuthState, type Db, type InsertOptions, type Subscription, type Table, type Transaction, type UpsertOptions, type WriteResult, type WriteTimestampOptions } from "./jazz-tools.js";
+import {
+  defineApp,
+  schema,
+  type AuthState,
+  type Db,
+  type InsertOptions,
+  type Subscription,
+  type Table,
+  type Transaction,
+  type UpsertOptions,
+  type WriteResult,
+  type WriteTimestampOptions,
+} from "./jazz-tools.js";
 
 const emptySchema = {};
 const app = defineApp({
@@ -90,7 +102,10 @@ test("createJazzClient subscriptions observe real WasmDb writes", async () => {
     await waitForSnapshots(snapshots, 1);
     assert.deepEqual(todoSnapshots(snapshots), [[]]);
 
-    const inserted = client.db.insert(app.todos as Table<Todo, Omit<Todo, "id">>, { title: "Real client callback", done: false });
+    const inserted = client.db.insert(app.todos as Table<Todo, Omit<Todo, "id">>, {
+      title: "Real client callback",
+      done: false,
+    });
     client.db.update(app.todos as Table<Todo, Omit<Todo, "id">>, inserted.id, { done: true });
     client.db.delete(app.todos as Table<Todo, Omit<Todo, "id">>, inserted.id);
 
@@ -127,7 +142,10 @@ test("JazzProvider passes the thin client to function children", async () => {
 
   assert.equal(JazzProvider({ client }), client);
   assert.equal(JazzProvider({ client, children: "ready" }), "ready");
-  assert.equal(JazzProvider({ client, children: (provided) => provided.getAuthState().authMode }), "local-first");
+  assert.equal(
+    JazzProvider({ client, children: (provided) => provided.getAuthState().authMode }),
+    "local-first",
+  );
 });
 
 test("createJazzHooks binds useDb, useTable, and useAll to DB subscription callbacks", () => {
@@ -145,13 +163,25 @@ test("createJazzHooks binds useDb, useTable, and useAll to DB subscription callb
   db.insert(todos, { id: "todo-1", title: "Ship hooks", done: false });
   assert.equal(liveTodos.current.length, 0);
   db.emit(todos);
-  assert.deepEqual(liveTodos.current.map((todo) => todo.title), ["Ship hooks"]);
-  assert.deepEqual(liveTodos.current.map((todo) => todo.done), [false]);
+  assert.deepEqual(
+    liveTodos.current.map((todo) => todo.title),
+    ["Ship hooks"],
+  );
+  assert.deepEqual(
+    liveTodos.current.map((todo) => todo.done),
+    [false],
+  );
 
   db.update(todos, "todo-1", { done: true });
-  assert.deepEqual(liveTodos.current.map((todo) => todo.done), [false]);
+  assert.deepEqual(
+    liveTodos.current.map((todo) => todo.done),
+    [false],
+  );
   db.emit(todos);
-  assert.deepEqual(liveTodos.current.map((todo) => todo.done), [true]);
+  assert.deepEqual(
+    liveTodos.current.map((todo) => todo.done),
+    [true],
+  );
 
   liveTodos.unsubscribe();
   assert.equal(db.unsubscribeCount, 1);
@@ -168,7 +198,12 @@ test("MemoryDb write compatibility handles stay row-like and expose value/wait",
   assert.equal(await inserted.wait({ tier: "local" }), inserted.value);
   assert.deepEqual(Object.keys(inserted).sort(), ["done", "id", "title"]);
 
-  const updated = db.update(todos, "todo-1", { done: true }, { updatedAt: "2026-06-24T00:00:00.000Z" });
+  const updated = db.update(
+    todos,
+    "todo-1",
+    { done: true },
+    { updatedAt: "2026-06-24T00:00:00.000Z" },
+  );
   assert.equal(updated.done, true);
   assert.equal(updated.value.done, true);
 
@@ -177,7 +212,11 @@ test("MemoryDb write compatibility handles stay row-like and expose value/wait",
   assert.equal(patched.title, "Patched");
   assert.equal(db.one(todos)?.title, "Patched");
 
-  const created = db.upsert(todos, { title: "Created", done: false }, { id: "todo-2", updatedAt: 0 });
+  const created = db.upsert(
+    todos,
+    { title: "Created", done: false },
+    { id: "todo-2", updatedAt: 0 },
+  );
   assert.equal(created.id, "todo-2");
   assert.equal(db.all(todos).length, 2);
 
@@ -190,7 +229,10 @@ test("MemoryDb write compatibility handles stay row-like and expose value/wait",
   assert.equal(restored.id, "todo-2");
   assert.equal(restored.value.title, "Restored");
   assert.equal(await restored.wait({ tier: "local" }), restored.value);
-  assert.throws(() => db.restore(todos, "todo-2", { title: "Still visible", done: false }), /row not deleted/);
+  assert.throws(
+    () => db.restore(todos, "todo-2", { title: "Still visible", done: false }),
+    /row not deleted/,
+  );
 });
 
 test("createJazzHooks can read a provider-backed current client", () => {
@@ -200,10 +242,16 @@ test("createJazzHooks can read a provider-backed current client", () => {
   const hooks = createJazzHooks(() => currentClient);
 
   assert.throws(() => hooks.useDb(), /Jazz client is not available/);
-  assert.equal(JazzProvider({ client, children: (provided) => {
-    currentClient = provided;
-    return hooks.useDb();
-  } }), db);
+  assert.equal(
+    JazzProvider({
+      client,
+      children: (provided) => {
+        currentClient = provided;
+        return hooks.useDb();
+      },
+    }),
+    db,
+  );
 });
 
 class MemoryDb implements Db {
@@ -220,7 +268,9 @@ class MemoryDb implements Db {
     throw new Error("transactions are not implemented by this test fixture");
   }
 
-  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(name: string): Table<Row, Init> {
+  table<Row extends { id: string | Uint8Array }, Init = Omit<Row, "id">>(
+    name: string,
+  ): Table<Row, Init> {
     this.rowsByTable[name] ??= [];
     return {
       _table: name,
@@ -235,7 +285,10 @@ class MemoryDb implements Db {
     row: Init & Partial<Pick<Row, "id">>,
     options: InsertOptions<Row> = {},
   ): WriteResult<Row> & Row {
-    const next = { id: options.id ?? row.id ?? `row-${this.rowsByTable[table._table].length + 1}`, ...row };
+    const next = {
+      id: options.id ?? row.id ?? `row-${this.rowsByTable[table._table].length + 1}`,
+      ...row,
+    };
     this.rowsByTable[table._table].push(next as Record<string, unknown>);
     return makeMemoryWriteResult(next as unknown as Row);
   }
@@ -289,17 +342,22 @@ class MemoryDb implements Db {
     _options: WriteTimestampOptions = {},
   ): WriteResult<Row> & Row {
     const rows = this.rowsByTable[table._table];
-    if (rows.some((existing) => existing.id === id)) throw new Error(`Restore failed: row not deleted: ${String(id)}`);
+    if (rows.some((existing) => existing.id === id))
+      throw new Error(`Restore failed: row not deleted: ${String(id)}`);
     const restored = { id, ...row };
     rows.push(restored as Record<string, unknown>);
     return makeMemoryWriteResult(restored as unknown as Row);
   }
 
-  all<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string }): Row[] {
+  all<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
+  ): Row[] {
     return [...this.rowsByTable[tableOrQuery._table]] as Row[];
   }
 
-  one<Row>(tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string }): Row | null {
+  one<Row>(
+    tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
+  ): Row | null {
     return this.all(tableOrQuery)[0] ?? null;
   }
 
@@ -314,7 +372,8 @@ class MemoryDb implements Db {
     tableOrQuery: Table<Row & { id: string | Uint8Array }, unknown> | { readonly _table: string },
     callback: (rows: Row[]) => void,
   ): Subscription<Row> {
-    const subscribers = this.subscribersByTable.get(tableOrQuery._table) ?? new Set<(rows: unknown[]) => void>();
+    const subscribers =
+      this.subscribersByTable.get(tableOrQuery._table) ?? new Set<(rows: unknown[]) => void>();
     this.subscribersByTable.set(tableOrQuery._table, subscribers);
     subscribers.add(callback as (rows: unknown[]) => void);
     callback(this.all(tableOrQuery));
@@ -326,7 +385,9 @@ class MemoryDb implements Db {
     };
   }
 
-  emit<Row extends { id: string | Uint8Array }>(tableOrQuery: Table<Row, unknown> | { readonly _table: string }): void {
+  emit<Row extends { id: string | Uint8Array }>(
+    tableOrQuery: Table<Row, unknown> | { readonly _table: string },
+  ): void {
     const rows = this.all(tableOrQuery);
     for (const callback of this.subscribersByTable.get(tableOrQuery._table) ?? []) {
       callback(rows);
@@ -370,8 +431,10 @@ function makeClient(db: Db): JazzClient {
 
 function makeMemoryWriteResult<Value extends object>(value: Value): WriteResult<Value> & Value;
 function makeMemoryWriteResult(value: void): WriteResult<void>;
-function makeMemoryWriteResult<Value>(value: Value): WriteResult<Value> | (WriteResult<Value> & object) {
-  const target = value && typeof value === "object" ? value as object : {};
+function makeMemoryWriteResult<Value>(
+  value: Value,
+): WriteResult<Value> | (WriteResult<Value> & object) {
+  const target = value && typeof value === "object" ? (value as object) : {};
   Object.defineProperties(target, {
     value: {
       value,

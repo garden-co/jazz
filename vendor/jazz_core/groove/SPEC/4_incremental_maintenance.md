@@ -43,10 +43,10 @@ Every tick advances `current_tick` exactly once, and every durable (`Persist`)
 node is evaluated before any subscription is notified (`INV-TICK-1`).
 
 **Tick kinds.** The same discipline applies to different maintenance events. A
-*commit tick* carries table deltas. A *binding tick* carries only binding
+_commit tick_ carries table deltas. A _binding tick_ carries only binding
 deltas, with no table deltas, to register and hydrate a new prepared binding
-(ch. 5). Both are ticks, and both advance `current_tick` once. A *hydration
-snapshot* — a fresh subscription's initial result, or a one-shot query — does
+(ch. 5). Both are ticks, and both advance `current_tick` once. A _hydration
+snapshot_ — a fresh subscription's initial result, or a one-shot query — does
 **not** advance `current_tick` and does not perturb other subscriptions' future
 deltas (`INV-TICK-19`). Within a single tick, recursive fixpoint iterations
 advance an inner `SubTick`, never `current_tick` (§4.3, ch. 6).
@@ -54,7 +54,7 @@ advance an inner `SubTick`, never `current_tick` (§4.3, ch. 6).
 The subscription contract (ch. 1) depends on a strict split between snapshots
 and deltas. A new subscription receives exactly one initial hydration
 `RecordDeltas` message — including an empty one for an empty result — before any
-commit delta (`INV-TICK-2`). Commit ticks then carry only weighted *result*
+commit delta (`INV-TICK-2`). Commit ticks then carry only weighted _result_
 deltas, never unchanged matching rows or base-table changes outside the result
 (`INV-TICK-3`). Hydration and one-shot query evaluation are isolated from
 existing subscriptions' future deltas (`INV-TICK-19`). The tick provides that
@@ -82,10 +82,10 @@ context-dependent (recursive) arrangements use the evaluator's nonzero
 
 An arrangement is updated in one of two modes:
 
-| mode | used by | effect on arrangement state |
-|---|---|---|
+| mode         | used by                                   | effect on arrangement state                                                                                                            |
+| ------------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `Accumulate` | commit/binding ticks, recursive sub-ticks | applies each delta once into the existing state at a new `SubTick`; re-accumulating at the same `SubTick` is idempotent (`INV-TICK-9`) |
-| `Replace` | hydration / one-shot snapshot evaluation | rebuilds the arrangement from scratch instead of accumulating over existing state (`INV-TICK-12`) |
+| `Replace`    | hydration / one-shot snapshot evaluation  | rebuilds the arrangement from scratch instead of accumulating over existing state (`INV-TICK-12`)                                      |
 
 For inner joins, the arrangement layer enforces the product rule and the
 same-tick cross-term correction (ch. 3). Join output multiplies each delta
@@ -94,7 +94,7 @@ same-tick cross term — formally `Δ(L⋈R) = ΔL·Rₐ + ΔR·Lₐ − ΔL·Δ
 `Lₐ`/`Rₐ` are the maintained sides after this tick (§3.4) — so the cross term is
 counted once (`INV-TICK-10`).
 
-*Further invariants.* `INV-TICK-11` — anti-join output deltas represent the
+_Further invariants._ `INV-TICK-11` — anti-join output deltas represent the
 left-visibility diff for keys whose left or right inputs changed.
 
 ## 4.4 Durable nodes and prepared-shape routing
@@ -107,7 +107,7 @@ Prepared shapes participate in the same tick: binding deltas are processed,
 outputs are evaluated after direct subscriptions, and those outputs are routed
 by `BindingKey`. Chapter 5 specifies that behavior.
 
-*Further invariants.* `INV-TICK-13` — a `Persist` node consolidates same-tick
+_Further invariants._ `INV-TICK-13` — a `Persist` node consolidates same-tick
 deltas by durable key before writing storage; a unique target rejects a
 conflicting positive delta. Same-tick durable reads observe staged `Persist`
 writes through the tick storage overlay before falling through to committed
@@ -130,7 +130,7 @@ minimal diff, `INV-REC-8`). After that recompute hydrates step arrangements,
 later insert-only commits can return to the positive-incremental path
 (`INV-REC-9`).
 
-*Further invariants.* `INV-TICK-17` — recursion rejects non-positive frontier
+_Further invariants._ `INV-TICK-17` — recursion rejects non-positive frontier
 facts rather than assigning bag-recursive semantics (ch. 6). `INV-TICK-18` —
 recursive evaluation stops with `RecursiveIterationLimit` when the frontier is
 still non-empty after `max_iters` (ch. 6). `INV-TICK-20` — contextual recursive
