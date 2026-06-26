@@ -597,22 +597,7 @@ pub(super) async fn publish_schema_handler(
         };
 
     let schema_hash = SchemaHash::compute(&request.schema);
-    let object_id = match state
-        .catalogue
-        .publish_schema(&state.runtime, request.schema)
-    {
-        Ok(object_id) => object_id,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to publish schema catalogue: {err}"
-                ))),
-            )
-                .into_response();
-        }
-    };
-    if let Some(schema) = direct_schema {
+    if let Some(schema) = direct_schema.clone() {
         let direct_core = match state.direct_core() {
             Some(direct_core) => direct_core,
             None => match state.start_direct_core(schema.clone()) {
@@ -638,6 +623,21 @@ pub(super) async fn publish_schema_handler(
                 .into_response();
         }
     }
+    let object_id = match state
+        .catalogue
+        .publish_schema(&state.runtime, request.schema)
+    {
+        Ok(object_id) => object_id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to publish schema catalogue: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    };
 
     (
         StatusCode::CREATED,
