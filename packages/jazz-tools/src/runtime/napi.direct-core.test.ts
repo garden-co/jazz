@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { DirectWasmRuntime } from "./direct-wasm/runtime.js";
@@ -58,6 +61,71 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi direct core memory DB", () => {
     runtime.delete("todos", inserted.id);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("reopens a persistent direct DB and reads previously written rows", async () => {
+    const { WasmDb } = await loadNapiModule();
+    const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-direct-"));
+    const dataPath = join(tempDir, "db");
+    const node = deterministicBytes("jazz-napi-direct-persistent:node");
+    const author = deterministicBytes("jazz-napi-direct-persistent:author");
+    let firstRuntime: DirectWasmRuntime | null = null;
+    let secondRuntime: DirectWasmRuntime | null = null;
+
+    try {
+      firstRuntime = new DirectWasmRuntime(
+        {
+          openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never,
+          openPersistent: (path, schema, config) =>
+            WasmDb.openPersistent(path, schema, config) as never,
+        },
+        TEST_SCHEMA,
+        node,
+        author,
+        7,
+        true,
+        { persistentPath: dataPath },
+      );
+
+      const inserted = firstRuntime.insert("todos", {
+        title: { type: "Text", value: "direct napi persistent row" },
+        done: { type: "Boolean", value: false },
+      });
+      await firstRuntime.waitForTransaction(inserted.transactionId, "local");
+      firstRuntime.close();
+      firstRuntime = null;
+
+      secondRuntime = new DirectWasmRuntime(
+        {
+          openMemory: (schema, config) => WasmDb.openMemory(schema, config) as never,
+          openPersistent: (path, schema, config) =>
+            WasmDb.openPersistent(path, schema, config) as never,
+        },
+        TEST_SCHEMA,
+        node,
+        author,
+        7,
+        true,
+        { persistentPath: dataPath },
+      );
+
+      await expect(secondRuntime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+        {
+          id: inserted.id,
+          table: "todos",
+          values: [
+            { type: "Text", value: "direct napi persistent row" },
+            { type: "Boolean", value: false },
+          ],
+        },
+      ]);
+      secondRuntime.close();
+      secondRuntime = null;
+    } finally {
+      firstRuntime?.close();
+      secondRuntime?.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

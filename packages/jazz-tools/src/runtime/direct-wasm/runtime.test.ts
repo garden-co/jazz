@@ -437,6 +437,36 @@ describe("DirectWasmRuntime server transport", () => {
     ).rejects.toThrow("does not support read propagation");
   });
 
+  it("passes include_deleted query intent through direct read options", async () => {
+    const readOptions: unknown[] = [];
+    const runtime = new DirectWasmRuntime(
+      {
+        openMemory: () => ({
+          all: (_query: unknown, opts: unknown) => {
+            readOptions.push(opts);
+            return new Uint8Array([0]);
+          },
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", include_deleted: true }), null, "edge"),
+    ).resolves.toEqual([]);
+
+    expect(readOptions).toEqual([{ tier: "edge", include_deleted: true }]);
+  });
+
   it("passes supported subscription read tiers through", () => {
     const runtime = directRuntimeWithEmptyDb();
 

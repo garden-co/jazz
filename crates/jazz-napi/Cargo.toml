@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["rocksdb"]
-rocksdb = ["jazz_tools/rocksdb", "jazz-server/rocksdb"]
+rocksdb = ["jazz/rocksdb", "jazz_tools/rocksdb", "jazz-server/rocksdb"]
 
 [lib]
 crate-type = ["cdylib"]

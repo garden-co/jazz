@@ -196,10 +196,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it.skip("TODO: exposes edge-confirmed browser deletes through includeDeleted over direct websocket", async () => {
-    // Proven blocker: with an edge-confirmed delete, querying
-    // app.todos.includeDeleted().where({ id }) at tier:"edge" timed out after
-    // 15s with lastRows=[] in this browser direct websocket gate.
+  it("exposes edge-confirmed browser deletes through includeDeleted over direct websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);

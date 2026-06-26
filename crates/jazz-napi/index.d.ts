@@ -67,6 +67,7 @@ export declare class TestJwtIssuer {
 
 export declare class WasmDb {
   static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb
+  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): WasmDb
   prepareQuery(query: Uint8Array): WasmPreparedQuery
   all(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
@@ -74,6 +75,7 @@ export declare class WasmDb {
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite
   delete(table: string, rowId: Uint8Array): WasmWrite
   tick(): void
+  close(): void
 }
 export type NapiDirectDb = WasmDb
 
