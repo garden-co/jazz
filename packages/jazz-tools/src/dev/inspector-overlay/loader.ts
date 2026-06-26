@@ -10,62 +10,54 @@ const TOGGLE_SIZE = 44;
 const EDGE_MARGIN = 8;
 const DRAG_THRESHOLD = 4;
 
-const readOpen = (): boolean => {
+// localStorage may throw (private mode / disabled), so every access is wrapped.
+// One read/write pair carries the try/catch; each accessor is a one-liner.
+const readLS = <T>(key: string, parse: (raw: string) => T, fallback: T): T => {
   try {
-    return localStorage.getItem(OPEN_KEY) === "1";
+    const raw = localStorage.getItem(key);
+    return raw == null ? fallback : parse(raw);
   } catch {
-    return false;
+    return fallback;
   }
 };
-const writeOpen = (open: boolean): void => {
+const writeLS = (key: string, value: string): void => {
   try {
-    localStorage.setItem(OPEN_KEY, open ? "1" : "0");
-  } catch {
-    /* ignore */
-  }
-};
-const readHeight = (): number | null => {
-  try {
-    const raw = localStorage.getItem(HEIGHT_KEY);
-    const n = raw == null ? NaN : Number(raw);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-};
-const writeHeight = (h: number): void => {
-  try {
-    localStorage.setItem(HEIGHT_KEY, String(Math.round(h)));
+    localStorage.setItem(key, value);
   } catch {
     /* ignore */
   }
 };
+
+const readOpen = (): boolean => readLS(OPEN_KEY, (raw) => raw === "1", false);
+const writeOpen = (open: boolean): void => writeLS(OPEN_KEY, open ? "1" : "0");
+
+const readHeight = (): number | null =>
+  readLS(
+    HEIGHT_KEY,
+    (raw) => {
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    },
+    null,
+  );
+const writeHeight = (h: number): void => writeLS(HEIGHT_KEY, String(Math.round(h)));
 
 const maxHeight = () => Math.round(window.innerHeight * 0.92);
 const clampHeight = (h: number) => Math.max(MIN_HEIGHT, Math.min(h, maxHeight()));
 
-const readTogglePos = (): { left: number; top: number } | null => {
-  try {
-    const raw = localStorage.getItem(TOGGLE_POS_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw) as { left?: unknown; top?: unknown };
-    if (typeof p.left === "number" && typeof p.top === "number")
-      return { left: p.left, top: p.top };
-  } catch {
-    /* ignore */
-  }
-  return null;
-};
-const writeTogglePos = (left: number, top: number): void => {
-  try {
-    localStorage.setItem(
-      TOGGLE_POS_KEY,
-      JSON.stringify({ left: Math.round(left), top: Math.round(top) }),
-    );
-  } catch {
-    /* ignore */
-  }
-};
+const readTogglePos = (): { left: number; top: number } | null =>
+  readLS(
+    TOGGLE_POS_KEY,
+    (raw) => {
+      const p = JSON.parse(raw) as { left?: unknown; top?: unknown };
+      return typeof p.left === "number" && typeof p.top === "number"
+        ? { left: p.left, top: p.top }
+        : null;
+    },
+    null,
+  );
+const writeTogglePos = (left: number, top: number): void =>
+  writeLS(TOGGLE_POS_KEY, JSON.stringify({ left: Math.round(left), top: Math.round(top) }));
 const clampToggle = (left: number, top: number): { left: number; top: number } => ({
   left: Math.max(EDGE_MARGIN, Math.min(left, window.innerWidth - TOGGLE_SIZE - EDGE_MARGIN)),
   top: Math.max(EDGE_MARGIN, Math.min(top, window.innerHeight - TOGGLE_SIZE - EDGE_MARGIN)),
