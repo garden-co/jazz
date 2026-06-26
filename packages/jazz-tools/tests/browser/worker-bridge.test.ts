@@ -35,10 +35,13 @@ import {
 import { CompiledPermissions, schema as s } from "../../src/";
 import {
   fetchPermissionsHead,
+  publishStoredMigration,
   publishStoredPermissions,
   publishStoredSchema,
+  type PublishedTableLens,
 } from "../../src/runtime/schema-fetch.js";
 import { encodeDirectSchema } from "../../src/runtime/direct-wasm/runtime.js";
+import { toValue } from "../../src/runtime/value-converter.js";
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -203,46 +206,33 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
   return app.todos.where({ projectId });
 }
 
-// Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
-const catalogueSchemaV1: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
+const catalogueSchemaDefinitionV1 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+  }),
 };
 
-const catalogueSchemaV2: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-      { name: "description", column_type: { type: "Text" }, nullable: true },
-    ],
-  },
+const catalogueSchemaDefinitionV2 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+    description: s.string().optional(),
+  }),
 };
 
-interface CatalogueTodo {
-  id: string;
-  title: string;
-  completed: boolean;
-  description?: string;
-}
+const catalogueAppV1 = s.defineApp(catalogueSchemaDefinitionV1);
+const catalogueAppV2 = s.defineApp(catalogueSchemaDefinitionV2);
+const { todos: catalogueTodos } = catalogueAppV2;
+type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
 
-const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
-  _table: "todos",
-  _schema: catalogueSchemaV2,
-  _rowType: {} as CatalogueTodo,
-  _build() {
-    return JSON.stringify({
-      table: "todos",
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    });
-  },
-};
+const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -959,6 +949,58 @@ describe("Worker Bridge with OPFS", () => {
     );
     const rows = await reopened.all(allTodos, { tier: "local" });
     expect(rows).toEqual([]);
+  });
+
+  it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
+    const dbName = uniqueDbName("catalogue-rehydrate");
+    const testingServer = await publishCatalogueSchemaFamily("catalogue-rehydrate");
+
+    const db = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const marker = `catalogue-rehydrate-${Date.now()}`;
+    await db
+      .insert(catalogueTodos, {
+        title: marker,
+        completed: false,
+        description: "written with v2 after catalogue setup",
+      })
+      .wait({ tier: "edge" });
+
+    await waitForCatalogueTodos(
+      db,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("v2")),
+      "initial catalogue v2 query should read the inserted row",
+      15000,
+      "local",
+    );
+
+    await db.shutdown();
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const rowsAfterRehydrate = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("v2")),
+      "reopened worker/main-thread catalogue v2 query should read the durable row",
+      15000,
+      "local",
+    );
+    expect(rowsAfterRehydrate.find((row) => row.title === marker)?.completed).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -2869,6 +2911,16 @@ async function waitForTodos(
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
 
+async function waitForCatalogueTodos(
+  db: Db,
+  predicate: (rows: CatalogueTodo[]) => boolean,
+  label: string,
+  timeoutMs = 15000,
+  tier?: "local" | "edge",
+): Promise<CatalogueTodo[]> {
+  return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
+}
+
 async function waitForSubscribedTodos(
   db: Db,
   predicate: (rows: Todo[]) => boolean,
@@ -2960,4 +3012,80 @@ async function publishPermissionsForServer(
     permissions,
     expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
+}
+
+async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { appId, serverUrl, adminSecret } = testingServer;
+  const v1 = await publishStoredSchema(serverUrl, {
+    appId,
+    adminSecret,
+    schema: catalogueAppV1.wasmSchema,
+  });
+  const v2 = await publishStoredSchema(serverUrl, {
+    appId,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+  });
+  const migration = s.defineMigration({
+    fromHash: v1.hash,
+    toHash: v2.hash,
+    from: catalogueSchemaDefinitionV1,
+    to: catalogueSchemaDefinitionV2,
+    migrate: {
+      todos: {
+        description: s.add.string({ default: null }),
+      },
+    },
+  });
+
+  await publishStoredMigration(serverUrl, {
+    appId,
+    adminSecret,
+    fromHash: v1.hash,
+    toHash: v2.hash,
+    forward: serializeCatalogueMigrationForward(migration.forward),
+  });
+
+  const { head } = await fetchPermissionsHead(serverUrl, {
+    appId,
+    adminSecret,
+  });
+  await publishStoredPermissions(serverUrl, {
+    appId,
+    adminSecret,
+    schemaHash: v2.hash,
+    permissions: cataloguePermissionsV2,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
+
+  return testingServer;
+}
+
+function serializeCatalogueMigrationForward(
+  forward: ReturnType<typeof s.defineMigration>["forward"],
+): PublishedTableLens[] {
+  return forward.map((tableLens) => ({
+    table: tableLens.table,
+    added: tableLens.added,
+    removed: tableLens.removed,
+    renamedFrom: tableLens.renamedFrom,
+    operations: tableLens.operations.map((op) => {
+      if (op.type === "rename") {
+        return op;
+      }
+
+      if (op.sqlType !== "TEXT") {
+        throw new Error(`Unsupported catalogue migration SQL type ${JSON.stringify(op.sqlType)}`);
+      }
+
+      const column_type = { type: "Text" as const };
+      return {
+        type: op.type,
+        column: op.column,
+        column_type,
+        value: toValue(op.value, column_type),
+      };
+    }),
+  }));
 }
