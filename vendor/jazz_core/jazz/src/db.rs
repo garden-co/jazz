@@ -1079,29 +1079,23 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        let data = self.write_mergeable(
-            self.identity.author,
-            None,
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-        )?;
-        let restore = self.write_mergeable(
-            self.identity.author,
-            None,
-            table,
-            row,
-            BTreeMap::new(),
-            Vec::new(),
-            Some(DeletionEvent::Restored),
-        )?;
+        self.table_schema(table)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(BTreeMap::<String, Value>::new())
+                .deletion(DeletionEvent::Restored),
+        ])?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
         Ok(WriteHandle {
-            node: restore.node,
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
-            tx_id: restore.tx_id,
-            local_tier: data.local_tier.max(restore.local_tier),
+            tx_id,
+            local_tier,
         })
     }
 
@@ -1116,29 +1110,25 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        let data = self.write_mergeable(
-            identity,
-            Some(identity),
-            table,
-            row,
-            cells,
-            Vec::new(),
-            None,
-        )?;
-        let restore = self.write_mergeable(
-            identity,
-            Some(identity),
-            table,
-            row,
-            BTreeMap::new(),
-            Vec::new(),
-            Some(DeletionEvent::Restored),
-        )?;
+        self.table_schema(table)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(identity)
+                .permission_subject(identity)
+                .cells(cells),
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(identity)
+                .permission_subject(identity)
+                .cells(BTreeMap::<String, Value>::new())
+                .deletion(DeletionEvent::Restored),
+        ])?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
         Ok(WriteHandle {
-            node: restore.node,
+            node: Rc::downgrade(&self.node.node),
             row_uuid: row,
-            tx_id: restore.tx_id,
-            local_tier: data.local_tier.max(restore.local_tier),
+            tx_id,
+            local_tier,
         })
     }
 

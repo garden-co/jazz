@@ -24,8 +24,8 @@ than old helper behavior:
 
 - `insert_benchmark` models team/folder authorization as a folder-access join
   policy instead of old `INHERITS SELECT VIA folder_id` session recursion.
-- `subscription_benchmark` consumes one direct subscription delta per insert in
-  the batch case; old RuntimeCore tick coalescing produced one larger callback.
+- `subscription_benchmark` uses `Db::mergeable_tx()` for the batch case so the
+  direct-core benchmark measures one transaction-shaped subscription delta.
 
 ## Intended next ports
 

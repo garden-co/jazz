@@ -1002,6 +1002,34 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
 }
 
 #[test]
+fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let mut subscription =
+        doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let mut tx = db.mergeable_tx();
+    for index in 0..100u8 {
+        tx.insert_with_id(
+            "todos",
+            RowUuid::from_bytes([index + 1; 16]),
+            doctest_support::todo_cells(&format!("todo {index}"), false),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+
+    let (added, updated, removed) =
+        delta_rows(doctest_support::block_on(subscription.next_event()).unwrap());
+    assert_eq!(added.len(), 100);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(subscription.try_next_event().is_none());
+}
+
+#[test]
 fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
     let schema = schema();
     let dir = tempfile::tempdir().unwrap();
