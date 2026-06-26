@@ -312,9 +312,10 @@ export class DirectWasmRuntime implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     const query = this.prepareQuery(queryJson);
     const session = readSession(sessionJson);
+    const opts = readOptions(tier);
     const rows = session
-      ? this.db.allForIdentity(query, parseUuid(session.user_id), readOptions())
-      : this.db.all(query, readOptions());
+      ? this.db.allForIdentity(query, parseUuid(session.user_id), opts)
+      : this.db.all(query, opts);
     return this.decodeDirectRows(rows, queryJson);
   }
 
@@ -328,7 +329,7 @@ export class DirectWasmRuntime implements Runtime {
     void readSession(sessionJson);
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
-    const reader = this.db.subscribe(query, readOptions()).getReader();
+    const reader = this.db.subscribe(query, readOptions(tier)).getReader();
     this.subscriptions.set(handle, {
       reader,
       rows: [],
@@ -593,13 +594,13 @@ function txIdFromContext(writeContext?: string | null): string | undefined {
   }
 }
 
-function readOptions(): unknown {
-  return { tier: "local" };
+function readOptions(tier?: string | null): unknown {
+  return { tier: tier ?? "local" };
 }
 
 function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
-  if (tier != null && tier !== "local") {
-    throw new Error(`Direct WasmDb runtime only supports local reads; received tier '${tier}'`);
+  if (tier != null && !["local", "edge", "global"].includes(tier)) {
+    throw new Error(`Direct WasmDb runtime received unsupported read tier '${tier}'`);
   }
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
@@ -675,7 +676,11 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
   if (encoded) {
-    return queryWithPredicates(parsed.table, encoded.predicates, readLimitIfPresent(parsed.limit));
+    return queryWithPredicates(
+      parsed.table,
+      encoded.predicates,
+      encoded.hasPostFilter ? undefined : readLimitIfPresent(parsed.limit),
+    );
   }
   if (parsed.limit != null) {
     return queryWithEqFilters(parsed.table, [], readLimit(parsed.limit));
@@ -687,7 +692,7 @@ function encodeSimpleRelationQuery(
   table: string,
   relationIr: unknown,
   schema: WasmSchema,
-): { predicates: DirectQueryPredicate[] } | null {
+): { predicates: DirectQueryPredicate[]; hasPostFilter: boolean } | null {
   const unwrapped = unwrapSimpleRelation(table, relationIr);
   if (!unwrapped) return null;
   const unsupportedIdComparator = unwrapped.predicates.find(
@@ -698,7 +703,9 @@ function encodeSimpleRelationQuery(
       `Direct WasmDb runtime does not support '${unsupportedIdComparator.op}' comparisons on id yet`,
     );
   }
+  const hasPostFilter = unwrapped.predicates.some((filter) => filter.column === "id");
   return {
+    hasPostFilter,
     predicates: unwrapped.predicates
       .filter((filter) => filter.column !== "id")
       .map((filter) => ({
@@ -743,6 +750,11 @@ function unwrapSimpleRelation(
     (tableScan as { table?: unknown }).table === table
   ) {
     return { predicates: [] };
+  }
+  const limit = relation.Limit;
+  if (limit && typeof limit === "object") {
+    const limitRecord = limit as { input?: unknown };
+    return unwrapSimpleRelation(table, limitRecord.input);
   }
   const filter = relation.Filter;
   if (!filter || typeof filter !== "object") return null;
