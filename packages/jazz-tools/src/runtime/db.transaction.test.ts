@@ -108,13 +108,13 @@ describe("Db transactions", () => {
     );
   });
 
-  it("rejects db transaction writes against a different client/schema", () => {
+  it("rejects db transaction writes against a different schema", () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
 
     expect(() =>
       tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    ).toThrow(/Db is already initialized with a different schema/);
   });
 });
 
@@ -176,12 +176,12 @@ describe("Db batches", () => {
     await expect(allTodos()).resolves.toEqual([]);
   });
 
-  it("rejects db batch writes against a different client/schema", () => {
+  it("rejects db batch writes against a different schema", () => {
     const batch = db.beginBatch();
     batch.insert(app.todos, { title: "Primary client", done: false });
 
     expect(() =>
       batch.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
-    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    ).toThrow(/Db is already initialized with a different schema/);
   });
 });

@@ -28,7 +28,7 @@ export interface ConnectionManagerHost {
   readonly isShuttingDown: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
   telemetryCollectorUrl(): string | undefined;
-  firstClientEntry(): ConnectionBridgeClientInput | null;
-  shutdownClientsForConnectionReset(): Promise<void>;
-  recreateClientAfterConnectionReset(schema: WasmSchema): JazzClient;
+  clientEntry(): ConnectionBridgeClientInput | null;
+  shutdownClient(): Promise<void>;
+  recreateClient(schema: WasmSchema): JazzClient;
 }

@@ -126,7 +126,10 @@ function clearActiveQuerySubscriptionBridge(db: Db): void {
   state.activeQuerySubscriptionsUnsubscribe = null;
 }
 
-function getFirstDbClient(db: Db): JazzClient | null {
+function getDbClient(db: Db): JazzClient | null {
+  const maybeClient = (db as unknown as { client?: unknown }).client;
+  if (maybeClient) return maybeClient as JazzClient;
+
   const maybeClients = (db as unknown as { clients?: unknown }).clients;
   if (!(maybeClients instanceof Map)) return null;
   const firstClient = maybeClients.values().next().value;
@@ -134,11 +137,11 @@ function getFirstDbClient(db: Db): JazzClient | null {
 }
 
 function tryGetSchemaFromDb(db: Db): WasmSchema | null {
-  const firstClient = getFirstDbClient(db);
-  if (!firstClient) {
+  const client = getDbClient(db);
+  if (!client) {
     return null;
   }
-  return firstClient.getSchema();
+  return client.getSchema();
 }
 
 function tryCreateClientForSchema(db: Db, schema: WasmSchema): JazzClient | null {
@@ -273,7 +276,7 @@ function hookRegistration(
             updateRuntimeBridgeSchema(db, schema);
             updateRuntimeBridgeConfig(db, dbConfig);
             tryCreateClientForSchema(db, schema);
-            const runtimeReady = Boolean(getFirstDbClient(db));
+            const runtimeReady = Boolean(getDbClient(db));
             respond({
               ok: true,
               payload: { ready: runtimeReady, wasmSchema: schema, dbConfig },
@@ -320,7 +323,7 @@ function hookRegistration(
             tryCreateClientForSchema(db, schema);
           }
 
-          const client = getFirstDbClient(db);
+          const client = getDbClient(db);
           if (!client) {
             throw new Error("No Jazz runtime client is initialized yet.");
           }

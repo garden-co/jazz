@@ -1192,8 +1192,8 @@ describe("Worker Bridge with OPFS", () => {
         workerExists: Boolean(getPrivateWorker(fresh)),
         workerOnMessage: Boolean(getPrivateWorker(fresh)?.onmessage),
         bridge: Boolean(getPrivateWorkerBridge(fresh)),
-        clientsType: typeof (fresh as unknown as { clients?: unknown }).clients,
-        clientKeys: Object.keys((fresh as unknown as { clients?: object }).clients ?? {}),
+        clientType: typeof (fresh as unknown as { client?: unknown }).client,
+        hasClient: Boolean((fresh as unknown as { client?: unknown }).client),
       })}`,
     );
     const snapshots: Todo[][] = [];
