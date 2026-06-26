@@ -12,11 +12,14 @@ jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-
   "transport-websocket",
   "otel-core",
 ] }
+jazz = { path = "../../vendor/jazz_core/jazz", default-features = false }
+jazz-server = { path = "../../vendor/jazz_core/jazz-server", default-features = false }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }
 napi-derive = "3"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_bytes = "0.11"

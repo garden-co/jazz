@@ -16,6 +16,7 @@ export interface JazzServerNetworkDebugState {
 declare module "vitest/internal/browser" {
   interface BrowserCommands {
     jazzServerInfo: (appId?: string) => Promise<JazzServerInfo>;
+    directJazzServerInfo: (appId: string, schema: Uint8Array) => Promise<JazzServerInfo>;
     jazzServerBlockNetwork: (serverUrl: string) => Promise<void>;
     jazzServerUnblockNetwork: (serverUrl: string) => Promise<void>;
     jazzServerJwtForUser: (
@@ -28,6 +29,10 @@ declare module "vitest/internal/browser" {
 
 export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
   return commands.jazzServerInfo(appId);
+}
+
+export function getDirectJazzServerInfo(appId: string, schema: Uint8Array): Promise<JazzServerInfo> {
+  return commands.directJazzServerInfo(appId, [...schema]);
 }
 
 export function blockJazzServerNetwork(serverUrl: string): Promise<void> {

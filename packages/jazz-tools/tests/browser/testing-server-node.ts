@@ -77,6 +77,55 @@ export async function jazzServerInfo(appId?: string): Promise<{
   };
 }
 
+export async function directJazzServerInfo(
+  appId: string,
+  schema: ArrayLike<number>,
+): Promise<{
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+}> {
+  const key = `direct:${appId}`;
+  const existing = jazzServerPromises.get(key);
+  if (existing) {
+    const started = await existing;
+    return {
+      appId: started.appId,
+      serverUrl: started.serverUrl,
+      adminSecret: started.adminSecret,
+    };
+  }
+  const startedServer = (async (): Promise<StartedJazzServer> => {
+    const jwtIssuer = await startTestJwtIssuer();
+    const adminSecret = "jazz-browser-test-admin";
+    const backendSecret = "jazz-browser-test-backend";
+    const server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret,
+      backendSecret,
+      directCoreSchema: Uint8Array.from(schema),
+    });
+    return {
+      server,
+      jwtIssuer,
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+    };
+  })().catch((error) => {
+    jazzServerPromises.delete(key);
+    throw error;
+  });
+  jazzServerPromises.set(key, startedServer);
+  const started = await startedServer;
+  return {
+    appId: started.appId,
+    serverUrl: started.serverUrl,
+    adminSecret: started.adminSecret,
+  };
+}
+
 export async function jazzServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,

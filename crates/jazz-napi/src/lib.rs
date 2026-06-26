@@ -39,6 +39,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jazz::db::DbIdentity;
+use jazz::ids::{AuthorId, NodeUuid};
+use jazz::schema::JazzSchema;
+use jazz_server::auth_admission::AuthAdmissionConfig;
+use jazz_server::loopback_websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 use jazz_tools::binding_support::{
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_read_durability_options, parse_runtime_schema_input, parse_session_input,
@@ -216,6 +221,15 @@ fn make_subscription_callback(
 
 type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler>;
 
+#[napi(object)]
+pub struct DirectJazzServerStartOptions {
+    #[napi(js_name = "appId")]
+    pub app_id: String,
+    pub port: Option<u16>,
+    #[napi(ts_type = "Buffer | Uint8Array")]
+    pub schema: Uint8Array,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JazzServerStartOptions {
@@ -333,6 +347,73 @@ impl Scheduler for NapiScheduler {
                 deliver_pending_mutation_errors(&core_arc);
             }
         });
+    }
+}
+
+// ============================================================================
+// DirectJazzServer
+// ============================================================================
+
+#[napi]
+pub struct DirectJazzServer {
+    server: Mutex<Option<LoopbackWebSocketServer>>,
+    url: String,
+}
+
+#[napi]
+impl DirectJazzServer {
+    #[napi(factory)]
+    pub fn start(options: DirectJazzServerStartOptions) -> napi::Result<Self> {
+        let schema =
+            postcard::from_bytes::<JazzSchema>(options.schema.as_ref()).map_err(|error| {
+                napi::Error::from_reason(format!("Invalid direct Jazz schema bytes: {error}"))
+            })?;
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorId::SYSTEM,
+        };
+        let mut config = LoopbackWebSocketServerConfig::in_memory(schema, identity)
+            .with_row_id_seed(0x5e)
+            .with_auth_admission(AuthAdmissionConfig::legacy_query_identity());
+        config.listener.bind_addr = ([127, 0, 0, 1], options.port.unwrap_or(0)).into();
+        config.listener.websocket_path = format!("/apps/{}/ws", options.app_id);
+
+        let server = LoopbackWebSocketServer::start_with_config(config).map_err(|error| {
+            napi::Error::from_reason(format!("Failed to start direct Jazz server: {error}"))
+        })?;
+        let port = server.local_addr().port();
+        Ok(Self {
+            server: Mutex::new(Some(server)),
+            url: format!("http://127.0.0.1:{port}"),
+        })
+    }
+
+    #[napi(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    #[napi]
+    pub fn stop(&self) -> napi::Result<()> {
+        if let Some(server) = self
+            .server
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .take()
+        {
+            server.shutdown();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DirectJazzServer {
+    fn drop(&mut self) {
+        if let Ok(mut server) = self.server.lock()
+            && let Some(server) = server.take()
+        {
+            server.shutdown();
+        }
     }
 }
 

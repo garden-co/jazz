@@ -133,7 +133,7 @@ export class DirectWasmRuntime implements Runtime {
     sourceId: number,
     historyComplete: boolean,
   ) {
-    this.schemaBytes = encodeSchema(schema);
+    this.schemaBytes = encodeDirectSchema(schema);
     this.configBytes = openConfig(node, author, sourceId, historyComplete);
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -329,6 +329,7 @@ export class DirectWasmRuntime implements Runtime {
       cancelled: false,
       reading: false,
     });
+    this.notifySyncNeeded();
     return handle;
   }
 
@@ -337,6 +338,7 @@ export class DirectWasmRuntime implements Runtime {
     if (!subscription) return;
     subscription.callback = onUpdate;
     this.startSubscriptionReader(handle, subscription);
+    this.notifySyncNeeded();
   }
 
   unsubscribe(handle: number): void {
@@ -726,7 +728,7 @@ function isUuidString(value: string): boolean {
   );
 }
 
-function encodeSchema(schema: WasmSchema): Uint8Array {
+export function encodeDirectSchema(schema: WasmSchema): Uint8Array {
   const tables = Object.entries(schema);
   const writer = new PostcardWriter();
   writer.vec((table, index) => {

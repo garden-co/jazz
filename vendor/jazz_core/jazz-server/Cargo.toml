@@ -3,8 +3,12 @@ name = "jazz-server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["jazz/rocksdb"]
+
 [dependencies]
-jazz = { path = "../jazz" }
+jazz = { path = "../jazz", default-features = false }
 postcard = { version = "1.1", features = ["alloc"] }
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 serde = { version = "1", features = ["derive"] }
