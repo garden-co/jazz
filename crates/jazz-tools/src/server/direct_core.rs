@@ -4,7 +4,7 @@ use std::thread;
 
 use jazz::db::DbIdentity;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use jazz::schema::JazzSchema;
 use jazz_server::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, ServerSession, StorageConfig,
@@ -21,6 +21,10 @@ enum DirectCoreCommand {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         reply: oneshot::Sender<Result<ServerSession, String>>,
+    },
+    PublishSchema {
+        schema: Box<JazzSchema>,
+        reply: oneshot::Sender<Result<SchemaVersionId, String>>,
     },
     ReceiveTickTake {
         session: ServerSession,
@@ -77,6 +81,12 @@ impl DirectCoreServer {
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
+                        DirectCoreCommand::PublishSchema { schema, reply } => {
+                            let result = shell
+                                .publish_runtime_schema(*schema)
+                                .map_err(|error| error.to_string());
+                            let _ = reply.send(result);
+                        }
                         DirectCoreCommand::ReceiveTickTake {
                             session,
                             frames,
@@ -126,6 +136,22 @@ impl DirectCoreServer {
         response
             .await
             .map_err(|_| "direct core thread dropped open response".to_owned())?
+    }
+
+    pub(crate) async fn publish_schema(
+        &self,
+        schema: JazzSchema,
+    ) -> Result<SchemaVersionId, String> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(DirectCoreCommand::PublishSchema {
+                schema: Box::new(schema),
+                reply,
+            })
+            .map_err(|_| "direct core thread is not running".to_owned())?;
+        response
+            .await
+            .map_err(|_| "direct core thread dropped schema publish response".to_owned())?
     }
 
     pub(crate) async fn receive_tick_take(
