@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{OriginalUri, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -35,6 +35,34 @@ use http::{
     publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
     schema_handler, schema_hashes_handler,
 };
+use utils::parse_app_id_param;
+
+async fn app_id_gate(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| uri.path())
+        .unwrap_or_else(|| request.uri().path());
+    let Some(app_id_text) = path
+        .strip_prefix("/apps/")
+        .and_then(|path| path.split('/').next())
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(app_id) = parse_app_id_param(app_id_text) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if app_id != state.app_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    next.run(request).await
+}
 
 async fn app_shutdown_gate(
     State(state): State<Arc<ServerState>>,
@@ -55,9 +83,6 @@ async fn app_shutdown_gate(
 }
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
-    // TODO: Accept app-name aliases in app-scoped route matching
-    // Nesting all non-health routes under a fixed "/apps/{state.app_id}" path makes the server only match the canonical UUID string, but JavaScript callers frequently propagate human-readable app IDs (e.g. "test-app") that are valid elsewhere via AppId::from_name(...). In that non-UUID case, the client now builds /apps/test-app/... URLs while the server only serves /apps/<derived-uuid>/..., so websocket and admin/schema requests return 404 for otherwise valid app IDs.
-    let app_route_prefix = format!("/apps/{}", state.app_id);
     let admin_routes = Router::new()
         .route("/schemas", post(publish_schema_handler))
         .route("/schema-connectivity", get(schema_connectivity_handler))
@@ -80,12 +105,13 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             state.clone(),
             app_shutdown_gate,
         ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), app_id_gate))
         .layer(TraceLayer::new_for_http());
 
     Router::new()
         .route("/health", get(health_handler))
         .route("/internal/shutdown", post(internal_shutdown_handler))
-        .nest(&app_route_prefix, traced_routes)
+        .nest("/apps/:app_id", traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -215,6 +241,10 @@ mod tests {
         )
     }
 
+    fn named_test_app_route(path: &str) -> String {
+        format!("/apps/test-app/{}", path.trim_start_matches('/'))
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ForwardedAdminRequest {
         method: String,
@@ -337,6 +367,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn app_routes_accept_canonical_uuid_app_id() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn app_routes_accept_name_alias_app_id() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(named_test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn app_routes_reject_mismatched_app_id() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/apps/other-app/schemas")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
