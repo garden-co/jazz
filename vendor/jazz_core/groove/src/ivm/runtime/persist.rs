@@ -7,7 +7,7 @@
 //! after evaluating the input node. Base table commits and schema-aware row
 //! encoding live above in [`crate::db`] and [`crate::records`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ivm::DurableStorage;
 use crate::records::RecordDescriptor;
@@ -35,48 +35,50 @@ pub(super) fn apply_persist_delta(
     // entry must remain present regardless of delta order.
     let mut pending = HashMap::<Vec<u8>, PendingPersistKey>::new();
     for record_delta in &delta.deltas {
-        let key = persist_record_key(
+        let keys = persist_record_keys(
             &delta.descriptor,
             record_delta.raw(),
             key_fields,
             durable_storage,
         )?;
 
-        if record_delta.weight > 0 {
-            if unique {
-                // A unique index key may be rewritten by the same record, but
-                // not by a different record.
-                let current = if let Some(record) = pending
-                    .get(&key)
-                    .and_then(|entry| entry.positive_record.clone())
-                {
-                    Some(record)
-                } else {
-                    store.get_raw(&key)?
-                };
-                if current
-                    .as_deref()
-                    .is_some_and(|record| record != record_delta.raw())
-                {
-                    return Err(IvmRuntimeError::UniqueIndexViolation {
-                        index: durable_storage_name(durable_storage),
-                    });
+        for key in keys {
+            if record_delta.weight > 0 {
+                if unique {
+                    // A unique index key may be rewritten by the same record, but
+                    // not by a different record.
+                    let current = if let Some(record) = pending
+                        .get(&key)
+                        .and_then(|entry| entry.positive_record.clone())
+                    {
+                        Some(record)
+                    } else {
+                        store.get_raw(&key)?
+                    };
+                    if current
+                        .as_deref()
+                        .is_some_and(|record| record != record_delta.raw())
+                    {
+                        return Err(IvmRuntimeError::UniqueIndexViolation {
+                            index: durable_storage_name(durable_storage),
+                        });
+                    }
                 }
-            }
-            let entry = pending.entry(key).or_default();
-            entry.weight += record_delta.weight;
-            entry.positive_record = Some(record_delta.raw().to_vec());
-        } else if record_delta.weight < 0 {
-            if unique {
-                let current = store.get_raw(&key)?;
-                if current
-                    .as_deref()
-                    .is_some_and(|record| record != record_delta.raw())
-                {
-                    continue;
+                let entry = pending.entry(key).or_default();
+                entry.weight += record_delta.weight;
+                entry.positive_record = Some(record_delta.raw().to_vec());
+            } else if record_delta.weight < 0 {
+                if unique {
+                    let current = store.get_raw(&key)?;
+                    if current
+                        .as_deref()
+                        .is_some_and(|record| record != record_delta.raw())
+                    {
+                        continue;
+                    }
                 }
+                pending.entry(key).or_default().weight += record_delta.weight;
             }
-            pending.entry(key).or_default().weight += record_delta.weight;
         }
     }
 
@@ -111,13 +113,15 @@ fn durable_storage_name(durable_storage: &DurableStorage) -> String {
         .replace('\0', ".")
 }
 
-fn persist_record_key(
+fn persist_record_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
     key_fields: &[usize],
     durable_storage: &DurableStorage,
-) -> Result<Vec<u8>, IvmRuntimeError> {
-    let mut key = durable_storage.key_prefix.clone();
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    let mut keys = vec![durable_storage.key_prefix.clone()];
+    let mut seen = HashSet::new();
+
     for field_idx in key_fields {
         let field = descriptor
             .fields()
@@ -128,7 +132,28 @@ fn persist_record_key(
             .as_deref()
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
         let value = descriptor.get(record, field_name)?;
-        encode_key_part(&mut key, &value)?;
+        let parts = match value {
+            crate::records::Value::Array(values) => values,
+            value => vec![value],
+        };
+
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
+        for key in &keys {
+            for value in &parts {
+                let mut next = key.clone();
+                encode_key_part(&mut next, value)?;
+                if seen.insert(next.clone()) {
+                    next_keys.push(next);
+                }
+            }
+        }
+        keys = next_keys;
+        seen.clear();
     }
-    Ok(key)
+
+    Ok(keys)
 }
