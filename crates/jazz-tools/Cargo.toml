@@ -57,7 +57,6 @@ otel = ["cli", "otel-core"]
 
 [dependencies]
 jazz = { workspace = true }
-jazz-server = { workspace = true }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
@@ -129,6 +128,9 @@ opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 lz4_flex = "0.13.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+jazz-server = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = { version = "0.3", features = ["futures"] }
