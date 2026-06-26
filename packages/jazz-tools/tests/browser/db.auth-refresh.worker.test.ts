@@ -29,7 +29,6 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { decodeMainToWorkerJs } from "jazz-wasm";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, withTimeout } from "./support.js";
@@ -90,10 +89,8 @@ const allTodos: QueryBuilder<Todo> = {
  * Must be called AFTER the WorkerBridge has been initialised (i.e. after
  * at least one insert or query that triggers getClient()).
  *
- * Each captured entry is a decoded `{type, ...}` JS object: init/ready stay
- * as the JS objects the bridge already sends, while postcard-binary
- * envelopes (`Uint8Array`) are decoded via `decodeMainToWorkerJs`. Variants
- * the decoder doesn't recognise are skipped silently.
+ * Each captured entry is a plain `{type, ...}` JS object posted by the
+ * direct worker bridge.
  */
 function attachOutboundMessageProbe(db: Db): {
   snapshot: () => Array<{ type: string; [k: string]: unknown }>;
@@ -109,13 +106,7 @@ function attachOutboundMessageProbe(db: Db): {
 
   const originalPostMessage = worker.postMessage.bind(worker);
   worker.postMessage = ((message: unknown, options?: unknown) => {
-    if (message instanceof Uint8Array) {
-      try {
-        captured.push(decodeMainToWorkerJs(message));
-      } catch {
-        // Unknown variant — protocol decoder doesn't expose every wire type.
-      }
-    } else if (message && typeof message === "object") {
+    if (message && typeof message === "object" && !(message instanceof Uint8Array)) {
       const typed = message as { type?: string };
       if (typed.type) {
         captured.push({ ...(typed as { type: string; [k: string]: unknown }) });
