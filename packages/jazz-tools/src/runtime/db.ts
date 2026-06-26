@@ -434,7 +434,7 @@ function assertTableBelongsToClient<T, Init>(
     return;
   }
   throw new Error(
-    `${operation} is bound to the client chosen by the first table used and cannot be used with table "${table._table}" from a different schema/client.`,
+    `${operation} is bound to the schema chosen by the first table used and cannot be used with table "${table._table}" from a different schema.`,
   );
 }
 
@@ -786,8 +786,11 @@ export type BatchScope = Scoped<DbDirectBatch>;
  * ```
  */
 export class Db {
-  private clients = new Map<string, JazzClient>();
-  private clientSchemas = new Map<string, WasmSchema>();
+  private client: JazzClient | null = null;
+  /**
+   * Db schema, cached for performance
+   */
+  private clientSchema: WasmSchema | null = null;
   private config: DbConfig;
   private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
@@ -805,8 +808,8 @@ export class Db {
     new Set<ActiveQuerySubscriptionTraceListener>();
   /**
    * Listeners attached with {@link Db.onMutationError} that are notified when a write operation
-   * (insert, update, delete) is rejected. Errors from all {@link Db.clients} (including those
-   * added after the listeners are attached) are forwarded to all Db listeners.
+   * (insert, update, delete) is rejected. Errors from the Db's client are forwarded to all Db
+   * listeners.
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   /**
@@ -842,29 +845,26 @@ export class Db {
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       telemetryCollectorUrl: () => this.telemetryCollectorUrl(),
-      firstClientEntry: () => this.firstConnectionBridgeClientEntry(),
-      shutdownClientsForConnectionReset: () => this.shutdownClientsForConnectionReset(),
-      recreateClientAfterConnectionReset: (schema) => this.getClient(schema),
+      clientEntry: () => this.connectionBridgeClientEntry(),
+      shutdownClient: () => this.shutdownClient(),
+      recreateClient: (schema) => this.getClient(schema),
     };
   }
 
-  private firstConnectionBridgeClientEntry(): ConnectionBridgeClientInput | null {
-    const first = this.clients.entries().next();
-    if (first.done) return null;
-    const [schemaKey, client] = first.value;
+  private connectionBridgeClientEntry(): ConnectionBridgeClientInput | null {
+    if (!this.client || !this.clientSchema) return null;
+    const schemaKey = getRuntimeSchemaCacheKey(this.clientSchema);
     return {
       schemaKey,
-      schema: this.clientSchemas.get(schemaKey) ?? normalizeRuntimeSchema(client.getSchema()),
-      client,
+      schema: this.clientSchema,
+      client: this.client,
     };
   }
 
-  private async shutdownClientsForConnectionReset(): Promise<void> {
-    for (const client of this.clients.values()) {
-      await client.shutdown();
-    }
-    this.clients.clear();
-    this.clientSchemas.clear();
+  private async shutdownClient(): Promise<void> {
+    await this.client?.shutdown();
+    this.client = null;
+    this.clientSchema = null;
   }
 
   /** @internal Store the seed used for local-first auth and schedule token refresh. */
@@ -931,9 +931,7 @@ export class Db {
 
     this.config.jwtToken = jwtToken;
 
-    for (const client of this.clients.values()) {
-      client.updateAuthToken(jwtToken);
-    }
+    this.client?.updateAuthToken(jwtToken);
 
     this.connection.updateAuth({ jwtToken });
 
@@ -953,9 +951,7 @@ export class Db {
 
     this.config.cookieSession = cookieSession;
 
-    for (const client of this.clients.values()) {
-      client.updateCookieSession(cookieSession);
-    }
+    this.client?.updateCookieSession(cookieSession);
 
     this.connection.updateAuth({ jwtToken: this.config.jwtToken });
 
@@ -1008,32 +1004,39 @@ export class Db {
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
 
-    if (!this.clients.has(key)) {
-      this.installMainThreadWasmTelemetry();
-      const usesDurablePeer = this.connection.hasDurablePeer;
-
-      const client = this.runtimeModule.createClient({
-        config: { ...this.config },
-        schema: runtimeSchema,
-        hasWorker: usesDurablePeer,
-        useBinaryEncoding: usesDurablePeer,
-        bufferOutboxWithoutSyncSender: usesDurablePeer,
-        onAuthFailure: (reason) => {
-          this.markUnauthenticated(reason);
-        },
-      });
-
-      this.attachMutationErrorHandler(client);
-      this.clients.set(key, client);
-      this.clientSchemas.set(key, runtimeSchema);
-      this.connection.onClientCreated({
-        schemaKey: key,
-        schema: runtimeSchema,
-        client,
-      });
+    if (this.client) {
+      if (!this.clientSchema || getRuntimeSchemaCacheKey(this.clientSchema) !== key) {
+        throw new Error(
+          "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
+        );
+      }
+      return this.client;
     }
 
-    return this.clients.get(key)!;
+    this.installMainThreadWasmTelemetry();
+    const usesDurablePeer = this.connection.hasDurablePeer;
+
+    const client = this.runtimeModule.createClient({
+      config: { ...this.config },
+      schema: runtimeSchema,
+      hasWorker: usesDurablePeer,
+      useBinaryEncoding: usesDurablePeer,
+      bufferOutboxWithoutSyncSender: usesDurablePeer,
+      onAuthFailure: (reason) => {
+        this.markUnauthenticated(reason);
+      },
+    });
+
+    this.attachMutationErrorHandler(client);
+    this.client = client;
+    this.clientSchema = runtimeSchema;
+    this.connection.onClientCreated({
+      schemaKey: key,
+      schema: runtimeSchema,
+      client,
+    });
+
+    return this.client;
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -1381,7 +1384,7 @@ export class Db {
    * - Can be initiated from either leader or follower tabs
    * - Coordinates worker shutdown through the SharedWorker broker before deleting OPFS files
    * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS files, and reconnects participating tabs
+   * - Tears down worker + client, deletes OPFS files, and reconnects participating tabs
    */
   async deleteClientStorage(): Promise<void> {
     return this.connection.deleteClientStorage();
@@ -1630,7 +1633,7 @@ export class Db {
 
   /**
    * Shutdown the Db and release all resources.
-   * Closes all memoized JazzClient connections and the worker.
+   * Closes the JazzClient and the worker.
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
@@ -1659,11 +1662,7 @@ export class Db {
     this.mutationErrorListeners.clear();
     this.disposeWasmTelemetry?.();
     this.disposeWasmTelemetry = null;
-    for (const client of this.clients.values()) {
-      await client.shutdown();
-    }
-    this.clients.clear();
-    this.clientSchemas.clear();
+    await this.shutdownClient();
 
     if (shutdownError) {
       throw shutdownError;

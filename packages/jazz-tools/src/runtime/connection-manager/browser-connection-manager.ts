@@ -343,9 +343,9 @@ export class BrowserConnectionManager implements ConnectionManager {
       this.activeRoleBridge = leaderBridge;
       this.tabRole = "leader";
       if (await this.finishCancelledBrokerPromotion(promotion)) return;
-      this.recreateFirstClientAfterBrokerReset();
+      this.recreateClientAfterBrokerReset();
       this.attachActiveRoleBridgeForExistingClient();
-      if (resetRequestId && !this.host.firstClientEntry()) {
+      if (resetRequestId && !this.host.clientEntry()) {
         this.reportBrokerLeaderReady({ bridgelessStorageReset: true });
       }
     } catch (error) {
@@ -587,9 +587,9 @@ export class BrowserConnectionManager implements ConnectionManager {
   }
 
   private attachActiveRoleBridgeForExistingClient(): void {
-    const first = this.host.firstClientEntry();
-    if (!first) return;
-    this.activeRoleBridge?.onClientCreated(first);
+    const clientEntry = this.host.clientEntry();
+    if (!clientEntry) return;
+    this.activeRoleBridge?.onClientCreated(clientEntry);
   }
 
   private attachFollowerPortBridgeForExistingClient(): void {
@@ -612,11 +612,11 @@ export class BrowserConnectionManager implements ConnectionManager {
     this.rejectDurablePathReady(error);
   }
 
-  private recreateFirstClientAfterBrokerReset(): void {
-    if (this.host.firstClientEntry() || !this.brokerResetSchema) return;
+  private recreateClientAfterBrokerReset(): void {
+    if (this.host.clientEntry() || !this.brokerResetSchema) return;
     const schema = this.brokerResetSchema;
     this.brokerResetSchema = null;
-    this.host.recreateClientAfterConnectionReset(schema);
+    this.host.recreateClient(schema);
   }
 
   private closeActiveRoleBridge(error?: Error, options: { preserveOutbox?: boolean } = {}): void {
@@ -738,7 +738,7 @@ export class BrowserConnectionManager implements ConnectionManager {
   }
 
   private async shutdownWorkerAndClientsForStorageReset(): Promise<void> {
-    this.brokerResetSchema = this.host.firstClientEntry()?.schema ?? null;
+    this.brokerResetSchema = this.host.clientEntry()?.schema ?? null;
     const roleBridge = this.activeRoleBridge;
     if (roleBridge instanceof LeaderWorkerConnectionRole) {
       await roleBridge.shutdownForStorageReset();
@@ -748,7 +748,7 @@ export class BrowserConnectionManager implements ConnectionManager {
     this.activeRoleBridge = null;
     this.brokerLeaderReadyLeadershipId = null;
     this.brokerSchemaFingerprint = null;
-    await this.host.shutdownClientsForConnectionReset();
+    await this.host.shutdownClient();
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
