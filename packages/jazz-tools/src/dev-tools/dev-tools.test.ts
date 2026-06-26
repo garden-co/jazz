@@ -301,6 +301,7 @@ describe("attachDevTools mutation bridge", () => {
       requestId,
       command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
       payload: {
+        table: "todos",
         objectId: "row-1",
         updates: {
           title: { type: "Text", value: "updated" },
@@ -312,7 +313,9 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ updated: true });
-    expect(update).toHaveBeenCalledWith("row-1", { title: { type: "Text", value: "updated" } });
+    expect(update).toHaveBeenCalledWith("todos", "row-1", {
+      title: { type: "Text", value: "updated" },
+    });
     expect(waitForTransaction).toHaveBeenCalledWith("transaction-update-devtools", "edge");
   });
 
@@ -357,6 +360,7 @@ describe("attachDevTools mutation bridge", () => {
       requestId,
       command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
       payload: {
+        table: "todos",
         objectId: "row-1",
         tier: "global",
       },
@@ -365,7 +369,7 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
-    expect(deleteMutation).toHaveBeenCalledWith("row-1");
+    expect(deleteMutation).toHaveBeenCalledWith("todos", "row-1");
     expect(waitForTransaction).toHaveBeenCalledWith("transaction-delete-devtools", "global");
   });
 
@@ -399,13 +403,13 @@ describe("attachDevTools mutation bridge", () => {
       {
         requestId: "invalid-update",
         command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
-        payload: { objectId: "row-1", updates: null },
+        payload: { table: "todos", objectId: "row-1", updates: null },
         expectedMessage: "Invalid payload for client.updateDurable.",
       },
       {
         requestId: "invalid-delete",
         command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
-        payload: { objectId: 123 },
+        payload: { table: "todos", objectId: 123 },
         expectedMessage: "Invalid payload for client.deleteDurable.",
       },
     ];

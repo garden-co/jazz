@@ -215,11 +215,12 @@ export class DirectWasmRuntime implements Runtime {
   }
 
   update(
+    table: string,
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
   ): DirectMutationResult {
-    const { table, rowId } = this.resolveRow(objectId);
+    const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const tx = this.currentTx(writeContext);
     if (tx) {
@@ -247,8 +248,9 @@ export class DirectWasmRuntime implements Runtime {
     return this.finishMutation(this.db.upsertEncoded(table, rowId, cells));
   }
 
-  delete(objectId: string, writeContext?: string | null): DirectMutationResult {
-    const { table, rowId } = this.resolveRow(objectId);
+  delete(table: string, objectId: string, writeContext?: string | null): DirectMutationResult {
+    this.table(table);
+    const rowId = parseUuid(objectId);
     const tx = this.currentTx(writeContext);
     if (tx) {
       tx.tx.delete(table, rowId);
@@ -439,16 +441,6 @@ export class DirectWasmRuntime implements Runtime {
     return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
-  }
-
-  private resolveRow(objectId: string): { table: string; rowId: Uint8Array } {
-    const rowId = parseUuid(objectId);
-    for (const table of Object.keys(this.schema)) {
-      if (this.readRow(table, rowId)) return { table, rowId };
-    }
-    const firstTable = Object.keys(this.schema)[0];
-    if (!firstTable) throw new Error("cannot resolve row without schema tables");
-    return { table: firstTable, rowId };
   }
 
   private prepareQuery(queryJson: string): DirectPreparedQuery {

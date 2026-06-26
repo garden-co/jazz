@@ -356,7 +356,11 @@ describe("NAPI integration", () => {
       dataPath,
     ) as unknown as {
       insert(table: string, values: unknown): RuntimeRowWithTransactionId;
-      update(objectId: string, updates: Record<string, unknown>): { transactionId: string };
+      update(
+        table: string,
+        objectId: string,
+        updates: Record<string, unknown>,
+      ): { transactionId: string };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -384,7 +388,7 @@ describe("NAPI integration", () => {
       });
       expect(secondRow.transactionId).toEqual(expect.any(String));
 
-      const updateResult = runtime.update(secondRow.id, {
+      const updateResult = runtime.update("todos", secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
       expect(updateResult.transactionId).toEqual(expect.any(String));

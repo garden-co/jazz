@@ -361,14 +361,15 @@ function hookRegistration(
               >)
             : {};
           const objectId = payload.objectId;
+          const table = payload.table;
           const updates = payload.updates;
           const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof objectId !== "string" || !isRecord(updates)) {
+          if (typeof table !== "string" || typeof objectId !== "string" || !isRecord(updates)) {
             throw new Error("Invalid payload for client.updateDurable.");
           }
 
           const client = await resolveCommandClient();
-          const updateHandle = client.update(objectId, updates as Record<string, Value>);
+          const updateHandle = client.update(table, objectId, updates as Record<string, Value>);
           if (tier) {
             await updateHandle.wait({ tier });
           }
@@ -383,13 +384,14 @@ function hookRegistration(
               >)
             : {};
           const objectId = payload.objectId;
+          const table = payload.table;
           const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof objectId !== "string") {
+          if (typeof table !== "string" || typeof objectId !== "string") {
             throw new Error("Invalid payload for client.deleteDurable.");
           }
 
           const client = await resolveCommandClient();
-          const deleteHandle = client.delete(objectId);
+          const deleteHandle = client.delete(table, objectId);
           if (tier) {
             await deleteHandle.wait({ tier });
           }

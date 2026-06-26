@@ -61,6 +61,7 @@ export type DevtoolsClientInsertDurableRequestPayload = {
 export type DevtoolsClientInsertDurableResponsePayload = Row;
 
 export type DevtoolsClientUpdateDurableRequestPayload = {
+  table: string;
   objectId: string;
   updates: Record<string, Value>;
   tier?: DurabilityTier;
@@ -68,6 +69,7 @@ export type DevtoolsClientUpdateDurableRequestPayload = {
 export type DevtoolsClientUpdateDurableResponsePayload = { updated: true };
 
 export type DevtoolsClientDeleteDurableRequestPayload = {
+  table: string;
   objectId: string;
   tier?: DurabilityTier;
 };

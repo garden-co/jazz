@@ -47,6 +47,7 @@ export interface Runtime {
     write_context_json?: string | null,
   ): DirectInsertResult;
   update(
+    table: string,
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
@@ -57,7 +58,11 @@ export interface Runtime {
     values: InsertValues,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  delete(object_id: string, write_context_json?: string | null): DirectMutationResult;
+  delete(
+    table: string,
+    object_id: string,
+    write_context_json?: string | null,
+  ): DirectMutationResult;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   beginTransaction(transactionKind: TransactionKind): string;
   commitTransaction(transactionId: string): void;
@@ -622,8 +627,12 @@ export class JazzClient {
     const runtime = new DirectWasmRuntime(
       wasmModule.WasmDb,
       context.schema,
-      deterministicRuntimeBytes(`${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:node`),
-      deterministicRuntimeBytes(`${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:author`),
+      deterministicRuntimeBytes(
+        `${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:node`,
+      ),
+      deterministicRuntimeBytes(
+        `${context.appId}:${context.env ?? "dev"}:${context.userBranch ?? "main"}:author`,
+      ),
       1,
       !runtimeOptions?.nonDurableClientRuntime,
     );
@@ -900,6 +909,7 @@ export class JazzClient {
    * Update a row by ID without waiting for durability.
    */
   update(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     options?: UpdateOptions,
@@ -907,6 +917,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.updateInternal(
+      table,
       objectId,
       updates,
       options?.updatedAt,
@@ -921,6 +932,7 @@ export class JazzClient {
    * @internal
    */
   updateInternal(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     updatedAt?: number,
@@ -935,19 +947,20 @@ export class JazzClient {
       transactionId,
       updatedAt,
     );
-    return this.runtime.update(objectId, updates, writeContext);
+    return this.runtime.update(table, objectId, updates, writeContext);
   }
 
   /**
    * Delete a row by ID without waiting for durability.
    */
   delete(
+    table: string,
     objectId: string,
     options?: DeleteOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, options?.updatedAt, session, attribution);
+    const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
     return new WriteHandle(result.transactionId, this);
   }
 
@@ -955,6 +968,7 @@ export class JazzClient {
    * @internal
    */
   deleteInternal(
+    table: string,
     objectId: string,
     updatedAt?: number,
     session?: Session,
@@ -968,7 +982,7 @@ export class JazzClient {
       transactionId,
       updatedAt,
     );
-    return this.runtime.delete(objectId, writeContext);
+    return this.runtime.delete(table, objectId, writeContext);
   }
 
   /**

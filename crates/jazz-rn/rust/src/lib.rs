@@ -554,6 +554,7 @@ impl RnRuntime {
 
     pub fn update(
         &self,
+        _table: String,
         object_id: String,
         values_json: String,
         write_context_json: Option<String>,
@@ -634,6 +635,7 @@ impl RnRuntime {
     #[uniffi::method(name = "delete")]
     pub fn delete_row(
         &self,
+        _table: String,
         object_id: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {

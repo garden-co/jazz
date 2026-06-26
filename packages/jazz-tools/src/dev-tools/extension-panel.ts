@@ -522,6 +522,7 @@ class DevToolsJazzClient {
     throw new Error("Method not implemented.");
   }
   update(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
@@ -529,23 +530,34 @@ class DevToolsJazzClient {
     throw new Error("DevTools client does not support non-durable update().");
   }
   async updateDurable(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     await ensureDevtoolsAnnounced();
     await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE, {
+      table,
       objectId,
       updates,
       tier: options?.tier,
     });
   }
-  delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
+  delete(
+    table: string,
+    objectId: string,
+    options?: { tier?: DurabilityTier },
+  ): DirectMutationResult {
     throw new Error("DevTools client does not support non-durable delete().");
   }
-  async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
+  async deleteDurable(
+    table: string,
+    objectId: string,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
     await ensureDevtoolsAnnounced();
     await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE, {
+      table,
       objectId,
       tier: options?.tier,
     });
