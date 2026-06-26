@@ -19,9 +19,11 @@ import {
   PostcardWriter,
   openConfig,
   queryFromTable,
+  queryWithEqFilters,
   readAbiRowBatch,
   readAbiSubscriptionDelta,
   type AbiRowBatch,
+  type DirectQueryLiteral,
   type DescriptorField,
   type ValueType,
 } from "./direct-codec.js";
@@ -86,9 +88,13 @@ type PendingTx = {
 type SubscriptionState = {
   reader: ReadableStreamDefaultReader<unknown>;
   rows: RowState[];
+  filters: RowFilter[];
   callback?: Function;
   cancelled: boolean;
+  reading: boolean;
 };
+
+type RowFilter = { column: string; value: DirectQueryLiteral };
 
 type RowState = {
   table: string;
@@ -110,6 +116,7 @@ export class DirectWasmRuntime implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private readonly syncNeededCallbacks = new Set<() => void>();
   private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
@@ -133,6 +140,13 @@ export class DirectWasmRuntime implements Runtime {
 
   connectUpstreamPeer(): DirectTransport {
     return this.db.connectUpstream();
+  }
+
+  onDirectSyncNeeded(callback: () => void): () => void {
+    this.syncNeededCallbacks.add(callback);
+    return () => {
+      this.syncNeededCallbacks.delete(callback);
+    };
   }
 
   insert(
@@ -234,11 +248,25 @@ export class DirectWasmRuntime implements Runtime {
     this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
     this.pumpSubscriptions();
+    this.notifySyncNeeded();
   }
 
   async waitForTransaction(transactionId: string, tier: string): Promise<void> {
     const write = this.writes.get(transactionId);
-    write?.wait(tier);
+    if (!write) return;
+    for (;;) {
+      try {
+        write.wait(tier);
+        return;
+      } catch (error) {
+        const rejected = rejectedWaitError(transactionId, error);
+        if (rejected) throw rejected;
+        if (!isNotObservedWaitError(error)) throw error;
+        this.db.tick();
+        this.pumpSubscriptions();
+        await sleep(10);
+      }
+    }
   }
 
   rollbackTransaction(transactionId: string): boolean {
@@ -256,7 +284,11 @@ export class DirectWasmRuntime implements Runtime {
     _optionsJson?: string | null,
   ): Promise<unknown> {
     const query = this.prepareQuery(queryJson);
-    return rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema);
+    return filterRows(
+      rowsFromBatches(readRowBatches(this.db.all(query, readOptions())), this.schema),
+      queryFiltersFromJson(queryJson, this.schema),
+      this.schema,
+    );
   }
 
   createSubscription(
@@ -268,7 +300,13 @@ export class DirectWasmRuntime implements Runtime {
     const handle = this.nextSubscriptionId++;
     const query = this.prepareQuery(queryJson);
     const reader = this.db.subscribe(query, readOptions()).getReader();
-    this.subscriptions.set(handle, { reader, rows: [], cancelled: false });
+    this.subscriptions.set(handle, {
+      reader,
+      rows: [],
+      filters: queryFiltersFromJson(queryJson, this.schema),
+      cancelled: false,
+      reading: false,
+    });
     return handle;
   }
 
@@ -276,7 +314,7 @@ export class DirectWasmRuntime implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate;
-    void this.readSubscription(handle, subscription);
+    this.startSubscriptionReader(handle, subscription);
   }
 
   unsubscribe(handle: number): void {
@@ -310,12 +348,14 @@ export class DirectWasmRuntime implements Runtime {
   private finishInsert(table: string, rowId: Uint8Array, write: DirectWrite): DirectInsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
+    this.notifySyncNeeded();
     return this.resultForRow(table, rowId, transactionId);
   }
 
   private finishMutation(write: DirectWrite): DirectMutationResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
+    this.notifySyncNeeded();
     return { transactionId };
   }
 
@@ -346,7 +386,7 @@ export class DirectWasmRuntime implements Runtime {
   }
 
   private prepareQuery(queryJson: string): DirectPreparedQuery {
-    const queryBytes = encodeQueryJson(queryJson);
+    const queryBytes = encodeQueryJson(queryJson, this.schema);
     const key = bytesKey(queryBytes);
     let query = this.preparedQueries.get(key);
     if (!query) {
@@ -370,23 +410,48 @@ export class DirectWasmRuntime implements Runtime {
   private pumpSubscriptions(): void {
     this.db.tick();
     for (const [handle, subscription] of this.subscriptions) {
-      void this.readSubscription(handle, subscription);
+      this.startSubscriptionReader(handle, subscription);
     }
   }
 
+  private notifySyncNeeded(): void {
+    for (const callback of this.syncNeededCallbacks) {
+      callback();
+    }
+  }
+
+  private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
+    if (subscription.cancelled || subscription.reading || !subscription.callback) return;
+    subscription.reading = true;
+    void this.readSubscription(handle, subscription);
+  }
+
   private async readSubscription(handle: number, subscription: SubscriptionState): Promise<void> {
-    if (subscription.cancelled) return;
-    const next = await subscription.reader.read();
-    if (next.done || subscription.cancelled) return;
-    const chunk = normalizeSubscriptionChunk(next.value);
-    if (chunk.type === "snapshot") {
-      subscription.rows = rowsFromBatches(chunk.rows, this.schema);
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
-    } else {
-      subscription.rows = rowsFromBatches(chunk.delta.added, this.schema).concat(
-        rowsFromBatches(chunk.delta.updated, this.schema),
-      );
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows));
+    try {
+      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
+        const next = await subscription.reader.read();
+        if (next.done || subscription.cancelled) return;
+        const chunk = normalizeSubscriptionChunk(next.value);
+        if (chunk.type === "snapshot") {
+          subscription.rows = filterRows(
+            rowsFromBatches(chunk.rows, this.schema),
+            subscription.filters,
+            this.schema,
+          );
+          subscription.callback?.(nativeDeltaFromRows(subscription.rows));
+        } else {
+          subscription.rows = filterRows(
+            rowsFromBatches(chunk.delta.added, this.schema).concat(
+              rowsFromBatches(chunk.delta.updated, this.schema),
+            ),
+            subscription.filters,
+            this.schema,
+          );
+          subscription.callback?.(nativeDeltaFromRows(subscription.rows));
+        }
+      }
+    } finally {
+      subscription.reading = false;
     }
   }
 }
@@ -411,15 +476,232 @@ function readOptions(): unknown {
   return { tier: "local" };
 }
 
-function encodeQueryJson(queryJson: string): Uint8Array {
-  const parsed = JSON.parse(queryJson) as { table?: unknown; limit?: unknown };
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNotObservedWaitError(error: unknown): boolean {
+  return errorMessage(error).includes("NotObserved");
+}
+
+function rejectedWaitError(
+  transactionId: string,
+  error: unknown,
+): { kind: "rejected"; transactionId: string; code: string; reason: string } | null {
+  const message = errorMessage(error);
+  if (!message.includes("WriteRejected")) return null;
+  return {
+    kind: "rejected",
+    transactionId,
+    code: rejectionCode(message),
+    reason: rejectionReason(message),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function rejectionCode(message: string): string {
+  if (message.includes("AuthorizationDenied")) return "permission_denied";
+  if (message.includes("ExclusiveConflict")) return "exclusive_conflict";
+  if (message.includes("CausalityViolation")) return "causality_violation";
+  if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
+  if (message.includes("Cascade")) return "cascade_rejected";
+  return "write_rejected";
+}
+
+function rejectionReason(message: string): string {
+  if (message.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  return message.replace(/^.*WriteRejected:?\s*/, "") || "Write rejected";
+}
+
+function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
+  const parsed = JSON.parse(queryJson) as { table?: unknown; limit?: unknown; relation_ir?: unknown };
   if (typeof parsed.table !== "string") {
     throw new Error("Direct WasmDb runtime only supports table queries in this slice");
   }
+  const encoded = encodeSimpleRelationQuery(parsed.table, parsed.relation_ir, schema);
+  if (encoded) {
+    return parsed.limit == null ? encoded.query : queryWithEqFilters(parsed.table, encoded.filters, readLimit(parsed.limit));
+  }
   if (parsed.limit != null) {
-    throw new Error("Direct WasmDb runtime query limit encoding is not wired yet");
+    return queryWithEqFilters(parsed.table, [], readLimit(parsed.limit));
   }
   return queryFromTable(parsed.table);
+}
+
+function encodeSimpleRelationQuery(
+  table: string,
+  relationIr: unknown,
+  schema: WasmSchema,
+): { query: Uint8Array; filters: Array<{ column: string; value: DirectQueryLiteral }> } | null {
+  const unwrapped = unwrapSimpleRelation(table, relationIr);
+  if (!unwrapped) return null;
+  const filters = unwrapped.filters.map((filter) => ({
+    ...filter,
+    value: coerceQueryLiteral(table, filter.column, filter.value, schema),
+  }));
+  const rustFilters = filters.filter((filter) => filter.column !== "id");
+  if (rustFilters.length === 0) {
+    return { query: queryFromTable(table), filters: [] };
+  }
+  return {
+    query: queryWithEqFilters(table, rustFilters),
+    filters: rustFilters,
+  };
+}
+
+function coerceQueryLiteral(
+  table: string,
+  column: string,
+  value: DirectQueryLiteral,
+  schema: WasmSchema,
+): DirectQueryLiteral {
+  const columnType =
+    column === "id"
+      ? { type: "Uuid" }
+      : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
+  const coerced =
+    columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)
+      ? { type: "Uuid" as const, value: value.value }
+      : value;
+  const nullable = column !== "id" && schema[table]?.columns.find((entry) => entry.name === column)?.nullable;
+  if (nullable && coerced.type !== "Nullable") {
+    return { type: "Nullable", value: coerced };
+  }
+  return coerced;
+}
+
+function unwrapSimpleRelation(
+  table: string,
+  relationIr: unknown,
+): { filters: Array<{ column: string; value: DirectQueryLiteral }> } | null {
+  if (!relationIr || typeof relationIr !== "object") return { filters: [] };
+  const relation = relationIr as Record<string, unknown>;
+  const tableScan = relation.TableScan;
+  if (tableScan && typeof tableScan === "object" && (tableScan as { table?: unknown }).table === table) {
+    return { filters: [] };
+  }
+  const filter = relation.Filter;
+  if (!filter || typeof filter !== "object") return null;
+  const filterRecord = filter as { input?: unknown; predicate?: unknown };
+  const input = unwrapSimpleRelation(table, filterRecord.input);
+  if (!input) return null;
+  const predicateFilters = predicateToEqFilters(filterRecord.predicate);
+  return predicateFilters ? { filters: input.filters.concat(predicateFilters) } : null;
+}
+
+function predicateToEqFilters(
+  predicate: unknown,
+): Array<{ column: string; value: DirectQueryLiteral }> | null {
+  if (predicate === "True") return [];
+  if (!predicate || typeof predicate !== "object") return null;
+  const record = predicate as Record<string, unknown>;
+  if (Array.isArray(record.And)) {
+    const filters: Array<{ column: string; value: DirectQueryLiteral }> = [];
+    for (const child of record.And) {
+      const childFilters = predicateToEqFilters(child);
+      if (!childFilters) return null;
+      filters.push(...childFilters);
+    }
+    return filters;
+  }
+  const cmp = record.Cmp;
+  if (!cmp || typeof cmp !== "object") return null;
+  const cmpRecord = cmp as { left?: unknown; op?: unknown; right?: unknown };
+  if (cmpRecord.op !== "Eq") return null;
+  const column = readColumnRef(cmpRecord.left);
+  const value = readLiteral(cmpRecord.right);
+  return column && value ? [{ column, value }] : null;
+}
+
+function readColumnRef(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const column = (value as { column?: unknown }).column;
+  if (typeof column !== "string") return null;
+  return column.split(".").at(-1) ?? column;
+}
+
+function readLiteral(value: unknown): DirectQueryLiteral | null {
+  if (!value || typeof value !== "object" || !("Literal" in value)) return null;
+  const literal = (value as { Literal?: unknown }).Literal;
+  if (!literal || typeof literal !== "object") return null;
+  const record = literal as { type?: unknown; value?: unknown };
+  if (record.type === "Boolean" && typeof record.value === "boolean") {
+    return { type: "Boolean", value: record.value };
+  }
+  if (record.type === "Uuid" && typeof record.value === "string") {
+    return { type: "Uuid", value: record.value };
+  }
+  if ((record.type === "Text" || record.type === "Enum") && typeof record.value === "string") {
+    return { type: "Text", value: record.value };
+  }
+  return null;
+}
+
+function readLimit(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("query limit must be a non-negative safe integer");
+  }
+  return value;
+}
+
+function queryFiltersFromJson(queryJson: string, schema: WasmSchema): RowFilter[] {
+  const parsed = JSON.parse(queryJson) as { table?: unknown; relation_ir?: unknown };
+  if (typeof parsed.table !== "string") return [];
+  return (
+    unwrapSimpleRelation(parsed.table, parsed.relation_ir)?.filters.map((filter) => ({
+      ...filter,
+      value: coerceQueryLiteral(parsed.table as string, filter.column, filter.value, schema),
+    })) ?? []
+  );
+}
+
+function filterRows(rows: RowState[], filters: RowFilter[], schema: WasmSchema): RowState[] {
+  if (filters.length === 0) return rows;
+  return rows.filter((row) =>
+    filters.every((filter) => rowMatchesFilter(row, filter, schema)),
+  );
+}
+
+function rowMatchesFilter(row: RowState, filter: RowFilter, schema: WasmSchema): boolean {
+  if (filter.column === "id") {
+    return literalString(filter.value) === row.id;
+  }
+  const index = schema[row.table]?.columns.findIndex((column) => column.name === filter.column) ?? -1;
+  if (index < 0) return false;
+  return valueMatchesLiteral(row.values[index], filter.value);
+}
+
+function valueMatchesLiteral(value: Value | undefined, literal: DirectQueryLiteral): boolean {
+  if (literal.type === "Nullable") {
+    if (literal.value == null) return !value || value.type === "Null";
+    return valueMatchesLiteral(value, literal.value);
+  }
+  if (!value || value.type === "Null") return false;
+  if (literal.type === "Boolean") {
+    return value.type === "Boolean" && value.value === literal.value;
+  }
+  const expected = literalString(literal);
+  return (
+    (value.type === "Text" || value.type === "Uuid") &&
+    typeof value.value === "string" &&
+    value.value === expected
+  );
+}
+
+function literalString(literal: DirectQueryLiteral): string | null {
+  if (literal.type === "Nullable") return literal.value ? literalString(literal.value) : null;
+  if (literal.type === "Text" || literal.type === "Uuid") return literal.value;
+  return null;
+}
+
+function isUuidString(value: string): boolean {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+    value,
+  );
 }
 
 function encodeSchema(schema: WasmSchema): Uint8Array {

@@ -80,7 +80,6 @@ export async function readSubscriptionDelta(
   return next.value;
 }
 
-
 export function tableSchema(tableName: string, descriptor: DescriptorField[]): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((table) => {
@@ -102,7 +101,12 @@ export function tableSchema(tableName: string, descriptor: DescriptorField[]): U
   return writer.finish();
 }
 
-export function openConfig(node: Uint8Array, author: Uint8Array, sourceId?: number, historyComplete = false): Uint8Array {
+export function openConfig(
+  node: Uint8Array,
+  author: Uint8Array,
+  sourceId?: number,
+  historyComplete = false,
+): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
   writer.bytes(author);
@@ -131,23 +135,15 @@ export function queryFromTable(table: string): Uint8Array {
 }
 
 export function queryWhereBool(table: string, column: string, value: boolean): Uint8Array {
-  const writer = new PostcardWriter();
-  writer.string(table);
-  writer.vec((filter) => {
-    writePredicateEqBool(filter, column, value);
-  }, 1);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.vec(() => undefined, 0);
-  writer.none();
-  writer.vec(() => undefined, 0);
-  writer.none();
-  writer.none();
-  writer.u64(0);
-  return writer.finish();
+  return queryWithEqFilters(table, [{ column, value: { type: "Boolean", value } }]);
 }
 
-export function queryWhereStringContains(table: string, column: string, value: string, limit?: number): Uint8Array {
+export function queryWhereStringContains(
+  table: string,
+  column: string,
+  value: string,
+  limit?: number,
+): Uint8Array {
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
   }
@@ -171,13 +167,79 @@ export function queryWhereStringContains(table: string, column: string, value: s
   return writer.finish();
 }
 
-function writePredicateEqBool(writer: PostcardWriter, column: string, value: boolean): void {
+export type DirectQueryLiteral =
+  | { type: "Boolean"; value: boolean }
+  | { type: "Text"; value: string }
+  | { type: "Uuid"; value: string }
+  | { type: "Nullable"; value: DirectQueryLiteral | null };
+
+export function queryWithEqFilters(
+  table: string,
+  filters: Array<{ column: string; value: DirectQueryLiteral }>,
+  limit?: number,
+): Uint8Array {
+  if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
+    throw new Error("query limit must be a non-negative safe integer");
+  }
+  const writer = new PostcardWriter();
+  writer.string(table);
+  writer.vec((filter, index) => {
+    const predicate = filters[index]!;
+    writePredicateEqLiteral(filter, predicate.column, predicate.value);
+  }, filters.length);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  writer.none();
+  writer.vec(() => undefined, 0);
+  writer.none();
+  if (limit == null) {
+    writer.none();
+  } else {
+    writer.some((valueWriter) => valueWriter.u64(limit));
+  }
+  writer.u64(0);
+  return writer.finish();
+}
+
+function writePredicateEqLiteral(
+  writer: PostcardWriter,
+  column: string,
+  value: DirectQueryLiteral,
+): void {
   writer.u64(3); // Predicate::Eq
   writer.u64(0); // Operand::Column
   writer.string(column);
   writer.u64(3); // Operand::Literal
-  writer.u64(5); // groove::records::Value::Bool
-  writer.bool(value);
+  writeGrooveValue(writer, value);
+}
+
+function writePredicateEqBool(writer: PostcardWriter, column: string, value: boolean): void {
+  writePredicateEqLiteral(writer, column, { type: "Boolean", value });
+}
+
+function writeGrooveValue(writer: PostcardWriter, value: DirectQueryLiteral): void {
+  if (value.type === "Nullable") {
+    writer.u64(12); // groove::records::Value::Nullable
+    if (value.value == null) {
+      writer.none();
+    } else {
+      writer.some((inner) => writeGrooveValue(inner, value.value!));
+    }
+    return;
+  }
+  if (value.type === "Boolean") {
+    writer.u64(5); // groove::records::Value::Bool
+    writer.bool(value.value);
+    return;
+  }
+  if (value.type === "Uuid") {
+    writer.u64(8); // groove::records::Value::Uuid
+    writer.bytes(parseUuidBytes(value.value));
+    return;
+  }
+  writer.u64(6); // groove::records::Value::String
+  writer.string(value.value);
 }
 
 function writePredicateContainsString(writer: PostcardWriter, column: string, value: string): void {
@@ -187,6 +249,16 @@ function writePredicateContainsString(writer: PostcardWriter, column: string, va
   writer.u64(3); // Operand::Literal
   writer.u64(6); // groove::records::Value::String
   writer.string(value);
+}
+
+function parseUuidBytes(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
 }
 
 export function encodedCells(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
@@ -218,7 +290,12 @@ export class PostcardWriter {
   }
 
   u32Le(value: number): void {
-    this.chunks.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+    this.chunks.push(
+      value & 0xff,
+      (value >>> 8) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 24) & 0xff,
+    );
   }
 
   bool(value: boolean): void {
@@ -325,9 +402,14 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return new Uint8Array(value);
   }
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    return new Uint8Array(
+      value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
+    );
   }
-  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  if (
+    Array.isArray(value) &&
+    value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+  ) {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
