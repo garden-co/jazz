@@ -598,7 +598,7 @@ export class JazzClient {
   }
 
   /**
-   * Create client from a pre-constructed runtime (e.g., NapiRuntime).
+   * Create client from a pre-constructed runtime.
    *
    * This allows server-side apps to use the native NAPI backend directly
    * without WASM loading.
@@ -1067,7 +1067,7 @@ export class JazzClient {
     this.shutdownPromise = (async () => {
       this.runtime.disconnect();
 
-      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+      // Close runtime if it supports explicit shutdown.
       if (this.runtime.close) {
         await this.runtime.close();
       }

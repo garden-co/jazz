@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createNapiRuntime } from "../runtime/testing/napi-runtime-test-utils.js";
-import { structuralSchemaHash } from "./schema-utils.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { createNapiCoreRuntime } from "../runtime/testing/napi-runtime-test-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -70,8 +70,8 @@ describe("dev catalogue API exports", () => {
   });
 });
 
-describe("dev catalogue schema hash parity", () => {
-  it("matches the native runtime hash for representative public schema shapes", async () => {
+describe("dev catalogue runtime schema identity", () => {
+  it("matches the CoreRuntime schema identity for representative public schema shapes", async () => {
     const schema = {
       users: s.table({
         name: s.string(),
@@ -93,9 +93,9 @@ describe("dev catalogue schema hash parity", () => {
         .indexOnly(["fileId", "status"]),
     };
     const app = s.defineApp(schema);
-    const runtime = await createNapiRuntime(app.wasmSchema);
+    const runtime = await createNapiCoreRuntime(app.wasmSchema);
 
-    expect(structuralSchemaHash(app.wasmSchema)).toBe(runtime.getSchemaHash());
+    expect(serializeRuntimeSchema(app.wasmSchema)).toBe(runtime.getSchemaHash());
   });
 });
 

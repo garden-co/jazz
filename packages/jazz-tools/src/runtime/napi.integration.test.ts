@@ -4,14 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import {
+  createPersistentNapiCoreRuntime,
+  loadNapiModule,
+} from "./testing/napi-runtime-test-utils.js";
 
 type RuntimeRowWithTransactionId = Row & {
   transactionId: string;
@@ -345,16 +347,13 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 
 describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
-    const { NapiRuntime } = await loadNapiModule();
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");
-    const runtime = new NapiRuntime(
-      serializeRuntimeSchema(TEST_SCHEMA),
-      `napi-large-index-${randomUUID()}`,
-      "test",
-      "main",
-      dataPath,
-    ) as unknown as {
+    const runtime = (await createPersistentNapiCoreRuntime(TEST_SCHEMA, dataPath, {
+      appId: `napi-large-index-${randomUUID()}`,
+      env: "test",
+      userBranch: "main",
+    })) as unknown as {
       insert(table: string, values: unknown): RuntimeRowWithTransactionId;
       update(
         table: string,
@@ -929,16 +928,13 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      const { NapiRuntime } = await loadNapiModule();
 
-      seedRuntime = new NapiRuntime(
-        serializeRuntimeSchema(BYTEA_SCHEMA),
+      seedRuntime = (await createPersistentNapiCoreRuntime(BYTEA_SCHEMA, dataPath, {
         appId,
-        "dev",
-        "main",
-        dataPath,
-        "edge",
-      ) as unknown as {
+        env: "dev",
+        userBranch: "main",
+        tier: "edge",
+      })) as unknown as {
         insert(table: string, values: unknown): { id: string };
         close(): void;
       };

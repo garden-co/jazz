@@ -74,53 +74,6 @@ export declare class NapiDirectDb {
   close(): void
 }
 
-export declare class NapiRuntime {
-  /** Create a new NapiRuntime with SQLite-backed persistent storage. */
-  constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
-  /** Create a new NapiRuntime with in-memory storage (no local persistence). */
-  static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
-  update(table: string, objectId: string, values: any, writeContextJson?: string | undefined | null): any
-  upsert(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
-  delete(table: string, objectId: string, writeContextJson?: string | undefined | null): any
-  restore(table: string, objectId: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null): any
-  onMutationError(callback: (event: any) => void): void
-  rollbackTransaction(transactionId: string): boolean
-  beginTransaction(transactionKind: string): string
-  commitTransaction(transactionId: string): void
-  waitForTransaction(transactionId: string, tier: string): Promise<void>
-  query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
-  unsubscribe(handle: number): void
-  /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
-  createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
-  /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
-  executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  getSchema(): any
-  getSchemaHash(): string
-  flush(): void
-  /** Flush and close the underlying storage, releasing filesystem locks. */
-  close(): void
-  /**
-   * Connect to a Jazz server over WebSocket.
-   *
-   * Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
-   * `RuntimeCore` via `install_transport` (which seeds the catalogue state
-   * hash on the handle), and spawns the manager loop as a Tokio task.
-   */
-  connect(url: string, authJson: string): void
-  /** Disconnect from the Jazz server and drop the transport handle. */
-  disconnect(): void
-  /** Push updated auth credentials into the live transport. */
-  updateAuth(authJson: string): void
-  /**
-   * Register a JS callback that fires when the Rust transport receives an
-   * auth rejection from the server during the WS handshake.
-   *
-   * The callback receives a single string argument: the rejection reason.
-   */
-  onAuthFailure(callback: (reason: string) => void): void
-}
-
 export declare class TestJwtIssuer {
   static start(): Promise<TestJwtIssuer>
   get jwksUrl(): string
