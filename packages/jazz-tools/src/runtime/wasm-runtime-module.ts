@@ -58,34 +58,35 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
   override createClient({
     config,
     schema,
-    hasWorker,
-    useBinaryEncoding,
-    bufferOutboxWithoutSyncSender,
+    durablePeer,
     onAuthFailure,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
+    const hasDurablePeer = durablePeer !== null;
     const runtimeOptions: ConnectSyncRuntimeOptions = {
-      // Worker-bridged runtimes exchange postcard payloads with peers;
+      // Main-thread peers exchange postcard payloads with their durable peer;
       // direct browser/server routing keeps JSON payloads.
-      useBinaryEncoding,
+      useBinaryEncoding: hasDurablePeer,
       onAuthFailure,
-      nonDurableClientRuntime: hasWorker,
+      nonDurableClientRuntime: hasDurablePeer,
     };
 
-    const runtime = new DirectWasmRuntime(
+    const mainThreadPeerRuntime = new DirectWasmRuntime(
       this.wasmModule.WasmDb,
       schema,
-      deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`),
-      deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`),
+      deterministicBytes(
+        `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:node`,
+      ),
+      deterministicBytes(
+        `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:author`,
+      ),
       1,
-      !hasWorker,
+      !hasDurablePeer,
     );
 
-    void bufferOutboxWithoutSyncSender;
-
     return JazzClient.connectWithRuntime(
-      runtime,
+      mainThreadPeerRuntime,
       {
         appId: config.appId,
         schema,
@@ -96,8 +97,8 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: hasWorker ? undefined : "local",
-        defaultDurabilityTier: hasWorker ? undefined : config.serverUrl ? "edge" : undefined,
+        tier: hasDurablePeer ? undefined : "local",
+        defaultDurabilityTier: hasDurablePeer ? undefined : config.serverUrl ? "edge" : undefined,
       },
       runtimeOptions,
     );
