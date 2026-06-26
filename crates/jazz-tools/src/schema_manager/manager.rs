@@ -887,6 +887,11 @@ impl SchemaManager {
         }
 
         let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let mut metadata = metadata;
+        metadata.insert(
+            crate::metadata::MetadataKey::PublishedAt.to_string(),
+            timestamp.to_string(),
+        );
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
         self.query_manager
@@ -936,8 +941,8 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
-        let metadata = self.schema_metadata(&schema_hash);
         let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
         self.query_manager
@@ -967,8 +972,8 @@ impl SchemaManager {
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&schema);
 
-        let metadata = self.schema_metadata(&schema_hash);
         let timestamp = self.query_manager.sync_manager_mut().reserve_timestamp();
+        let metadata = self.schema_metadata_with_published_at(&schema_hash, timestamp);
         self.catalogue_publish_timestamps
             .insert(object_id, timestamp);
         self.query_manager
@@ -1140,6 +1145,36 @@ impl SchemaManager {
         metadata
     }
 
+    fn schema_metadata_with_published_at(
+        &self,
+        schema_hash: &SchemaHash,
+        published_at: u64,
+    ) -> HashMap<String, String> {
+        let mut metadata = self.schema_metadata(schema_hash);
+        metadata.insert(
+            crate::metadata::MetadataKey::PublishedAt.to_string(),
+            published_at.to_string(),
+        );
+        metadata
+    }
+
+    fn note_catalogue_publish_timestamp(
+        &mut self,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) {
+        let Some(timestamp) = metadata
+            .get(crate::metadata::MetadataKey::PublishedAt.as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return;
+        };
+        self.catalogue_publish_timestamps
+            .entry(object_id)
+            .and_modify(|existing| *existing = (*existing).max(timestamp))
+            .or_insert(timestamp);
+    }
+
     pub(crate) fn permissions_head_object_id_for(app_id: AppId) -> ObjectId {
         ObjectId::from_uuid(Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
@@ -1230,7 +1265,7 @@ impl SchemaManager {
 
         match type_str.as_str() {
             t if t == crate::metadata::ObjectType::CatalogueSchema.as_str() => {
-                self.process_catalogue_schema(metadata, content)
+                self.process_catalogue_schema(object_id, metadata, content)
             }
             t if t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str() => {
                 self.process_catalogue_permissions_bundle(object_id, metadata, content)
@@ -1250,6 +1285,7 @@ impl SchemaManager {
 
     fn process_catalogue_schema(
         &mut self,
+        object_id: ObjectId,
         metadata: &HashMap<String, String>,
         content: &[u8],
     ) -> Result<(), SchemaError> {
@@ -1275,6 +1311,7 @@ impl SchemaManager {
         }
 
         let hash = SchemaHash::compute(&schema);
+        self.note_catalogue_publish_timestamp(object_id, metadata);
 
         // Always add to known_schemas (server or client)
         // This allows server-mode query execution even without lens paths
@@ -2293,6 +2330,34 @@ mod tests {
         assert!(
             second_timestamp > first_timestamp,
             "republishing the same schema should advance the visible publish timestamp"
+        );
+    }
+
+    #[test]
+    fn schema_manager_rehydrates_schema_published_at_from_catalogue_metadata() {
+        let schema = make_schema_v1();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut storage = crate::storage::MemoryStorage::new();
+        let app_id = test_app_id();
+        let mut publisher =
+            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
+
+        publisher.persist_schema_object(&mut storage, &schema);
+        let published_at = publisher
+            .schema_published_at(&schema_hash)
+            .expect("publisher should track publish timestamp");
+
+        let mut rehydrated = SchemaManager::new_server(SyncManager::new(), app_id, "prod");
+        crate::schema_manager::rehydrate::rehydrate_schema_manager_from_catalogue(
+            &mut rehydrated,
+            &storage,
+            app_id,
+        )
+        .expect("rehydrate catalogue");
+
+        assert_eq!(
+            rehydrated.schema_published_at(&schema_hash),
+            Some(published_at)
         );
     }
 

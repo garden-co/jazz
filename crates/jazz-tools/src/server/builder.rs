@@ -11,7 +11,7 @@ use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::query_manager::types::Schema;
+use crate::query_manager::types::{Schema, SchemaHash};
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
@@ -154,16 +154,7 @@ impl ServerBuilder {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
-        let direct_core = match &self.schema_mode {
-            ServerSchemaMode::Fixed(schema) => {
-                let schema = crate::server::direct_schema::convert_alpha_schema(schema)
-                    .map_err(|error| format!("failed to build direct core schema: {error}"))?;
-                Some(crate::server::direct_core::DirectCoreServer::in_memory(
-                    schema,
-                )?)
-            }
-            ServerSchemaMode::Dynamic => None,
-        };
+        let direct_core = self.build_direct_core(&runtime)?;
 
         let state = Arc::new(ServerState {
             runtime,
@@ -247,6 +238,53 @@ impl ServerBuilder {
                     .map_err(|e| format!("failed to initialize schema manager: {e:?}"))
             }
         }
+    }
+
+    fn build_direct_core(
+        &self,
+        runtime: &TokioRuntime<DynStorage>,
+    ) -> Result<Option<crate::server::direct_core::DirectCoreServer>, String> {
+        let schema = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
+            ServerSchemaMode::Dynamic => self.latest_published_schema(runtime)?,
+        };
+        let Some(schema) = schema else {
+            return Ok(None);
+        };
+        let schema = crate::server::direct_schema::convert_alpha_schema(&schema)
+            .map_err(|error| format!("failed to build direct core schema: {error}"))?;
+        Ok(Some(
+            crate::server::direct_core::DirectCoreServer::in_memory(schema)?,
+        ))
+    }
+
+    fn latest_published_schema(
+        &self,
+        runtime: &TokioRuntime<DynStorage>,
+    ) -> Result<Option<Schema>, String> {
+        let mut candidates = Vec::<(u64, SchemaHash)>::new();
+        for hash in runtime
+            .known_schema_hashes()
+            .map_err(|error| format!("failed to inspect known schemas: {error:?}"))?
+        {
+            if let Some(published_at) = runtime
+                .schema_published_at(&hash)
+                .map_err(|error| format!("failed to inspect schema publish timestamp: {error:?}"))?
+            {
+                candidates.push((published_at, hash));
+            }
+        }
+        candidates.sort_by(|(left_time, left_hash), (right_time, right_hash)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
+        });
+        let Some((_, hash)) = candidates.pop() else {
+            return Ok(None);
+        };
+        runtime
+            .known_schema(&hash)
+            .map_err(|error| format!("failed to load direct core schema: {error:?}"))
     }
 
     fn build_main_storage(&self) -> Result<DynStorage, String> {
@@ -702,6 +740,53 @@ mod tests {
             tiers,
             std::collections::HashSet::from([DurabilityTier::GlobalServer])
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dynamic_builder_starts_direct_core_from_rehydrated_catalogue_schema() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("dynamic-direct-core-rehydrate");
+        let schema = crate::query_manager::types::SchemaBuilder::new()
+            .table(
+                crate::query_manager::types::TableSchema::builder("todos")
+                    .column("id", crate::query_manager::types::ColumnType::Uuid)
+                    .column("title", crate::query_manager::types::ColumnType::Text),
+            )
+            .build();
+
+        {
+            let built = ServerBuilder::new(app_id)
+                .with_schema(schema)
+                .with_storage(StorageBackend::Sqlite {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build fixed schema server");
+            assert!(built.state.direct_core.is_some());
+            built
+                .state
+                .runtime
+                .persist_schema()
+                .expect("publish fixed schema catalogue");
+            built
+                .state
+                .runtime
+                .flush()
+                .await
+                .expect("flush fixed schema catalogue");
+        }
+
+        let rebuilt = ServerBuilder::new(app_id)
+            .with_storage(StorageBackend::Sqlite {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build dynamic server from rehydrated catalogue");
+
+        assert!(rebuilt.state.direct_core.is_some());
     }
 
     #[tokio::test]
