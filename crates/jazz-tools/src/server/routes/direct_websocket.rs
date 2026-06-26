@@ -2,7 +2,7 @@
 //!
 //! This route intentionally does not share the alpha `/ws` transport framing.
 //! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
-//! matching the direct core binding/server carrier shape.
+//! matching the core server binding/server carrier shape.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -544,7 +544,7 @@ async fn handle_direct_ws_connection(
         }
     };
 
-    let Some(direct_core) = state.direct_core() else {
+    let Some(core_server) = state.core_server() else {
         send_direct_wire_error(
             &mut socket,
             WireError::new(
@@ -557,7 +557,7 @@ async fn handle_direct_ws_connection(
         let _ = socket.close().await;
         return;
     };
-    let session = match direct_core
+    let session = match core_server
         .open(admission.identity, admission.claims, admission.trust)
         .await
     {
@@ -645,7 +645,7 @@ async fn handle_direct_ws_connection(
                             break;
                         }
                     };
-                    let outbound = match direct_core.receive_tick_take(session, frames).await {
+                    let outbound = match core_server.receive_tick_take(session, frames).await {
                         Ok(frames) => frames,
                         Err(error) => {
                             send_direct_wire_error(
@@ -669,7 +669,7 @@ async fn handle_direct_ws_connection(
                 _ => {}
             },
             _ = outbound_tick.tick() => {
-                let outbound = match direct_core.tick_take(session).await {
+                let outbound = match core_server.tick_take(session).await {
                     Ok(frames) => frames,
                     Err(_) => break,
                 };
@@ -680,7 +680,7 @@ async fn handle_direct_ws_connection(
         }
     }
 
-    direct_core.close(session);
+    core_server.close(session);
     let _ = socket.close().await;
 }
 
@@ -938,7 +938,7 @@ mod tests {
             })
             .with_storage(StorageBackend::InMemory)
             .with_schema(Schema::new())
-            .with_direct_core_schema(schema)
+            .with_core_server_schema(schema)
             .build()
             .await
             .expect("build direct ws convergence test state")
@@ -973,10 +973,10 @@ mod tests {
         );
     }
 
-    // Internal admission-boundary test: direct core policy reads are not yet
+    // Internal admission-boundary test: core server policy reads are not yet
     // observable through a public direct websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
-    // DirectCoreServer::open(identity, claims, trust).
+    // CoreServer::open(identity, claims, trust).
     #[tokio::test]
     async fn direct_ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_direct_ws_test_state().await;
@@ -1563,7 +1563,7 @@ mod tests {
     }
 
     // Internal route-boundary test: identity isolation is enforced before the
-    // direct core has a higher-level public client surface to observe.
+    // core server has a higher-level public client surface to observe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn direct_peer_identity_eviction_does_not_affect_other_identities() {
         let state = make_direct_ws_test_state().await;

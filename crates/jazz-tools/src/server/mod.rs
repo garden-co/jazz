@@ -20,7 +20,7 @@ use jazz_server::StorageConfig;
 
 mod builder;
 mod catalogue;
-mod direct_core;
+mod core_server;
 mod direct_schema;
 pub mod routes;
 mod shutdown;
@@ -433,8 +433,8 @@ pub struct ServerState {
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     /// Server-side jazz_core peer loop for the direct websocket route.
-    pub(crate) direct_core: StdRwLock<Option<direct_core::DirectCoreServer>>,
-    pub(crate) direct_core_storage_config: Option<StorageConfig>,
+    pub(crate) core_server: StdRwLock<Option<core_server::CoreServer>>,
+    pub(crate) core_server_storage_config: Option<StorageConfig>,
     pub shutdown: ShutdownController,
 }
 
@@ -444,28 +444,28 @@ pub struct ConnectionState {
 }
 
 impl ServerState {
-    pub(crate) fn direct_core(&self) -> Option<direct_core::DirectCoreServer> {
-        self.direct_core.read().unwrap().clone()
+    pub(crate) fn core_server(&self) -> Option<core_server::CoreServer> {
+        self.core_server.read().unwrap().clone()
     }
 
-    pub(crate) fn start_direct_core(
+    pub(crate) fn start_core_server(
         &self,
         schema: jazz::schema::JazzSchema,
-    ) -> Result<direct_core::DirectCoreServer, String> {
-        if let Some(direct_core) = self.direct_core() {
-            return Ok(direct_core);
+    ) -> Result<core_server::CoreServer, String> {
+        if let Some(core_server) = self.core_server() {
+            return Ok(core_server);
         }
 
         let storage_config = self
-            .direct_core_storage_config
+            .core_server_storage_config
             .clone()
-            .ok_or_else(|| "direct core storage is not configured".to_owned())?;
-        let mut direct_core = self.direct_core.write().unwrap();
-        if let Some(existing) = direct_core.clone() {
+            .ok_or_else(|| "core server storage is not configured".to_owned())?;
+        let mut core_server = self.core_server.write().unwrap();
+        if let Some(existing) = core_server.clone() {
             return Ok(existing);
         }
-        let started = direct_core::DirectCoreServer::start_with_storage(schema, storage_config)?;
-        *direct_core = Some(started.clone());
+        let started = core_server::CoreServer::start_with_storage(schema, storage_config)?;
+        *core_server = Some(started.clone());
         Ok(started)
     }
 
@@ -780,8 +780,8 @@ mod tests {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: None,
-            direct_core: StdRwLock::new(None),
-            direct_core_storage_config: None,
+            core_server: StdRwLock::new(None),
+            core_server_storage_config: None,
             shutdown: ShutdownController::new(timeout),
         })
     }

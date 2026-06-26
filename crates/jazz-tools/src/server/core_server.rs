@@ -12,11 +12,11 @@ use jazz_server::{
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
-pub(crate) struct DirectCoreServer {
-    commands: mpsc::Sender<DirectCoreCommand>,
+pub(crate) struct CoreServer {
+    commands: mpsc::Sender<CoreCommand>,
 }
 
-enum DirectCoreCommand {
+enum CoreCommand {
     Open {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
@@ -41,7 +41,7 @@ enum DirectCoreCommand {
     },
 }
 
-impl DirectCoreServer {
+impl CoreServer {
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
@@ -50,7 +50,7 @@ impl DirectCoreServer {
         let (started_tx, started_rx) = mpsc::channel();
 
         thread::Builder::new()
-            .name("jazz-direct-core".to_owned())
+            .name("jazz-core-server".to_owned())
             .spawn(move || {
                 let config = InMemoryServerShellConfig::new(
                     schema,
@@ -74,7 +74,7 @@ impl DirectCoreServer {
 
                 while let Ok(command) = receiver.recv() {
                     match command {
-                        DirectCoreCommand::Open {
+                        CoreCommand::Open {
                             identity,
                             claims,
                             trust,
@@ -87,13 +87,13 @@ impl DirectCoreServer {
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
-                        DirectCoreCommand::PublishSchema { schema, reply } => {
+                        CoreCommand::PublishSchema { schema, reply } => {
                             let result = shell
                                 .publish_runtime_schema(*schema)
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
-                        DirectCoreCommand::ReceiveTickTake {
+                        CoreCommand::ReceiveTickTake {
                             session,
                             frames,
                             reply,
@@ -105,24 +105,24 @@ impl DirectCoreServer {
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
-                        DirectCoreCommand::TickTake { session, reply } => {
+                        CoreCommand::TickTake { session, reply } => {
                             let result = shell
                                 .tick()
                                 .and_then(|()| shell.take_frames(session))
                                 .map_err(|error| error.to_string());
                             let _ = reply.send(result);
                         }
-                        DirectCoreCommand::Close { session } => {
+                        CoreCommand::Close { session } => {
                             let _ = shell.close_session(session);
                         }
                     }
                 }
             })
-            .map_err(|error| format!("failed to spawn direct core thread: {error}"))?;
+            .map_err(|error| format!("failed to spawn core server thread: {error}"))?;
 
         started_rx
             .recv()
-            .map_err(|_| "direct core thread exited before startup".to_owned())??;
+            .map_err(|_| "core server thread exited before startup".to_owned())??;
         Ok(Self { commands })
     }
 
@@ -134,16 +134,16 @@ impl DirectCoreServer {
     ) -> Result<ServerSession, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(DirectCoreCommand::Open {
+            .send(CoreCommand::Open {
                 identity,
                 claims,
                 trust,
                 reply,
             })
-            .map_err(|_| "direct core thread is not running".to_owned())?;
+            .map_err(|_| "core server thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "direct core thread dropped open response".to_owned())?
+            .map_err(|_| "core server thread dropped open response".to_owned())?
     }
 
     pub(crate) async fn publish_schema(
@@ -152,14 +152,14 @@ impl DirectCoreServer {
     ) -> Result<SchemaVersionId, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(DirectCoreCommand::PublishSchema {
+            .send(CoreCommand::PublishSchema {
                 schema: Box::new(schema),
                 reply,
             })
-            .map_err(|_| "direct core thread is not running".to_owned())?;
+            .map_err(|_| "core server thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "direct core thread dropped schema publish response".to_owned())?
+            .map_err(|_| "core server thread dropped schema publish response".to_owned())?
     }
 
     pub(crate) async fn receive_tick_take(
@@ -169,28 +169,28 @@ impl DirectCoreServer {
     ) -> Result<Vec<AbiBytes>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(DirectCoreCommand::ReceiveTickTake {
+            .send(CoreCommand::ReceiveTickTake {
                 session,
                 frames,
                 reply,
             })
-            .map_err(|_| "direct core thread is not running".to_owned())?;
+            .map_err(|_| "core server thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "direct core thread dropped receive response".to_owned())?
+            .map_err(|_| "core server thread dropped receive response".to_owned())?
     }
 
     pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(DirectCoreCommand::TickTake { session, reply })
-            .map_err(|_| "direct core thread is not running".to_owned())?;
+            .send(CoreCommand::TickTake { session, reply })
+            .map_err(|_| "core server thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "direct core thread dropped tick response".to_owned())?
+            .map_err(|_| "core server thread dropped tick response".to_owned())?
     }
 
     pub(crate) fn close(&self, session: ServerSession) {
-        let _ = self.commands.send(DirectCoreCommand::Close { session });
+        let _ = self.commands.send(CoreCommand::Close { session });
     }
 }

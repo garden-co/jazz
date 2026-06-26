@@ -24,7 +24,7 @@ const directWebSocketCarrierMock = vi.hoisted(() => {
   return { DirectWebSocketCarrier, instances };
 });
 
-vi.mock("./direct-core/direct-websocket.js", () => ({
+vi.mock("./core-runtime/direct-websocket.js", () => ({
   DirectWebSocketCarrier: directWebSocketCarrierMock.DirectWebSocketCarrier,
   directWireAuthFailureReason: (error: { code: string; message: string }) => {
     if (error.code !== "auth_failed") return null;

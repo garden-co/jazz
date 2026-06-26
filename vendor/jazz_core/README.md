@@ -27,7 +27,7 @@ execution path.
   objects directly and use core payloads such as row batches and subscription
   chunks, encoded with postcard where a byte boundary is useful.
 - **future jazz-napi**: native Node bindings should be a sibling binding crate
-  over the same direct core-object binding shape as WASM.
+  over the same core runtime object binding shape as WASM.
 
 ## Getting Started
 

@@ -7,11 +7,11 @@ import {
   encodeDirectWebSocketFrameBatch,
   isDirectWireHello,
 } from "./direct-websocket.js";
-import { DirectCoreRuntime, type DirectTransport } from "./runtime.js";
+import { CoreRuntime, type DirectTransport } from "./runtime.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
-describe("DirectCoreRuntime server transport", () => {
+describe("CoreRuntime server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
   });
@@ -25,7 +25,7 @@ describe("DirectCoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([Uint8Array.from([1, 2, 3])]);
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           connectUpstream: () => transport,
@@ -87,7 +87,7 @@ describe("DirectCoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([]);
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           connectUpstream: () => transport,
@@ -127,7 +127,7 @@ describe("DirectCoreRuntime server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([]);
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           connectUpstream: () => transport,
@@ -165,7 +165,7 @@ describe("DirectCoreRuntime server transport", () => {
       wait: () => undefined,
       writeState: () => ({}),
     };
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => Uint8Array.from([0]),
@@ -216,7 +216,7 @@ describe("DirectCoreRuntime server transport", () => {
       wait: () => undefined,
       writeState: () => ({}),
     };
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () =>
@@ -273,7 +273,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("routes session-scoped queries through allForIdentity", async () => {
     const authors: string[] = [];
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => {
@@ -324,7 +324,7 @@ describe("DirectCoreRuntime server transport", () => {
   });
 
   it("decodes fixed-width array columns from direct row batches", async () => {
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => encodeFileRows(),
@@ -368,7 +368,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("lowers scalar comparison relation IR into the prepared direct query", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => new Uint8Array([0]),
@@ -420,7 +420,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("keeps simple equality relation queries supported", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () =>
@@ -490,7 +490,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("rejects unsupported relation query shapes before preparing or reading", async () => {
     const calls: string[] = [];
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => {
@@ -528,7 +528,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("rejects unsupported subscription relation shapes before subscribing", () => {
     const calls: string[] = [];
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           prepareQuery: () => {
@@ -581,7 +581,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("passes include_deleted query intent through direct read options", async () => {
     const readOptions: unknown[] = [];
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: (_query: unknown, opts: unknown) => {
@@ -640,7 +640,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("applies subscription deltas to the full keyed snapshot", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           prepareQuery: () => ({}),
@@ -749,7 +749,7 @@ describe("DirectCoreRuntime server transport", () => {
 
   it("does not push limits below post-filtered id predicates", async () => {
     let preparedBytes: Uint8Array | undefined;
-    const runtime = new DirectCoreRuntime(
+    const runtime = new CoreRuntime(
       {
         openMemory: () => ({
           all: () => new Uint8Array([0]),
@@ -805,8 +805,8 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-function directRuntimeWithEmptyDb(): DirectCoreRuntime {
-  return new DirectCoreRuntime(
+function directRuntimeWithEmptyDb(): CoreRuntime {
+  return new CoreRuntime(
     {
       openMemory: () => ({
         all: () => new Uint8Array([0]),

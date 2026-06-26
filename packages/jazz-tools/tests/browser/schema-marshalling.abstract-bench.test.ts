@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadWasmModule } from "../../src/runtime/client.js";
-import { DirectCoreRuntime } from "../../src/runtime/direct-core/runtime.js";
+import { CoreRuntime } from "../../src/runtime/core-runtime/runtime.js";
 import {
   createSyntheticRuntimeSchema,
   runSchemaMarshallingBench,
@@ -14,7 +14,7 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")(
     it("measures repeated getSchema overhead for the browser WASM path", async () => {
       const schema = createSyntheticRuntimeSchema();
       const wasmModule = await loadWasmModule();
-      const runtime = new DirectCoreRuntime(
+      const runtime = new CoreRuntime(
         wasmModule.WasmDb,
         schema,
         deterministicBytes("schema-bench-browser-wasm:test:main:node"),

@@ -321,7 +321,7 @@ Subscriptions cross the boundary as host streams/callbacks built on
 `Db::subscribe`, with postcard-encoded chunks if a byte payload is needed.
 Transport code moves encoded `WireFrame` bytes; it does not
 decode `SyncMessage` as product API. Catalogue, branch, lens, and large-value
-APIs should be added only when their direct core APIs and binding ergonomics are
+APIs should be added only when their core runtime APIs and binding ergonomics are
 settled.
 
 ### 13.7.1 Binding Responsibilities

@@ -580,14 +580,14 @@ pub(super) async fn publish_schema_handler(
     }
 
     let direct_schema =
-        match state.direct_core().is_some() || state.direct_core_storage_config.is_some() {
+        match state.core_server().is_some() || state.core_server_storage_config.is_some() {
             true => match crate::server::direct_schema::convert_alpha_schema(&request.schema) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse::bad_request(format!(
-                            "schema is not supported by direct core: {err}"
+                            "schema is not supported by core server: {err}"
                         ))),
                     )
                         .into_response();
@@ -598,26 +598,26 @@ pub(super) async fn publish_schema_handler(
 
     let schema_hash = SchemaHash::compute(&request.schema);
     if let Some(schema) = direct_schema.clone() {
-        let direct_core = match state.direct_core() {
-            Some(direct_core) => direct_core,
-            None => match state.start_direct_core(schema.clone()) {
-                Ok(direct_core) => direct_core,
+        let core_server = match state.core_server() {
+            Some(core_server) => core_server,
+            None => match state.start_core_server(schema.clone()) {
+                Ok(core_server) => core_server,
                 Err(err) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::internal(format!(
-                            "failed to start direct core: {err}"
+                            "failed to start core server: {err}"
                         ))),
                     )
                         .into_response();
                 }
             },
         };
-        if let Err(err) = direct_core.publish_schema(schema).await {
+        if let Err(err) = core_server.publish_schema(schema).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(format!(
-                    "failed to publish schema to direct core: {err}"
+                    "failed to publish schema to core server: {err}"
                 ))),
             )
                 .into_response();
@@ -862,7 +862,7 @@ pub(super) async fn publish_permissions_handler(
     }
 
     let direct_schema =
-        match state.direct_core().is_some() || state.direct_core_storage_config.is_some() {
+        match state.core_server().is_some() || state.core_server_storage_config.is_some() {
             true => {
                 match crate::server::direct_schema::convert_alpha_schema(&schema_with_permissions) {
                     Ok(schema) => Some(schema),
@@ -870,7 +870,7 @@ pub(super) async fn publish_permissions_handler(
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(ErrorResponse::bad_request(format!(
-                                "permissions schema is not supported by direct core: {err}"
+                                "permissions schema is not supported by core server: {err}"
                             ))),
                         )
                             .into_response();
@@ -889,26 +889,26 @@ pub(super) async fn publish_permissions_handler(
         Ok(_) => match state.catalogue.current_permissions_head(&state.runtime) {
             Ok(head) => {
                 if let Some(schema) = direct_schema {
-                    let direct_core = match state.direct_core() {
-                        Some(direct_core) => direct_core,
-                        None => match state.start_direct_core(schema.clone()) {
-                            Ok(direct_core) => direct_core,
+                    let core_server = match state.core_server() {
+                        Some(core_server) => core_server,
+                        None => match state.start_core_server(schema.clone()) {
+                            Ok(core_server) => core_server,
                             Err(err) => {
                                 return (
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     Json(ErrorResponse::internal(format!(
-                                        "failed to start direct core: {err}"
+                                        "failed to start core server: {err}"
                                     ))),
                                 )
                                     .into_response();
                             }
                         },
                     };
-                    if let Err(err) = direct_core.publish_schema(schema).await {
+                    if let Err(err) = core_server.publish_schema(schema).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::internal(format!(
-                                "failed to publish permissions schema to direct core: {err}"
+                                "failed to publish permissions schema to core server: {err}"
                             ))),
                         )
                             .into_response();

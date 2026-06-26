@@ -41,12 +41,12 @@ import { createRecord, decodeRecordValue } from "./direct-row-codec.js";
 
 export { encodeDirectSchema } from "./direct-schema-codec.js";
 
-type DirectCoreDbConstructor = {
-  openMemory(schema: Uint8Array, config: Uint8Array): DirectCoreDb;
-  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): DirectCoreDb;
+type CoreDbConstructor = {
+  openMemory(schema: Uint8Array, config: Uint8Array): CoreDb;
+  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): CoreDb;
 };
 
-type DirectCoreDb = {
+type CoreDb = {
   all(query: DirectPreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: DirectPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   propagateQuery?(query: DirectPreparedQuery, opts: unknown): void;
@@ -161,19 +161,19 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 function openPersistentDirectDb(
-  Runtime: DirectCoreDbConstructor,
+  Runtime: CoreDbConstructor,
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
-): DirectCoreDb {
+): CoreDb {
   if (!Runtime.openPersistent) {
     throw new Error("Direct core runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
 }
 
-export class DirectCoreRuntime implements Runtime {
-  private readonly db: DirectCoreDb;
+export class CoreRuntime implements Runtime {
+  private readonly db: CoreDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
@@ -195,7 +195,7 @@ export class DirectCoreRuntime implements Runtime {
   private nextSubscriptionId = 1;
 
   constructor(
-    Runtime: DirectCoreDbConstructor,
+    Runtime: CoreDbConstructor,
     private readonly schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
@@ -801,7 +801,7 @@ function assertNoSessionWriteInTx(writeIdentity: Uint8Array | undefined): void {
   if (!writeIdentity) return;
   throw new Error(
     "Direct core runtime cannot perform session-scoped transaction writes: " +
-      "the direct core mergeable transaction API has no identity-aware staging methods.",
+      "the core runtime mergeable transaction API has no identity-aware staging methods.",
   );
 }
 
