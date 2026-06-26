@@ -35,6 +35,34 @@ use crate::{InMemoryServerShell, InMemoryServerShellConfig, MetricsSnapshot, She
 /// Result type returned by loopback HTTP helpers.
 pub type LoopbackHttpResult<T> = std::result::Result<T, LoopbackHttpError>;
 
+/// Load the latest admin-published schema for an app from `admin-schemas.json`.
+///
+/// Permissions-bearing schema publishes are intentionally not loaded here yet:
+/// the current admin path rejects non-null permissions, and this helper keeps
+/// durable server startup aligned with that supported surface.
+pub fn load_latest_admin_schema_for_app(
+    data_dir: impl AsRef<Path>,
+    app_id: &str,
+) -> io::Result<Option<JazzSchema>> {
+    let schema_store_path = data_dir.as_ref().join("admin-schemas.json");
+    let schemas = load_admin_schema_store(Some(&schema_store_path))?;
+    let Some(schema) = schemas.get(app_id).and_then(|schemas| schemas.last()) else {
+        return Ok(None);
+    };
+    if matches!(schema.permissions.as_ref(), Some(value) if !value.is_null()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "stored admin schema {} has unsupported permissions",
+                schema.object_id
+            ),
+        ));
+    }
+    convert_admin_schema(&schema.schema)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 /// Running loopback listener and shutdown handle.
 #[derive(Debug)]
 pub struct LoopbackHttpServer {
