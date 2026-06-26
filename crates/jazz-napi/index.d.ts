@@ -65,6 +65,27 @@ export declare class TestJwtIssuer {
   stop(): Promise<void>
 }
 
+export declare class WasmDb {
+  static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb
+  prepareQuery(query: Uint8Array): WasmPreparedQuery
+  all(query: WasmPreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite
+  tick(): void
+}
+export type NapiDirectDb = WasmDb
+
+export declare class WasmPreparedQuery {
+
+}
+export type NapiDirectPreparedQuery = WasmPreparedQuery
+
+export declare class WasmWrite {
+  get payload(): Uint8Array
+  wait(tier: string): void
+}
+export type NapiDirectWrite = WasmWrite
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
