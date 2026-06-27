@@ -249,14 +249,6 @@ export class CoreRuntime implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  getDirectOpenPayload(): {
-    schema: Uint8Array;
-    config: Uint8Array;
-    peerIdentity: Uint8Array;
-  } {
-    return { schema: this.schemaBytes, config: this.configBytes, peerIdentity: this.peerIdentity };
-  }
-
   connectUpstreamPeer(): DirectTransport {
     return this.db.connectUpstream();
   }
