@@ -12,7 +12,7 @@ import {
   type RuntimeTokenOptions,
 } from "./db-runtime-module.js";
 import { CoreRuntime } from "./core-runtime/runtime.js";
-import { PersistentBrowserRuntime } from "./core-runtime/persistent-browser-runtime.js";
+import { PersistentBrowserOpfsProxyRuntime } from "./core-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload } from "./client-session.js";
 
@@ -104,7 +104,7 @@ export class WasmRuntimeModule extends DbRuntimeModule<DbConfig> {
       ? authorBytesForSubject(subject, identitySeed)
       : deterministicBytes(`${identitySeed}:author`);
     const mainThreadPeerRuntime = persistentBrowserDbName
-      ? new PersistentBrowserRuntime(
+      ? new PersistentBrowserOpfsProxyRuntime(
           config.runtimeSources,
           schema,
           persistentBrowserDbName,
