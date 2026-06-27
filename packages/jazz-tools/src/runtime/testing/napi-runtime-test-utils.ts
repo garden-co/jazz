@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { onTestFinished } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
-import { NativeRuntimeAdapter } from "../core-runtime/native-runtime-adapter.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 
 type NapiModule = typeof import("jazz-napi");
 export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };

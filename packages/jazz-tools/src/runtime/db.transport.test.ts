@@ -21,7 +21,7 @@ class TestDb extends Db {
 }
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
-  protected override async loadCore(): Promise<typeof TestDb.runtime> {
+  protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
     return TestDb.runtime;
   }
 
@@ -206,7 +206,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U03b preserves local policies when the core source does not support policy bypass", () => {
+  it("DBRT-U03b preserves local policies when the runtime source does not support policy bypass", () => {
     const client = makeClientStub();
     const connectWithRuntimeSpy = vi
       .spyOn(JazzClient, "connectWithRuntime")
@@ -249,10 +249,10 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U04 routes Db core wiring through an injected core source", async () => {
+  it("DBRT-U04 routes Db runtime wiring through an injected runtime source", async () => {
     const app = makeTodosApp();
     const schema = app.todos._schema;
-    const loadedCore = { kind: "test-core" };
+    const loadedRuntime = { kind: "test-core" };
     const runtimeRow: InsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
@@ -270,15 +270,15 @@ describe("runtime/Db native runtime path upstream wiring", () => {
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
     class TestRuntimeSource extends RuntimeSource<DbConfig> {
-      readonly loadCoreMock = vi.fn(async (_config: DbConfig) => loadedCore);
+      readonly loadRuntimeMock = vi.fn(async (_config: DbConfig) => loadedRuntime);
       override readonly createClient = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
       override readonly mintLocalFirstToken = vi.fn(
         (options: RuntimeTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
       );
 
-      protected override async loadCore(config: DbConfig): Promise<typeof loadedCore> {
-        return await this.loadCoreMock(config);
+      protected override async loadRuntime(config: DbConfig): Promise<typeof loadedRuntime> {
+        return await this.loadRuntimeMock(config);
       }
     }
     const runtimeSource = new TestRuntimeSource();
@@ -301,7 +301,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     await db.shutdown();
 
     expect(inserted.value).toEqual({ id: "todo-1", title: "Buy milk" });
-    expect(runtimeSource.loadCoreMock).toHaveBeenCalledTimes(1);
+    expect(runtimeSource.loadRuntimeMock).toHaveBeenCalledTimes(1);
     expect(runtimeSource.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
@@ -322,7 +322,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     );
     const createClientContext = runtimeSource.createClient.mock.calls[0]?.[0];
     expect(createClientContext).toBeDefined();
-    expect("loadedCore" in createClientContext!).toBe(false);
+    expect("loadedRuntime" in createClientContext!).toBe(false);
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(proof).toBe("jwt:alice-secret:proof-audience:7");
     expect(client.shutdown).toHaveBeenCalledTimes(1);
@@ -333,7 +333,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     class RecordingRuntimeSource extends RuntimeSource<DbConfig> {
       readonly createClientMock = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
 
-      protected override async loadCore(): Promise<typeof TestDb.runtime> {
+      protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
         return TestDb.runtime;
       }
 

@@ -11,8 +11,8 @@ import {
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
-import { NativeRuntimeAdapter } from "./core-runtime/native-runtime-adapter.js";
-import { PersistentBrowserOpfsRuntime } from "./core-runtime/persistent-browser-runtime.js";
+import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload } from "./client-session.js";
 
@@ -76,7 +76,7 @@ export class WasmRuntimeSource extends RuntimeSource<DbConfig> {
 
   private get wasmModule(): WasmModule {
     if (!this.module) {
-      throw new Error("WASM core source is not loaded");
+      throw new Error("WASM runtime source is not loaded");
     }
     return this.module;
   }

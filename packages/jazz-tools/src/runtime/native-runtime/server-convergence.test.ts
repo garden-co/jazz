@@ -52,7 +52,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
       server = await startLocalJazzServer({
         appId,
         inMemory: true,
-        adminSecret: "core-runtime-convergence-admin",
+        adminSecret: "native-runtime-convergence-admin",
         schema: encodeSchema(schema),
       });
 
@@ -114,11 +114,11 @@ describe("NativeRuntimeAdapter server convergence", () => {
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
-      const tempRoot = await mkdtemp(join(tmpdir(), "jazz-core-runtime-restart-"));
+      const tempRoot = await mkdtemp(join(tmpdir(), "jazz-native-runtime-restart-"));
       tempRoots.push(tempRoot);
       const dataDir = join(tempRoot, "server-data");
       const appId = "00000000-0000-0000-0000-00000000c002";
-      const adminSecret = "core-runtime-restart-admin";
+      const adminSecret = "native-runtime-restart-admin";
 
       server = await startLocalJazzServer({
         appId,
@@ -252,7 +252,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
     server = await startLocalJazzServer({
       appId,
       inMemory: true,
-      adminSecret: "core-runtime-bytea-convergence-admin",
+      adminSecret: "native-runtime-bytea-convergence-admin",
       schema: encodeSchema(binaryLargeValueSchema),
     });
 
@@ -315,7 +315,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
       server = await startLocalJazzServer({
         appId,
         inMemory: true,
-        adminSecret: "core-runtime-restore-convergence-admin",
+        adminSecret: "native-runtime-restore-convergence-admin",
         schema: encodeSchema(schema),
       });
 
