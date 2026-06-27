@@ -166,6 +166,14 @@ const removedBrowserRuntimePrefix = ["browser", "broker"].join("-");
 const removedPostMessagePathName = ["worker", "bridge"].join("-");
 const removedLeaderLockName = ["leader", "lock"].join("-");
 const removedBrowserRuntimeBuildArtifacts = [
+  "dev/expo.js",
+  "dev/expo.d.ts",
+  "expo/index.js",
+  "expo/index.d.ts",
+  "expo/polyfills.js",
+  "expo/polyfills.d.ts",
+  "react-native/index.js",
+  "react-native/index.d.ts",
   `runtime/${removedBrowserRuntimePrefix}-client.js`,
   `runtime/${removedBrowserRuntimePrefix}-client.d.ts`,
   `runtime/${removedBrowserRuntimePrefix}-errors.js`,
@@ -204,7 +212,10 @@ const removedBrowserRuntimeExportPathFragments = [
   "browser-broker",
   "broker-worker",
   ["direct", "wasm"].join("-"),
+  "/dev/expo",
+  "/expo",
   "leader-lock",
+  "/react-native",
   "sync-transport",
   "worker-bridge",
   "jazz-broker-worker",
