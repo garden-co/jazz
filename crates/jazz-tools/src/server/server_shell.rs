@@ -11,31 +11,31 @@ use jazz_server::{
 };
 use tokio::sync::{oneshot, watch};
 
-/// Sendable handle for the thread that owns the local engine shell.
+/// Sendable handle for the thread that owns the in-memory server shell.
 ///
 /// The underlying `InMemoryServerShell` is intentionally kept on one OS thread
 /// because it currently stores its DB, sessions, and transports behind
 /// `Rc<RefCell<...>>`. Axum request/websocket tasks can clone this handle, but
-/// all direct shell work is serialized onto the local owner thread below.
+/// all shell access is serialized onto that owner thread.
 #[derive(Clone)]
-pub(crate) struct LocalEngineHandle {
-    jobs: mpsc::Sender<LocalEngineJob>,
+pub(crate) struct ServerShellHandle {
+    jobs: mpsc::Sender<ServerShellJob>,
     activity_tx: watch::Sender<u64>,
 }
 
-type LocalEngineJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
 
-impl LocalEngineHandle {
+impl ServerShellHandle {
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<LocalEngineJob>();
+        let (jobs, receiver) = mpsc::channel::<ServerShellJob>();
         let (started_tx, started_rx) = mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
 
         thread::Builder::new()
-            .name("jazz-local-engine".to_owned())
+            .name("jazz-server-shell".to_owned())
             .spawn(move || {
                 let config = InMemoryServerShellConfig::new(
                     schema,
@@ -61,11 +61,11 @@ impl LocalEngineHandle {
                     job(&mut shell);
                 }
             })
-            .map_err(|error| format!("failed to spawn local engine thread: {error}"))?;
+            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
         started_rx
             .recv()
-            .map_err(|_| "local engine thread exited before startup".to_owned())??;
+            .map_err(|_| "server shell thread exited before startup".to_owned())??;
         Ok(Self { jobs, activity_tx })
     }
 
@@ -112,7 +112,7 @@ impl LocalEngineHandle {
                 .and_then(|()| shell.take_frames(session))
                 .map_err(|error| error.to_string());
             if result.is_ok() {
-                notify_engine_activity(&activity_tx);
+                notify_shell_activity(&activity_tx);
             }
             result
         })
@@ -147,14 +147,14 @@ impl LocalEngineHandle {
             .send(Box::new(move |shell| {
                 let _ = reply.send(run_on_shell(shell));
             }))
-            .map_err(|_| "local engine thread is not running".to_owned())?;
+            .map_err(|_| "server shell thread is not running".to_owned())?;
         response
             .await
-            .map_err(|_| "local engine thread dropped response".to_owned())?
+            .map_err(|_| "server shell thread dropped response".to_owned())?
     }
 }
 
-fn notify_engine_activity(activity_tx: &watch::Sender<u64>) {
+fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
     activity_tx.send_modify(|version| {
         *version = version.wrapping_add(1);
     });

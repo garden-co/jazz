@@ -27,7 +27,7 @@ const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "rocksdb")]
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 #[cfg(feature = "rocksdb")]
-const LOCAL_ENGINE_ROCKSDB_DIR: &str = "local-engine.rocksdb";
+const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct BuiltServer {
@@ -44,9 +44,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` requires the RocksDB feature for durable local engine
+/// `Persistent` requires the RocksDB feature for durable server shell
 /// storage. SQLite remains a client/native storage backend, but is not a
-/// supported local engine backend.
+/// supported server shell backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -68,7 +68,7 @@ pub struct ServerBuilder {
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
-    local_engine_schema: Option<JazzSchema>,
+    server_shell_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
     shutdown_timeout: Duration,
 }
@@ -85,7 +85,7 @@ impl ServerBuilder {
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
-            local_engine_schema: None,
+            server_shell_schema: None,
             upstream_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
@@ -122,8 +122,8 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_local_engine_schema(mut self, schema: JazzSchema) -> Self {
-        self.local_engine_schema = Some(schema);
+    pub fn with_server_shell_schema(mut self, schema: JazzSchema) -> Self {
+        self.server_shell_schema = Some(schema);
         self
     }
 
@@ -147,10 +147,10 @@ impl ServerBuilder {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
-        let local_engine_storage_config = self.build_local_engine_storage_config();
-        let local_engine =
-            self.build_local_engine(latest_catalogue_schema, local_engine_storage_config.clone())?;
-        let local_engine_storage_config = local_engine_storage_config.ok();
+        let server_shell_storage_config = self.build_server_shell_storage_config();
+        let server_shell =
+            self.build_server_shell(latest_catalogue_schema, server_shell_storage_config.clone())?;
+        let server_shell_storage_config = server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
             catalogue_store,
@@ -161,8 +161,8 @@ impl ServerBuilder {
             topology,
             jwt_verifier,
             http_client,
-            local_engine: std::sync::RwLock::new(local_engine),
-            local_engine_storage_config,
+            server_shell: std::sync::RwLock::new(server_shell),
+            server_shell_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -201,15 +201,15 @@ impl ServerBuilder {
         Ok((store, latest_catalogue_schema))
     }
 
-    fn build_local_engine(
+    fn build_server_shell(
         &self,
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
-    ) -> Result<Option<crate::server::local_engine::LocalEngineHandle>, String> {
-        if let Some(schema) = &self.local_engine_schema {
+    ) -> Result<Option<crate::server::server_shell::ServerShellHandle>, String> {
+        if let Some(schema) = &self.server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::server::local_engine::LocalEngineHandle::start_with_storage(
+                crate::server::server_shell::ServerShellHandle::start_with_storage(
                     schema.clone(),
                     storage_config,
                 )?,
@@ -225,16 +225,16 @@ impl ServerBuilder {
         };
         let storage_config = storage_config?;
         let schema = crate::server::schema_convert::convert_public_schema(&schema)
-            .map_err(|error| format!("failed to build local engine schema: {error}"))?;
+            .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::server::local_engine::LocalEngineHandle::start_with_storage(
+            crate::server::server_shell::ServerShellHandle::start_with_storage(
                 schema,
                 storage_config,
             )?,
         ))
     }
 
-    fn build_local_engine_storage_config(&self) -> Result<StorageConfig, String> {
+    fn build_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
         match &self.storage_backend {
             StorageBackend::InMemory => Ok(StorageConfig::InMemory),
             StorageBackend::Persistent { path } => {
@@ -244,12 +244,12 @@ impl ServerBuilder {
                 #[cfg(feature = "rocksdb")]
                 {
                     Ok(StorageConfig::RocksDb {
-                        path: path.join(LOCAL_ENGINE_ROCKSDB_DIR),
+                        path: path.join(SERVER_SHELL_ROCKSDB_DIR),
                     })
                 }
                 #[cfg(not(feature = "rocksdb"))]
                 {
-                    Err("local engine persistent storage requires the rocksdb feature".to_owned())
+                    Err("server shell persistent storage requires the rocksdb feature".to_owned())
                 }
             }
             #[cfg(feature = "rocksdb")]
@@ -257,12 +257,12 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
                 Ok(StorageConfig::RocksDb {
-                    path: path.join(LOCAL_ENGINE_ROCKSDB_DIR),
+                    path: path.join(SERVER_SHELL_ROCKSDB_DIR),
                 })
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {
-                Err("local engine storage does not support sqlite yet".to_owned())
+                Err("server shell storage does not support sqlite yet".to_owned())
             }
         }
     }
@@ -296,7 +296,7 @@ impl ServerBuilder {
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {
-                Err("local engine catalogue storage does not support sqlite".to_owned())
+                Err("server catalogue storage does not support sqlite".to_owned())
             }
             #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
             StorageBackend::RocksDb { path } => {
@@ -591,9 +591,9 @@ mod tests {
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn dynamic_builder_starts_local_engine_from_rehydrated_catalogue_schema() {
+    async fn dynamic_builder_starts_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("dynamic-local-engine-rehydrate");
+        let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
         let schema = crate::schema_api::SchemaBuilder::new()
             .table(
                 crate::schema_api::TableSchema::builder("todos")
@@ -611,7 +611,7 @@ mod tests {
                 .build()
                 .await
                 .expect("build fixed schema server");
-            assert!(built.state.local_engine().is_some());
+            assert!(built.state.server_shell().is_some());
             built
                 .state
                 .catalogue_store
@@ -632,14 +632,14 @@ mod tests {
             .await
             .expect("build dynamic server from rehydrated catalogue");
 
-        assert!(rebuilt.state.local_engine().is_some());
+        assert!(rebuilt.state.server_shell().is_some());
     }
 
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_starts_local_engine_with_catalogue_storage_after_restart() {
+    async fn rocksdb_builder_starts_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-local-engine-restart");
+        let app_id = AppId::from_name("rocksdb-server-shell-restart");
         let schema = crate::schema_api::SchemaBuilder::new()
             .table(
                 crate::schema_api::TableSchema::builder("todos")
@@ -656,11 +656,11 @@ mod tests {
                 })
                 .build()
                 .await
-                .expect("build RocksDB server with local engine");
+                .expect("build RocksDB server with server shell");
 
-            assert!(built.state.local_engine().is_some());
+            assert!(built.state.server_shell().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
-            assert!(data_dir.path().join(LOCAL_ENGINE_ROCKSDB_DIR).exists());
+            assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
         }
 
         let rebuilt = ServerBuilder::new(app_id)
@@ -670,10 +670,10 @@ mod tests {
             })
             .build()
             .await
-            .expect("rebuild RocksDB server with local engine");
+            .expect("rebuild RocksDB server with server shell");
 
-        assert!(rebuilt.state.local_engine().is_some());
-        assert!(data_dir.path().join(LOCAL_ENGINE_ROCKSDB_DIR).exists());
+        assert!(rebuilt.state.server_shell().is_some());
+        assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
     }
 
     #[tokio::test]
